@@ -291,6 +291,136 @@ Tests:
 - benchmarks.md overhaul stays blocked on the NVMe slice; spec recorded
   earlier in this file.
 
+## Node enrollment arc plan (post-0.4, after #153)
+
+Goal: one command joins a freshly booted machine to an existing cluster.
+An operator runs an invite on any member, pastes the resulting token into
+fibrilctl (or the setup page) on the new node, and the node ends up with
+the cluster secret, TLS material chaining to the cluster CA, and
+coordination config - then joins, catches up, and receives users and
+settings through normal replication. The Elasticsearch enrollment-token
+and kubeadm-join pattern.
+
+Precedent anatomy (ES, kubeadm, docker swarm): a token carries reachable
+endpoints, a way to VERIFY the cluster before trusting it (a CA
+fingerprint pin), and a short-lived credential authorizing the join. The
+real secrets travel only inside the verified channel, never in the token.
+
+Token design:
+- Opaque base64 of a versioned JSON: { v, endpoints, ca_fingerprint,
+  expires_ms, nonce, hmac } where hmac = HMAC-SHA256(cluster_secret,
+  canonical(v|endpoints|ca_fingerprint|expires_ms|nonce)).
+- The token NEVER contains the cluster secret. Leaking a token leaks a
+  bounded-lifetime join authorization, nothing durable. Default TTL 30
+  minutes, configurable at mint.
+- Single-use: redemption records the nonce in a coordination attribute
+  (CAS, with expiry-based GC of old nonces). If the CAS bookkeeping
+  proves heavier than expected in-brick, TTL-only is the documented
+  fallback, but single-use is the default posture for a secret-yielding
+  exchange.
+
+Flow:
+1. Any member: fibrilctl cluster invite [--ttl ...] -> POST
+   /admin/api/enrollment-token (admin-auth'd). The node must hold the
+   cluster secret and the cluster CA to mint.
+2. New node, CLI lane: fibrilctl node enroll --token X [--data-dir D],
+   with the server NOT yet running. The CLI dials a token endpoint over
+   HTTPS pinned to ca_fingerprint (reusing the client fingerprint-pin
+   verifier from crates/client/src/tls.rs - the exact machinery the TLS
+   arc built), and POSTs /admin/api/enroll with the token plus the new
+   node's advertise hosts and proposed listen address.
+3. The issuer verifies the HMAC + expiry + unused nonce, then:
+   - mints a SERVER certificate for the joiner's SANs from the cluster
+     CA (mint-on-issue: the CA key never leaves the nodes that already
+     hold it - least privilege, the ES model - so the response carries
+     ca.pem + leaf + key, not ca.key),
+   - reserves a raft id from committed membership via a CAS attribute
+     (never guessed locally - collision safety is cluster-coordinated),
+   - records the consumed nonce,
+   - returns { cluster_secret, ca_pem, server_pem, server_key,
+     coordination: { raft_node_id, peers including self, mode } }.
+4. The joiner writes everything into the data dir: cluster.secret (0600),
+   tls-provided material, and a coordination section in
+   config-overlay.toml (ConfigOverlay grows coordination, same
+   layered-below-explicit-config precedence as tls and auth). The
+   overlay+marker write is LAST and is the commit point: a failure at
+   any earlier step leaves nothing that changes the next boot.
+5. Boot: the node starts in ganglion mode from the overlay, joins as a
+   LEARNER first and is promoted once caught up - ganglion already has
+   this path (the learner_joins_catches_up_and_gets_promoted test) -
+   then users, settings, and assignments arrive via existing
+   replication. Enrollment installs TRUST and ADDRESSING only; this is
+   the payoff of keeping node trust separate from user data in the auth
+   arc.
+6. Setup-page lane: a "Join a cluster" card (paste token) performs the
+   same redemption server-side during first-boot setup, then falls
+   through into the normal boot as setup mode already does.
+
+Invariants:
+1. The cluster secret and private keys travel only inside TLS pinned to
+   the cluster CA fingerprint carried by the token.
+2. Tokens are bounded-lifetime and single-use; a tampered, expired, or
+   replayed token yields a guided error naming the fix (mint a new
+   invite), never a partial join.
+3. Joiner-side atomicity: overlay + marker last; any earlier failure
+   leaves the data dir boot-inert, and re-running enroll succeeds.
+4. Idempotent: enrolling a node that already holds the marker is a
+   no-op with a clear message.
+5. Raft ids are reserved through coordination CAS, never assigned by
+   the joiner.
+6. Enrollment grants membership only - no user data rides the
+   enrollment response; it replicates after join like everything else.
+
+Prerequisites: #153 lands first - the CA-reuse/mint-from-CA machinery in
+fibril-tls (its brick 1) is exactly the mint-on-issue primitive, and
+inter-broker TLS is what makes the post-join cluster traffic protected.
+Admin HTTPS (shipped in 0.3) already carries the redemption itself.
+
+Code map:
+- crates/tls: the #153 mint-from-existing-CA path, plus a
+  mint_server_cert_for_sans(ca_pair, sans) helper for the issuer.
+- crates/client/src/tls.rs: FingerprintVerifier - reuse for the
+  joiner's pinned HTTPS (the CLI can use reqwest with a custom rustls
+  config, or a thin hyper call over tokio-rustls; the verifier logic is
+  the part to share).
+- crates/config: ConfigOverlay + coordination section, CLUSTER_SECRET_FILE,
+  the setup marker constants; resolve_cluster_secret shows the read side.
+- crates/admin: routes.rs users/enroll route patterns, check_auth;
+  setup.rs for the join card (mirror the existing card + apply-callback
+  shape).
+- crates/coordination-ganglion: cluster attribute CAS (update_users is
+  the template for nonce records and raft-id reservation);
+  add-voting-member plumbing (CoordinationMembershipManager) and the
+  learner-promotion path via ganglion.
+- crates/cli: AdminClient + the cert/secret command patterns.
+
+Bricks:
+1. Token module: mint/verify (HMAC, expiry, canonical encoding), pure
+   and vector-tested (tamper each field, expiry edge, wrong secret).
+2. Issuer: enrollment-token + enroll endpoints, mint-on-issue, raft-id
+   reservation, nonce single-use; fibrilctl cluster invite.
+3. Joiner CLI: fibrilctl node enroll with pinned redemption and the
+   atomic write order; guided errors for every refusal.
+4. Learner-first join wiring + promote-on-catch-up exposure if not
+   already surfaced through coordination-ganglion.
+5. Setup-page join card.
+6. Docs: the cluster guide's entry-level path becomes invite + enroll;
+   manual secret/CA distribution remains documented as the unattended
+   and air-gapped lane.
+
+Tests:
+- Unit: token vectors (each field tampered, expired, wrong secret,
+  version bump), nonce CAS single-use.
+- Integration: one-node cluster, invite, enroll a second data dir ->
+  files and overlay exactly as specified; boot node 2 -> learner, then
+  promoted; a user created on node 1 BEFORE the join appears on node 2
+  AFTER it (the payoff assertion for the whole trust design).
+- Failure: expired token (nothing written), wrong-CA endpoint (pin
+  refuses - the MITM case), replayed token (single-use refuses),
+  re-enroll with marker present (no-op).
+- Atomicity: inject a write failure between material and overlay ->
+  next boot unaffected, re-run enrolls cleanly.
+
 
 ## Auth beyond the static handler (gate 4, #114) - design brief (2026-07-05)
 
@@ -371,19 +501,9 @@ Bricks, in order:
    management. Linked in the sidebar.
 7. Client polish: typed auth errors where they are still generic.
 
-Future arc (assessed 2026-07-05, sequenced after this arc and #153):
-NODE ENROLLMENT. fibrilctl pointed at a freshly booted node enrolls it
-into an existing cluster - the docker swarm join / Elasticsearch
-enrollment-token pattern. An existing node issues a short-lived token
-(HMAC-signed with the cluster secret) carrying coordination endpoints,
-the secret, and the cluster CA once inter-node TLS exists. The new node
-redeems it through its local admin/setup surface (or a "join a cluster"
-field on the setup page), which installs the secret and CA into the data
-dir, extends the config overlay with the coordination bits, and drives
-add-voting-member. Users then arrive by replication automatically:
-enrollment installs TRUST only, which is exactly why node trust and user
-data are kept separate in this arc. Needs #153 first to be safe over a
-network, and ConfigOverlay grows a coordination section.
+Future arc: NODE ENROLLMENT - full implementation brief in the
+"Node enrollment arc plan" section above (token design, mint-on-issue,
+learner-first join, invariants, bricks, tests).
 
 Post-arc examination item: tenancy. Fibril groups are already namespace
 prefixes, which is a natural hook if multi-tenant isolation ever becomes
