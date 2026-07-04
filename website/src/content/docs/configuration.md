@@ -152,6 +152,8 @@ These fields are read on process start.
 | `tls.admin_enabled` | `FIBRIL_TLS_ADMIN_ENABLED` | none | follows `tls.enabled` |
 | `tls.inter_broker` | `FIBRIL_TLS_INTER_BROKER` | none | follows `tls.enabled` |
 | `tls.peer_ca_path` | `FIBRIL_TLS_PEER_CA_PATH` | none | generated CA, then OS roots |
+| `tls.client_auth` | `FIBRIL_TLS_CLIENT_AUTH` | none | `off` |
+| `tls.client_ca_path` | `FIBRIL_TLS_CLIENT_CA_PATH` | none | generated CA |
 | `setup.mode` | `FIBRIL_SETUP_MODE` | none | `false` |
 | `auth.allow_default_loopback` | none | none | `true` |
 | `auth.seed_users` | `FIBRIL_AUTH_USERNAME` + `FIBRIL_AUTH_PASSWORD` (one entry) | none | empty |
@@ -233,6 +235,17 @@ peers are verified against, falling back to the generated
 `<data_dir>/tls/ca.pem` when present, then OS roots. The serving certificate
 and key reload live via `fibrilctl admin reload-tls` or
 `POST /admin/api/tls/reload`.
+
+`tls.client_auth` turns client certificates into credentials: `request`
+verifies a presented certificate (certless clients still connect and
+password-auth, the migration lane), `require` rejects certless clients in the
+handshake. A verified certificate whose identity (first DNS SAN, else CN)
+names an existing user authenticates as that user with no password; the `@`
+node namespace can never be claimed by certificate. `tls.client_ca_path`
+names the CA client certificates chain to, falling back to the generated CA -
+issue workload certificates from it with `fibrilctl cert issue <identity>`.
+Brokers present their own certificate on inter-broker dials, so a cluster
+converges at any `client_auth` setting.
 
 The `auth` section governs broker authentication. The built-in default
 credentials (`fibril`/`fibril`) are accepted from loopback connections only,

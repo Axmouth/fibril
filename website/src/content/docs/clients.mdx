@@ -158,13 +158,24 @@ client = await (
   </TabItem>
 </Tabs>
 
+On brokers with `tls.client_auth`, a client certificate replaces the
+password: a verified certificate whose identity names an existing broker user
+authenticates the connection with no `auth` call at all. Issue one from the
+deployment CA with `fibrilctl cert issue <identity>`, then present it with
+`tls_client_cert(cert, key)` (TypeScript `withTlsClientCert`, Python
+`with_tls_client_cert`). See
+[TLS across nodes](/deployment/cluster/#tls-across-nodes) for the broker-side
+setup.
+
 Misconfiguration surfaces as distinct typed errors because the fixes differ:
 `TlsRequiredByBroker` (the broker reported that this plaintext client must
 enable TLS), `TlsNotSupportedByBroker` (the handshake ended early, the broker
 listener is probably plaintext), `TlsCertificateUntrusted` (trust
-configuration: fix the CA path or the fingerprint), and `TlsConfig` for
-client-side option problems. The TypeScript and Python names are
-`TlsRequiredByBrokerError` and so on. None of them are retried automatically.
+configuration: fix the CA path or the fingerprint),
+`TlsClientCertificateRequired` (the broker demands a client certificate this
+client did not present), and `TlsConfig` for client-side option problems. The
+TypeScript and Python names are `TlsRequiredByBrokerError` and so on. None of
+them are retried automatically.
 
 One Python caveat: the fingerprint pin checks the whole presented chain from
 Python 3.13, while older Pythons only expose the leaf certificate, so pin the

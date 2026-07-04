@@ -98,6 +98,10 @@ Operational depth on top of the security baseline:
   shared-CA lane for generated material and live leaf-certificate rotation
   through the admin API. Landed on main, see
   [TLS across nodes](/deployment/cluster/#tls-across-nodes).
+- Mutual TLS: client certificates as credentials (`tls.client_auth`), with
+  certificate identities mapping to store users, `fibrilctl cert issue`, and
+  client options plus a typed required-cert error in all three clients.
+  Landed on main.
 
 ### Toward 1.0 (later 0.x minors)
 
@@ -106,8 +110,9 @@ Each subsequent minor knocks off part of a gate, incrementally:
 - The wire protocol is versioned with a back-compat policy and the client APIs
   are frozen, including the Offset/Topic newtype and `Arc<str>` pass (gate 2).
 - Durable restart reconciliation finishes the operational lifecycle (gate 3).
-- The remaining security depth (mTLS client auth, per-topic authorization)
-  completes gate 4.
+- Per-topic authorization is the only security-depth item left open, and it
+  is shelved until a real need appears (it reads as tenancy-adjacent), so
+  gate 4 is effectively complete.
 
 ### After 1.0 (parallel, non-gating)
 

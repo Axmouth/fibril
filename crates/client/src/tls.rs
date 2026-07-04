@@ -158,22 +158,32 @@ fn classify_tls_connect_error(err: io::Error, address: &str) -> FibrilError {
 
 /// With TLS 1.3 the client side of the handshake completes before the
 /// broker's client-certificate verdict, so a `require` rejection lands on
-/// the first read after connect instead of in the handshake itself. This
-/// refines that failure into the typed error when TLS was in play.
+/// the first read after connect instead of in the handshake itself. The
+/// alert is sometimes readable there (the typed lane) and sometimes
+/// flattened into a bare stream end by connection teardown, so a certless
+/// TLS session that dies during the HELLO exchange is attributed to the
+/// certificate requirement - the one broker behavior with exactly that
+/// shape.
 pub(crate) fn refine_post_connect_error(
     err: FibrilError,
     tls: Option<&TlsClientOptions>,
     address: &str,
 ) -> FibrilError {
-    if tls.is_some()
-        && let FibrilError::Disconnection { msg } = &err
-        && msg.contains("CertificateRequired")
-    {
-        return FibrilError::TlsClientCertificateRequired {
-            address: address.to_string(),
-        };
+    let Some(tls) = tls else {
+        return err;
+    };
+    let required = || FibrilError::TlsClientCertificateRequired {
+        address: address.to_string(),
+    };
+    match &err {
+        FibrilError::Disconnection { msg } if msg.contains("CertificateRequired") => required(),
+        FibrilError::Eof | FibrilError::BrokenPipe | FibrilError::Disconnection { .. }
+            if tls.client_cert_path.is_none() =>
+        {
+            required()
+        }
+        _ => err,
     }
-    err
 }
 
 fn build_connector(tls: &TlsClientOptions) -> FibrilResult<TlsConnector> {

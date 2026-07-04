@@ -79,6 +79,15 @@ Transport identity and cluster membership stay separate on purpose: TLS
 proves which host a connection reaches, the cluster secret authenticates the
 node inside the session. Both apply.
 
+With `tls.client_auth = require`, the listeners only complete handshakes with
+holders of a deployment-CA certificate, which closes the network surface to
+everything unidentified - including the coordination and replication ports
+(brokers present their own certificate when dialing peers). Workload clients
+then authenticate by certificate identity instead of password: issue one with
+`fibrilctl cert issue <identity>` and create the matching user. `request`
+mode does the same verification while still admitting certless
+password-authing clients, which is the migration lane.
+
 ## Rotating certificates
 
 A node's server certificate rotates without a restart as long as the CA stays

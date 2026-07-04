@@ -581,13 +581,15 @@ See also: [configuration](/configuration/) for the `tls` section fields.
 | Inter-broker TLS | Implemented | `tls.inter_broker` (follows `enabled`) wraps follower-to-owner replication dials and the coordination raft channel; peer trust via `tls.peer_ca_path`, the generated CA, or OS roots; mismatches named in both directions |
 | Shared-CA material lane | Implemented | A generated-material dir holding only `ca.pem` + `ca.key` mints that node's server certificate from the shared CA on boot (or via `fibrilctl cert generate`) |
 | Live certificate reload | Implemented | `POST /admin/api/tls/reload` + `fibrilctl admin reload-tls`: validated swap of the serving pair, old material keeps serving on rejection, established connections unaffected |
-| mTLS client auth | Planned | Reserved config surface, not wired |
+| mTLS client auth | Implemented | `tls.client_auth = off/request/require` + `tls.client_ca_path` (falls back to the generated CA). A verified certificate whose identity (first DNS SAN, else CN) names an existing user authenticates with no AUTH frame; unknown identities are a transport pass only; `@` names never map. `require` rejects certless clients in the handshake. Client cert options + a typed required-cert error in Rust, TypeScript, and Python; `fibrilctl cert issue` mints workload certificates from the deployment CA; brokers present their own leaf on peer dials |
 
 Conditions and limits:
 
 - Live reload rotates the leaf certificate under the same CA. Rotating the CA itself requires a rolling restart and re-pinning fingerprint-pinned clients.
 - Inter-broker TLS assumes every node's certificate chains to one CA. Independently generated per-node CAs do not interoperate; use the shared-CA lane or `tls.inter_broker = false`.
 - The cluster secret keeps authenticating nodes inside the TLS session; transport identity and membership are separate layers.
+- Certificate identities replace the password proof only: the user store stays the single authority on who exists, so listings and future authorization stay uniform.
+- Rotating the client CA is restart-required, same rule as the server CA.
 - Generated self-signed material that a client does not verify defeats passive snooping only. Clients should trust the generated `ca.pem` or pin the printed fingerprint.
 - Fibril never ships certificates.
 

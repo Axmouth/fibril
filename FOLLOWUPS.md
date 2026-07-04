@@ -573,7 +573,18 @@ previous-client smoke (the matrix gate).
 
 ## Security depth plans (post-0.4 minors)
 
-### Arc: mTLS client auth (#114 tail, gate-4 depth) - ACTIVE
+### Arc: mTLS client auth (#114 tail, gate-4 depth) - SHIPPED
+
+Shipped on main (post-0.3, lands in 0.4), built exactly to the decisions
+below. As-built pointers: verifier + identity + issue_client_certificate in
+fibril-tls (identity extraction itself lives in fibril-util so the protocol
+crate can use it); verified_identity flows serve_connection ->
+handle_connection; StoreAuthHandler::decide_certificate is the exists-check;
+peer_connector_from_config presents the node leaf on ALL broker dials
+unconditionally; fibrilctl cert issue writes <identity>.pem/.key. One
+Python-specific hedge, documented in the FEATURE_MATRIX footnote: asyncio
+flattens the certificate-required alert into clean EOF, so a certless TLS
+connect ending with no HELLO reply maps to the typed error.
 
 Goal: a verified client certificate is an identity. Workloads connect
 with a certificate instead of a password, an unidentified peer cannot

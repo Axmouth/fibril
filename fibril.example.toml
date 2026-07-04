@@ -54,6 +54,12 @@ enabled = false
 # CA that peer certificates chain to. Unset falls back to the generated
 # <data_dir>/tls/ca.pem, then OS roots:
 # peer_ca_path = "/etc/fibril/tls/ca.pem"
+# Client certificates as credentials: "request" verifies a presented
+# certificate (certless clients still password-auth), "require" rejects
+# certless clients in the handshake. Issue with: fibrilctl cert issue
+# client_auth = "off"
+# CA that client certificates chain to. Unset falls back to the generated CA:
+# client_ca_path = "/etc/fibril/tls/ca.pem"
 
 [storage.keratin]
 fsync_interval_ms = 5

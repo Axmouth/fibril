@@ -20,6 +20,17 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   holding only the copied `ca.pem` + `ca.key` mints that node's server
   certificate from the shared deployment CA. Nodes keep authenticating with
   the cluster secret inside the session.
+- Mutual TLS. `tls.client_auth = request | require` verifies client
+  certificates against `tls.client_ca_path` (or the generated CA), and a
+  verified identity (first DNS SAN, else CN) that names an existing user
+  authenticates the connection with no password - certificates become
+  workload credentials while the user store stays the single authority.
+  `require` rejects certless clients in the handshake, closing every
+  listener to unidentified peers; brokers present their own certificate on
+  inter-broker dials so clusters converge at any setting. `fibrilctl cert
+  issue` mints workload certificates from the deployment CA, and the Rust,
+  TypeScript, and Python clients gain client-certificate options plus a
+  typed required-certificate error.
 - Live certificate rotation. `POST /admin/api/tls/reload` and
   `fibrilctl admin reload-tls` re-read and validate the serving pair, then
   swap it for new handshakes without a restart; invalid material is rejected

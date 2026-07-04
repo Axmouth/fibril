@@ -927,6 +927,7 @@ mod tests {
             connection_stats,
             conn_id,
             None::<StaticAuthHandler>,
+            None,
             ConnectionSettings::new(Some(60)),
             None,
             None,
