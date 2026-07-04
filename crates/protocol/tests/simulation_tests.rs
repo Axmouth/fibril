@@ -1073,6 +1073,434 @@ fn ganglion_returning_old_owner_is_demoted_under_simulated_partition() {
     assert!(done.load(Ordering::SeqCst), "scenario runs to completion");
 }
 
+/// The controller every drain-scenario host runs: keeps both brokers
+/// registered and replans each tick (leader-gated; anti-churn keeps no-op
+/// plans off the raft log). Unlike the split-brain controller both nodes
+/// stay in the live set the whole time - the DRAINING label on the owner,
+/// not liveness, is what must move ownership.
+async fn run_drain_controller(
+    coordination: Arc<GanglionCoordination>,
+    queue: QueueIdentity,
+    follower_tails: Arc<std::sync::Mutex<Option<(u64, u64)>>>,
+    owner_draining: Arc<AtomicBool>,
+    done: Arc<AtomicBool>,
+) {
+    let tail_label = fibril_coordination_ganglion::applied_tail_label(&queue);
+    let queues = [queue];
+    let no_streams: Vec<StreamIdentity> = Vec::new();
+    while !done.load(Ordering::SeqCst) {
+        if coordination.consensus_node().is_leader().await {
+            let snapshot = coordination.snapshot();
+            if !snapshot.nodes.contains_key("a-owner") {
+                coordination
+                    .register_self(&split_brain_node_info("a-owner"))
+                    .await
+                    .ok();
+            }
+            if !snapshot.nodes.contains_key("b-follower") {
+                coordination
+                    .register_self(&split_brain_node_info("b-follower"))
+                    .await
+                    .ok();
+            }
+            // The follower's applied tails, published the way production
+            // heartbeats do: evacuation only picks followers with caught-up
+            // evidence. Written here because every registration must run
+            // leader-side - a non-leader's write forwards over the
+            // non-simulated client_write path (real DNS) and fails in
+            // turmoil.
+            // Labels live in the committed ganglion node registry, not the
+            // fibril-facing snapshot.
+            let committed_nodes = coordination.consensus_node().committed_snapshot().nodes;
+            let tails = *follower_tails.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((messages, events)) = tails {
+                let published = committed_nodes
+                    .get("b-follower")
+                    .is_some_and(|node| node.labels.contains_key(&tail_label));
+                if !published {
+                    let mut labels = BTreeMap::new();
+                    labels.insert(tail_label.clone(), format!("{messages}:{events}"));
+                    coordination
+                        .register_self_with_labels(&split_brain_node_info("b-follower"), labels)
+                        .await
+                        .ok();
+                }
+            }
+            if owner_draining.load(Ordering::SeqCst) {
+                let marked = committed_nodes.get("a-owner").is_some_and(|node| {
+                    node.labels
+                        .contains_key(fibril_coordination_ganglion::DRAINING_LABEL)
+                });
+                if !marked {
+                    let mut labels = BTreeMap::new();
+                    labels.insert(
+                        fibril_coordination_ganglion::DRAINING_LABEL.to_string(),
+                        "1".to_string(),
+                    );
+                    coordination
+                        .register_self_with_labels(&split_brain_node_info("a-owner"), labels)
+                        .await
+                        .ok();
+                }
+            }
+            if snapshot.nodes.contains_key("a-owner") && snapshot.nodes.contains_key("b-follower") {
+                let live = split_brain_live(false);
+                coordination
+                    .control_iteration(
+                        &DeterministicPartitionPlacement,
+                        &queues,
+                        &DeterministicStreamPlacement,
+                        &no_streams,
+                        1,
+                        1,
+                        ReplicationDurabilityPolicy::LocalDurable,
+                        &live,
+                        8,
+                    )
+                    .await
+                    .ok();
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+/// Drain handoff over a real raft cluster: marking a LIVE owner draining
+/// moves its partition to the caught-up follower under a fenced epoch while
+/// the owner keeps serving, the follower promotes at its replicated tails
+/// with no loss, the demoted owner refuses further writes, and the
+/// coordination snapshot reaches zero partitions owned by the draining node
+/// (the condition the drain call waits on).
+#[test]
+fn ganglion_draining_owner_hands_off_before_stopping() {
+    let topic = "sim.drain";
+    let queue = QueueIdentity::new(topic, Partition::new(0), None);
+
+    let mut sim = turmoil::Builder::new()
+        .simulation_duration(Duration::from_secs(300))
+        .build();
+
+    let caught_up = Arc::new(AtomicBool::new(false));
+    let handed_off = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+    let follower_tails: Arc<std::sync::Mutex<Option<(u64, u64)>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let owner_draining = Arc::new(AtomicBool::new(false));
+
+    // Draining owner: publishes the initial data, marks itself draining once
+    // the follower is caught up, then observes its own demotion while still
+    // fully connected.
+    {
+        let queue = queue.clone();
+        let caught_up = caught_up.clone();
+        let follower_tails = follower_tails.clone();
+        let owner_draining = owner_draining.clone();
+        let done = done.clone();
+        sim.client("a-owner", async move {
+            let coordination = start_split_brain_node("a-owner", 1).await;
+            let (engine, _dir) = open_engine("drain-owner").await;
+            let broker = Broker::new(engine, test_broker_config(), None);
+
+            let publisher = broker
+                .get_publisher(topic, Partition::new(0), &None)
+                .await
+                .unwrap();
+            for payload in [b"drain-first".as_slice(), b"drain-second".as_slice()] {
+                let reply = publisher
+                    .publish(
+                        payload.to_vec(),
+                        unix_millis(),
+                        unix_millis(),
+                        None,
+                        Default::default(),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                reply.await.unwrap().unwrap();
+            }
+
+            let serve_broker = broker.clone();
+            tokio::spawn(run_server(
+                bind_addr(),
+                None,
+                serve_broker,
+                TcpStats::new(10),
+                ConnectionStats::new(),
+                None::<StaticAuthHandler>,
+                ConnectionSettings::new(Some(60)),
+                None,
+                None,
+                None,
+            ));
+            let resolver = Arc::new(CoordinationProtocolOwnerPeerResolver::new(
+                coordination.clone(),
+            ));
+            broker.spawn_assignment_watcher_with_follower_replication(
+                coordination.clone(),
+                resolver,
+                FollowerReplicationWorkerConfig {
+                    caught_up_poll_ms: 60_000,
+                    ..Default::default()
+                },
+            );
+            tokio::spawn(run_drain_controller(
+                coordination.clone(),
+                queue.clone(),
+                follower_tails.clone(),
+                owner_draining.clone(),
+                done.clone(),
+            ));
+
+            tokio::time::timeout(Duration::from_secs(60), async {
+                loop {
+                    if let Ok(checkpoint) = broker
+                        .export_owner_state_checkpoint(topic, Partition::new(0), None)
+                        .await
+                    {
+                        if checkpoint.message_epoch >= 1 {
+                            break;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("owner takes initial ownership under the fence");
+
+            tokio::time::timeout(Duration::from_secs(120), async {
+                while !caught_up.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("follower catches up");
+
+            // The drain begins: the label (written leader-side by the
+            // controller task) is the only signal, and this node stays live
+            // and serving until the controller moves ownership.
+            owner_draining.store(true, Ordering::SeqCst);
+
+            // Demotion arrives through this node's own watch: writes on the
+            // existing publisher start being refused under the bumped epoch.
+            tokio::time::timeout(Duration::from_secs(120), async {
+                loop {
+                    let refused = match publisher
+                        .publish(
+                            b"stale-during-drain".to_vec(),
+                            unix_millis(),
+                            unix_millis(),
+                            None,
+                            Default::default(),
+                            None,
+                        )
+                        .await
+                    {
+                        Ok(reply) => reply.await.map(|inner| inner.is_err()).unwrap_or(true),
+                        Err(_) => true,
+                    };
+                    if refused {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("draining owner is demoted and refuses writes");
+
+            // The drain-wait condition: the committed snapshot shows this
+            // node owning nothing.
+            tokio::time::timeout(Duration::from_secs(60), async {
+                loop {
+                    let snapshot = coordination.snapshot();
+                    let owned = snapshot
+                        .assignments
+                        .values()
+                        .filter(|assignment| assignment.is_owned_by("a-owner"))
+                        .count();
+                    if owned == 0 {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("the draining node ends the handoff owning zero partitions");
+
+            tokio::time::timeout(Duration::from_secs(120), async {
+                while !done.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .ok();
+            Ok(())
+        });
+    }
+
+    // Follower: replicates, publishes its applied tails (the caught-up
+    // evidence evacuation requires), and takes over with no loss.
+    {
+        let queue = queue.clone();
+        let caught_up = caught_up.clone();
+        let handed_off = handed_off.clone();
+        let follower_tails = follower_tails.clone();
+        let owner_draining = owner_draining.clone();
+        let done = done.clone();
+        sim.client("b-follower", async move {
+            let coordination = start_split_brain_node("b-follower", 2).await;
+            let (engine, _dir) = open_engine("drain-follower").await;
+            let broker = Broker::new(engine, test_broker_config(), None);
+
+            let serve_broker = broker.clone();
+            tokio::spawn(run_server(
+                bind_addr(),
+                None,
+                serve_broker,
+                TcpStats::new(10),
+                ConnectionStats::new(),
+                None::<StaticAuthHandler>,
+                ConnectionSettings::new(Some(60)),
+                None,
+                None,
+                None,
+            ));
+            let resolver = Arc::new(CoordinationProtocolOwnerPeerResolver::new(
+                coordination.clone(),
+            ));
+            broker.spawn_assignment_watcher_with_follower_replication(
+                coordination.clone(),
+                resolver,
+                FollowerReplicationWorkerConfig {
+                    caught_up_poll_ms: 60_000,
+                    ..Default::default()
+                },
+            );
+            tokio::spawn(run_drain_controller(
+                coordination.clone(),
+                queue.clone(),
+                follower_tails.clone(),
+                owner_draining.clone(),
+                done.clone(),
+            ));
+
+            let replicated_message_next = tokio::time::timeout(Duration::from_secs(60), async {
+                loop {
+                    let state = broker
+                        .follower_replication_worker_snapshot(topic, Partition::new(0), None)
+                        .await;
+                    if let Some(state) = state {
+                        if state.status == FollowerReplicationWorkerStatus::CaughtUp {
+                            break (state.message_next_offset, state.event_next_offset);
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("follower catches up");
+            assert_eq!(replicated_message_next.0, 2);
+
+            *follower_tails.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(replicated_message_next);
+            caught_up.store(true, Ordering::SeqCst);
+
+            // The drain moves ownership here; promote at tails and serve.
+            tokio::time::timeout(Duration::from_secs(120), async {
+                loop {
+                    if QueueOwnership::owns_queue(
+                        coordination.as_ref(),
+                        topic,
+                        Partition::new(0),
+                        None,
+                    ) {
+                        if let Ok(publisher) =
+                            broker.get_publisher(topic, Partition::new(0), &None).await
+                        {
+                            if let Ok(reply) = publisher
+                                .publish(
+                                    b"post-drain".to_vec(),
+                                    unix_millis(),
+                                    unix_millis(),
+                                    None,
+                                    Default::default(),
+                                    None,
+                                )
+                                .await
+                            {
+                                if reply.await.unwrap().is_ok() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("follower is promoted during the drain and serves");
+
+            // No loss: the promoted log is the replicated history plus the
+            // one post-drain publish.
+            let promoted = broker
+                .export_owner_state_checkpoint(topic, Partition::new(0), None)
+                .await
+                .unwrap();
+            assert_eq!(promoted.message_next_offset, replicated_message_next.0 + 1);
+            handed_off.store(true, Ordering::SeqCst);
+
+            tokio::time::timeout(Duration::from_secs(120), async {
+                while !done.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .ok();
+            Ok(())
+        });
+    }
+
+    // Coordinator: raft-only third vote.
+    {
+        let queue = queue.clone();
+        let follower_tails = follower_tails.clone();
+        let owner_draining = owner_draining.clone();
+        let done = done.clone();
+        sim.client("coordinator", async move {
+            let coordination = start_split_brain_node("coordinator", 3).await;
+            tokio::spawn(run_drain_controller(
+                coordination.clone(),
+                queue.clone(),
+                follower_tails.clone(),
+                owner_draining.clone(),
+                done.clone(),
+            ));
+            tokio::time::timeout(Duration::from_secs(240), async {
+                while !done.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .ok();
+            Ok(())
+        });
+    }
+
+    // Orchestrator: no partitions in this scenario - the whole handoff
+    // happens between connected, healthy nodes. Finish once both sides have
+    // proven their half.
+    loop {
+        let finished = sim.step().expect("simulation step");
+        if handed_off.load(Ordering::SeqCst) {
+            done.store(true, Ordering::SeqCst);
+        }
+        if finished {
+            break;
+        }
+    }
+    assert!(done.load(Ordering::SeqCst), "scenario runs to completion");
+}
+
 /// Raft coordination converges despite a lossy, latent, message-dropping network.
 ///
 /// Three ganglion raft nodes run inside turmoil over the injected transport with
@@ -1627,6 +2055,7 @@ fn repartition_cutover_waits_for_delayed_topology_ack() {
                     connection_stats,
                     conn_id,
                     None::<StaticAuthHandler>,
+                    None,
                     ConnectionSettings::new(Some(60)),
                     Some(source as Arc<dyn ClientTopologySource>),
                     None,
