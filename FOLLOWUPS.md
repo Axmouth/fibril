@@ -525,16 +525,49 @@ making rolling upgrades a first-class flow (drain-restart node by
 node = a mixed-version cluster for the duration).
 
 Audited facts (2026-07-04) per surface:
-- Keratin event records: STROMA_VER = 3 (u16, per-record) at
-  keratin stroma/core/src/event.rs:9. CAVEAT CONFIRMED: the decode
-  check at event.rs:645 is an EQUALITY test - `ver != STROMA_VER` is
-  an InvalidData error, so bumping the version makes every existing
-  data dir unreadable. The guarantee therefore needs per-version
-  decode arms (keep decoding v3 when v4 lands), not just "audit that
-  bumps happen". Rule until then: never bump STROMA_VER without adding
-  a decode arm for the previous value. Also audit whether keratin log
-  segment headers and snapshot files carry their own version marker or
-  only the per-record one.
+  Keratin persists queue state on TWO surfaces with DIFFERENT compat
+  properties. Both matter for any field change.
+
+  Surface 1 - event-log records: STROMA_VER = 3 (u16, per-record) at
+  keratin stroma/core/src/event.rs. Records are length-framed by the log
+  (keratin-log record.rs carries payload_len + a per-record RECORD_VERSION
+  + CRC), and the event decoder reads exactly each type's known fields
+  without asserting it consumed the whole slice, so trailing bytes are
+  ignored. That makes ADDITIVE fields both forward and backward compatible
+  with NO version bump - append the new field at end-of-record and read it
+  behind an `i < bytes.len()` guard (absent on old records = default,
+  ignored by old readers), repeatably. Locked by a
+  decode_tolerates_trailing_bytes test plus a decode()-site comment in
+  keratin so no later hardening adds a full-consumption check. The
+  STROMA_VER equality test (`ver != STROMA_VER` -> InvalidData) only bites
+  reordering/removing/resizing an EXISTING field: that needs a bump AND a
+  kept decode arm for the old value. Sharp edge: MarkInflightMany is a
+  count-prefixed fixed-stride array, so a per-entry trailing field needs a
+  parallel count-matched trailing array, not a splice into the entries.
+
+  Surface 2 - the snapshot blob: SEPARATE FORMAT_VERSION = 4 (state.rs)
+  with an EQUALITY check on decode, and it is NOT trailing-tolerant. Its
+  inflight map is a count-prefixed fixed-stride array of (offset, deadline)
+  pairs. Adding a field to snapshotted state is therefore a RESHAPE: bump
+  FORMAT_VERSION and keep a decode branch for the old version, else old
+  snapshots turn unreadable. Snapshots compact away the events before them,
+  so state that predates the last snapshot lives ONLY here - a field cannot
+  be kept on the event alone.
+
+  Consequence for #105's likely inflight-owner: it touches BOTH surfaces
+  (recent deliveries as MarkInflight events, older ones only in the
+  snapshot inflight map), so it is a free append on the event but a
+  FORMAT_VERSION bump + kept decode branch on the snapshot. Not free
+  overall.
+
+  Decision - do NOT pre-add the inflight-owner field behind a placeholder
+  now. The snapshot-branch cost is identical whether paid now or later, so
+  pre-adding buys nothing and forces the FORMAT_VERSION bump now against a
+  guessed shape (wrong type, per-message vs per-lease). A wrong guess
+  becomes a second reshape, and it carries dead bytes on the hot delivery
+  path meanwhile. Reserve a field only when its shape is confident; #105's
+  persisted shape is still open. Still open to audit: whether keratin log
+  segment headers carry their own version marker beyond STROMA_VER.
 - Ganglion raft-wal.jsonl + snapshot.json: serde_json of
   PersistedMetadataLogEntry (ganglion crates/ganglion-storage/src/
   lib.rs), NO format marker anywhere. Additive serde-default fields
@@ -771,6 +804,19 @@ Design outline:
   ResumeNotFound; messages redeliver per at-least-once as today. NOT a
   delivery-tag preservation across restarts - tags die with the
   process, and #104's stale-tag surface covers that honestly.
+  Storage-format note: if #105 is ever taken FURTHER than redelivery -
+  i.e. a reconnecting client reclaims its still-held inflight leases
+  across the restart instead of redelivering - the broker has to know
+  who each inflight message belonged to, which means persisting a
+  consumer/session identity wherever inflight state lives. Per the
+  back-compat brief that is BOTH surfaces: a free additive trailing field
+  on the MarkInflight/MarkInflightMany event, but a FORMAT_VERSION bump +
+  kept decode branch on the snapshot inflight map (fixed-stride, equality
+  checked), because a message inflight before the last snapshot exists
+  only in the snapshot. Not pre-added now (decision recorded in that
+  brief). The v0.4.0 golden fixture pins today's owner-less encoding on
+  both surfaces, so whenever this lands CI proves old inflight state still
+  decodes.
 
 Invariants:
 1. At-least-once is never weakened: any ambiguity resolves to
