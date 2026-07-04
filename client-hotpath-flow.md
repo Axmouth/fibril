@@ -169,3 +169,127 @@ consumer: msg.ack()  --[settle oneshot]--> ack task
   commands are processed one-per-select or in a batch, so batching does not fail
   MORE than the unbatched path. TODO: a test that pins this (fatal mid-batch
   fails cleanly, remaining commands surface a connection error, no hang).
+
+## Engine read/write split - concrete plan
+
+Goal: writing interleaves with reading (two tasks, two cores) so a single
+client moves from ~180k toward 200-300k. Every step is proved on the bench
+before the next; the branch merges only when the whole matrix is green.
+
+Verified facts the plan builds on:
+- `MaybeTlsStream` is `Plain(TcpStream) | Tls(Box<TlsStream<TcpStream>>)`.
+  Plain splits zero-cost via `TcpStream::into_split()`. TLS needs
+  `tokio::io::split()` (BiLock per poll - rustls shares one state machine, so
+  TLS keeps some read/write coupling; measure plain first, accept a smaller TLS
+  win).
+- `FramedWrite::set_backpressure_boundary` exists (framed_write.rs:156), so the
+  raised-boundary fix carries over.
+- `dashmap` is already a client dependency (waiter-map option).
+
+### Step 0 - bench prerequisite (do first, independently useful)
+
+Add an unthrottled mode to steady_c (`--rate-per-sec 0` = no interval tick, a
+plain loop), so saturation runs stop measuring the rate limiter. Also add a
+`mixed` single-client scenario (1 producer + 1 consumer, same client) - the
+split's interleaving claim is strongest there. Record the pre-split baselines
+with it: publish-only, consume-only, mixed, each 3 runs.
+
+### Step 1 - split the stream and the codec halves
+
+`MaybeTlsStream::into_halves() -> (ReadHalf, WriteHalf)` (enum halves wrapping
+`OwnedReadHalf`/`OwnedWriteHalf` for plain, `tokio::io::ReadHalf/WriteHalf` for
+TLS). Replace `Framed<S, ProtoCodec>` with `FramedRead<ReadHalf, ProtoCodec>` +
+`FramedWrite<WriteHalf, ProtoCodec>` (same codec; decode state lives only in
+FramedRead, encode buffer only in FramedWrite - they were already disjoint).
+Set the backpressure boundary on the FramedWrite. No task split yet: keep one
+loop selecting over both halves. Prove: bench unchanged (this step must be
+neutral) and the full client test suite green.
+
+### Step 2 - two tasks, ownership divided
+
+- WRITE task owns: `FramedWrite`, `cmd_rx` (with the proven batch-drain),
+  `next_req` allocation, encode + feed + the flush ticker/thresholds, the
+  heartbeat PING ticker, and the heartbeat-timeout check.
+- READ task owns: `FramedRead`, `subs` (installed on SubscribeOk, removed on
+  drop), delivery dispatch, reply dispatch, topology/assignment pushes, and
+  updates `last_seen`.
+- Shared state, minimal by design:
+  - `waiters`: DashMap<u64, Waiter> (write task inserts before feeding a
+    confirmed publish, read task removes on reply). Sharded map because two
+    tasks now touch it ~150k/s each; a plain Mutex<HashMap> is the fallback if
+    DashMap shows anything odd - measure both if in doubt.
+    Insert-before-feed preserves the no-lost-reply invariant: the reply cannot
+    arrive before the frame is written.
+  - `last_seen`: Arc<AtomicU64> (millis relative to engine start; read task
+    stores, write task compares on its heartbeat tick).
+  - a `CancellationToken` (or Notify pair): whichever task hits a fatal error
+    records it (OnceLock<FibrilError>), cancels the token; both tasks exit on
+    cancellation.
+- A small supervisor (the code that today spawns the engine) awaits both task
+  handles, then runs the existing teardown exactly once: fail all waiters
+  (drain the shared map), clear subs via the registry, notify shutdown. The
+  reconnect/resume path calls the same spawn, so it inherits the split
+  unchanged.
+Prove: full test suite + tls_client + auth_client + redirect tests green,
+then bench - expect client CPU > 1 core and publish-only saturate to move.
+This step is the win-or-shelve gate: if mixed/publish saturate does not clear
+~220k on this hardware, stop and reassess before piling on.
+
+### Step 3 - settle path simplification (rides the split)
+
+Manual-ack settle today: consumer -> oneshot -> per-delivery spawned task ->
+cmd channel. Give `InflightMessage` a `cmd_tx` clone and have
+`complete()/fail()/retry()` send `Command::Ack/Nack` directly - deletes the
+per-delivery `tokio::spawn` and the oneshot (memory + churn win). The engine
+shutdown must still fail in-hand settles: senders observe the closed channel
+(BrokenPipe), same surface as today. Prove: settle tests + soak, bench
+consume-drain (expect the consumer side to gain most here).
+
+### Step 4 - delivery hardening (robustness, zero happy-path cost)
+
+Replace the read task's `tx.send(msg).await` into the sub channel with
+`try_send`. The channel is sized to the broker credit window
+(prefetch x partitions, fixed at subscribe) so Full is a credit violation:
+treat it as a fatal protocol error naming the invariant (never silent drop -
+at-least-once redelivers after inflight TTL, but the error must be loud).
+Prove: delivery tests + a new test that overfills a shrunken channel and
+asserts the loud failure, not a hang.
+
+### Step 5 - optional, only if step 2 pays: vectored write
+
+Bypass the Encoder copy for large payloads: write header and payload `Bytes`
+separately (write_vectored on the write half) instead of extend_from_slice
+into the write buffer. Saves the second payload copy (~4% CPU at 1KB, more at
+larger payloads) and transient memory. Intrusive - only do it inside the
+already-reworked write task, and only if the numbers justify it.
+
+### Step 6 - the full matrix before any merge decision
+
+- Throughput: publish-only unconfirmed + confirmed(w=1024, 4096), consume-only,
+  mixed, at 1 client and 10 clients, 1KB (plus one 16KB spot-check).
+- Latency guardrail: confirmed publish p50/p99 at a FIXED offered rate (50k)
+  must be within noise of main - the split must not add latency at moderate
+  load.
+- CPU split sanity: writer/read/write tasks together should exceed 1 core
+  under saturation, broker headroom unchanged.
+- Correctness: fatal-mid-batch (kill the socket during a burst: every pending
+  confirm fails with Disconnection, no hang), publish order preserved within a
+  partition under the batch-drain, heartbeat timeout still fires (server
+  accepts then goes silent), reconnect + resume identity survives the split,
+  clean shutdown mid-traffic. Existing suites: client unit + integration,
+  handler_tests, error_guides, TS/Python untouched but rerun for safety.
+- Memory: RSS per idle connection and under load vs main (the write buffer may
+  hold up to PUBLISH_FLUSH_BYTES transiently; confirm steady-state is not
+  higher than main by more than that).
+
+### Follow-on (after Rust lands): the other clients
+
+- Measure TS and Python single-client ceilings with the same
+  saturate/mixed/latency matrix (their benches may need the same no-tick fix).
+- Check each for the same two flaws found here: a per-few-frames forced socket
+  flush (TS: how socket.write chunks; Python: per-message drain() awaits), and
+  a serialized read/write structure (both are single-threaded runtimes - the
+  interleaving story differs, but a Python writer that awaits drain() per
+  message is the same bug shape as the 8KB boundary).
+- Port what applies; wording of guides stays per error_guides.json, numbers
+  land next to the FEATURE_MATRIX per-client perf bar.
