@@ -88,8 +88,8 @@ await publisher.publish_delayed_confirmed(payload, 30)
   <TabItem label="Go">
 
 ```go
-publisher.PublishDelayed(payload, 30*time.Second)
-publisher.PublishDelayedConfirmed(payload, 30*time.Second)
+publisher.PublishDelayed(ctx, payload, 30*time.Second)
+publisher.PublishDelayedConfirmed(ctx, payload, 30*time.Second)
 ```
 
   </TabItem>
@@ -185,7 +185,7 @@ await publisher.publish(reply)
 
 ```go
 publisher := client.Publisher("rpc.reply").Expiring(30 * time.Second)
-publisher.Publish(fibril.Text("reply"))
+publisher.Publish(ctx, fibril.Text("reply"))
 ```
 
   </TabItem>
@@ -223,7 +223,7 @@ await client.declare_queue(QueueConfig("rpc.reply").default_message_ttl(30))
 
 ```go
 ttl := uint64((30 * time.Second).Milliseconds())
-client.DeclareQueue(fibril.DeclareQueue{
+client.DeclareQueue(ctx, fibril.DeclareQueue{
     Topic:               "rpc.reply",
     DefaultMessageTTLms: &ttl,
 })

@@ -161,22 +161,28 @@ for msg in sub:
   </TabItem>
   <TabItem label="Go">
 
-The Go client lives in `clients/go`. Delays are a `time.Duration`. Deliveries
-arrive on a channel and settle with `Ack`/`Nack`.
+The Go client lives in `clients/go`. Every network method takes a
+`context.Context` first (use `context.Background()` with no deadline). Delays are
+a `time.Duration`. Deliveries arrive on a channel and settle with `Ack`/`Nack`.
 
 ```go
-import fibril "github.com/Axmouth/fibril/clients/go"
+import (
+    "context"
 
-client, err := fibril.Dial("127.0.0.1:9876", fibril.ClientOptions{
+    fibril "github.com/Axmouth/fibril/clients/go"
+)
+
+ctx := context.Background()
+client, err := fibril.Dial(ctx, "127.0.0.1:9876", fibril.ClientOptions{
     Auth: &fibril.Auth{Username: "fibril", Password: "fibril"},
 })
 
 publisher := client.Publisher("email.send")
-publisher.Publish(fibril.Text("hello"))
-publisher.PublishDelayed(fibril.Text("hello later"), 30*time.Second)
+publisher.Publish(ctx, fibril.Text("hello"))
+publisher.PublishDelayed(ctx, fibril.Text("hello later"), 30*time.Second)
 
 // SubscribeTopic fans in every partition (nil group, prefetch 32, manual ack).
-sub, err := client.SubscribeTopic("email.send", nil, 32, false)
+sub, err := client.SubscribeTopic(ctx, "email.send", nil, 32, false)
 for msg := range sub.Deliveries {
     process(msg.Text())
     msg.Ack()

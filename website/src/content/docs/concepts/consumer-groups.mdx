@@ -72,7 +72,7 @@ async for msg in sub:
 
 ```go
 // Run several instances; they self-organize into the group.
-sub, err := client.SubscribeTopicExclusive("orders", 32, true)
+sub, err := client.SubscribeTopicExclusive(ctx, "orders", 32, true)
 
 for msg := range sub.Deliveries {
     process(msg.Text()) // per-key order preserved
@@ -113,7 +113,7 @@ await publisher.publish(NewMessage.msgpack(order).partition_key(order.id))
 
 ```go
 msg, _ := fibril.JSON(order)
-publisher.Publish(msg.Keyed([]byte(order.ID)))
+publisher.Publish(ctx, msg.Keyed([]byte(order.ID)))
 ```
 
   </TabItem>

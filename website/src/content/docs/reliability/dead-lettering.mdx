@@ -78,7 +78,7 @@ await client.declare_queue(
 ```go
 group := "workers"
 maxRetries := uint32(3)
-client.DeclareQueue(fibril.DeclareQueue{
+client.DeclareQueue(ctx, fibril.DeclareQueue{
     Topic:         "orders.created",
     Group:         &group,
     DlqPolicy:     &fibril.DlqPolicy{Kind: fibril.DlqGlobal},

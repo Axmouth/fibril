@@ -44,7 +44,7 @@ sub = await client.subscribe("email.send").prefetch(32).sub()
 
 ```go
 // SubscribeTopic's fourth arg is the per-partition prefetch.
-sub, err := client.SubscribeTopic("email.send", nil, 32, false)
+sub, err := client.SubscribeTopic(ctx, "email.send", nil, 32, false)
 ```
 
   </TabItem>
