@@ -42,14 +42,17 @@ Go-specific decisions.
 3. `codec.go` - 20-byte frame header + opcode table + buffer-level
    `TryDecodeFrame`. **DONE** (`codec_test.go`: byte layout, round-trip,
    partial/back-to-back framing).
-4. `engine.go` - one connection, actor-shaped (one run goroutine owns all state
-   + is sole writer; a read goroutine feeds it frames; methods use a command
-   channel + per-request reply channel; no locks). **Publish path DONE**:
-   HELLO/AUTH handshake (compliance + version checks), confirmed/unconfirmed
-   publish, declare-queue, topology, Ping/Pong heartbeat + timeout, clean
-   shutdown. Race-clean vs a net.Pipe fake broker (`engine_test.go`) and live via
-   `examples/smoke`. **TODO:** subscribe/deliver/ack (delivery channels keyed by
-   sub id), then reconnect/resume.
+4. `engine.go` + `delivery.go` - one connection, actor-shaped (one run goroutine
+   owns all state + is sole writer; a read goroutine feeds it frames; methods use
+   a command channel + per-request reply channel; no locks). **DONE** for a single
+   connection: HELLO/AUTH handshake (compliance + version checks),
+   confirmed/unconfirmed publish, declare-queue, topology, subscribe -> per-sub
+   delivery channel (buffered to prefetch), DELIVER routing, ack/nack (fire-and-
+   forget, reuse the delivery request id), Ping/Pong heartbeat + timeout, clean
+   shutdown. Race-clean vs a net.Pipe fake broker (`engine_test.go`,
+   `delivery_test.go`) and validated live end-to-end via `examples/smoke`
+   (declare -> subscribe -> publish -> receive -> ack). Reconnect/resume lives in
+   the client layer next.
 5. `client.go` - pool keyed by host:port, topology cache, partition routing,
    bounded redirect-follow, reconnect. TODO.
 6. `publisher.go` / `subscription.go` / `message.go` - public API. TODO.
