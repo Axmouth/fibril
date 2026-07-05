@@ -103,6 +103,18 @@ the same durable name tracks an independent cursor per partition.
 | Topology refresh on transient failure (throttled) | done | done | done | done |
 | Subscription supervisor (re-subscribe on owner drop + graceful move) | done | done | done | done |
 
+## Discovery
+
+Discovery is an opt-in surface (a routing/discovery view over the client) that
+fans in across channels by a topic glob, driven by the cluster topology.
+
+| Feature | Rust | TypeScript | Python | Go |
+| --- | --- | --- | --- | --- |
+| Catalogue snapshot (declared queues + streams) | done | done | done | done |
+| Catalogue change events | done | done | done | done |
+| Pattern subscribe over queues (glob + auto-pickup) | done | done | done | done <sup>16</sup> |
+| Pattern subscribe over streams (glob + auto-pickup) | done | done | done | done <sup>16</sup> |
+
 ## Reliability and groups
 
 | Feature | Rust | TypeScript | Python | Go |
@@ -128,8 +140,8 @@ the same durable name tracks an independent cursor per partition.
 | Feature | Rust | TypeScript | Python | Go |
 | --- | --- | --- | --- | --- |
 | Examples | done | done | done | done |
-| Examples-as-light-tests runner | done | done | deferred <sup>10</sup> | deferred <sup>10</sup> |
-| Real-broker integration smoke | done | done <sup>5</sup> | deferred <sup>5</sup> | deferred <sup>5</sup> |
+| Examples-as-light-tests runner | done | done | deferred <sup>10</sup> | done |
+| Real-broker integration smoke | done | done <sup>5</sup> | deferred <sup>5</sup> | done <sup>5</sup> |
 
 ## Notes
 
@@ -156,10 +168,12 @@ the same durable name tracks an independent cursor per partition.
    the per-partition gate regardless, so this is observability/narrowing, not
    correctness.
 5. CI runs the examples against the published single-node broker image for Rust
-   and TS. A multi-node ganglion cluster smoke for a real cross-owner redirect is
-   still pending. The Python and Go clients' wire correctness is pinned by the
-   shared cross-client vectors (note 6). Wiring their examples into CI against a
-   live broker is still pending.
+   and TS. The Go client has the same runner (`clients/go/examples/run-all.sh`),
+   which boots a fresh release broker and runs each self-validating example, so
+   the real-broker smoke exists; wiring it into CI is the remaining step. A
+   multi-node ganglion cluster smoke for a real cross-owner redirect is still
+   pending across clients. The Python client's wire correctness is pinned by the
+   shared cross-client vectors (note 6); wiring its examples into CI is pending.
 6. The Python and Go wire codecs are cross-checked byte-for-byte against the
    shared `clients/wire_vectors.json`, the same fixture the Rust protocol crate
    pins its encoders to (`crates/protocol/tests/wire_vectors.rs`), so all four
@@ -171,8 +185,8 @@ the same durable name tracks an independent cursor per partition.
 9. The Python blocking client (`fibril.blocking.BlockingClient`) is a thin facade
    over the async core on a background event-loop thread, not a second
    implementation.
-10. The Python and Go clients have unit and fake-broker integration tests. A
-    runnable examples-as-tests job like the TS client's is not wired up yet.
+10. The Python client has unit and fake-broker integration tests. A runnable
+    examples-as-tests job like the TS and Go clients' is not wired up yet.
 11. The express lane is wired end to end. Durable persists and fsyncs before
     delivering and confirming. Speculative delivers off the staged offset, fsyncs
     in the background, and defers the producer confirm until durable (deliveries
@@ -191,6 +205,12 @@ the same durable name tracks an independent cursor per partition.
 15. Text, JSON, and raw have builders (`Text`/`JSON`/`Raw`); `Msgpack` and
     `Custom` tag already-encoded bytes with the content type, so the Go client
     needs no MessagePack serialization dependency.
+16. Discovery is reached via `Client.Routing()`. `SubscribePattern` and
+    `SubscribeStreamPattern` take an options struct (Go idiom) rather than the
+    fluent builder the other clients use, but the surface and behavior match. The
+    catalogue is empty against a single-node broker (which advertises no
+    topology), so the pattern example is a demo and the behavior is covered by a
+    fake-broker test.
 
 See the repo-root `FOLLOWUPS.md` "Clients" section for the brick-by-brick plan
 behind these rows.
