@@ -41,7 +41,8 @@ Superscript numbers refer to the Notes under the tables.
 | --- | --- | --- | --- | --- |
 | Unconfirmed publish | done | done | done | done |
 | Confirmed publish (awaits offset) | done | done | done | done |
-| Pipelined confirmation handle | done | done | done | done |
+| Confirmation handle (publish_with_confirmation) | done | done | done | done |
+| Delayed publish with confirmation handle | done | done | done | done |
 | Delayed publish | done | done | done | done |
 | Raw bytes publish | done | done | done | done |
 | Content types (msgpack/json/text/raw/custom) | done | done | done | done <sup>15</sup> |
@@ -124,6 +125,7 @@ fans in across channels by a topic glob, driven by the cluster topology.
 | ReliablePublisher helper | done | done | done | done |
 | Producer-id dedup headers | done | done <sup>3</sup> | done <sup>3</sup> | done <sup>3</sup> |
 | Exclusive consumer groups | done | done | done | done |
+| Exclusive cohort shorthand (`exclusive()`) | done | done | done | done <sup>17</sup> |
 | Cohort member id mint/carry | done | done | done | done |
 | Assignment events stream (AssignmentChanged) | done | done <sup>4</sup> | done <sup>4</sup> | done <sup>4</sup> |
 
@@ -211,6 +213,9 @@ fans in across channels by a topic glob, driven by the cluster topology.
     catalogue is empty against a single-node broker (which advertises no
     topology), so the pattern example is a demo and the behavior is covered by a
     fake-broker test.
+17. Go's exclusive shorthand is `SubscribeTopicExclusive` (a whole-topic fan-in
+    joining the default cohort), with `SubscribeTopicCohort` for a named cohort.
+    All four clients join the same default cohort id "default".
 
 See the repo-root `FOLLOWUPS.md` "Clients" section for the brick-by-brick plan
 behind these rows.
