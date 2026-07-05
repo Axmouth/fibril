@@ -300,12 +300,26 @@ class Engine:
 
     def shutdown(self) -> None:
         """Tear the connection down and fail every pending operation."""
+        self._flush_pending_sync()
         self._mark_dead(self._fatal or BrokenPipeError("engine shutdown"))
 
     def shutdown_for_reconnect(self) -> None:
         """Tear down but keep registered subscription queues alive for a new engine."""
         self._preserve_subscriptions = True
+        self._flush_pending_sync()
         self._mark_dead(self._fatal or BrokenPipeError("engine reconnect"))
+
+    def _flush_pending_sync(self) -> None:
+        # Best-effort flush of buffered fire-and-forget frames (coalesced acks and
+        # publishes) on a graceful teardown, so an ack-then-close does not silently
+        # drop the ack. The transport sends synchronously and close() drains the
+        # rest. On a dead socket the write just fails and is ignored.
+        if self._closed or not self._pending:
+            return
+        try:
+            self._writer.write(self._take_pending())
+        except (ConnectionError, OSError):
+            pass
 
     async def wait_closed(self) -> None:
         for task in (self._read_task, self._heartbeat_task):
@@ -405,7 +419,10 @@ class Engine:
         if sub is None:
             return
         msg = wire.Ack(topic=sub.topic, group=sub.group, partition=sub.partition, tags=[tag])
-        if not await self._send_or_die(build_frame(Op.ACK, request_id, encode_body(Op.ACK, msg))):
+        # Acks are fire-and-forget (no reply awaited), so they coalesce like
+        # unconfirmed publishes. A lost ack on a severed connection just redelivers,
+        # which is already the at-least-once guarantee.
+        if not await self._send_buffered(build_frame(Op.ACK, request_id, encode_body(Op.ACK, msg))):
             raise self._fatal or BrokenPipeError()
 
     async def nack(
@@ -427,7 +444,8 @@ class Engine:
             requeue=requeue,
             not_before=not_before,
         )
-        if not await self._send_or_die(build_frame(Op.NACK, request_id, encode_body(Op.NACK, msg))):
+        # Fire-and-forget like ack (see there).
+        if not await self._send_buffered(build_frame(Op.NACK, request_id, encode_body(Op.NACK, msg))):
             raise self._fatal or BrokenPipeError()
 
     # ---- internals -----------------------------------------------------

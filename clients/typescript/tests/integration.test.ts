@@ -2033,6 +2033,61 @@ async function waitUntil(cond: () => boolean, timeoutMs = 1000): Promise<void> {
   }
 }
 
+test("a buffered ack is flushed to the broker on graceful shutdown", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      } else if (f.opcode === Op.Subscribe) {
+        const sub = decodeFrameBody<SubscribeMsg>(f);
+        broker.send(
+          s,
+          buildFrame(Op.SubscribeOk, f.requestId, {
+            sub_id: 100n,
+            topic: sub.topic,
+            group: sub.group,
+            partition: 0,
+            prefetch: sub.prefetch,
+          }),
+        );
+        broker.send(
+          s,
+          buildFrame(Op.Deliver, 0n, {
+            sub_id: 100n,
+            topic: sub.topic,
+            group: sub.group,
+            partition: 0,
+            offset: 1n,
+            delivery_tag: { epoch: 7n },
+            published: 1n,
+            publish_received: 1n,
+            content_type: { kind: "msg_pack" },
+            headers: {},
+            payload: new Uint8Array([0xa5, 0x68, 0x65, 0x6c, 0x6c, 0x6f]),
+          }),
+        );
+      }
+    };
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    const sub = await client.subscribe("t1").sub();
+    const result = await sub[Symbol.asyncIterator]().next();
+    assert.equal(result.done, false);
+    if (!result.done) await result.value.complete(); // buffers the coalesced ack
+    // Shut down immediately: the graceful flush must push the buffered ack out
+    // rather than dropping it.
+    await client.shutdown();
+    await new Promise((r) => setTimeout(r, 20)); // let the broker read it
+    assert.ok(
+      broker.received.some((f) => f.opcode === Op.Ack),
+      "buffered ack should be flushed on graceful shutdown",
+    );
+  } finally {
+    await broker.stop();
+  }
+});
+
 test("withWriteCoalescing sets only the passed limits and validates", () => {
   const base = new ClientOptions();
   const tuned = base.withWriteCoalescing({ maxBytes: 4096, maxFrames: 8, windowMs: 2 });

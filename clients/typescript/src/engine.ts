@@ -143,6 +143,10 @@ export type SubscriptionRegistry = Map<bigint, RegisteredSubscription>;
 
 interface ShutdownMode {
   preserveSubscriptions: boolean;
+  // Set by the engine loop: best-effort synchronous flush of buffered
+  // fire-and-forget frames (coalesced acks and publishes), called on a graceful
+  // shutdown before the socket closes so an ack-then-close does not drop the ack.
+  flush?: () => void;
 }
 
 // Shared mutable holder for the engine's terminal error, set as the loop tears
@@ -411,6 +415,9 @@ export class Engine {
   shutdown(): void {
     if (this.#shutdownInitiated) return;
     this.#shutdownInitiated = true;
+    // Push any buffered fire-and-forget frames (coalesced acks/publishes) to the
+    // socket before it closes, so an ack-then-shutdown does not drop the ack.
+    this.#shutdownMode.flush?.();
     // Close the command queue: command consumer will exit cleanly.
     this.#commandQueue.close(new BrokenPipeError("engine shutdown"));
     // Destroy the socket: frame producer's async iterator will end.
@@ -611,6 +618,19 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
       scheduleFlush();
     }
     return !socketDead;
+  };
+
+  // Graceful-shutdown hook: push buffered fire-and-forget frames to the socket
+  // before it closes. libuv attempts a synchronous write and the kernel flushes
+  // its send buffer on the FIN, so a small trailing ack still reaches the broker.
+  shutdownMode.flush = (): void => {
+    if (socketDead || pending.length === 0) return;
+    cancelScheduledFlush();
+    try {
+      socket.write(takePending());
+    } catch {
+      // Best effort: a dead socket just drops it, which redelivers.
+    }
   };
 
   // ---- heartbeat ----
@@ -824,7 +844,10 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
           partition: sub.partition,
           tags: [cmd.tag],
         };
-        const ok = await sendOrDie(buildFrame(Op.Ack, cmd.request_id, msg));
+        // Acks are fire-and-forget (no reply awaited), so they coalesce like
+        // unconfirmed publishes. A lost ack on a severed connection just
+        // redelivers, which is already the at-least-once guarantee.
+        const ok = await sendBuffered(buildFrame(Op.Ack, cmd.request_id, msg));
         if (ok) cmd.reply.resolve();
         else cmd.reply.reject(new BrokenPipeError());
         return;
@@ -843,7 +866,8 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
           requeue: cmd.requeue,
           not_before: cmd.not_before,
         };
-        const ok = await sendOrDie(buildFrame(Op.Nack, cmd.request_id, msg));
+        // Fire-and-forget like ack (see there).
+        const ok = await sendBuffered(buildFrame(Op.Nack, cmd.request_id, msg));
         if (ok) cmd.reply.resolve();
         else cmd.reply.reject(new BrokenPipeError());
         return;
