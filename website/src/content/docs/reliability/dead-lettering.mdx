@@ -3,6 +3,8 @@ title: Dead Lettering
 description: Configure where failed messages should go.
 ---
 
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
 Dead lettering gives failed messages somewhere explicit to go after retry handling is exhausted. It is useful when you want to inspect, replay, or separately process messages that could not be handled normally.
 
 ## What You Can Configure
@@ -26,7 +28,8 @@ You can also set the queue retry limit when declaring the queue policy. Leave it
 
 Applications can declare retry and dead-letter policy when they start. This is usually the clearest place to put per-queue behavior, because the code that publishes or consumes a queue also documents what should happen when processing keeps failing.
 
-Rust:
+<Tabs syncKey="client-language">
+  <TabItem label="Rust">
 
 ```rust
 use fibril_client::QueueConfig;
@@ -41,7 +44,8 @@ client
     .await?;
 ```
 
-TypeScript:
+  </TabItem>
+  <TabItem label="TypeScript">
 
 ```ts
 import { QueueConfig } from "@fibril/client";
@@ -53,6 +57,37 @@ await client.declareQueue(
     .maxRetries(3),
 );
 ```
+
+  </TabItem>
+  <TabItem label="Python">
+
+```python
+from fibril import QueueConfig
+
+await client.declare_queue(
+    QueueConfig("orders.created")
+    .group("workers")
+    .use_global_dead_letter_queue()
+    .max_retries(3)
+)
+```
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+group := "workers"
+maxRetries := uint32(3)
+client.DeclareQueue(fibril.DeclareQueue{
+    Topic:         "orders.created",
+    Group:         &group,
+    DlqPolicy:     &fibril.DlqPolicy{Kind: fibril.DlqGlobal},
+    DlqMaxRetries: &maxRetries,
+})
+```
+
+  </TabItem>
+</Tabs>
 
 CLI:
 

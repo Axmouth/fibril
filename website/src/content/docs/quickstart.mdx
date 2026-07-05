@@ -50,7 +50,7 @@ multi-node bring-up.
 
 ## Client shape
 
-Fibril has Rust, TypeScript, and Python clients over the same broker surface:
+Fibril has Rust, TypeScript, Python, and Go clients over the same broker surface:
 publishers, delayed publish, and manual-ack subscriptions. The examples are for
 the current pre-alpha source tree, not a stable package contract.
 
@@ -157,6 +157,31 @@ for msg in sub:
 
   </TabItem>
 </Tabs>
+
+  </TabItem>
+  <TabItem label="Go">
+
+The Go client lives in `clients/go`. Delays are a `time.Duration`. Deliveries
+arrive on a channel and settle with `Ack`/`Nack`.
+
+```go
+import fibril "github.com/Axmouth/fibril/clients/go"
+
+client, err := fibril.Dial("127.0.0.1:9876", fibril.ClientOptions{
+    Auth: &fibril.Auth{Username: "fibril", Password: "fibril"},
+})
+
+publisher := client.Publisher("email.send")
+publisher.Publish(fibril.Text("hello"))
+publisher.PublishDelayed(fibril.Text("hello later"), 30*time.Second)
+
+// SubscribeTopic fans in every partition (nil group, prefetch 32, manual ack).
+sub, err := client.SubscribeTopic("email.send", nil, 32, false)
+for msg := range sub.Deliveries {
+    process(msg.Text())
+    msg.Ack()
+}
+```
 
   </TabItem>
 </Tabs>

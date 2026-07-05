@@ -1,11 +1,11 @@
 ---
 title: Client usage
-description: Use the Rust, TypeScript, and Python clients to publish, consume, and settle messages.
+description: Use the Rust, TypeScript, Python, and Go clients to publish, consume, and settle messages.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-Fibril has Rust, TypeScript, and Python clients for the same core broker surface:
+Fibril has Rust, TypeScript, Python, and Go clients for the same core broker surface:
 
 - connect with optional auth
 - publish with or without confirmation
@@ -16,11 +16,13 @@ Fibril has Rust, TypeScript, and Python clients for the same core broker surface
 
 The examples below are source-tree examples for the current pre-alpha API. They are useful for building against this repository, but not yet a stable package contract.
 
-Parity note: all three clients cover the branch's partition topology,
+Parity note: all four clients cover the branch's partition topology,
 owner-redirect, partition-key routing, exclusive consumer-group surface, and
-message TTL. The Rust client is the reference implementation. The TypeScript and
-Python clients mirror its behavior. The Python client also ships a synchronous
-facade (`fibril.blocking.BlockingClient`) over the same async core.
+message TTL. The Rust client is the reference implementation. The TypeScript,
+Python, and Go clients mirror its behavior. The Python client also ships a
+synchronous facade (`fibril.blocking.BlockingClient`) over the same async core.
+The Go client presents ordinary blocking, goroutine-safe calls and delivers on
+channels, so it has no separate async and sync split.
 
 ## Requirements
 
@@ -28,6 +30,7 @@ facade (`fibril.blocking.BlockingClient`) over the same async core.
 - **TypeScript**: Node.js 18 or newer, ESM.
 - **Python**: Python 3.11 or newer. The only runtime dependency is the PyPI
   `msgpack` package, installed automatically with the client.
+- **Go**: Go 1.23 or newer. No third-party dependencies.
 
 For reconnect behavior and current limits, see [reconnects](/reliability/reconnects/).
 
@@ -82,6 +85,17 @@ client = BlockingClient.connect(
 
   </TabItem>
 </Tabs>
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+import fibril "github.com/Axmouth/fibril/clients/go"
+
+client, err := fibril.Dial("127.0.0.1:9876", fibril.ClientOptions{
+    Auth: &fibril.Auth{Username: "fibril", Password: "fibril"},
+})
+```
 
   </TabItem>
 </Tabs>
@@ -154,6 +168,20 @@ client = await (
     .connect("broker.internal:9876")
 )
 ```
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+client, err := fibril.Dial("broker.internal:9876", fibril.ClientOptions{
+    Auth: &fibril.Auth{Username: "fibril", Password: "fibril"},
+    TLS:  &fibril.TLSOptions{CAFile: "/var/lib/fibril/tls/ca.pem"},
+})
+```
+
+The Go trust order matches the others: `CAFingerprint` pins the SHA-256
+fingerprint, else `CAFile` trusts a PEM, else an empty `TLSOptions{}` uses the OS
+roots. A client certificate is `ClientCertFile` with `ClientKeyFile`.
 
   </TabItem>
 </Tabs>
@@ -247,6 +275,15 @@ client = BlockingClient.connect(
 </Tabs>
 
   </TabItem>
+  <TabItem label="Go">
+
+```go
+client, err := fibril.Dial("127.0.0.1:9876", fibril.ClientOptions{
+    ReconcilePolicy: fibril.ReconcileRestore,
+})
+```
+
+  </TabItem>
 </Tabs>
 
 ## Publish
@@ -322,6 +359,20 @@ pipelined_offset = confirmation.confirmed()
 </Tabs>
 
   </TabItem>
+  <TabItem label="Go">
+
+```go
+publisher := client.Publisher("email.send")
+
+publisher.Publish(fibril.Text("hello"))
+
+offset, err := publisher.PublishConfirmed(fibril.Text("needs an offset"))
+
+confirmation, err := publisher.PublishWithConfirmation(fibril.Text("pipeline me"))
+pipelinedOffset, err := confirmation.Confirmed()
+```
+
+  </TabItem>
 </Tabs>
 
 ## Delayed Publish
@@ -388,6 +439,18 @@ offset = publisher.publish_delayed_confirmed("send later and return offset", 30)
 Python delays are seconds (a float or a `datetime.timedelta`).
 
   </TabItem>
+  <TabItem label="Go">
+
+```go
+publisher.PublishDelayed(fibril.Text("send later"), 30*time.Second)
+
+offset, err := publisher.PublishDelayedConfirmed(
+    fibril.Text("send later and return offset"), 30*time.Second)
+```
+
+Go delays are a `time.Duration`.
+
+  </TabItem>
 </Tabs>
 
 ## Delayed Retry
@@ -439,6 +502,16 @@ msg.retry_after(30)
 </Tabs>
 
 Python delays are seconds (a float or a `datetime.timedelta`).
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+msg := <-sub.Deliveries
+msg.RetryAfter(30 * time.Second)
+```
+
+`Retry()` requeues immediately. `RetryAfter(d)` takes a `time.Duration`.
 
   </TabItem>
 </Tabs>
@@ -528,6 +601,21 @@ publisher.publish(NewMessage.raw(bytes([1, 2, 3])))
 
   </TabItem>
 </Tabs>
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+job, err := fibril.JSON(map[string]any{"id": 42, "kind": "welcome"})
+publisher.Publish(job)
+
+publisher.Publish(fibril.Text("plain text").WithHeader("x-trace-id", "abc123"))
+
+publisher.Publish(fibril.Raw([]byte{1, 2, 3}))
+```
+
+`fibril.Msgpack(bytes)` and `fibril.Custom(contentType, bytes)` tag already-encoded
+payloads, so the Go client needs no msgpack dependency.
 
   </TabItem>
 </Tabs>
@@ -624,9 +712,26 @@ for msg in sub:
 </Tabs>
 
   </TabItem>
+  <TabItem label="Go">
+
+```go
+group := "workers"
+sub, err := client.SubscribeTopic("email.send", &group, 32, false)
+
+for msg := range sub.Deliveries {
+    body := msg.Text()
+    if err := sendEmail(body); err == nil {
+        msg.Ack()
+    } else {
+        msg.Retry()
+    }
+}
+```
+
+  </TabItem>
 </Tabs>
 
-`retry()` requeues immediately. Use `retry_after(..)` in Rust and Python or `retryAfter(..)` in TypeScript for delayed retry.
+`retry()` requeues immediately. Use `retry_after(..)` in Rust and Python, `retryAfter(..)` in TypeScript, or `RetryAfter(..)` in Go for delayed retry.
 
 ## Dead Letter Workflow
 
@@ -718,6 +823,20 @@ client.declare_queue(
 </Tabs>
 
   </TabItem>
+  <TabItem label="Go">
+
+```go
+group := "workers"
+maxRetries := uint32(3)
+client.DeclareQueue(fibril.DeclareQueue{
+    Topic:         "email.send",
+    Group:         &group,
+    DlqPolicy:     &fibril.DlqPolicy{Kind: fibril.DlqGlobal},
+    DlqMaxRetries: &maxRetries,
+})
+```
+
+  </TabItem>
 </Tabs>
 
 Application clients keep using normal publish/consume code:
@@ -806,6 +925,27 @@ for msg in sub:
 </Tabs>
 
   </TabItem>
+  <TabItem label="Go">
+
+```go
+publisher := client.PublisherGrouped("email.send", "workers")
+job, _ := fibril.JSON(jobData)
+publisher.PublishConfirmed(job)
+
+group := "workers"
+sub, err := client.SubscribeTopic("email.send", &group, 32, false)
+
+for msg := range sub.Deliveries {
+    var j Job
+    if msg.JSON(&j) == nil && process(j) {
+        msg.Ack()
+    } else {
+        msg.Retry()
+    }
+}
+```
+
+  </TabItem>
 </Tabs>
 
 Once the configured retry limit is exhausted, the broker routes the failed message to `_dlq.email`. Subscribe to that queue like any other queue when you want inspection or replay tooling.
@@ -849,6 +989,22 @@ job = msg.deserialize()
 raw = msg.raw()
 text = msg.text()
 ```
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+type Job struct {
+    ID uint64 `json:"id"`
+}
+
+var job Job
+err := msg.JSON(&job)
+raw := msg.Payload
+text := msg.Text()
+```
+
+Go decode is explicit: `JSON(&v)` for JSON, `Payload` for raw bytes, `Text()` for text.
 
   </TabItem>
 </Tabs>
@@ -913,6 +1069,19 @@ for msg in sub:
 
   </TabItem>
 </Tabs>
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+sub, err := client.SubscribeTopic("metrics", nil, 128, true)
+
+for msg := range sub.Deliveries {
+    var m Metric
+    msg.JSON(&m)
+    observe(m)
+}
+```
 
   </TabItem>
 </Tabs>
@@ -1016,6 +1185,34 @@ for msg in sub:
 </Tabs>
 
   </TabItem>
+  <TabItem label="Go">
+
+```go
+partitions := uint32(4)
+maxRecords := uint64(1_000_000)
+client.DeclarePlexus(fibril.DeclarePlexus{
+    Topic:          "events",
+    PartitionCount: &partitions,
+    Retention:      fibril.StreamRetention{MaxRecords: &maxRecords},
+})
+
+// Publish uses the normal publisher.
+client.Publisher("events").Publish(fibril.Text("hello"))
+
+durable := "analytics"
+sub, err := client.SubscribeStreamTopic("events", fibril.StreamSubscribeOptions{
+    DurableName: &durable,
+    Filter:      []fibril.StreamFilter{{Key: "region", Pattern: "eu-*"}},
+    Prefetch:    16,
+})
+
+for msg := range sub.Deliveries {
+    handle(msg.Text())
+    msg.Ack() // advances the durable cursor
+}
+```
+
+  </TabItem>
 </Tabs>
 
 For a live tail without a durable cursor, drop `.durable(...)` and pick a start
@@ -1093,6 +1290,20 @@ for item in sub:
 </Tabs>
 
   </TabItem>
+  <TabItem label="Go">
+
+```go
+routing := client.Routing()
+sub, err := routing.SubscribePattern("events.*", fibril.PatternSubscribeOptions{})
+
+// Each delivery carries its source topic in msg.Topic.
+for msg := range sub.Deliveries {
+    handle(msg.Topic, msg.Text())
+    msg.Ack()
+}
+```
+
+  </TabItem>
 </Tabs>
 
 ## Shutdown
@@ -1130,6 +1341,13 @@ client.shutdown()
 
   </TabItem>
 </Tabs>
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+client.Shutdown()
+```
 
   </TabItem>
 </Tabs>
