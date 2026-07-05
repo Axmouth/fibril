@@ -37,6 +37,19 @@ from .protocol import COMPLIANCE_STRING, PROTOCOL_V1, Op
 
 DEFAULT_HEARTBEAT_INTERVAL_S = 5.0
 
+# Coalesce fire-and-forget writes and flush in one socket write, because
+# asyncio's transport does an eager per-write syscall (an unconfirmed-publish
+# burst is otherwise one send syscall per message). Three triggers flush the
+# buffer, whichever comes first: a byte cap (bounds memory, and makes large
+# messages flush after only a few), a frame-count cap (bounds latency for tiny
+# messages that would take many to reach the byte cap), and a short time window
+# (bounds the tail when traffic trickles). Reply-bearing frames flush
+# immediately regardless, so coalescing only ever delays fire-and-forget frames,
+# and never past the window.
+DEFAULT_WRITE_COALESCE_BYTES = 64 * 1024
+DEFAULT_WRITE_COALESCE_COUNT = 128
+DEFAULT_WRITE_COALESCE_WINDOW_S = 0.0005
+
 _HANDSHAKE_REQUEST_ID = 1
 _AUTH_REQUEST_ID = 2
 _RECONCILE_REQUEST_ID = 3
@@ -53,6 +66,9 @@ class EngineOptions:
     resume_identity: Optional[wire.ResumeIdentity] = None
     reconnect_reconcile_policy: wire.ReconcilePolicy = "restore_client_subscriptions"
     heartbeat_interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL_S
+    write_coalesce_bytes: int = DEFAULT_WRITE_COALESCE_BYTES
+    write_coalesce_count: int = DEFAULT_WRITE_COALESCE_COUNT
+    write_coalesce_window_s: float = DEFAULT_WRITE_COALESCE_WINDOW_S
 
 
 @dataclass
@@ -149,6 +165,14 @@ class Engine:
         self._closed = False
         self._fatal: Optional[BaseException] = None
         self._preserve_subscriptions = False
+
+        # Write coalescing for fire-and-forget frames (see _send_buffered).
+        self._pending = bytearray()
+        self._pending_count = 0
+        self._flush_scheduled = False
+        self._coalesce_bytes = opts.write_coalesce_bytes
+        self._coalesce_count = opts.write_coalesce_count
+        self._coalesce_window = opts.write_coalesce_window_s
 
         loop = asyncio.get_running_loop()
         self._last_seen = loop.time()
@@ -294,7 +318,7 @@ class Engine:
     async def publish(self, msg: wire.Publish, confirm: bool) -> Optional[int]:
         msg.require_confirm = confirm
         if not confirm:
-            await self._send_or_die(build_frame(Op.PUBLISH, self._alloc_id(), encode_body(Op.PUBLISH, msg)))
+            await self._send_buffered(build_frame(Op.PUBLISH, self._alloc_id(), encode_body(Op.PUBLISH, msg)))
             return None
         offset = await self._request("publish", Op.PUBLISH, msg)
         assert isinstance(offset, int)
@@ -320,7 +344,7 @@ class Engine:
     async def publish_delayed(self, msg: wire.PublishDelayed, confirm: bool) -> Optional[int]:
         msg.require_confirm = confirm
         if not confirm:
-            await self._send_or_die(
+            await self._send_buffered(
                 build_frame(Op.PUBLISH_DELAYED, self._alloc_id(), encode_body(Op.PUBLISH_DELAYED, msg))
             )
             return None
@@ -423,15 +447,79 @@ class Engine:
         return await fut
 
     async def _send_or_die(self, frame: Frame) -> bool:
+        # Reply-bearing and control frames flush immediately: the caller (or the
+        # broker) is about to wait on a response, so the frame cannot sit in the
+        # coalescing buffer. Any pending fire-and-forget frames go out first, in
+        # order.
         if self._closed:
             return False
+        self._pending += encode_frame(frame)
+        return await self._flush()
+
+    async def _send_buffered(self, frame: Frame) -> bool:
+        """Queue a fire-and-forget frame, coalescing writes.
+
+        Appends to the pending buffer and flushes only once it crosses the
+        coalesce threshold, otherwise schedules a flush for the next event-loop
+        tick. A saturating unconfirmed-publish loop never yields, so the
+        threshold flush is what bounds the buffer and batches the send syscalls
+        the buffer is coalescing; the scheduled flush covers a lone frame in an
+        otherwise idle connection so it leaves promptly.
+        """
+        if self._closed:
+            return False
+        self._pending += encode_frame(frame)
+        self._pending_count += 1
+        if len(self._pending) >= self._coalesce_bytes or self._pending_count >= self._coalesce_count:
+            return await self._flush()
+        self._schedule_flush()
+        return True
+
+    def _take_pending(self) -> bytearray:
+        # Hand the buffer to the transport and start a fresh one, so no copy is
+        # needed and a concurrent append lands in the next batch.
+        data = self._pending
+        self._pending = bytearray()
+        self._pending_count = 0
+        return data
+
+    async def _flush(self) -> bool:
+        """Write the pending buffer in one socket write, draining for backpressure."""
+        if self._closed:
+            return False
+        if not self._pending:
+            return True
         try:
-            self._writer.write(encode_frame(frame))
+            self._writer.write(self._take_pending())
             await self._writer.drain()
             return True
         except (ConnectionError, OSError) as err:
             self._mark_dead(DisconnectionError(f"socket write failed: {err}"))
             return False
+
+    def _schedule_flush(self) -> None:
+        # Anchor the deadline to the first buffered frame (not each one), so the
+        # tail latency is bounded to one window. A zero window collapses to the
+        # next event-loop tick, the lowest latency asyncio can offer.
+        if self._flush_scheduled or self._closed:
+            return
+        self._flush_scheduled = True
+        loop = asyncio.get_running_loop()
+        if self._coalesce_window > 0:
+            loop.call_later(self._coalesce_window, self._flush_soon)
+        else:
+            loop.call_soon(self._flush_soon)
+
+    def _flush_soon(self) -> None:
+        # Window/tick flush: low volume, so the transport is not paused and a bare
+        # write needs no drain. Backpressure is enforced by the byte/count caps.
+        self._flush_scheduled = False
+        if self._closed or not self._pending:
+            return
+        try:
+            self._writer.write(self._take_pending())
+        except (ConnectionError, OSError) as err:
+            self._mark_dead(DisconnectionError(f"socket write failed: {err}"))
 
     async def _heartbeat_loop(self) -> None:
         interval = max(self._opts.heartbeat_interval_seconds, 0.001)
@@ -664,6 +752,8 @@ class Engine:
             return
         self._closed = True
         self._fatal = err
+        self._pending.clear()
+        self._pending_count = 0
         for w in self._waiters.values():
             if not w.future.done():
                 w.future.set_exception(err)

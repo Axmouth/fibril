@@ -208,6 +208,34 @@ async def test_reconnect_reconciles_registered_subs(broker: FakeBroker) -> None:
         eng.shutdown()
 
 
+async def test_buffered_unconfirmed_publishes_all_deliver_in_order(broker: FakeBroker) -> None:
+    # A burst of fire-and-forget publishes is coalesced into fewer socket writes.
+    # Every frame must still reach the broker, in order, none dropped or merged.
+    eng = await _connect(broker)
+    try:
+        for i in range(200):
+            msg = wire.Publish(
+                topic="jobs",
+                partition=0,
+                group=None,
+                require_confirm=False,
+                content_type="text",
+                headers={},
+                payload=bytes([i]),
+                published=0,
+            )
+            await eng.publish(msg, confirm=False)
+        # The burst stays buffered until the loop next yields; then it flushes.
+        for _ in range(50):
+            if len(broker.publishes) >= 200:
+                break
+            await asyncio.sleep(0.01)
+        assert len(broker.publishes) == 200
+        assert [p.payload for p in broker.publishes] == [bytes([i]) for i in range(200)]
+    finally:
+        eng.shutdown()
+
+
 async def test_nonretryable_connection_error_preserves_code(broker: FakeBroker) -> None:
     # A connection-level error frame (no correlated request) with a non-retryable
     # code closes the engine preserving the broker code, so the reconnect path can
