@@ -1,4 +1,4 @@
-"""Publisher handles: fire-and-forget, confirmed, pipelined, delayed, reliable.
+"""Publisher handles: fire-and-forget, confirmed, with-confirmation, delayed, reliable.
 
 Confirmed publishes follow owner redirects (bounded) and retry across a transient
 owner failover (refresh topology, jittered backoff, deadline), mirroring the Rust
@@ -69,7 +69,7 @@ class _SendSpec:
 
 
 class PublishConfirmation:
-    """A handle for a pipelined confirmed publish. Await ``confirmed()`` for the offset."""
+    """A handle for a confirmed publish awaited later. Await ``confirmed()`` for the offset."""
 
     def __init__(self, future: "object") -> None:
         self._future = future
@@ -133,6 +133,13 @@ class Publisher:
             _spec_from_message(into_message(payload), deadline_from_delay(delay))
         )
 
+    async def publish_delayed_with_confirmation(
+        self, payload: Publishable, delay: Delay
+    ) -> PublishConfirmation:
+        return await self._send_with_confirmation(
+            _spec_from_message(into_message(payload), deadline_from_delay(delay))
+        )
+
     def expiring(self, ttl: Delay) -> "Publisher":
         """A publisher that stamps a default TTL (seconds or timedelta) on each
         immediate publish, so the broker drops the message if not consumed in
@@ -193,7 +200,10 @@ class Publisher:
     async def _send_with_confirmation(self, spec: _SendSpec) -> PublishConfirmation:
         route = self._client.route(self._topic, self._group, spec.key)
         engine = await self._client.engine_for(self._topic, route.partition, self._group)
-        future = await engine.publish_pipelined(self._build_publish(spec, route))
+        if spec.not_before is None:
+            future = await engine.publish_with_confirmation(self._build_publish(spec, route))
+        else:
+            future = await engine.publish_delayed_with_confirmation(self._build_delayed(spec, route))
         return PublishConfirmation(future)
 
     def _build_publish(self, spec: _SendSpec, route: Route) -> wire.Publish:

@@ -166,6 +166,12 @@ class BlockingPublisher:
     def publish_delayed_confirmed(self, payload: Publishable, delay: Delay) -> int:
         return self._owner._run(self._publisher.publish_delayed_confirmed(payload, delay))
 
+    def publish_delayed_with_confirmation(
+        self, payload: Publishable, delay: Delay
+    ) -> "BlockingPublishConfirmation":
+        conf = self._owner._run(self._publisher.publish_delayed_with_confirmation(payload, delay))
+        return BlockingPublishConfirmation(self._owner, conf)
+
     def expiring(self, ttl: Delay) -> "BlockingPublisher":
         return BlockingPublisher(self._owner, self._publisher.expiring(ttl))
 
@@ -193,7 +199,7 @@ class BlockingReliablePublisher:
 
 
 class BlockingPublishConfirmation:
-    """Synchronous handle for a pipelined confirmed publish."""
+    """Synchronous handle for a confirmed publish awaited later."""
 
     def __init__(self, owner: BlockingClient, conf: PublishConfirmation) -> None:
         self._owner = owner

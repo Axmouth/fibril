@@ -37,6 +37,7 @@ class FakeBroker:
 
     # Records for assertions.
     publishes: list[wire.Publish] = field(default_factory=list)
+    delayed_publishes: list[wire.PublishDelayed] = field(default_factory=list)
     acks: list[wire.Ack] = field(default_factory=list)
     nacks: list[wire.Nack] = field(default_factory=list)
     declares: list[wire.DeclareQueue] = field(default_factory=list)
@@ -151,6 +152,18 @@ class FakeBroker:
                 code, text = self.error_publish
                 await self._error(writer, Op.ERROR, rid, code, text)
             elif msg.require_confirm:
+                self._offset += 1
+                await self._send(
+                    writer,
+                    build_frame(Op.PUBLISH_OK, rid, encode_body(Op.PUBLISH_OK, wire.PublishOk(self._offset))),
+                )
+            return
+
+        if op == Op.PUBLISH_DELAYED:
+            dmsg = decode_body(Op.PUBLISH_DELAYED, frame.payload)
+            assert isinstance(dmsg, wire.PublishDelayed)
+            self.delayed_publishes.append(dmsg)
+            if dmsg.require_confirm:
                 self._offset += 1
                 await self._send(
                     writer,

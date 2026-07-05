@@ -72,11 +72,25 @@ async def test_expiring_sets_ttl_in_ms_from_seconds(broker: FakeBroker) -> None:
         await client.shutdown()
 
 
-async def test_pipelined_confirmation(broker: FakeBroker) -> None:
+async def test_publish_with_confirmation(broker: FakeBroker) -> None:
     client = await _connect(broker)
     try:
         conf = await client.publisher("jobs").publish_with_confirmation({"id": 1})
         assert await conf.confirmed() == 1
+    finally:
+        await client.shutdown()
+
+
+async def test_publish_delayed_with_confirmation(broker: FakeBroker) -> None:
+    client = await _connect(broker)
+    try:
+        conf = await client.publisher("jobs").publish_delayed_with_confirmation({"id": 1}, 30)
+        assert await conf.confirmed() == 1
+        # It goes out on the delayed frame carrying a not_before deadline, not the
+        # immediate publish path.
+        assert len(broker.delayed_publishes) == 1
+        assert broker.delayed_publishes[0].not_before > 0
+        assert broker.publishes == []
     finally:
         await client.shutdown()
 
