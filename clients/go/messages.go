@@ -2,7 +2,7 @@ package fibril
 
 // This file maps the idiomatic message structs to and from the wire codec, in
 // both directions for every op, so the field order lives in exactly one place.
-// Byte layouts are byte-for-byte identical to the Rust reference and pinned by
+// Byte layouts are byte-for-byte identical across clients and pinned by
 // clients/wire_vectors.json. Option fields are Go pointers (nil = none).
 
 // ResumeOutcome is the handshake outcome the broker reports.

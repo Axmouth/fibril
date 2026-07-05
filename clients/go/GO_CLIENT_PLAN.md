@@ -1,6 +1,6 @@
 # Go client plan
 
-The Go client (`clients/go`) ports the Rust reference to full feature parity.
+The Go client (`clients/go`) ports the reference client to full feature parity.
 Read `../ARCHITECTURE.md` (layering, invariants, porting lessons) and
 `../FEATURE_MATRIX.md` (the parity checklist) first - this doc records the
 Go-specific decisions.
@@ -11,11 +11,12 @@ Go-specific decisions.
   Lives in the monorepo alongside the other clients; the shared wire vectors
   (`../wire_vectors.json`) and error-guide vectors (`../error_guides.json`) are
   read from `..`.
-- **Concurrency: mirror the Rust reference, not the event-loop shape.** Go's
-  goroutines + channels + `select` map almost 1:1 onto the Rust client's
-  `tokio::spawn` + `mpsc` + `tokio::select!`, so the engine uses a command
-  channel, a read goroutine, and a request-id -> reply-channel map like the
-  reference - closer than the asyncio/TS "drop the sync primitives" port. The
+- **Concurrency: mirror the reference client, not the event-loop shape.** Go's
+  goroutines + channels + `select` map almost 1:1 onto the reference client's
+  concurrency (it happens to be Rust: `tokio::spawn` + `mpsc` + `tokio::select!`),
+  so the engine uses a command channel, a read goroutine, and a
+  request-id -> reply-channel map like the reference - closer than the asyncio/TS
+  "drop the sync primitives" port. The
   ARCHITECTURE invariants (byte-exact wire, FNV-1a, cache-only routing,
   compliance marker, server-side auto-ack, reserved headers) are language
   agnostic and hold unchanged.
@@ -60,7 +61,7 @@ as higher layers land).
    u16 opcode, u32 flags, u64 request_id) + TCP stream framing. See
    `../python/src/fibril/codec.py`. Opcodes live in the protocol; port the op
    number table.
-3. Then the engine (one connection, Rust-style: command channel + read goroutine
+3. Then the engine (one connection, reference-style: command channel + read goroutine
    + reply-channel map + heartbeat). Cross-check against a REAL broker here
    before building higher, per ARCHITECTURE.
 4. Then client + routing (pool, topology cache, redirect follow, reconnect), then

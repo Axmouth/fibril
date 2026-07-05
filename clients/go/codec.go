@@ -10,7 +10,8 @@ package fibril
 //	u64 request_id
 //	bytes payload[payload_len]
 //
-// Byte-exact with the Rust crates/protocol/src/v1/frame.rs and the other clients.
+// Byte-exact with the broker's frame format (crates/protocol/src/v1/frame.rs)
+// and every other client.
 
 import "encoding/binary"
 

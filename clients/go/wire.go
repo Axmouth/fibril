@@ -1,10 +1,10 @@
 // Package fibril is a Go client for the Fibril message broker.
 //
 // This file is the wire codec: byte-exact encode/decode of v1 frame bodies in
-// the broker's custom binary format. It is byte-for-byte identical to the Rust
-// reference (crates/protocol/src/v1/wire.rs) and the other clients, and is
-// pinned by the shared vectors in clients/wire_vectors.json. This is the only
-// file that touches raw bytes.
+// the broker's custom binary format (the authoritative layout lives in the
+// protocol crate, crates/protocol/src/v1/wire.rs). It is byte-for-byte identical
+// across every client and pinned by the shared vectors in
+// clients/wire_vectors.json. This is the only file that touches raw bytes.
 //
 // Layout (all big-endian): u8/u16/u32/u64 integers; length-prefixed bytes (u32
 // length then raw bytes); strings are length-prefixed UTF-8; bool is a u8 (0 or
