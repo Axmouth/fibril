@@ -82,6 +82,63 @@ func cases() []vcase {
 			SubID: 5, Topic: "t", Partition: 1, Group: sp("g"), Prefetch: 16,
 			ConsumerGroup: sp("cg"), MemberID: uup(fill(4))}),
 			func(b []byte) ([]byte, error) { v, e := DecodeSubscribeOk(b); return EncodeSubscribeOk(v), e }},
+		{"declare", EncodeDeclareQueue(DeclareQueue{
+			Topic: "t", Group: sp("g"), DlqPolicy: &DlqPolicy{Kind: DlqCustom, Topic: "dlq"},
+			DlqMaxRetries: u32p(3), PartitionCount: u32p(4), DefaultMessageTTLms: u64p(30000)}),
+			func(b []byte) ([]byte, error) { v, e := DecodeDeclareQueue(b); return EncodeDeclareQueue(v), e }},
+		{"declare_min", EncodeDeclareQueue(DeclareQueue{Topic: "t"}),
+			func(b []byte) ([]byte, error) { v, e := DecodeDeclareQueue(b); return EncodeDeclareQueue(v), e }},
+		{"declare_ok", EncodeDeclareQueueOk(DeclareQueueOk{Status: "created", PartitionCount: 4}),
+			func(b []byte) ([]byte, error) { v, e := DecodeDeclareQueueOk(b); return EncodeDeclareQueueOk(v), e }},
+		{"declare_plexus", EncodeDeclarePlexus(DeclarePlexus{
+			Topic: "t", PartitionCount: u32p(4), Durability: StreamSpeculative,
+			Retention:         StreamRetention{MaxAgeMs: u64p(60000), MaxRecords: u64p(1000000)},
+			ReplicationFactor: u32p(2)}),
+			func(b []byte) ([]byte, error) { v, e := DecodeDeclarePlexus(b); return EncodeDeclarePlexus(v), e }},
+		{"declare_plexus_min", EncodeDeclarePlexus(DeclarePlexus{Topic: "t"}),
+			func(b []byte) ([]byte, error) { v, e := DecodeDeclarePlexus(b); return EncodeDeclarePlexus(v), e }},
+		{"declare_plexus_ok", EncodeDeclarePlexusOk(DeclarePlexusOk{Status: "created", PartitionCount: 4}),
+			func(b []byte) ([]byte, error) { v, e := DecodeDeclarePlexusOk(b); return EncodeDeclarePlexusOk(v), e }},
+		{"topology_ok", EncodeTopologyOk(TopologyOk{
+			Generation: 12,
+			Queues: []QueueTopologyEntry{
+				{Topic: "t", Partition: 0, OwnerEndpoints: []AdvertisedAddress{{Host: "127.0.0.1", Port: 7000}}, PartitioningVersion: 1, PartitionCount: 2},
+				{Topic: "t", Partition: 1, PartitioningVersion: 1, PartitionCount: 2},
+			},
+			Streams: []StreamTopologyEntry{{Topic: "s", Partition: 2, OwnerEndpoints: []AdvertisedAddress{{Host: "10.0.0.9", Port: 7100}}, PartitioningVersion: 4, PartitionCount: 3}}}),
+			func(b []byte) ([]byte, error) { v, e := DecodeTopologyOk(b); return EncodeTopologyOk(v), e }},
+		{"topology_req", EncodeTopologyRequest(TopologyRequest{Topic: sp("t")}),
+			func(b []byte) ([]byte, error) { v, e := DecodeTopologyRequest(b); return EncodeTopologyRequest(v), e }},
+		{"topology_update", EncodeTopologyUpdate(TopologyOk{
+			Generation: 12,
+			Queues:     []QueueTopologyEntry{{Topic: "t", Partition: 0, OwnerEndpoints: []AdvertisedAddress{{Host: "127.0.0.1", Port: 7000}}, PartitioningVersion: 1, PartitionCount: 2}},
+			Streams:    []StreamTopologyEntry{{Topic: "s", Partition: 2, OwnerEndpoints: []AdvertisedAddress{{Host: "10.0.0.9", Port: 7100}}, PartitioningVersion: 4, PartitionCount: 3}}}),
+			func(b []byte) ([]byte, error) { v, e := DecodeTopologyUpdate(b); return EncodeTopologyUpdate(v), e }},
+		{"topology_update_ack", EncodeTopologyUpdateAck(TopologyUpdateAck{Generation: 12}),
+			func(b []byte) ([]byte, error) {
+				v, e := DecodeTopologyUpdateAck(b)
+				return EncodeTopologyUpdateAck(v), e
+			}},
+		{"reconcile_client", EncodeReconcileClient(ReconcileClient{
+			Policy:        ReconcileRestore,
+			Subscriptions: []ReconcileSubscription{{SubID: 1, Topic: "t", Partition: 0, AutoAck: false, Prefetch: 8}}}),
+			func(b []byte) ([]byte, error) { v, e := DecodeReconcileClient(b); return EncodeReconcileClient(v), e }},
+		{"redirect", EncodeRedirect(Redirect{Topic: "t", Partition: 1, Group: sp("g"), OwnerEndpoints: []AdvertisedAddress{{Host: "h", Port: 1}}, PartitioningVersion: 3}),
+			func(b []byte) ([]byte, error) { v, e := DecodeRedirect(b); return EncodeRedirect(v), e }},
+		{"assignment", EncodeAssignmentChanged(AssignmentChanged{
+			Topic: "t", ConsumerGroup: "cg", Generation: 6, Assigned: []uint32{0, 1, 2}, Added: []uint32{2}, Revoked: []uint32{}}),
+			func(b []byte) ([]byte, error) {
+				v, e := DecodeAssignmentChanged(b)
+				return EncodeAssignmentChanged(v), e
+			}},
+		{"going_away", EncodeGoingAway(GoingAway{GraceMs: 30000, Message: "broker restarting for upgrade"}),
+			func(b []byte) ([]byte, error) { v, e := DecodeGoingAway(b); return EncodeGoingAway(v), e }},
+		{"subscribe_stream", EncodeSubscribeStream(SubscribeStream{
+			Topic: "t", Partition: 1, DurableName: sp("c1"), Start: StreamStart{Kind: StreamByTime, Value: 1234},
+			Filter: []StreamFilter{{"region", "eu-*"}, {"kind", "order"}}, Prefetch: 16, AutoAck: false}),
+			func(b []byte) ([]byte, error) { v, e := DecodeSubscribeStream(b); return EncodeSubscribeStream(v), e }},
+		{"subscribe_stream_min", EncodeSubscribeStream(SubscribeStream{Topic: "t", Start: StreamStart{Kind: StreamLatest}, AutoAck: true}),
+			func(b []byte) ([]byte, error) { v, e := DecodeSubscribeStream(b); return EncodeSubscribeStream(v), e }},
 	}
 }
 
@@ -129,6 +186,21 @@ func TestDecodeRoundTripsToVector(t *testing.T) {
 		}
 		if got := hex.EncodeToString(reencoded); got != want {
 			t.Errorf("%s does not round-trip\n got: %s\nwant: %s", c.name, got, want)
+		}
+	}
+}
+
+// TestAllVectorsCovered fails if a shared vector has no conformance case, so a
+// new op added to wire_vectors.json cannot silently skip the Go codec.
+func TestAllVectorsCovered(t *testing.T) {
+	vectors := loadVectors(t)
+	covered := make(map[string]bool)
+	for _, c := range cases() {
+		covered[c.name] = true
+	}
+	for name := range vectors {
+		if !covered[name] {
+			t.Errorf("shared vector %q has no Go conformance case", name)
 		}
 	}
 }

@@ -33,9 +33,11 @@ Go-specific decisions.
 1. `wire.go` - byte-exact codec primitives (writer/reader), field types
    (`UUID`, `ContentType`, `Headers`), FNV-1a. **DONE**, pinned by
    `wire_test.go` against `../wire_vectors.json` + canonical FNV vectors.
-2. `messages.go` - op structs <-> wire, both directions. **Core set DONE**
-   (17 ops: hello, hello_ok, auth, error, publish, publish_delayed, publish_ok,
-   ack, nack, subscribe, subscribe_ok, deliver). Remaining ops are the next brick.
+2. `messages.go` + `messages_ext.go` - op structs <-> wire, both directions.
+   **DONE for ALL 33 shared vectors** (handshake, auth, error, publish family,
+   ack/nack, subscribe(+ok), deliver, declare queue/plexus(+ok), topology
+   (ok/req/update/ack), reconcile_client, redirect, assignment, going_away,
+   subscribe_stream). `wire_test.go` also guards that every vector has a case.
 3. `codec.go` - 20-byte frame header + TCP stream framing. TODO.
 4. `engine.go` - one connection: handshake/auth/heartbeat, request-id->reply
    channel, per-subscription delivery, read/write goroutines. TODO.
@@ -48,14 +50,18 @@ as higher layers land).
 
 ## Status / next bricks
 
-1. **DONE:** wire codec + core message ops + FNV, all green against the shared
-   vectors (byte-exact, round-trip, canonical FNV).
-2. Remaining wire ops: declare (+ok), declare_plexus (+ok), topology_req/ok,
-   topology_update (+ack), reconcile_client, redirect, assignment, going_away,
-   subscribe_stream (needs the stream-start + filter types). Add each with its
-   shared vector.
-3. Frame codec (`codec.go`), then the engine (one connection), then client +
-   routing, then the public handles. Cross-check against a real broker early
-   (before building higher layers on the codec), per ARCHITECTURE.
-4. Add a Go column to `../FEATURE_MATRIX.md` once there is a usable client
+1. **DONE:** wire codec + **all 33 message ops** + FNV, green against the shared
+   vectors (byte-exact encode, decode round-trip, canonical FNV, coverage guard).
+   The entire byte surface - the highest-risk part - is proven identical to the
+   broker.
+2. **NEXT:** frame codec (`codec.go`) - the 20-byte header (u32 len, u16 version,
+   u16 opcode, u32 flags, u64 request_id) + TCP stream framing. See
+   `../python/src/fibril/codec.py`. Opcodes live in the protocol; port the op
+   number table.
+3. Then the engine (one connection, Rust-style: command channel + read goroutine
+   + reply-channel map + heartbeat). Cross-check against a REAL broker here
+   before building higher, per ARCHITECTURE.
+4. Then client + routing (pool, topology cache, redirect follow, reconnect), then
+   the public handles (publisher/subscription/message).
+5. Add a Go column to `../FEATURE_MATRIX.md` once there is a usable client
    surface to track.
