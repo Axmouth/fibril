@@ -274,6 +274,41 @@ func (e *Engine) PublishDelayedConfirmed(p PublishDelayed) (uint64, error) {
 	return ok.Offset, nil
 }
 
+// PublishResult is the outcome of a pipelined confirmed publish.
+type PublishResult struct {
+	Offset uint64
+	Err    error
+}
+
+// PublishPipelined sends a confirmed publish and returns a channel that yields
+// its result later, without blocking. The frame is written before this returns,
+// so callers can pipeline several publishes (in send order) and collect each
+// offset afterward.
+func (e *Engine) PublishPipelined(p Publish) (<-chan PublishResult, error) {
+	p.RequireConfirm = true
+	rc := make(chan reply, 1)
+	select {
+	case e.cmdCh <- command{op: OpPublish, body: encodePublish(p), reply: rc}:
+	case <-e.done:
+		return nil, e.err()
+	}
+	out := make(chan PublishResult, 1)
+	go func() {
+		select {
+		case r := <-rc:
+			if r.err != nil {
+				out <- PublishResult{Err: r.err}
+				return
+			}
+			ok, err := decodePublishOk(r.frame.Payload)
+			out <- PublishResult{Offset: ok.Offset, Err: err}
+		case <-e.done:
+			out <- PublishResult{Err: e.err()}
+		}
+	}()
+	return out, nil
+}
+
 // DeclareQueue declares a queue and waits for the broker's confirmation.
 func (e *Engine) DeclareQueue(d DeclareQueue) (DeclareQueueOk, error) {
 	f, err := e.request(OpDeclareQueue, encodeDeclareQueue(d))

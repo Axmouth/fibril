@@ -360,6 +360,20 @@ func (c *Client) PublishConfirmed(p Publish) (uint64, error) {
 	})
 }
 
+// PublishPipelined routes a confirmed publish to the partition owner and returns
+// a handle for its result, without blocking on the confirm. Fire several to
+// pipeline confirmations and collect each offset afterward. It routes once (no
+// redirect-follow), since the confirmation resolves asynchronously; a stale route
+// surfaces as a RedirectError on the returned channel.
+func (c *Client) PublishPipelined(p Publish) (<-chan PublishResult, error) {
+	p.Partition = c.partitionFor(p.Topic, p.Group, p.PartitionKey)
+	eng, err := c.engineFor(c.topo.ownerOf(p.Topic, p.Partition, p.Group))
+	if err != nil {
+		return nil, err
+	}
+	return eng.PublishPipelined(p)
+}
+
 // PublishDelayedConfirmed routes and sends a delayed confirmed publish.
 func (c *Client) PublishDelayedConfirmed(p PublishDelayed) (uint64, error) {
 	return c.routedConfirm(p.Topic, p.Group, p.PartitionKey, func(eng *Engine, partition uint32) (uint64, error) {
