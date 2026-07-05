@@ -1,0 +1,100 @@
+name: Go client CI
+
+on:
+  workflow_call:
+  pull_request:
+    paths:
+      - ".github/workflows/go-client-ci.yaml"
+      - "clients/go/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/go-client-ci.yaml"
+      - "clients/go/**"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Go client tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache-dependency-path: clients/go/go.sum
+
+      - name: Check formatting
+        working-directory: clients/go
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "these files need gofmt:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+      - name: Vet
+        working-directory: clients/go
+        run: go vet ./...
+
+      - name: Run tests
+        working-directory: clients/go
+        run: go test -race ./...
+
+  examples:
+    name: Examples against a real broker
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache-dependency-path: clients/go/go.sum
+
+      # Reuse the published server image instead of building from source: client
+      # CI runs against the latest-main broker, which is what client-only changes
+      # want and is far faster than a Rust build.
+      - name: Log in to GitHub Container Registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Start broker container
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/fibril-server:main"
+          docker run -d --name fibril-server -p 9876:9876 -p 8081:8081 "$image"
+
+      - name: Wait for broker health
+        run: |
+          for _ in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:8081/healthz; then
+              echo "broker healthy"; exit 0
+            fi
+            sleep 1
+          done
+          echo "broker did not become healthy"; docker logs fibril-server; exit 1
+
+      - name: Run examples
+        env:
+          FIBRIL_EXTERNAL_BROKER: "1"
+          FIBRIL_ADDR: "127.0.0.1:9876"
+        run: clients/go/examples/run-all.sh
+
+      - name: Broker logs
+        if: always()
+        run: docker logs fibril-server || true
+
+      - name: Stop broker container
+        if: always()
+        run: docker rm -f fibril-server || true
