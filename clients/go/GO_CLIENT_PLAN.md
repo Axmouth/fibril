@@ -57,9 +57,13 @@ Go-specific decisions.
    (round-robin for keyless), bounded redirect-follow. **Core DONE**: Dial,
    Publish/PublishConfirmed (routed + redirect-follow), Subscribe (routed +
    redirect-follow), DeclareQueue, FetchTopology, Shutdown; deliveries settle via
-   the Subscription (carries its engine). Race-clean tests (redirect follow, FNV
-   routing) + live via `examples/smoke`. **TODO**: reconnect/resume, topology-push
-   handling, multi-partition fan-in, supervised (failover) subscriptions.
+   the delivery (it carries its engine). Now also: **multi-partition fan-in**
+   (`SubscribeTopic`, merges all partitions) and **bootstrap reconnect/resume**
+   (reconnects on op with the resume identity; publish/subscribe retry on
+   transient). Race-clean tests (redirect, FNV routing, fan-in, reconnect via a
+   real TCP fake broker) + live via `examples/smoke`. **TODO**: topology-push
+   handling, supervised (failover) subscriptions (re-subscribe a dropped
+   partition).
 6. `publisher.go` / `subscription.go` / `message.go` - ergonomic handles
    (reliable publisher, message encode/decode). TODO.
 
