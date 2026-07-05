@@ -101,10 +101,10 @@ func servePatternBroker(conn net.Conn, catalogue []string) {
 			return
 		}
 		switch f.Opcode {
-		case OpHello:
-			ok := HelloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, Compliance: ComplianceString}
-			_, _ = conn.Write(encodeFrame(buildFrame(OpHelloOk, f.RequestID, encodeHelloOk(ok))))
-		case OpTopology:
+		case opHello:
+			ok := helloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, Compliance: ComplianceString}
+			_, _ = conn.Write(encodeFrame(buildFrame(opHelloOk, f.RequestID, encodeHelloOk(ok))))
+		case opTopology:
 			req, _ := decodeTopologyRequest(f.Payload)
 			topo := TopologyOk{Generation: 1}
 			for _, topic := range catalogue {
@@ -113,16 +113,16 @@ func servePatternBroker(conn net.Conn, catalogue []string) {
 				}
 				topo.Queues = append(topo.Queues, QueueTopologyEntry{Topic: topic, Partition: 0, PartitionCount: 1})
 			}
-			_, _ = conn.Write(encodeFrame(buildFrame(OpTopologyOk, f.RequestID, encodeTopologyOk(topo))))
-		case OpSubscribe:
+			_, _ = conn.Write(encodeFrame(buildFrame(opTopologyOk, f.RequestID, encodeTopologyOk(topo))))
+		case opSubscribe:
 			req, _ := decodeSubscribe(f.Payload)
 			nextSub++
-			so := SubscribeOk{SubID: nextSub, Topic: req.Topic, Partition: req.Partition, Prefetch: req.Prefetch}
-			_, _ = conn.Write(encodeFrame(buildFrame(OpSubscribeOk, f.RequestID, encodeSubscribeOk(so))))
-			d := Deliver{SubID: nextSub, Topic: req.Topic, Partition: req.Partition, ContentType: ContentType{Kind: ContentText}, Payload: []byte(req.Topic)}
-			_, _ = conn.Write(encodeFrame(buildFrame(OpDeliver, 8000+nextSub, encodeDeliver(d))))
-		case OpPing:
-			_, _ = conn.Write(encodeFrame(buildFrame(OpPong, f.RequestID, nil)))
+			so := subscribeOk{SubID: nextSub, Topic: req.Topic, Partition: req.Partition, Prefetch: req.Prefetch}
+			_, _ = conn.Write(encodeFrame(buildFrame(opSubscribeOk, f.RequestID, encodeSubscribeOk(so))))
+			d := deliver{SubID: nextSub, Topic: req.Topic, Partition: req.Partition, ContentType: ContentType{Kind: ContentText}, Payload: []byte(req.Topic)}
+			_, _ = conn.Write(encodeFrame(buildFrame(opDeliver, 8000+nextSub, encodeDeliver(d))))
+		case opPing:
+			_, _ = conn.Write(encodeFrame(buildFrame(opPong, f.RequestID, nil)))
 		}
 	}
 }

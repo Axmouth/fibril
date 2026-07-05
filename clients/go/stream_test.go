@@ -19,18 +19,18 @@ func TestEngineSubscribeStreamDelivers(t *testing.T) {
 				return
 			}
 			switch f.Opcode {
-			case OpHello:
-				ok := HelloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, Compliance: ComplianceString}
-				_, _ = server.Write(encodeFrame(buildFrame(OpHelloOk, f.RequestID, encodeHelloOk(ok))))
-			case OpSubscribeStream:
+			case opHello:
+				ok := helloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, Compliance: ComplianceString}
+				_, _ = server.Write(encodeFrame(buildFrame(opHelloOk, f.RequestID, encodeHelloOk(ok))))
+			case opSubscribeStream:
 				req, _ := decodeSubscribeStream(f.Payload)
 				gotStart = req.Start.Kind
-				so := SubscribeOk{SubID: 200, Topic: req.Topic, Partition: req.Partition, Prefetch: 8}
-				_, _ = server.Write(encodeFrame(buildFrame(OpSubscribeOk, f.RequestID, encodeSubscribeOk(so))))
-				d := Deliver{SubID: 200, Topic: req.Topic, Partition: req.Partition, ContentType: ContentType{Kind: ContentText}, Payload: []byte("rec")}
-				_, _ = server.Write(encodeFrame(buildFrame(OpDeliver, 7000, encodeDeliver(d))))
-			case OpPing:
-				_, _ = server.Write(encodeFrame(buildFrame(OpPong, f.RequestID, nil)))
+				so := subscribeOk{SubID: 200, Topic: req.Topic, Partition: req.Partition, Prefetch: 8}
+				_, _ = server.Write(encodeFrame(buildFrame(opSubscribeOk, f.RequestID, encodeSubscribeOk(so))))
+				d := deliver{SubID: 200, Topic: req.Topic, Partition: req.Partition, ContentType: ContentType{Kind: ContentText}, Payload: []byte("rec")}
+				_, _ = server.Write(encodeFrame(buildFrame(opDeliver, 7000, encodeDeliver(d))))
+			case opPing:
+				_, _ = server.Write(encodeFrame(buildFrame(opPong, f.RequestID, nil)))
 			}
 		}
 	}()

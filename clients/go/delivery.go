@@ -87,7 +87,7 @@ func (e *Engine) subscribe(req Subscribe, noReconcile bool) (*Subscription, erro
 	sr := make(chan subResult, 1)
 	reqCopy := req
 	select {
-	case e.cmdCh <- command{op: OpSubscribe, body: encodeSubscribe(req), subReply: sr, autoAck: req.AutoAck, noReconcile: noReconcile, sub: &reqCopy}:
+	case e.cmdCh <- command{op: opSubscribe, body: encodeSubscribe(req), subReply: sr, autoAck: req.AutoAck, noReconcile: noReconcile, sub: &reqCopy}:
 	case <-e.done:
 		return nil, e.err()
 	}
@@ -106,7 +106,7 @@ func (e *Engine) SubscribeStream(req SubscribeStream) (*Subscription, error) {
 	sr := make(chan subResult, 1)
 	// Streams resume by durable cursor, not the reconcile registry.
 	select {
-	case e.cmdCh <- command{op: OpSubscribeStream, body: encodeSubscribeStream(req), subReply: sr, autoAck: req.AutoAck, noReconcile: true}:
+	case e.cmdCh <- command{op: opSubscribeStream, body: encodeSubscribeStream(req), subReply: sr, autoAck: req.AutoAck, noReconcile: true}:
 	case <-e.done:
 		return nil, e.err()
 	}
@@ -121,21 +121,21 @@ func (e *Engine) SubscribeStream(req SubscribeStream) (*Subscription, error) {
 // Ack settles a delivery as processed. It is a no-op-worthy call for an auto-ack
 // delivery (already settled server-side) but harmless. Fire-and-forget.
 func (e *Engine) Ack(d Delivery) error {
-	body := encodeAck(Ack{Topic: d.Topic, Group: d.Group, Partition: d.Partition, Tags: []DeliveryTag{d.DeliveryTag}})
-	return e.sendWithID(OpAck, d.reqID, body)
+	body := encodeAck(ackFrame{Topic: d.Topic, Group: d.Group, Partition: d.Partition, Tags: []DeliveryTag{d.DeliveryTag}})
+	return e.sendWithID(opAck, d.reqID, body)
 }
 
 // Nack returns a delivery unprocessed, optionally requeuing it (notBefore delays
 // the requeue). Fire-and-forget.
 func (e *Engine) Nack(d Delivery, requeue bool, notBefore *uint64) error {
-	body := encodeNack(Nack{
+	body := encodeNack(nackFrame{
 		Topic: d.Topic, Group: d.Group, Partition: d.Partition,
 		Tags: []DeliveryTag{d.DeliveryTag}, Requeue: requeue, NotBefore: notBefore,
 	})
-	return e.sendWithID(OpNack, d.reqID, body)
+	return e.sendWithID(opNack, d.reqID, body)
 }
 
-func (e *Engine) sendWithID(op Op, id uint64, body []byte) error {
+func (e *Engine) sendWithID(op op, id uint64, body []byte) error {
 	select {
 	case e.cmdCh <- command{op: op, body: body, id: id}:
 		return nil
@@ -146,7 +146,7 @@ func (e *Engine) sendWithID(op Op, id uint64, body []byte) error {
 
 // ---- run-goroutine handlers --------------------------------------------
 
-func (e *Engine) handleSubscribeOk(f Frame) {
+func (e *Engine) handleSubscribeOk(f frame) {
 	w, ok := e.waiters[f.RequestID]
 	if !ok {
 		return
@@ -168,7 +168,7 @@ func (e *Engine) handleSubscribeOk(f Frame) {
 	// channel. The registry then owns the channel across the engine's death.
 	preserve := false
 	if reg := e.opts.ReconcileRegistry; reg != nil && !w.noReconcile && w.sub != nil {
-		reg.register(ReconcileSubscription{
+		reg.register(reconcileSubscription{
 			SubID:          ok2.SubID,
 			Topic:          ok2.Topic,
 			Partition:      ok2.Partition,
@@ -195,7 +195,7 @@ func (e *Engine) handleSubscribeOk(f Frame) {
 	}
 }
 
-func (e *Engine) handleDeliver(f Frame) {
+func (e *Engine) handleDeliver(f frame) {
 	d, err := decodeDeliver(f.Payload)
 	if err != nil {
 		return

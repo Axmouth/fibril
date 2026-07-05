@@ -644,6 +644,13 @@ func (c *Client) FetchTopology(req TopologyRequest) (TopologyOk, error) {
 	return TopologyOk{}, &DisconnectionError{Message: "topology fetch failed after reconnect"}
 }
 
+// Close shuts the client down, the idiomatic io.Closer form of Shutdown. It
+// always returns nil today, so an error return is reserved for future use.
+func (c *Client) Close() error {
+	c.Shutdown()
+	return nil
+}
+
 // Shutdown closes the bootstrap connection and every pooled connection.
 func (c *Client) Shutdown() {
 	if c.closed.Swap(true) {

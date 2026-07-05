@@ -20,14 +20,14 @@ func TestEnginePublishWithConfirmation(t *testing.T) {
 				return
 			}
 			switch f.Opcode {
-			case OpHello:
-				ok := HelloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, Compliance: ComplianceString}
-				_, _ = server.Write(encodeFrame(buildFrame(OpHelloOk, f.RequestID, encodeHelloOk(ok))))
-			case OpPublish:
+			case opHello:
+				ok := helloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, Compliance: ComplianceString}
+				_, _ = server.Write(encodeFrame(buildFrame(opHelloOk, f.RequestID, encodeHelloOk(ok))))
+			case opPublish:
 				off := next.Add(1) - 1
-				_, _ = server.Write(encodeFrame(buildFrame(OpPublishOk, f.RequestID, encodePublishOk(PublishOk{Offset: off}))))
-			case OpPing:
-				_, _ = server.Write(encodeFrame(buildFrame(OpPong, f.RequestID, nil)))
+				_, _ = server.Write(encodeFrame(buildFrame(opPublishOk, f.RequestID, encodePublishOk(publishOk{Offset: off}))))
+			case opPing:
+				_, _ = server.Write(encodeFrame(buildFrame(opPong, f.RequestID, nil)))
 			}
 		}
 	}()

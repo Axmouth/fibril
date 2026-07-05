@@ -1,6 +1,6 @@
 package fibril
 
-// Frame header and TCP stream framing. The fixed 20-byte header wraps every body
+// frame header and TCP stream framing. The fixed 20-byte header wraps every body
 // encoded by the wire codec:
 //
 //	u32 payload_len
@@ -23,71 +23,71 @@ const (
 	frameHeaderSize = 20
 )
 
-// Op is a v1 protocol opcode.
-type Op uint16
+// op is a v1 protocol opcode.
+type op uint16
 
 const (
-	OpHello    Op = 1
-	OpHelloOk  Op = 2
-	OpHelloErr Op = 3
+	opHello    op = 1
+	opHelloOk  op = 2
+	opHelloErr op = 3
 
-	OpAuth    Op = 10
-	OpAuthOk  Op = 11
-	OpAuthErr Op = 12
+	opAuth    op = 10
+	opAuthOk  op = 11
+	opAuthErr op = 12
 
-	OpPublish        Op = 20
-	OpPublishDelayed Op = 21
-	OpPublishOk      Op = 25
+	opPublish        op = 20
+	opPublishDelayed op = 21
+	opPublishOk      op = 25
 
-	OpSubscribe    Op = 30
-	OpSubscribeOk  Op = 31
-	OpSubscribeErr Op = 32
+	opSubscribe    op = 30
+	opSubscribeOk  op = 31
+	opSubscribeErr op = 32
 
-	OpDeliver           Op = 40
-	OpAck               Op = 41
-	OpNack              Op = 42
-	OpAssignmentChanged Op = 43
+	opDeliver           op = 40
+	opAck               op = 41
+	opNack              op = 42
+	opAssignmentChanged op = 43
 
-	OpPing Op = 50
-	OpPong Op = 51
+	opPing op = 50
+	opPong op = 51
 
-	OpDeclareQueue    Op = 60
-	OpDeclareQueueOk  Op = 61
-	OpDeclarePlexus   Op = 62
-	OpDeclarePlexusOk Op = 63
-	OpSubscribeStream Op = 64
+	opDeclareQueue    op = 60
+	opDeclareQueueOk  op = 61
+	opDeclarePlexus   op = 62
+	opDeclarePlexusOk op = 63
+	opSubscribeStream op = 64
 
-	OpReconcileClient Op = 70
-	OpReconcileServer Op = 71
-	OpReconcileResult Op = 72
+	opReconcileClient op = 70
+	opReconcileServer op = 71
+	opReconcileResult op = 72
 
-	OpTopology   Op = 90
-	OpTopologyOk Op = 91
-	OpRedirect   Op = 92
+	opTopology   op = 90
+	opTopologyOk op = 91
+	opRedirect   op = 92
 
-	OpTopologyUpdate    Op = 101
-	OpTopologyUpdateAck Op = 102
-	OpGoingAway         Op = 103
+	opTopologyUpdate    op = 101
+	opTopologyUpdateAck op = 102
+	opGoingAway         op = 103
 
-	OpError Op = 255
+	opError op = 255
 )
 
-// Frame is a decoded protocol frame: the fixed header fields plus the body.
-type Frame struct {
+// frame is a decoded protocol frame: the fixed header fields plus the body.
+type frame struct {
 	Version   uint16
-	Opcode    Op
+	Opcode    op
 	Flags     uint32
 	RequestID uint64
 	Payload   []byte
 }
 
 // buildFrame wraps an already-encoded body in a v1 frame for op.
-func buildFrame(op Op, requestID uint64, payload []byte) Frame {
-	return Frame{Version: ProtocolV1, Opcode: op, RequestID: requestID, Payload: payload}
+func buildFrame(op op, requestID uint64, payload []byte) frame {
+	return frame{Version: ProtocolV1, Opcode: op, RequestID: requestID, Payload: payload}
 }
 
 // encodeFrame serializes a frame to its on-wire byte representation.
-func encodeFrame(f Frame) []byte {
+func encodeFrame(f frame) []byte {
 	out := make([]byte, frameHeaderSize+len(f.Payload))
 	binary.BigEndian.PutUint32(out[0:], uint32(len(f.Payload)))
 	binary.BigEndian.PutUint16(out[4:], f.Version)
@@ -102,18 +102,18 @@ func encodeFrame(f Frame) []byte {
 // and the number of bytes consumed, or ok=false when buf does not yet hold a
 // full frame (the caller reads more and retries). The payload is copied, so it
 // does not alias buf.
-func tryDecodeFrame(buf []byte) (frame Frame, consumed int, ok bool) {
+func tryDecodeFrame(buf []byte) (frame, int, bool) {
 	if len(buf) < frameHeaderSize {
-		return Frame{}, 0, false
+		return frame{}, 0, false
 	}
 	payloadLen := binary.BigEndian.Uint32(buf[0:])
 	total := frameHeaderSize + int(payloadLen)
 	if len(buf) < total {
-		return Frame{}, 0, false
+		return frame{}, 0, false
 	}
-	f := Frame{
+	f := frame{
 		Version:   binary.BigEndian.Uint16(buf[4:]),
-		Opcode:    Op(binary.BigEndian.Uint16(buf[6:])),
+		Opcode:    op(binary.BigEndian.Uint16(buf[6:])),
 		Flags:     binary.BigEndian.Uint32(buf[8:]),
 		RequestID: binary.BigEndian.Uint64(buf[12:]),
 	}

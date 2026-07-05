@@ -66,7 +66,7 @@ type EngineOptions struct {
 // command is a request from a public method to the run goroutine: send op(body),
 // and if reply/subReply is non-nil, correlate the broker's response back to it.
 type command struct {
-	op       Op
+	op       op
 	body     []byte
 	id       uint64         // if nonzero, use this request id instead of allocating one
 	reply    chan reply     // generic request/reply; nil = fire-and-forget
@@ -81,7 +81,7 @@ type command struct {
 }
 
 type reply struct {
-	frame Frame
+	frame frame
 	err   error
 }
 
@@ -125,7 +125,7 @@ type Engine struct {
 	opts EngineOptions
 
 	cmdCh   chan command
-	frameCh chan Frame    // read goroutine -> run goroutine
+	frameCh chan frame    // read goroutine -> run goroutine
 	stop    chan struct{} // closed once on teardown, unblocks the read goroutine
 	done    chan struct{} // closed when run returns
 
@@ -172,13 +172,13 @@ func startEngine(conn net.Conn, opts EngineOptions) (*Engine, error) {
 	br := bufio.NewReader(conn)
 
 	// HELLO.
-	hello := Hello{
+	hello := hello{
 		ClientName:      opts.ClientName,
 		ClientVersion:   opts.ClientVersion,
 		ProtocolVersion: ProtocolV1,
 		Resume:          opts.Resume,
 	}
-	if _, err := conn.Write(encodeFrame(buildFrame(OpHello, 1, encodeHello(hello)))); err != nil {
+	if _, err := conn.Write(encodeFrame(buildFrame(opHello, 1, encodeHello(hello)))); err != nil {
 		return nil, &DisconnectionError{Message: "write HELLO: " + err.Error()}
 	}
 	hf, err := readFrame(br)
@@ -186,8 +186,8 @@ func startEngine(conn net.Conn, opts EngineOptions) (*Engine, error) {
 		return nil, &DisconnectionError{Message: "read HELLO reply: " + err.Error()}
 	}
 	switch hf.Opcode {
-	case OpHelloOk:
-	case OpHelloErr, OpError:
+	case opHelloOk:
+	case opHelloErr, opError:
 		em, _ := decodeError(hf.Payload)
 		// A plaintext connection to a TLS listener draws this definitive code.
 		if em.Code == errTLSRequired {
@@ -210,7 +210,7 @@ func startEngine(conn net.Conn, opts EngineOptions) (*Engine, error) {
 
 	// AUTH (optional).
 	if opts.Auth != nil {
-		if _, err := conn.Write(encodeFrame(buildFrame(OpAuth, 2, encodeAuth(*opts.Auth)))); err != nil {
+		if _, err := conn.Write(encodeFrame(buildFrame(opAuth, 2, encodeAuth(*opts.Auth)))); err != nil {
 			return nil, &DisconnectionError{Message: "write AUTH: " + err.Error()}
 		}
 		af, err := readFrame(br)
@@ -218,8 +218,8 @@ func startEngine(conn net.Conn, opts EngineOptions) (*Engine, error) {
 			return nil, &DisconnectionError{Message: "read AUTH reply: " + err.Error()}
 		}
 		switch af.Opcode {
-		case OpAuthOk:
-		case OpAuthErr, OpError:
+		case opAuthOk:
+		case opAuthErr, opError:
 			em, _ := decodeError(af.Payload)
 			return nil, &ServerError{Code: em.Code, Message: em.Message}
 		default:
@@ -234,7 +234,7 @@ func startEngine(conn net.Conn, opts EngineOptions) (*Engine, error) {
 	nextID := uint64(2) // 1 = HELLO, 2 = AUTH
 	if reg := opts.ReconcileRegistry; reg != nil && !reg.isEmpty() {
 		nextID = 3
-		if _, err := conn.Write(encodeFrame(buildFrame(OpReconcileClient, 3, encodeReconcileClient(ReconcileClient{
+		if _, err := conn.Write(encodeFrame(buildFrame(opReconcileClient, 3, encodeReconcileClient(reconcileClient{
 			Policy:        reg.policy,
 			Subscriptions: reg.snapshot(),
 		})))); err != nil {
@@ -245,13 +245,13 @@ func startEngine(conn net.Conn, opts EngineOptions) (*Engine, error) {
 			return nil, &DisconnectionError{Message: "read RECONCILE reply: " + err.Error()}
 		}
 		switch rf.Opcode {
-		case OpReconcileResult:
+		case opReconcileResult:
 			res, derr := decodeReconcileResult(rf.Payload)
 			if derr != nil {
 				return nil, derr
 			}
 			subs = reg.applyResult(res)
-		case OpError:
+		case opError:
 			em, _ := decodeError(rf.Payload)
 			return nil, &ServerError{Code: em.Code, Message: em.Message}
 		default:
@@ -264,7 +264,7 @@ func startEngine(conn net.Conn, opts EngineOptions) (*Engine, error) {
 		bw:             bufio.NewWriterSize(conn, writeBufSize),
 		opts:           opts,
 		cmdCh:          make(chan command, 64),
-		frameCh:        make(chan Frame, 64),
+		frameCh:        make(chan frame, 64),
 		stop:           make(chan struct{}),
 		done:           make(chan struct{}),
 		nextID:         nextID,
@@ -284,13 +284,13 @@ func startEngine(conn net.Conn, opts EngineOptions) (*Engine, error) {
 // PublishUnconfirmed sends a fire-and-forget publish.
 func (e *Engine) PublishUnconfirmed(p Publish) error {
 	p.RequireConfirm = false
-	return e.send(OpPublish, encodePublish(p))
+	return e.send(opPublish, encodePublish(p))
 }
 
 // PublishConfirmed sends a publish and waits for the broker-assigned offset.
 func (e *Engine) PublishConfirmed(p Publish) (uint64, error) {
 	p.RequireConfirm = true
-	f, err := e.request(OpPublish, encodePublish(p))
+	f, err := e.request(opPublish, encodePublish(p))
 	if err != nil {
 		return 0, err
 	}
@@ -304,13 +304,13 @@ func (e *Engine) PublishConfirmed(p Publish) (uint64, error) {
 // PublishDelayedUnconfirmed sends a fire-and-forget publish scheduled for later.
 func (e *Engine) PublishDelayedUnconfirmed(p PublishDelayed) error {
 	p.RequireConfirm = false
-	return e.send(OpPublishDelayed, encodePublishDelayed(p))
+	return e.send(opPublishDelayed, encodePublishDelayed(p))
 }
 
 // PublishDelayedConfirmed sends a delayed publish and waits for the offset.
 func (e *Engine) PublishDelayedConfirmed(p PublishDelayed) (uint64, error) {
 	p.RequireConfirm = true
-	f, err := e.request(OpPublishDelayed, encodePublishDelayed(p))
+	f, err := e.request(opPublishDelayed, encodePublishDelayed(p))
 	if err != nil {
 		return 0, err
 	}
@@ -344,7 +344,7 @@ func (c PublishConfirmation) Confirmed() (uint64, error) {
 
 // confirmation sends a confirm-required op and returns a handle that resolves to
 // the publish offset later, without blocking on the confirm.
-func (e *Engine) confirmation(op Op, body []byte) (PublishConfirmation, error) {
+func (e *Engine) confirmation(op op, body []byte) (PublishConfirmation, error) {
 	rc := make(chan reply, 1)
 	select {
 	case e.cmdCh <- command{op: op, body: body, reply: rc}:
@@ -372,21 +372,21 @@ func (e *Engine) confirmation(op Op, body []byte) (PublishConfirmation, error) {
 // offset, without blocking on the confirm.
 func (e *Engine) PublishWithConfirmation(p Publish) (PublishConfirmation, error) {
 	p.RequireConfirm = true
-	return e.confirmation(OpPublish, encodePublish(p))
+	return e.confirmation(opPublish, encodePublish(p))
 }
 
 // PublishDelayedWithConfirmation sends a delayed confirmed publish and returns a
 // handle for its offset, without blocking on the confirm.
 func (e *Engine) PublishDelayedWithConfirmation(p PublishDelayed) (PublishConfirmation, error) {
 	p.RequireConfirm = true
-	return e.confirmation(OpPublishDelayed, encodePublishDelayed(p))
+	return e.confirmation(opPublishDelayed, encodePublishDelayed(p))
 }
 
 // DeclareQueue declares a queue and waits for the broker's confirmation.
 
 // DeclareQueue declares a queue and waits for the broker's confirmation.
 func (e *Engine) DeclareQueue(d DeclareQueue) (DeclareQueueOk, error) {
-	f, err := e.request(OpDeclareQueue, encodeDeclareQueue(d))
+	f, err := e.request(opDeclareQueue, encodeDeclareQueue(d))
 	if err != nil {
 		return DeclareQueueOk{}, err
 	}
@@ -395,7 +395,7 @@ func (e *Engine) DeclareQueue(d DeclareQueue) (DeclareQueueOk, error) {
 
 // DeclarePlexus declares a Plexus (fan-out stream) channel.
 func (e *Engine) DeclarePlexus(d DeclarePlexus) (DeclarePlexusOk, error) {
-	f, err := e.request(OpDeclarePlexus, encodeDeclarePlexus(d))
+	f, err := e.request(opDeclarePlexus, encodeDeclarePlexus(d))
 	if err != nil {
 		return DeclarePlexusOk{}, err
 	}
@@ -404,11 +404,18 @@ func (e *Engine) DeclarePlexus(d DeclarePlexus) (DeclarePlexusOk, error) {
 
 // FetchTopology requests the cluster topology, optionally filtered.
 func (e *Engine) FetchTopology(req TopologyRequest) (TopologyOk, error) {
-	f, err := e.request(OpTopology, encodeTopologyRequest(req))
+	f, err := e.request(opTopology, encodeTopologyRequest(req))
 	if err != nil {
 		return TopologyOk{}, err
 	}
 	return decodeTopologyOk(f.Payload)
+}
+
+// Close tears the connection down, the idiomatic io.Closer form of Shutdown. It
+// always returns nil today, so an error return is reserved for future use.
+func (e *Engine) Close() error {
+	e.Shutdown()
+	return nil
 }
 
 // Shutdown tears the connection down gracefully and waits for the loops to exit.
@@ -429,7 +436,7 @@ func (e *Engine) IsClosed() bool {
 
 // ---- command submission ------------------------------------------------
 
-func (e *Engine) send(op Op, body []byte) error {
+func (e *Engine) send(op op, body []byte) error {
 	select {
 	case e.cmdCh <- command{op: op, body: body}:
 		return nil
@@ -438,18 +445,18 @@ func (e *Engine) send(op Op, body []byte) error {
 	}
 }
 
-func (e *Engine) request(op Op, body []byte) (Frame, error) {
+func (e *Engine) request(op op, body []byte) (frame, error) {
 	rc := make(chan reply, 1)
 	select {
 	case e.cmdCh <- command{op: op, body: body, reply: rc}:
 	case <-e.done:
-		return Frame{}, e.err()
+		return frame{}, e.err()
 	}
 	select {
 	case r := <-rc:
 		return r.frame, r.err
 	case <-e.done:
-		return Frame{}, e.err()
+		return frame{}, e.err()
 	}
 }
 
@@ -534,35 +541,35 @@ func (e *Engine) handleCommand(cmd command) {
 	}
 }
 
-func (e *Engine) handleFrame(f Frame) {
+func (e *Engine) handleFrame(f frame) {
 	e.lastSeen = time.Now()
 	switch f.Opcode {
-	case OpPong:
+	case opPong:
 		return
-	case OpPing:
-		_ = e.write(buildFrame(OpPong, f.RequestID, nil))
-	case OpPublishOk, OpDeclareQueueOk, OpDeclarePlexusOk, OpTopologyOk:
+	case opPing:
+		_ = e.write(buildFrame(opPong, f.RequestID, nil))
+	case opPublishOk, opDeclareQueueOk, opDeclarePlexusOk, opTopologyOk:
 		e.resolve(f.RequestID, reply{frame: f})
-	case OpSubscribeOk:
+	case opSubscribeOk:
 		e.handleSubscribeOk(f)
-	case OpDeliver:
+	case opDeliver:
 		e.handleDeliver(f)
-	case OpTopologyUpdate:
+	case opTopologyUpdate:
 		// Unsolicited routing refresh. Apply it and ack the generation now
 		// reflected so the broker can fence a repartition cutover.
 		if e.opts.OnTopologyUpdate != nil {
 			if topo, err := decodeTopologyUpdate(f.Payload); err == nil {
 				gen := e.opts.OnTopologyUpdate(topo)
-				_ = e.write(buildFrame(OpTopologyUpdateAck, f.RequestID, encodeTopologyUpdateAck(TopologyUpdateAck{Generation: gen})))
+				_ = e.write(buildFrame(opTopologyUpdateAck, f.RequestID, encodeTopologyUpdateAck(topologyUpdateAck{Generation: gen})))
 			}
 		}
-	case OpAssignmentChanged:
+	case opAssignmentChanged:
 		if e.opts.OnAssignmentChanged != nil {
 			if a, err := decodeAssignmentChanged(f.Payload); err == nil {
 				e.opts.OnAssignmentChanged(a)
 			}
 		}
-	case OpRedirect:
+	case opRedirect:
 		// The broker routed us to a different owner. Fail the waiter with a typed
 		// redirect the client layer acts on; not fatal to the connection.
 		w, ok := e.waiters[f.RequestID]
@@ -575,13 +582,13 @@ func (e *Engine) handleFrame(f Frame) {
 		} else {
 			failWaiter(w, &RedirectError{Redirect: rd})
 		}
-	case OpError, OpSubscribeErr:
+	case opError, opSubscribeErr:
 		em, _ := decodeError(f.Payload)
 		serr := &ServerError{Code: em.Code, Message: em.Message}
 		if w, ok := e.waiters[f.RequestID]; ok {
 			delete(e.waiters, f.RequestID)
 			failWaiter(w, serr)
-		} else if f.Opcode == OpError {
+		} else if f.Opcode == opError {
 			// A connection-level error with no correlated request is fatal.
 			e.markDead(&DisconnectionError{Message: serr.Error()})
 		}
@@ -608,7 +615,7 @@ func (e *Engine) tick() {
 		return
 	}
 	e.nextID++
-	if err := e.write(buildFrame(OpPing, e.nextID, nil)); err != nil {
+	if err := e.write(buildFrame(opPing, e.nextID, nil)); err != nil {
 		e.markDead(err)
 	}
 }
@@ -640,7 +647,7 @@ func (e *Engine) markDead(err error) {
 // writer and needs no write lock.
 // write buffers a frame. The run goroutine flushes the buffer once per batch;
 // errors surface at flush time (or as a sticky error on the next write).
-func (e *Engine) write(f Frame) error {
+func (e *Engine) write(f frame) error {
 	_, err := e.bw.Write(encodeFrame(f))
 	return err
 }
@@ -689,22 +696,22 @@ func (e *Engine) err() error {
 
 // readFrame reads exactly one whole frame from r (blocking until it has one, or
 // returning an error on EOF/short read).
-func readFrame(r io.Reader) (Frame, error) {
+func readFrame(r io.Reader) (frame, error) {
 	var header [frameHeaderSize]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
-		return Frame{}, err
+		return frame{}, err
 	}
 	payloadLen := binary.BigEndian.Uint32(header[0:])
-	f := Frame{
+	f := frame{
 		Version:   binary.BigEndian.Uint16(header[4:]),
-		Opcode:    Op(binary.BigEndian.Uint16(header[6:])),
+		Opcode:    op(binary.BigEndian.Uint16(header[6:])),
 		Flags:     binary.BigEndian.Uint32(header[8:]),
 		RequestID: binary.BigEndian.Uint64(header[12:]),
 	}
 	if payloadLen > 0 {
 		f.Payload = make([]byte, payloadLen)
 		if _, err := io.ReadFull(r, f.Payload); err != nil {
-			return Frame{}, err
+			return frame{}, err
 		}
 	}
 	return f, nil

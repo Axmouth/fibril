@@ -18,7 +18,7 @@ func TestReconcileRestoresSubscriptionAcrossReconnect(t *testing.T) {
 	defer ln.Close()
 	addr := ln.Addr().String()
 
-	reconcileSent := make(chan ReconcileClient, 1)
+	reconcileSent := make(chan reconcileClient, 1)
 	go func() {
 		connN := 0
 		for {
@@ -84,7 +84,7 @@ func recvDelivery(t *testing.T, ch <-chan Delivery, want string) {
 	}
 }
 
-func serveReconcileBroker(conn net.Conn, connN int, reconcileSent chan ReconcileClient) {
+func serveReconcileBroker(conn net.Conn, connN int, reconcileSent chan reconcileClient) {
 	defer conn.Close()
 	br := bufio.NewReader(conn)
 	for {
@@ -93,46 +93,46 @@ func serveReconcileBroker(conn net.Conn, connN int, reconcileSent chan Reconcile
 			return
 		}
 		switch f.Opcode {
-		case OpHello:
-			ok := HelloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, Compliance: ComplianceString}
-			_, _ = conn.Write(encodeFrame(buildFrame(OpHelloOk, f.RequestID, encodeHelloOk(ok))))
-		case OpSubscribe:
+		case opHello:
+			ok := helloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, Compliance: ComplianceString}
+			_, _ = conn.Write(encodeFrame(buildFrame(opHelloOk, f.RequestID, encodeHelloOk(ok))))
+		case opSubscribe:
 			req, _ := decodeSubscribe(f.Payload)
-			so := SubscribeOk{SubID: 1, Topic: req.Topic, Partition: req.Partition, Prefetch: req.Prefetch}
-			_, _ = conn.Write(encodeFrame(buildFrame(OpSubscribeOk, f.RequestID, encodeSubscribeOk(so))))
-			d := Deliver{SubID: 1, Topic: req.Topic, Partition: req.Partition, ContentType: ContentType{Kind: ContentText}, Payload: []byte("first")}
-			_, _ = conn.Write(encodeFrame(buildFrame(OpDeliver, 9000, encodeDeliver(d))))
+			so := subscribeOk{SubID: 1, Topic: req.Topic, Partition: req.Partition, Prefetch: req.Prefetch}
+			_, _ = conn.Write(encodeFrame(buildFrame(opSubscribeOk, f.RequestID, encodeSubscribeOk(so))))
+			d := deliver{SubID: 1, Topic: req.Topic, Partition: req.Partition, ContentType: ContentType{Kind: ContentText}, Payload: []byte("first")}
+			_, _ = conn.Write(encodeFrame(buildFrame(opDeliver, 9000, encodeDeliver(d))))
 			if connN == 1 {
 				time.Sleep(30 * time.Millisecond)
 				return // bounce conn1 to force reconnect + reconcile
 			}
-		case OpReconcileClient:
+		case opReconcileClient:
 			rc, _ := decodeReconcileClient(f.Payload)
 			reconcileSent <- rc
-			results := make([]ReconcileSubscriptionResult, 0, len(rc.Subscriptions))
+			results := make([]reconcileSubscriptionResult, 0, len(rc.Subscriptions))
 			for i := range rc.Subscriptions {
 				s := rc.Subscriptions[i]
-				results = append(results, ReconcileSubscriptionResult{Client: &s, Server: &s, Action: ReconcileKeep})
+				results = append(results, reconcileSubscriptionResult{Client: &s, Server: &s, Action: reconcileKeep})
 			}
-			_, _ = conn.Write(encodeFrame(buildFrame(OpReconcileResult, f.RequestID, encodeReconcileResult(ReconcileResult{Subscriptions: results}))))
+			_, _ = conn.Write(encodeFrame(buildFrame(opReconcileResult, f.RequestID, encodeReconcileResult(reconcileResult{Subscriptions: results}))))
 			for _, s := range rc.Subscriptions {
-				d := Deliver{SubID: s.SubID, Topic: s.Topic, Partition: s.Partition, ContentType: ContentType{Kind: ContentText}, Payload: []byte("second")}
-				_, _ = conn.Write(encodeFrame(buildFrame(OpDeliver, 9001, encodeDeliver(d))))
+				d := deliver{SubID: s.SubID, Topic: s.Topic, Partition: s.Partition, ContentType: ContentType{Kind: ContentText}, Payload: []byte("second")}
+				_, _ = conn.Write(encodeFrame(buildFrame(opDeliver, 9001, encodeDeliver(d))))
 			}
-		case OpTopology:
-			_, _ = conn.Write(encodeFrame(buildFrame(OpTopologyOk, f.RequestID, encodeTopologyOk(TopologyOk{Generation: 1}))))
-		case OpPing:
-			_, _ = conn.Write(encodeFrame(buildFrame(OpPong, f.RequestID, nil)))
+		case opTopology:
+			_, _ = conn.Write(encodeFrame(buildFrame(opTopologyOk, f.RequestID, encodeTopologyOk(TopologyOk{Generation: 1}))))
+		case opPing:
+			_, _ = conn.Write(encodeFrame(buildFrame(opPong, f.RequestID, nil)))
 		}
 	}
 }
 
 func TestReconcileResultCodecRoundTrip(t *testing.T) {
-	client := ReconcileSubscription{SubID: 7, Topic: "t", Partition: 2, Prefetch: 16, AutoAck: true}
-	in := ReconcileResult{Subscriptions: []ReconcileSubscriptionResult{
-		{Client: &client, Server: &client, Action: ReconcileKeep, Reason: "kept"},
-		{Client: &client, Server: nil, Action: ReconcileCloseClientSide, Reason: "gone"},
-		{Client: nil, Server: nil, Action: ReconcileRecreateClient, Reason: ""},
+	client := reconcileSubscription{SubID: 7, Topic: "t", Partition: 2, Prefetch: 16, AutoAck: true}
+	in := reconcileResult{Subscriptions: []reconcileSubscriptionResult{
+		{Client: &client, Server: &client, Action: reconcileKeep, Reason: "kept"},
+		{Client: &client, Server: nil, Action: reconcileCloseClientSide, Reason: "gone"},
+		{Client: nil, Server: nil, Action: reconcileRecreateClient, Reason: ""},
 	}}
 	out, err := decodeReconcileResult(encodeReconcileResult(in))
 	if err != nil {
@@ -141,10 +141,10 @@ func TestReconcileResultCodecRoundTrip(t *testing.T) {
 	if len(out.Subscriptions) != 3 {
 		t.Fatalf("got %d results, want 3", len(out.Subscriptions))
 	}
-	if out.Subscriptions[0].Action != ReconcileKeep || out.Subscriptions[0].Server == nil || out.Subscriptions[0].Server.SubID != 7 {
+	if out.Subscriptions[0].Action != reconcileKeep || out.Subscriptions[0].Server == nil || out.Subscriptions[0].Server.SubID != 7 {
 		t.Errorf("result 0 = %+v", out.Subscriptions[0])
 	}
-	if out.Subscriptions[1].Server != nil || out.Subscriptions[1].Action != ReconcileCloseClientSide {
+	if out.Subscriptions[1].Server != nil || out.Subscriptions[1].Action != reconcileCloseClientSide {
 		t.Errorf("result 1 = %+v", out.Subscriptions[1])
 	}
 	if out.Subscriptions[2].Client != nil || out.Subscriptions[2].Reason != "" {

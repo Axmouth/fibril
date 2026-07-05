@@ -23,18 +23,18 @@ func TestClientFollowsPublishRedirect(t *testing.T) {
 				return
 			}
 			switch f.Opcode {
-			case OpHello:
-				ok := HelloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, Compliance: ComplianceString}
-				_, _ = server.Write(encodeFrame(buildFrame(OpHelloOk, f.RequestID, encodeHelloOk(ok))))
-			case OpPublish:
+			case opHello:
+				ok := helloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, Compliance: ComplianceString}
+				_, _ = server.Write(encodeFrame(buildFrame(opHelloOk, f.RequestID, encodeHelloOk(ok))))
+			case opPublish:
 				if publishes.Add(1) == 1 {
 					rd := Redirect{Topic: "t", Partition: 0, OwnerEndpoints: []AdvertisedAddress{{Host: "127.0.0.1", Port: 9999}}, PartitioningVersion: 1}
-					_, _ = server.Write(encodeFrame(buildFrame(OpRedirect, f.RequestID, encodeRedirect(rd))))
+					_, _ = server.Write(encodeFrame(buildFrame(opRedirect, f.RequestID, encodeRedirect(rd))))
 				} else {
-					_, _ = server.Write(encodeFrame(buildFrame(OpPublishOk, f.RequestID, encodePublishOk(PublishOk{Offset: 99}))))
+					_, _ = server.Write(encodeFrame(buildFrame(opPublishOk, f.RequestID, encodePublishOk(publishOk{Offset: 99}))))
 				}
-			case OpPing:
-				_, _ = server.Write(encodeFrame(buildFrame(OpPong, f.RequestID, nil)))
+			case opPing:
+				_, _ = server.Write(encodeFrame(buildFrame(opPong, f.RequestID, nil)))
 			}
 		}
 	}()

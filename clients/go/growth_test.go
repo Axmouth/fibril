@@ -24,10 +24,10 @@ func TestFanInPicksUpGrownPartition(t *testing.T) {
 				return
 			}
 			switch f.Opcode {
-			case OpHello:
-				ok := HelloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, Compliance: ComplianceString}
-				_, _ = server.Write(encodeFrame(buildFrame(OpHelloOk, f.RequestID, encodeHelloOk(ok))))
-			case OpTopology:
+			case opHello:
+				ok := helloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, Compliance: ComplianceString}
+				_, _ = server.Write(encodeFrame(buildFrame(opHelloOk, f.RequestID, encodeHelloOk(ok))))
+			case opTopology:
 				// Grow from one partition to two after the first couple of fetches.
 				n := fetches.Add(1)
 				gen, count := uint64(1), uint32(1)
@@ -37,14 +37,14 @@ func TestFanInPicksUpGrownPartition(t *testing.T) {
 				topo := TopologyOk{Generation: gen, Queues: []QueueTopologyEntry{
 					{Topic: "t", Partition: 0, PartitionCount: count},
 				}}
-				_, _ = server.Write(encodeFrame(buildFrame(OpTopologyOk, f.RequestID, encodeTopologyOk(topo))))
-			case OpSubscribe:
+				_, _ = server.Write(encodeFrame(buildFrame(opTopologyOk, f.RequestID, encodeTopologyOk(topo))))
+			case opSubscribe:
 				req, _ := decodeSubscribe(f.Payload)
-				so := SubscribeOk{SubID: uint64(req.Partition) + 1, Topic: req.Topic, Partition: req.Partition, Prefetch: req.Prefetch}
-				_, _ = server.Write(encodeFrame(buildFrame(OpSubscribeOk, f.RequestID, encodeSubscribeOk(so))))
+				so := subscribeOk{SubID: uint64(req.Partition) + 1, Topic: req.Topic, Partition: req.Partition, Prefetch: req.Prefetch}
+				_, _ = server.Write(encodeFrame(buildFrame(opSubscribeOk, f.RequestID, encodeSubscribeOk(so))))
 				subscribed <- req.Partition
-			case OpPing:
-				_, _ = server.Write(encodeFrame(buildFrame(OpPong, f.RequestID, nil)))
+			case opPing:
+				_, _ = server.Write(encodeFrame(buildFrame(opPong, f.RequestID, nil)))
 			}
 		}
 	}()

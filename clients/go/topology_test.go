@@ -11,7 +11,7 @@ import (
 // routing cache and is acked with the generation the client now reflects.
 func TestClientAppliesTopologyPush(t *testing.T) {
 	client, server := net.Pipe()
-	acks := make(chan TopologyUpdateAck, 2)
+	acks := make(chan topologyUpdateAck, 2)
 	owner := []AdvertisedAddress{{Host: "127.0.0.1", Port: 9999}}
 
 	go func() {
@@ -20,19 +20,19 @@ func TestClientAppliesTopologyPush(t *testing.T) {
 		if err != nil {
 			return
 		}
-		ok := HelloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, Compliance: ComplianceString}
-		_, _ = server.Write(encodeFrame(buildFrame(OpHelloOk, f.RequestID, encodeHelloOk(ok))))
+		ok := helloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, Compliance: ComplianceString}
+		_, _ = server.Write(encodeFrame(buildFrame(opHelloOk, f.RequestID, encodeHelloOk(ok))))
 		// Push a topology snapshot for "t" with 4 partitions.
 		topo := TopologyOk{Generation: 7, Queues: []QueueTopologyEntry{
 			{Topic: "t", Partition: 0, PartitionCount: 4, OwnerEndpoints: owner},
 		}}
-		_, _ = server.Write(encodeFrame(buildFrame(OpTopologyUpdate, 0, encodeTopologyUpdate(topo))))
+		_, _ = server.Write(encodeFrame(buildFrame(opTopologyUpdate, 0, encodeTopologyUpdate(topo))))
 		for {
 			f, err := readFrame(br)
 			if err != nil {
 				return
 			}
-			if f.Opcode == OpTopologyUpdateAck {
+			if f.Opcode == opTopologyUpdateAck {
 				a, _ := decodeTopologyUpdateAck(f.Payload)
 				acks <- a
 			}

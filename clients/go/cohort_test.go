@@ -22,23 +22,23 @@ func TestClientCohortMemberCaptureCarryAndAssignment(t *testing.T) {
 				return
 			}
 			switch f.Opcode {
-			case OpHello:
-				ok := HelloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, Compliance: ComplianceString}
-				_, _ = server.Write(encodeFrame(buildFrame(OpHelloOk, f.RequestID, encodeHelloOk(ok))))
-			case OpSubscribe:
+			case opHello:
+				ok := helloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, Compliance: ComplianceString}
+				_, _ = server.Write(encodeFrame(buildFrame(opHelloOk, f.RequestID, encodeHelloOk(ok))))
+			case opSubscribe:
 				req, _ := decodeSubscribe(f.Payload)
 				subCount++
 				if subCount == 2 {
 					secondSubMember <- req.MemberID // the client should carry the minted id here
 				}
-				so := SubscribeOk{SubID: uint64(subCount), Topic: req.Topic, Partition: req.Partition, ConsumerGroup: req.ConsumerGroup, MemberID: &minted}
-				_, _ = server.Write(encodeFrame(buildFrame(OpSubscribeOk, f.RequestID, encodeSubscribeOk(so))))
+				so := subscribeOk{SubID: uint64(subCount), Topic: req.Topic, Partition: req.Partition, ConsumerGroup: req.ConsumerGroup, MemberID: &minted}
+				_, _ = server.Write(encodeFrame(buildFrame(opSubscribeOk, f.RequestID, encodeSubscribeOk(so))))
 				if subCount == 1 {
 					a := AssignmentChanged{Topic: req.Topic, ConsumerGroup: "cg", Generation: 1, Assigned: []uint32{0, 1}}
-					_, _ = server.Write(encodeFrame(buildFrame(OpAssignmentChanged, 0, encodeAssignmentChanged(a))))
+					_, _ = server.Write(encodeFrame(buildFrame(opAssignmentChanged, 0, encodeAssignmentChanged(a))))
 				}
-			case OpPing:
-				_, _ = server.Write(encodeFrame(buildFrame(OpPong, f.RequestID, nil)))
+			case opPing:
+				_, _ = server.Write(encodeFrame(buildFrame(opPong, f.RequestID, nil)))
 			}
 		}
 	}()
@@ -94,13 +94,13 @@ func TestSubscribeTopicExclusiveJoinsDefaultCohort(t *testing.T) {
 				return
 			}
 			switch f.Opcode {
-			case OpHello:
-				ok := HelloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, Compliance: ComplianceString}
-				_, _ = server.Write(encodeFrame(buildFrame(OpHelloOk, f.RequestID, encodeHelloOk(ok))))
-			case OpTopology:
+			case opHello:
+				ok := helloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, Compliance: ComplianceString}
+				_, _ = server.Write(encodeFrame(buildFrame(opHelloOk, f.RequestID, encodeHelloOk(ok))))
+			case opTopology:
 				topo := TopologyOk{Generation: 1, Queues: []QueueTopologyEntry{{Topic: "orders", Partition: 0, PartitionCount: 1}}}
-				_, _ = server.Write(encodeFrame(buildFrame(OpTopologyOk, f.RequestID, encodeTopologyOk(topo))))
-			case OpSubscribe:
+				_, _ = server.Write(encodeFrame(buildFrame(opTopologyOk, f.RequestID, encodeTopologyOk(topo))))
+			case opSubscribe:
 				req, _ := decodeSubscribe(f.Payload)
 				cg := ""
 				if req.ConsumerGroup != nil {
@@ -108,10 +108,10 @@ func TestSubscribeTopicExclusiveJoinsDefaultCohort(t *testing.T) {
 				}
 				gotCG <- cg
 				sid++
-				so := SubscribeOk{SubID: sid, Topic: req.Topic, Partition: req.Partition, Prefetch: req.Prefetch, ConsumerGroup: req.ConsumerGroup}
-				_, _ = server.Write(encodeFrame(buildFrame(OpSubscribeOk, f.RequestID, encodeSubscribeOk(so))))
-			case OpPing:
-				_, _ = server.Write(encodeFrame(buildFrame(OpPong, f.RequestID, nil)))
+				so := subscribeOk{SubID: sid, Topic: req.Topic, Partition: req.Partition, Prefetch: req.Prefetch, ConsumerGroup: req.ConsumerGroup}
+				_, _ = server.Write(encodeFrame(buildFrame(opSubscribeOk, f.RequestID, encodeSubscribeOk(so))))
+			case opPing:
+				_, _ = server.Write(encodeFrame(buildFrame(opPong, f.RequestID, nil)))
 			}
 		}
 	}()

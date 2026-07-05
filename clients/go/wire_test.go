@@ -31,15 +31,15 @@ type vcase struct {
 
 func cases() []vcase {
 	return []vcase{
-		{"hello", encodeHello(Hello{"py-client", "0.1.0", 1, &ResumeIdentity{fill(1), fill(2), fill(3)}}),
+		{"hello", encodeHello(hello{"py-client", "0.1.0", 1, &ResumeIdentity{fill(1), fill(2), fill(3)}}),
 			func(b []byte) ([]byte, error) { v, e := decodeHello(b); return encodeHello(v), e }},
-		{"hello_no_resume", encodeHello(Hello{"c", "v", 1, nil}),
+		{"hello_no_resume", encodeHello(hello{"c", "v", 1, nil}),
 			func(b []byte) ([]byte, error) { v, e := decodeHello(b); return encodeHello(v), e }},
-		{"hello_ok", encodeHelloOk(HelloOk{1, fill(9), fill(8), fill(7), ResumeResumed, "srv", "v=1;x"}),
+		{"hello_ok", encodeHelloOk(helloOk{1, fill(9), fill(8), fill(7), ResumeResumed, "srv", "v=1;x"}),
 			func(b []byte) ([]byte, error) { v, e := decodeHelloOk(b); return encodeHelloOk(v), e }},
 		{"auth", encodeAuth(Auth{"u", "p"}),
 			func(b []byte) ([]byte, error) { v, e := decodeAuth(b); return encodeAuth(v), e }},
-		{"error", encodeError(ErrorMsg{409, "not owner"}),
+		{"error", encodeError(errorMsg{409, "not owner"}),
 			func(b []byte) ([]byte, error) { v, e := decodeError(b); return encodeError(v), e }},
 		{"publish", encodePublish(Publish{
 			Topic: "orders", Partition: 3, Group: sp("g"), RequireConfirm: true,
@@ -58,19 +58,19 @@ func cases() []vcase {
 			ContentType: ContentType{Kind: ContentText}, Headers: Headers{"k": "v"},
 			Payload: []byte{5, 6}, Published: 42, PartitioningVersion: 2}),
 			func(b []byte) ([]byte, error) { v, e := decodePublishDelayed(b); return encodePublishDelayed(v), e }},
-		{"publish_ok", encodePublishOk(PublishOk{777}),
+		{"publish_ok", encodePublishOk(publishOk{777}),
 			func(b []byte) ([]byte, error) { v, e := decodePublishOk(b); return encodePublishOk(v), e }},
-		{"deliver", encodeDeliver(Deliver{
+		{"deliver", encodeDeliver(deliver{
 			SubID: 11, Topic: "t", Group: sp("g"), Partition: 2, Offset: 100,
 			DeliveryTag: DeliveryTag{5}, Published: 7, PublishReceived: 8,
 			ContentType: ContentType{Kind: ContentMsgpack}, Headers: Headers{"h": "1"},
 			Payload: []byte{3, 2, 1}}),
 			func(b []byte) ([]byte, error) { v, e := decodeDeliver(b); return encodeDeliver(v), e }},
-		{"ack", encodeAck(Ack{Topic: "t", Tags: []DeliveryTag{{1}, {2}}}),
+		{"ack", encodeAck(ackFrame{Topic: "t", Tags: []DeliveryTag{{1}, {2}}}),
 			func(b []byte) ([]byte, error) { v, e := decodeAck(b); return encodeAck(v), e }},
-		{"nack", encodeNack(Nack{Topic: "t", Group: sp("g"), Partition: 1, Tags: []DeliveryTag{{9}}, Requeue: true, NotBefore: u64p(5000)}),
+		{"nack", encodeNack(nackFrame{Topic: "t", Group: sp("g"), Partition: 1, Tags: []DeliveryTag{{9}}, Requeue: true, NotBefore: u64p(5000)}),
 			func(b []byte) ([]byte, error) { v, e := decodeNack(b); return encodeNack(v), e }},
-		{"nack_no_nb", encodeNack(Nack{Topic: "t", Tags: []DeliveryTag{}}),
+		{"nack_no_nb", encodeNack(nackFrame{Topic: "t", Tags: []DeliveryTag{}}),
 			func(b []byte) ([]byte, error) { v, e := decodeNack(b); return encodeNack(v), e }},
 		{"subscribe", encodeSubscribe(Subscribe{
 			Topic: "t", Partition: 1, Group: sp("g"), Prefetch: 32, AutoAck: false,
@@ -78,7 +78,7 @@ func cases() []vcase {
 			func(b []byte) ([]byte, error) { v, e := decodeSubscribe(b); return encodeSubscribe(v), e }},
 		{"subscribe_min", encodeSubscribe(Subscribe{Topic: "t", AutoAck: true}),
 			func(b []byte) ([]byte, error) { v, e := decodeSubscribe(b); return encodeSubscribe(v), e }},
-		{"subscribe_ok", encodeSubscribeOk(SubscribeOk{
+		{"subscribe_ok", encodeSubscribeOk(subscribeOk{
 			SubID: 5, Topic: "t", Partition: 1, Group: sp("g"), Prefetch: 16,
 			ConsumerGroup: sp("cg"), MemberID: uup(fill(4))}),
 			func(b []byte) ([]byte, error) { v, e := decodeSubscribeOk(b); return encodeSubscribeOk(v), e }},
@@ -114,14 +114,14 @@ func cases() []vcase {
 			Queues:     []QueueTopologyEntry{{Topic: "t", Partition: 0, OwnerEndpoints: []AdvertisedAddress{{Host: "127.0.0.1", Port: 7000}}, PartitioningVersion: 1, PartitionCount: 2}},
 			Streams:    []StreamTopologyEntry{{Topic: "s", Partition: 2, OwnerEndpoints: []AdvertisedAddress{{Host: "10.0.0.9", Port: 7100}}, PartitioningVersion: 4, PartitionCount: 3}}}),
 			func(b []byte) ([]byte, error) { v, e := decodeTopologyUpdate(b); return encodeTopologyUpdate(v), e }},
-		{"topology_update_ack", encodeTopologyUpdateAck(TopologyUpdateAck{Generation: 12}),
+		{"topology_update_ack", encodeTopologyUpdateAck(topologyUpdateAck{Generation: 12}),
 			func(b []byte) ([]byte, error) {
 				v, e := decodeTopologyUpdateAck(b)
 				return encodeTopologyUpdateAck(v), e
 			}},
-		{"reconcile_client", encodeReconcileClient(ReconcileClient{
+		{"reconcile_client", encodeReconcileClient(reconcileClient{
 			Policy:        ReconcileRestore,
-			Subscriptions: []ReconcileSubscription{{SubID: 1, Topic: "t", Partition: 0, AutoAck: false, Prefetch: 8}}}),
+			Subscriptions: []reconcileSubscription{{SubID: 1, Topic: "t", Partition: 0, AutoAck: false, Prefetch: 8}}}),
 			func(b []byte) ([]byte, error) { v, e := decodeReconcileClient(b); return encodeReconcileClient(v), e }},
 		{"redirect", encodeRedirect(Redirect{Topic: "t", Partition: 1, Group: sp("g"), OwnerEndpoints: []AdvertisedAddress{{Host: "h", Port: 1}}, PartitioningVersion: 3}),
 			func(b []byte) ([]byte, error) { v, e := decodeRedirect(b); return encodeRedirect(v), e }},
@@ -131,7 +131,7 @@ func cases() []vcase {
 				v, e := decodeAssignmentChanged(b)
 				return encodeAssignmentChanged(v), e
 			}},
-		{"going_away", encodeGoingAway(GoingAway{GraceMs: 30000, Message: "broker restarting for upgrade"}),
+		{"going_away", encodeGoingAway(goingAway{GraceMs: 30000, Message: "broker restarting for upgrade"}),
 			func(b []byte) ([]byte, error) { v, e := decodeGoingAway(b); return encodeGoingAway(v), e }},
 		{"subscribe_stream", encodeSubscribeStream(SubscribeStream{
 			Topic: "t", Partition: 1, DurableName: sp("c1"), Start: StreamStart{Kind: StreamByTime, Value: 1234},

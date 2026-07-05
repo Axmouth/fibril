@@ -386,23 +386,23 @@ func decodeTopologyRequest(body []byte) (TopologyRequest, error) {
 	return req, r.finish()
 }
 
-// TopologyUpdateAck acknowledges the generation a client now reflects, so the
+// topologyUpdateAck acknowledges the generation a client now reflects, so the
 // broker can fence a repartition cutover.
-type TopologyUpdateAck struct {
+type topologyUpdateAck struct {
 	Generation uint64
 }
 
-func encodeTopologyUpdateAck(a TopologyUpdateAck) []byte {
+func encodeTopologyUpdateAck(a topologyUpdateAck) []byte {
 	w := writer{}
 	w.magic("FTA1")
 	w.u64(a.Generation)
 	return w.buf
 }
 
-func decodeTopologyUpdateAck(body []byte) (TopologyUpdateAck, error) {
+func decodeTopologyUpdateAck(body []byte) (topologyUpdateAck, error) {
 	r := reader{buf: body}
 	r.expectMagic("FTA1")
-	a := TopologyUpdateAck{Generation: r.u64()}
+	a := topologyUpdateAck{Generation: r.u64()}
 	return a, r.finish()
 }
 
@@ -432,9 +432,9 @@ func (r *reader) reconcilePolicy() ReconcilePolicy {
 	return ReconcileConservative
 }
 
-// ReconcileSubscription describes a subscription a reconnecting client wants the
+// reconcileSubscription describes a subscription a reconnecting client wants the
 // broker to restore.
-type ReconcileSubscription struct {
+type reconcileSubscription struct {
 	SubID          uint64
 	Topic          string
 	Partition      uint32
@@ -446,7 +446,7 @@ type ReconcileSubscription struct {
 	MemberID       *UUID
 }
 
-func (w *writer) reconcileSubscription(s ReconcileSubscription) {
+func (w *writer) reconcileSubscription(s reconcileSubscription) {
 	w.u64(s.SubID)
 	w.queueKey(s.Topic, s.Partition, s.Group)
 	w.writeBool(s.AutoAck)
@@ -456,8 +456,8 @@ func (w *writer) reconcileSubscription(s ReconcileSubscription) {
 	w.optionalUUID(s.MemberID)
 }
 
-func (r *reader) reconcileSubscription() ReconcileSubscription {
-	s := ReconcileSubscription{SubID: r.u64()}
+func (r *reader) reconcileSubscription() reconcileSubscription {
+	s := reconcileSubscription{SubID: r.u64()}
 	s.Topic, s.Partition, s.Group = r.queueKey()
 	s.AutoAck = r.readBool()
 	s.Prefetch = r.u32()
@@ -467,14 +467,14 @@ func (r *reader) reconcileSubscription() ReconcileSubscription {
 	return s
 }
 
-// ReconcileClient asks the broker to reconcile the listed subscriptions under a
+// reconcileClient asks the broker to reconcile the listed subscriptions under a
 // policy after a reconnect.
-type ReconcileClient struct {
+type reconcileClient struct {
 	Policy        ReconcilePolicy
-	Subscriptions []ReconcileSubscription
+	Subscriptions []reconcileSubscription
 }
 
-func encodeReconcileClient(rc ReconcileClient) []byte {
+func encodeReconcileClient(rc reconcileClient) []byte {
 	w := writer{}
 	w.magic("FRC1")
 	w.reconcilePolicy(rc.Policy)
@@ -485,29 +485,29 @@ func encodeReconcileClient(rc ReconcileClient) []byte {
 	return w.buf
 }
 
-func decodeReconcileClient(body []byte) (ReconcileClient, error) {
+func decodeReconcileClient(body []byte) (reconcileClient, error) {
 	r := reader{buf: body}
 	r.expectMagic("FRC1")
-	rc := ReconcileClient{Policy: r.reconcilePolicy()}
+	rc := reconcileClient{Policy: r.reconcilePolicy()}
 	n := r.u32()
-	rc.Subscriptions = make([]ReconcileSubscription, 0, n)
+	rc.Subscriptions = make([]reconcileSubscription, 0, n)
 	for i := uint32(0); i < n && r.err == nil; i++ {
 		rc.Subscriptions = append(rc.Subscriptions, r.reconcileSubscription())
 	}
 	return rc, r.finish()
 }
 
-// ReconcileAction is the broker's verdict for one reconciled subscription.
-type ReconcileAction uint8
+// reconcileAction is the broker's verdict for one reconciled subscription.
+type reconcileAction uint8
 
 const (
-	ReconcileKeep            ReconcileAction = 0
-	ReconcileCloseClientSide ReconcileAction = 1
-	ReconcileCloseServerSide ReconcileAction = 2
-	ReconcileRecreateClient  ReconcileAction = 3
+	reconcileKeep            reconcileAction = 0
+	reconcileCloseClientSide reconcileAction = 1
+	reconcileCloseServerSide reconcileAction = 2
+	reconcileRecreateClient  reconcileAction = 3
 )
 
-func (w *writer) optionalReconcileSubscription(s *ReconcileSubscription) {
+func (w *writer) optionalReconcileSubscription(s *reconcileSubscription) {
 	if s == nil {
 		w.u8(0)
 		return
@@ -516,7 +516,7 @@ func (w *writer) optionalReconcileSubscription(s *ReconcileSubscription) {
 	w.reconcileSubscription(*s)
 }
 
-func (r *reader) optionalReconcileSubscription() *ReconcileSubscription {
+func (r *reader) optionalReconcileSubscription() *reconcileSubscription {
 	if r.u8() != 1 {
 		return nil
 	}
@@ -524,23 +524,23 @@ func (r *reader) optionalReconcileSubscription() *ReconcileSubscription {
 	return &s
 }
 
-// ReconcileSubscriptionResult is the broker's verdict for one subscription a
+// reconcileSubscriptionResult is the broker's verdict for one subscription a
 // reconnecting client asked it to reconcile: the client's view, the server's
 // restored view (if any), the action, and a human-readable reason.
-type ReconcileSubscriptionResult struct {
-	Client *ReconcileSubscription
-	Server *ReconcileSubscription
-	Action ReconcileAction
+type reconcileSubscriptionResult struct {
+	Client *reconcileSubscription
+	Server *reconcileSubscription
+	Action reconcileAction
 	Reason string
 }
 
-// ReconcileServer is an unsolicited broker->client push of the subscriptions the
+// reconcileServer is an unsolicited broker->client push of the subscriptions the
 // broker believes a client holds (op 71).
-type ReconcileServer struct {
-	Subscriptions []ReconcileSubscription
+type reconcileServer struct {
+	Subscriptions []reconcileSubscription
 }
 
-func encodeReconcileServer(rs ReconcileServer) []byte {
+func encodeReconcileServer(rs reconcileServer) []byte {
 	w := writer{}
 	w.magic("FRS1")
 	w.u32(uint32(len(rs.Subscriptions)))
@@ -550,24 +550,24 @@ func encodeReconcileServer(rs ReconcileServer) []byte {
 	return w.buf
 }
 
-func decodeReconcileServer(body []byte) (ReconcileServer, error) {
+func decodeReconcileServer(body []byte) (reconcileServer, error) {
 	r := reader{buf: body}
 	r.expectMagic("FRS1")
 	n := r.u32()
-	rs := ReconcileServer{Subscriptions: make([]ReconcileSubscription, 0, n)}
+	rs := reconcileServer{Subscriptions: make([]reconcileSubscription, 0, n)}
 	for i := uint32(0); i < n && r.err == nil; i++ {
 		rs.Subscriptions = append(rs.Subscriptions, r.reconcileSubscription())
 	}
 	return rs, r.finish()
 }
 
-// ReconcileResult is the broker's reply to a RECONCILE_CLIENT: one verdict per
+// reconcileResult is the broker's reply to a RECONCILE_CLIENT: one verdict per
 // reconciled subscription.
-type ReconcileResult struct {
-	Subscriptions []ReconcileSubscriptionResult
+type reconcileResult struct {
+	Subscriptions []reconcileSubscriptionResult
 }
 
-func encodeReconcileResult(rr ReconcileResult) []byte {
+func encodeReconcileResult(rr reconcileResult) []byte {
 	w := writer{}
 	w.magic("FRR1")
 	w.u32(uint32(len(rr.Subscriptions)))
@@ -580,16 +580,16 @@ func encodeReconcileResult(rr ReconcileResult) []byte {
 	return w.buf
 }
 
-func decodeReconcileResult(body []byte) (ReconcileResult, error) {
+func decodeReconcileResult(body []byte) (reconcileResult, error) {
 	r := reader{buf: body}
 	r.expectMagic("FRR1")
 	n := r.u32()
-	rr := ReconcileResult{Subscriptions: make([]ReconcileSubscriptionResult, 0, n)}
+	rr := reconcileResult{Subscriptions: make([]reconcileSubscriptionResult, 0, n)}
 	for i := uint32(0); i < n && r.err == nil; i++ {
-		rr.Subscriptions = append(rr.Subscriptions, ReconcileSubscriptionResult{
+		rr.Subscriptions = append(rr.Subscriptions, reconcileSubscriptionResult{
 			Client: r.optionalReconcileSubscription(),
 			Server: r.optionalReconcileSubscription(),
-			Action: ReconcileAction(r.u8()),
+			Action: reconcileAction(r.u8()),
 			Reason: r.readStr(),
 		})
 	}
@@ -665,13 +665,13 @@ func decodeAssignmentChanged(body []byte) (AssignmentChanged, error) {
 
 // ---- going away --------------------------------------------------------
 
-// GoingAway is the broker's drain notice ahead of a planned shutdown or upgrade.
-type GoingAway struct {
+// goingAway is the broker's drain notice ahead of a planned shutdown or upgrade.
+type goingAway struct {
 	GraceMs uint64
 	Message string
 }
 
-func encodeGoingAway(g GoingAway) []byte {
+func encodeGoingAway(g goingAway) []byte {
 	w := writer{}
 	w.magic("FGA1")
 	w.u64(g.GraceMs)
@@ -679,10 +679,10 @@ func encodeGoingAway(g GoingAway) []byte {
 	return w.buf
 }
 
-func decodeGoingAway(body []byte) (GoingAway, error) {
+func decodeGoingAway(body []byte) (goingAway, error) {
 	r := reader{buf: body}
 	r.expectMagic("FGA1")
-	g := GoingAway{GraceMs: r.u64(), Message: r.readStr()}
+	g := goingAway{GraceMs: r.u64(), Message: r.readStr()}
 	return g, r.finish()
 }
 

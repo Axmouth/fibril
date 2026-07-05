@@ -80,23 +80,23 @@ func serveSupervised(conn net.Conn, n int32) {
 			return
 		}
 		switch f.Opcode {
-		case OpHello:
-			ok := HelloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, Compliance: ComplianceString}
-			_, _ = conn.Write(encodeFrame(buildFrame(OpHelloOk, f.RequestID, encodeHelloOk(ok))))
-		case OpTopology:
+		case opHello:
+			ok := helloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, Compliance: ComplianceString}
+			_, _ = conn.Write(encodeFrame(buildFrame(opHelloOk, f.RequestID, encodeHelloOk(ok))))
+		case opTopology:
 			// Empty topology: owner stays unknown, so routing uses the bootstrap.
-			_, _ = conn.Write(encodeFrame(buildFrame(OpTopologyOk, f.RequestID, encodeTopologyOk(TopologyOk{Generation: uint64(n)}))))
-		case OpSubscribe:
+			_, _ = conn.Write(encodeFrame(buildFrame(opTopologyOk, f.RequestID, encodeTopologyOk(TopologyOk{Generation: uint64(n)}))))
+		case opSubscribe:
 			req, _ := decodeSubscribe(f.Payload)
-			so := SubscribeOk{SubID: 100, Topic: req.Topic, Partition: req.Partition, Prefetch: 8}
-			_, _ = conn.Write(encodeFrame(buildFrame(OpSubscribeOk, f.RequestID, encodeSubscribeOk(so))))
-			d := Deliver{SubID: 100, Topic: req.Topic, Partition: req.Partition, ContentType: ContentType{Kind: ContentText}, Payload: []byte{byte('0' + n)}}
-			_, _ = conn.Write(encodeFrame(buildFrame(OpDeliver, 5000, encodeDeliver(d))))
+			so := subscribeOk{SubID: 100, Topic: req.Topic, Partition: req.Partition, Prefetch: 8}
+			_, _ = conn.Write(encodeFrame(buildFrame(opSubscribeOk, f.RequestID, encodeSubscribeOk(so))))
+			d := deliver{SubID: 100, Topic: req.Topic, Partition: req.Partition, ContentType: ContentType{Kind: ContentText}, Payload: []byte{byte('0' + n)}}
+			_, _ = conn.Write(encodeFrame(buildFrame(opDeliver, 5000, encodeDeliver(d))))
 			if n == 1 {
 				return // drop connection 1 after its delivery
 			}
-		case OpPing:
-			_, _ = conn.Write(encodeFrame(buildFrame(OpPong, f.RequestID, nil)))
+		case opPing:
+			_, _ = conn.Write(encodeFrame(buildFrame(opPong, f.RequestID, nil)))
 		}
 	}
 }

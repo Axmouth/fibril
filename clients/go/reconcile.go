@@ -19,7 +19,7 @@ type reconcileRegistry struct {
 }
 
 type reconcileEntry struct {
-	sub     ReconcileSubscription
+	sub     reconcileSubscription
 	ch      chan Delivery
 	autoAck bool
 }
@@ -31,7 +31,7 @@ func newReconcileRegistry(policy ReconcilePolicy) *reconcileRegistry {
 	return &reconcileRegistry{policy: policy, subs: map[uint64]*reconcileEntry{}}
 }
 
-func (r *reconcileRegistry) register(sub ReconcileSubscription, ch chan Delivery, autoAck bool) {
+func (r *reconcileRegistry) register(sub reconcileSubscription, ch chan Delivery, autoAck bool) {
 	r.mu.Lock()
 	r.subs[sub.SubID] = &reconcileEntry{sub: sub, ch: ch, autoAck: autoAck}
 	r.mu.Unlock()
@@ -43,10 +43,10 @@ func (r *reconcileRegistry) isEmpty() bool {
 	return len(r.subs) == 0
 }
 
-func (r *reconcileRegistry) snapshot() []ReconcileSubscription {
+func (r *reconcileRegistry) snapshot() []reconcileSubscription {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]ReconcileSubscription, 0, len(r.subs))
+	out := make([]reconcileSubscription, 0, len(r.subs))
 	for _, e := range r.subs {
 		out = append(out, e.sub)
 	}
@@ -57,7 +57,7 @@ func (r *reconcileRegistry) snapshot() []ReconcileSubscription {
 // map a reconnecting engine should start with, keyed by the (new) server sub ids.
 // Channels of subscriptions the broker did not keep are closed so their consumers
 // stop.
-func (r *reconcileRegistry) applyResult(res ReconcileResult) map[uint64]*subState {
+func (r *reconcileRegistry) applyResult(res reconcileResult) map[uint64]*subState {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -76,7 +76,7 @@ func (r *reconcileRegistry) applyResult(res ReconcileResult) map[uint64]*subStat
 			continue
 		}
 		switch sr.Action {
-		case ReconcileKeep, ReconcileRecreateClient:
+		case reconcileKeep, reconcileRecreateClient:
 			newID := oldID
 			if sr.Server != nil {
 				newID = sr.Server.SubID

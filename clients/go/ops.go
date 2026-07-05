@@ -94,15 +94,15 @@ func (r *reader) optionalResumeIdentity() *ResumeIdentity {
 	return &ResumeIdentity{OwnerID: r.uuid(), ClientID: r.uuid(), ResumeToken: r.uuid()}
 }
 
-// Hello is the client's opening handshake frame.
-type Hello struct {
+// hello is the client's opening handshake frame.
+type hello struct {
 	ClientName      string
 	ClientVersion   string
 	ProtocolVersion uint16
 	Resume          *ResumeIdentity
 }
 
-func encodeHello(h Hello) []byte {
+func encodeHello(h hello) []byte {
 	w := writer{}
 	w.magic("FHL1")
 	w.writeStr(h.ClientName)
@@ -112,10 +112,10 @@ func encodeHello(h Hello) []byte {
 	return w.buf
 }
 
-func decodeHello(body []byte) (Hello, error) {
+func decodeHello(body []byte) (hello, error) {
 	r := reader{buf: body}
 	r.expectMagic("FHL1")
-	h := Hello{
+	h := hello{
 		ClientName:      r.readStr(),
 		ClientVersion:   r.readStr(),
 		ProtocolVersion: r.u16(),
@@ -124,8 +124,8 @@ func decodeHello(body []byte) (Hello, error) {
 	return h, r.finish()
 }
 
-// HelloOk is the broker's handshake reply.
-type HelloOk struct {
+// helloOk is the broker's handshake reply.
+type helloOk struct {
 	ProtocolVersion uint16
 	OwnerID         UUID
 	ClientID        UUID
@@ -135,7 +135,7 @@ type HelloOk struct {
 	Compliance      string
 }
 
-func encodeHelloOk(h HelloOk) []byte {
+func encodeHelloOk(h helloOk) []byte {
 	w := writer{}
 	w.magic("FHO1")
 	w.u16(h.ProtocolVersion)
@@ -148,10 +148,10 @@ func encodeHelloOk(h HelloOk) []byte {
 	return w.buf
 }
 
-func decodeHelloOk(body []byte) (HelloOk, error) {
+func decodeHelloOk(body []byte) (helloOk, error) {
 	r := reader{buf: body}
 	r.expectMagic("FHO1")
-	h := HelloOk{
+	h := helloOk{
 		ProtocolVersion: r.u16(),
 		OwnerID:         r.uuid(),
 		ClientID:        r.uuid(),
@@ -184,13 +184,13 @@ func decodeAuth(body []byte) (Auth, error) {
 	return a, r.finish()
 }
 
-// ErrorMsg is a structured broker error.
-type ErrorMsg struct {
+// errorMsg is a structured broker error.
+type errorMsg struct {
 	Code    uint16
 	Message string
 }
 
-func encodeError(e ErrorMsg) []byte {
+func encodeError(e errorMsg) []byte {
 	w := writer{}
 	w.magic("FER1")
 	w.u16(e.Code)
@@ -198,10 +198,10 @@ func encodeError(e ErrorMsg) []byte {
 	return w.buf
 }
 
-func decodeError(body []byte) (ErrorMsg, error) {
+func decodeError(body []byte) (errorMsg, error) {
 	r := reader{buf: body}
 	r.expectMagic("FER1")
-	e := ErrorMsg{Code: r.u16(), Message: r.readStr()}
+	e := errorMsg{Code: r.u16(), Message: r.readStr()}
 	return e, r.finish()
 }
 
@@ -318,22 +318,22 @@ func decodePublishDelayed(body []byte) (PublishDelayed, error) {
 	return p, r.finish()
 }
 
-// PublishOk is the broker's confirmed-publish reply carrying the assigned offset.
-type PublishOk struct {
+// publishOk is the broker's confirmed-publish reply carrying the assigned offset.
+type publishOk struct {
 	Offset uint64
 }
 
-func encodePublishOk(o PublishOk) []byte {
+func encodePublishOk(o publishOk) []byte {
 	w := writer{}
 	w.magic("FPO1")
 	w.u64(o.Offset)
 	return w.buf
 }
 
-func decodePublishOk(body []byte) (PublishOk, error) {
+func decodePublishOk(body []byte) (publishOk, error) {
 	r := reader{buf: body}
 	r.expectMagic("FPO1")
-	o := PublishOk{Offset: r.u64()}
+	o := publishOk{Offset: r.u64()}
 	return o, r.finish()
 }
 
@@ -345,14 +345,14 @@ type DeliveryTag struct {
 }
 
 // Ack settles one or more deliveries as processed.
-type Ack struct {
+type ackFrame struct {
 	Topic     string
 	Group     *string
 	Partition uint32
 	Tags      []DeliveryTag
 }
 
-func encodeAck(a Ack) []byte {
+func encodeAck(a ackFrame) []byte {
 	w := writer{}
 	w.magic("FAK1")
 	w.writeStr(a.Topic)
@@ -362,16 +362,16 @@ func encodeAck(a Ack) []byte {
 	return w.buf
 }
 
-func decodeAck(body []byte) (Ack, error) {
+func decodeAck(body []byte) (ackFrame, error) {
 	r := reader{buf: body}
 	r.expectMagic("FAK1")
-	a := Ack{Topic: r.readStr(), Group: r.optionalStr(), Partition: r.u32(), Tags: r.settleTags()}
+	a := ackFrame{Topic: r.readStr(), Group: r.optionalStr(), Partition: r.u32(), Tags: r.settleTags()}
 	return a, r.finish()
 }
 
 // Nack returns deliveries unprocessed, optionally requeuing them (NotBefore
 // delays the requeue).
-type Nack struct {
+type nackFrame struct {
 	Topic     string
 	Group     *string
 	Partition uint32
@@ -380,7 +380,7 @@ type Nack struct {
 	NotBefore *uint64
 }
 
-func encodeNack(n Nack) []byte {
+func encodeNack(n nackFrame) []byte {
 	w := writer{}
 	w.magic("FNK1")
 	w.writeStr(n.Topic)
@@ -392,10 +392,10 @@ func encodeNack(n Nack) []byte {
 	return w.buf
 }
 
-func decodeNack(body []byte) (Nack, error) {
+func decodeNack(body []byte) (nackFrame, error) {
 	r := reader{buf: body}
 	r.expectMagic("FNK1")
-	n := Nack{Topic: r.readStr(), Group: r.optionalStr(), Partition: r.u32(), Tags: r.settleTags()}
+	n := nackFrame{Topic: r.readStr(), Group: r.optionalStr(), Partition: r.u32(), Tags: r.settleTags()}
 	n.Requeue = r.readBool()
 	n.NotBefore = r.optionalU64()
 	return n, r.finish()
@@ -440,9 +440,9 @@ func decodeSubscribe(body []byte) (Subscribe, error) {
 	return s, r.finish()
 }
 
-// SubscribeOk is the broker's subscribe reply, echoing the assignment and the
+// subscribeOk is the broker's subscribe reply, echoing the assignment and the
 // server-chosen sub id.
-type SubscribeOk struct {
+type subscribeOk struct {
 	SubID          uint64
 	Topic          string
 	Partition      uint32
@@ -453,7 +453,7 @@ type SubscribeOk struct {
 	MemberID       *UUID
 }
 
-func encodeSubscribeOk(s SubscribeOk) []byte {
+func encodeSubscribeOk(s subscribeOk) []byte {
 	w := writer{}
 	w.magic("FSO1")
 	w.u64(s.SubID)
@@ -465,10 +465,10 @@ func encodeSubscribeOk(s SubscribeOk) []byte {
 	return w.buf
 }
 
-func decodeSubscribeOk(body []byte) (SubscribeOk, error) {
+func decodeSubscribeOk(body []byte) (subscribeOk, error) {
 	r := reader{buf: body}
 	r.expectMagic("FSO1")
-	s := SubscribeOk{SubID: r.u64()}
+	s := subscribeOk{SubID: r.u64()}
 	s.Topic, s.Partition, s.Group = r.queueKey()
 	s.Prefetch = r.u32()
 	s.ConsumerGroup = r.optionalStr()
@@ -479,8 +479,8 @@ func decodeSubscribeOk(body []byte) (SubscribeOk, error) {
 
 // ---- deliver -----------------------------------------------------------
 
-// Deliver is a broker-pushed message delivery.
-type Deliver struct {
+// deliver is a broker-pushed message delivery.
+type deliver struct {
 	SubID           uint64
 	Topic           string
 	Group           *string
@@ -494,7 +494,7 @@ type Deliver struct {
 	Payload         []byte
 }
 
-func encodeDeliver(d Deliver) []byte {
+func encodeDeliver(d deliver) []byte {
 	w := writer{}
 	w.magic("FDL1")
 	w.u64(d.SubID)
@@ -511,10 +511,10 @@ func encodeDeliver(d Deliver) []byte {
 	return w.buf
 }
 
-func decodeDeliver(body []byte) (Deliver, error) {
+func decodeDeliver(body []byte) (deliver, error) {
 	r := reader{buf: body}
 	r.expectMagic("FDL1")
-	d := Deliver{SubID: r.u64(), Topic: r.readStr(), Group: r.optionalStr(), Partition: r.u32()}
+	d := deliver{SubID: r.u64(), Topic: r.readStr(), Group: r.optionalStr(), Partition: r.u32()}
 	d.Offset = r.u64()
 	d.DeliveryTag = DeliveryTag{Epoch: r.u64()}
 	d.Published = r.u64()

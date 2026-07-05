@@ -9,7 +9,7 @@ import (
 
 func TestEngineSubscribeDeliverAck(t *testing.T) {
 	client, server := net.Pipe()
-	acks := make(chan Ack, 4)
+	acks := make(chan ackFrame, 4)
 
 	go func() {
 		br := bufio.NewReader(server)
@@ -19,24 +19,24 @@ func TestEngineSubscribeDeliverAck(t *testing.T) {
 				return
 			}
 			switch f.Opcode {
-			case OpHello:
-				ok := HelloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, ServerName: "fake", Compliance: ComplianceString}
-				_, _ = server.Write(encodeFrame(buildFrame(OpHelloOk, f.RequestID, encodeHelloOk(ok))))
-			case OpSubscribe:
+			case opHello:
+				ok := helloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, ServerName: "fake", Compliance: ComplianceString}
+				_, _ = server.Write(encodeFrame(buildFrame(opHelloOk, f.RequestID, encodeHelloOk(ok))))
+			case opSubscribe:
 				req, _ := decodeSubscribe(f.Payload)
-				so := SubscribeOk{SubID: 100, Topic: req.Topic, Partition: req.Partition, Group: req.Group, Prefetch: 16}
-				_, _ = server.Write(encodeFrame(buildFrame(OpSubscribeOk, f.RequestID, encodeSubscribeOk(so))))
-				d := Deliver{
+				so := subscribeOk{SubID: 100, Topic: req.Topic, Partition: req.Partition, Group: req.Group, Prefetch: 16}
+				_, _ = server.Write(encodeFrame(buildFrame(opSubscribeOk, f.RequestID, encodeSubscribeOk(so))))
+				d := deliver{
 					SubID: 100, Topic: req.Topic, Group: req.Group, Partition: req.Partition,
 					Offset: 7, DeliveryTag: DeliveryTag{Epoch: 42}, Published: 1, PublishReceived: 2,
 					ContentType: ContentType{Kind: ContentText}, Payload: []byte("job"),
 				}
-				_, _ = server.Write(encodeFrame(buildFrame(OpDeliver, 5000, encodeDeliver(d))))
-			case OpAck:
+				_, _ = server.Write(encodeFrame(buildFrame(opDeliver, 5000, encodeDeliver(d))))
+			case opAck:
 				a, _ := decodeAck(f.Payload)
 				acks <- a
-			case OpPing:
-				_, _ = server.Write(encodeFrame(buildFrame(OpPong, f.RequestID, nil)))
+			case opPing:
+				_, _ = server.Write(encodeFrame(buildFrame(opPong, f.RequestID, nil)))
 			}
 		}
 	}()
