@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"strconv"
 	"sync/atomic"
+	"time"
 )
 
 // Publisher publishes to a fixed topic (and optional group).
@@ -44,6 +45,47 @@ func (p *Publisher) PublishConfirmed(m Message) (uint64, error) {
 		return 0, err
 	}
 	return p.client.PublishConfirmed(pub)
+}
+
+// PublishDelayed sends m fire-and-forget, to become visible after delay from now.
+func (p *Publisher) PublishDelayed(m Message, delay time.Duration) error {
+	pd, err := p.toDelayed(m, delay)
+	if err != nil {
+		return err
+	}
+	return p.client.PublishDelayed(pd)
+}
+
+// PublishDelayedConfirmed sends m to become visible after delay and waits for the
+// broker-assigned offset.
+func (p *Publisher) PublishDelayedConfirmed(m Message, delay time.Duration) (uint64, error) {
+	pd, err := p.toDelayed(m, delay)
+	if err != nil {
+		return 0, err
+	}
+	return p.client.PublishDelayedConfirmed(pd)
+}
+
+// toDelayed builds a delayed publish from a message, turning a relative delay into
+// the absolute not-before deadline the wire carries (milliseconds).
+func (p *Publisher) toDelayed(m Message, delay time.Duration) (PublishDelayed, error) {
+	pub, err := m.toPublish(p.topic, p.group)
+	if err != nil {
+		return PublishDelayed{}, err
+	}
+	notBefore := time.Now().UnixMilli() + delay.Milliseconds()
+	if notBefore < 0 {
+		notBefore = 0
+	}
+	return PublishDelayed{
+		Topic:        pub.Topic,
+		Group:        pub.Group,
+		ContentType:  pub.ContentType,
+		Headers:      pub.Headers,
+		Payload:      pub.Payload,
+		PartitionKey: pub.PartitionKey,
+		NotBefore:    uint64(notBefore),
+	}, nil
 }
 
 // ReliablePublisher stamps each message with a stable producer id and a

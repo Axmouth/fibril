@@ -206,10 +206,18 @@ type topologyCache struct {
 	partitions  map[string]uint32 // (topic,group) -> partition count
 	owners      map[string]string // (topic,partition,group) -> endpoint
 	lastRefresh time.Time         // last throttled refresh, to rate-limit re-fetches
+
+	catalogue      Catalogue               // declared channels, derived from topology
+	catListeners   map[int]func(Catalogue) // change listeners for pattern subscriptions
+	nextListenerID int
 }
 
 func newTopologyCache() *topologyCache {
-	return &topologyCache{partitions: map[string]uint32{}, owners: map[string]string{}}
+	return &topologyCache{
+		partitions:   map[string]uint32{},
+		owners:       map[string]string{},
+		catListeners: map[int]func(Catalogue){},
+	}
 }
 
 // dueForRefresh reports whether a throttled refresh may run now, recording the
@@ -248,8 +256,8 @@ func addrString(a AdvertisedAddress) string {
 // one so an out-of-order push cannot regress routing.
 func (t *topologyCache) replace(topo TopologyOk) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	if topo.Generation < t.generation && t.generation != 0 {
+		t.mu.Unlock()
 		return
 	}
 	t.generation = topo.Generation
@@ -266,6 +274,25 @@ func (t *topologyCache) replace(topo TopologyOk) {
 		if len(s.OwnerEndpoints) > 0 {
 			t.owners[partCacheKey(s.Topic, s.Partition, nil)] = addrString(s.OwnerEndpoints[0])
 		}
+	}
+	// Refresh the catalogue only from a newer generation, so a topic-filtered
+	// fetch (which returns a subset at the same generation) cannot shrink it.
+	// Listeners are collected and fired after unlock so one cannot re-enter the
+	// cache under the lock.
+	var fire []func(Catalogue)
+	if topo.Generation > t.catalogue.Generation || t.catalogue.Generation == 0 {
+		next := catalogueFromTopology(topo)
+		if !next.sameChannels(t.catalogue) {
+			for _, l := range t.catListeners {
+				fire = append(fire, l)
+			}
+		}
+		t.catalogue = next
+	}
+	current := t.catalogue
+	t.mu.Unlock()
+	for _, l := range fire {
+		l(current)
 	}
 }
 
