@@ -40,13 +40,19 @@ DEFAULT_HEARTBEAT_INTERVAL_S = 5.0
 # Coalesce fire-and-forget writes and flush in one socket write, because
 # asyncio's transport does an eager per-write syscall (an unconfirmed-publish
 # burst is otherwise one send syscall per message). Three triggers flush the
-# buffer, whichever comes first: a byte cap (bounds memory, and makes large
-# messages flush after only a few), a frame-count cap (bounds latency for tiny
-# messages that would take many to reach the byte cap), and a short time window
-# (bounds the tail when traffic trickles). Reply-bearing frames flush
-# immediately regardless, so coalescing only ever delays fire-and-forget frames,
-# and never past the window.
-DEFAULT_WRITE_COALESCE_BYTES = 64 * 1024
+# buffer, whichever comes first: a byte cap, a frame-count cap, and a short time
+# window. Reply-bearing frames flush immediately regardless, so coalescing only
+# ever delays fire-and-forget frames, and never past the window.
+#
+# Throughput plateaus once a flush carries a few dozen frames (past that the cost
+# is interpreter, not syscalls), so the caps are really memory/latency ceilings,
+# not throughput knobs. The byte cap wants to be one clean chunk the kernel
+# absorbs in a send or two: comfortably above the per-message syscall knee, yet a
+# small fraction of the socket send buffer (autotuned into the MBs), so a flush
+# leaves no large userspace tail and backpressure stays smooth. The count cap
+# does the same job for tiny messages that would take many to reach the byte cap.
+# At ~1KB messages the two meet at ~128 frames per flush.
+DEFAULT_WRITE_COALESCE_BYTES = 128 * 1024
 DEFAULT_WRITE_COALESCE_COUNT = 128
 DEFAULT_WRITE_COALESCE_WINDOW_S = 0.0005
 
@@ -169,10 +175,15 @@ class Engine:
         # Write coalescing for fire-and-forget frames (see _send_buffered).
         self._pending = bytearray()
         self._pending_count = 0
-        self._flush_scheduled = False
+        self._flush_handle: Optional[asyncio.Handle] = None
         self._coalesce_bytes = opts.write_coalesce_bytes
         self._coalesce_count = opts.write_coalesce_count
         self._coalesce_window = opts.write_coalesce_window_s
+        # The flush window is measured from the last flush, not the first buffered
+        # frame, so a lone frame after an idle stretch (its deadline already
+        # elapsed) goes out on the next tick instead of waiting a full window.
+        # Seed it in the distant past so the first frame flushes promptly too.
+        self._last_flush = 0.0
 
         loop = asyncio.get_running_loop()
         self._last_seen = loop.time()
@@ -477,11 +488,18 @@ class Engine:
 
     def _take_pending(self) -> bytearray:
         # Hand the buffer to the transport and start a fresh one, so no copy is
-        # needed and a concurrent append lands in the next batch.
+        # needed and a concurrent append lands in the next batch. Record the
+        # flush time so the next window is measured from here.
         data = self._pending
         self._pending = bytearray()
         self._pending_count = 0
+        self._last_flush = asyncio.get_running_loop().time()
         return data
+
+    def _cancel_scheduled_flush(self) -> None:
+        if self._flush_handle is not None:
+            self._flush_handle.cancel()
+            self._flush_handle = None
 
     async def _flush(self) -> bool:
         """Write the pending buffer in one socket write, draining for backpressure."""
@@ -489,6 +507,7 @@ class Engine:
             return False
         if not self._pending:
             return True
+        self._cancel_scheduled_flush()
         try:
             self._writer.write(self._take_pending())
             await self._writer.drain()
@@ -498,22 +517,23 @@ class Engine:
             return False
 
     def _schedule_flush(self) -> None:
-        # Anchor the deadline to the first buffered frame (not each one), so the
-        # tail latency is bounded to one window. A zero window collapses to the
-        # next event-loop tick, the lowest latency asyncio can offer.
-        if self._flush_scheduled or self._closed:
+        # Deadline is one window from the LAST flush, not from this frame: after an
+        # idle stretch that deadline has already passed, so a lone low-rate frame
+        # dispatches on the next tick rather than waiting a full window. A zero
+        # window always collapses to the next tick, the lowest latency available.
+        if self._flush_handle is not None or self._closed:
             return
-        self._flush_scheduled = True
         loop = asyncio.get_running_loop()
-        if self._coalesce_window > 0:
-            loop.call_later(self._coalesce_window, self._flush_soon)
+        delay = self._last_flush + self._coalesce_window - loop.time()
+        if delay <= 0:
+            self._flush_handle = loop.call_soon(self._flush_soon)
         else:
-            loop.call_soon(self._flush_soon)
+            self._flush_handle = loop.call_later(delay, self._flush_soon)
 
     def _flush_soon(self) -> None:
         # Window/tick flush: low volume, so the transport is not paused and a bare
         # write needs no drain. Backpressure is enforced by the byte/count caps.
-        self._flush_scheduled = False
+        self._flush_handle = None
         if self._closed or not self._pending:
             return
         try:
@@ -752,6 +772,7 @@ class Engine:
             return
         self._closed = True
         self._fatal = err
+        self._cancel_scheduled_flush()
         self._pending.clear()
         self._pending_count = 0
         for w in self._waiters.values():
