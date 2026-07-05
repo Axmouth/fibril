@@ -12,6 +12,7 @@ import {
   ERR_TLS_REQUIRED,
   FibrilError,
   RedirectError,
+  retryAdvice,
   ServerError,
   TlsRequiredByBrokerError,
   UnexpectedError,
@@ -132,6 +133,13 @@ interface ShutdownMode {
   preserveSubscriptions: boolean;
 }
 
+// Shared mutable holder for the engine's terminal error, set as the loop tears
+// down and read by the reconnect path. A holder (rather than a return value)
+// lets the reconnect gate read the reason the instant the engine closes.
+interface CloseReason {
+  reason: FibrilError | null;
+}
+
 function normalizePayload(payload: DeliverMsg["payload"] | number[]): Uint8Array {
   if (payload instanceof Uint8Array) return payload;
   return Uint8Array.from(payload);
@@ -177,6 +185,10 @@ export class Engine {
   readonly #commandQueue: BoundedQueue<Command>;
   readonly #socket: Socket;
   readonly #shutdownMode: ShutdownMode;
+  // Why this engine's connection ended, set once as it tears down. Read by the
+  // reconnect path so a non-retryable close (bad credentials, forbidden) is
+  // surfaced instead of storming the broker with the same doomed handshake.
+  readonly #closeReason: CloseReason;
   readonly resumeIdentity: ResumeIdentity;
   readonly resumeOutcome: HelloOk["resume_outcome"];
   #shutdownInitiated = false;
@@ -189,12 +201,14 @@ export class Engine {
     socket: Socket,
     completed: Promise<void>,
     shutdownMode: ShutdownMode,
+    closeReason: CloseReason,
     resumeIdentity: ResumeIdentity,
     resumeOutcome: HelloOk["resume_outcome"],
   ) {
     this.#commandQueue = commandQueue;
     this.#socket = socket;
     this.#shutdownMode = shutdownMode;
+    this.#closeReason = closeReason;
     this.#completed = completed.finally(() => {
       this.#closed = true;
     });
@@ -317,6 +331,7 @@ export class Engine {
       opts.heartbeatIntervalSeconds ?? DEFAULT_HEARTBEAT_INTERVAL_S;
 
     const shutdownMode = { preserveSubscriptions: false };
+    const closeReason: CloseReason = { reason: null };
     const completed = runEngineLoop({
       socket,
       reader,
@@ -325,12 +340,21 @@ export class Engine {
       subscriptionRegistry,
       initialSubscriptions: restoredSubscriptions,
       shutdownMode,
+      closeReason,
       onAssignmentChanged,
       onTopologyUpdate,
       onGoingAway,
     });
 
-    return new Engine(commandQueue, socket, completed, shutdownMode, resumeIdentity, hello.resume_outcome);
+    return new Engine(
+      commandQueue,
+      socket,
+      completed,
+      shutdownMode,
+      closeReason,
+      resumeIdentity,
+      hello.resume_outcome,
+    );
   }
 
   /**
@@ -395,6 +419,15 @@ export class Engine {
   isClosed(): boolean {
     return this.#closed || this.#shutdownInitiated || this.#socket.destroyed;
   }
+
+  /**
+   * Why this connection ended, or null while it is still open. The reconnect
+   * path reads it to tell a transient transport drop from a fatal rejection
+   * (bad credentials, forbidden) that would only fail again on reconnect.
+   */
+  closeReason(): FibrilError | null {
+    return this.#closeReason.reason;
+  }
 }
 
 // ===== Engine main loop =====
@@ -407,6 +440,7 @@ interface EngineLoopArgs {
   subscriptionRegistry: SubscriptionRegistry;
   initialSubscriptions: Map<bigint, SubState>;
   shutdownMode: ShutdownMode;
+  closeReason: CloseReason;
   onAssignmentChanged?: (msg: AssignmentChangedMsg) => void;
   onTopologyUpdate?: (topology: TopologyOkMsg) => bigint;
   onGoingAway?: (notice: GoingAwayMsg) => void;
@@ -421,6 +455,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
     subscriptionRegistry,
     initialSubscriptions,
     shutdownMode,
+    closeReason,
     onAssignmentChanged,
     onTopologyUpdate,
     onGoingAway,
@@ -451,6 +486,9 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
     if (socketDead) return;
     socketDead = true;
     if (!fatalError) fatalError = err;
+    // Record the terminal reason before the socket is destroyed, so the
+    // reconnect gate can read it the instant isClosed() flips.
+    closeReason.reason = fatalError;
     // Unblock command consumer.
     commandQueue.close(err);
     // Unblock frame producer.
@@ -926,11 +964,18 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
           waiters.delete(frame.requestId);
           failWaiter(w, new ServerError(err.code, err.message));
         } else {
-          // connection-level error: fatal
+          // Connection-level error (no correlated request). Preserve the broker
+          // code so a non-retryable rejection (bad credentials, forbidden,
+          // malformed) is not mistaken for a transient disconnect and stormed on
+          // reconnect. A retryable code (owner moved, 5xx) still closes as a
+          // transient disconnect, so the reconnect/failover path is unchanged.
+          const failure = new ServerError(err.code, err.message);
           markDead(
-            new DisconnectionError(
-              `Server connection error ${err.code}: ${err.message}`,
-            ),
+            retryAdvice(failure) === "do_not_retry"
+              ? failure
+              : new DisconnectionError(
+                  `Server connection error ${err.code}: ${err.message}`,
+                ),
           );
         }
         return;

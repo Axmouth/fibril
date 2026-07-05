@@ -25,7 +25,7 @@ import {
 } from "../src/protocol.js";
 import { Client, ClientOptions, QueueConfig, type Catalogue } from "../src/client.js";
 import type { SubscribeStream } from "../src/wire.js";
-import { BrokenPipeError, DisconnectionError, RedirectError } from "../src/errors.js";
+import { BrokenPipeError, DisconnectionError, RedirectError, ServerError } from "../src/errors.js";
 import { NewMessage } from "../src/message.js";
 import { fnv1a } from "../src/internal/topology.js";
 
@@ -2015,6 +2015,93 @@ test("reliable publisher stamps producer ids and retries until confirmed", async
     assert.equal(publishes[0]!.headers["fibril.client.producer_seq"], "0");
     // A retry re-sends the same sequence.
     assert.equal(publishes[1]!.headers["fibril.client.producer_seq"], "0");
+
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
+// Poll until a condition holds, so a test can await an asynchronous close
+// without a fixed sleep. The client destroys its socket when the engine dies,
+// which the broker observes as openConnections dropping to zero.
+async function waitUntil(cond: () => boolean, timeoutMs = 1000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error("waitUntil timed out");
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
+test("non-retryable connection error surfaces without reconnect", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    let hellos = 0;
+    let clientSocket: Socket | null = null;
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        hellos += 1;
+        clientSocket = s;
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      }
+    };
+
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    assert.ok(clientSocket);
+    // A connection-level error (request id 0, no correlated request) with a
+    // non-retryable code must surface, not storm reconnects into the same
+    // rejection.
+    broker.send(clientSocket!, buildFrame(Op.Error, 0n, { code: 403, message: "forbidden" }));
+    await waitUntil(() => broker.openConnections === 0);
+
+    await assert.rejects(
+      () => client.fetchTopology(),
+      (err) => err instanceof ServerError && err.code === 403,
+    );
+    // No reconnect was attempted and only the original HELLO was seen.
+    assert.equal(broker.openConnections, 0);
+    assert.equal(hellos, 1);
+
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
+test("retryable connection error still reconnects", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    let hellos = 0;
+    let clientSocket: Socket | null = null;
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        hellos += 1;
+        clientSocket = s;
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      } else if (f.opcode === Op.Topology) {
+        broker.send(
+          s,
+          buildFrame(Op.TopologyOk, f.requestId, {
+            generation: 0n,
+            queues: [],
+            streams: [],
+          } satisfies TopologyOkMsg),
+        );
+      }
+    };
+
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    assert.ok(clientSocket);
+    // A retryable code (5xx) closes as a transient disconnect, so the next op
+    // reconnects: the broker sees a second HELLO and the op succeeds.
+    broker.send(clientSocket!, buildFrame(Op.Error, 0n, { code: 503, message: "unavailable" }));
+    await waitUntil(() => broker.openConnections === 0);
+
+    await client.fetchTopology();
+    assert.equal(hellos, 2);
+    assert.equal(broker.openConnections, 1);
 
     await client.shutdown();
   } finally {

@@ -29,6 +29,7 @@ from .errors import (
     TlsClientCertificateRequiredError,
     TlsHandshakeError,
     TlsNotSupportedByBrokerError,
+    retry_advice,
 )
 from .internal.bounded_queue import BoundedQueue
 from .internal.topology import Route, RoundRobin, TopologyCache, route_partition
@@ -793,6 +794,12 @@ class Client:
             return
         if self._user_shutdown or self._opts.auto_reconnect_attempts == 0:
             raise BrokenPipeError()
+        # A non-retryable close (bad credentials, forbidden, malformed request)
+        # will only fail again on reconnect, so surface it instead of storming the
+        # broker with doomed handshakes while the real error never reaches the caller.
+        reason = self._engine.close_reason()
+        if reason is not None and retry_advice(reason) == "do_not_retry":
+            raise reason
         async with self._reconnect_lock:
             if not self._engine.is_closed():
                 return

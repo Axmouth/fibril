@@ -30,6 +30,7 @@ from .errors import (
     ServerError,
     TlsRequiredByBrokerError,
     UnexpectedError,
+    retry_advice,
 )
 from .frames import decode_body, encode_body
 from .protocol import COMPLIANCE_STRING, PROTOCOL_V1, Op
@@ -280,6 +281,13 @@ class Engine:
 
     def is_closed(self) -> bool:
         return self._closed
+
+    def close_reason(self) -> Optional[BaseException]:
+        """Why this connection ended, or None while it is still open. The
+        reconnect path reads it to tell a transient transport drop from a fatal
+        rejection (bad credentials, forbidden) that would only fail again on
+        reconnect."""
+        return self._fatal
 
     # ---- request methods ----------------------------------------------
 
@@ -553,10 +561,18 @@ class Engine:
                 if not w.future.done():
                     w.future.set_exception(ServerError(err.code, err.message))
             elif op == Op.ERROR:
-                # No waiter: a connection-level error is fatal.
-                self._mark_dead(
-                    DisconnectionError(f"server connection error {err.code}: {err.message}")
-                )
+                # No waiter: a connection-level error. Preserve the broker code so
+                # a non-retryable rejection (bad credentials, forbidden, malformed)
+                # is not mistaken for a transient disconnect and stormed on
+                # reconnect. A retryable code (owner moved, 5xx) still closes as a
+                # transient disconnect, so the reconnect/failover path is unchanged.
+                failure = ServerError(err.code, err.message)
+                if retry_advice(failure) == "do_not_retry":
+                    self._mark_dead(failure)
+                else:
+                    self._mark_dead(
+                        DisconnectionError(f"server connection error {err.code}: {err.message}")
+                    )
             return
 
         # Unknown opcode: ignore (forward compatibility).

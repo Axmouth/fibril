@@ -17,6 +17,7 @@ import {
   BrokenPipeError,
   DisconnectionError,
   FibrilError,
+  retryAdvice,
   TlsCertificateUntrustedError,
   TlsConfigError,
   TlsHandshakeError,
@@ -1252,12 +1253,20 @@ provide one with withTlsClientCert(certPath, keyPath)`,
   }
 
   async #reconnectIfClosed(): Promise<void> {
-    if (!this.#engine.current().isClosed()) return;
+    const current = this.#engine.current();
+    if (!current.isClosed()) return;
     if (this.#userShutdown) {
       throw new BrokenPipeError();
     }
     if (this.#opts.autoReconnectAttempts === 0) {
       throw new BrokenPipeError();
+    }
+    // A non-retryable close (bad credentials, forbidden, malformed request)
+    // will only fail again on reconnect, so surface it instead of storming the
+    // broker with doomed handshakes while the real error never reaches the caller.
+    const reason = current.closeReason();
+    if (reason && retryAdvice(reason) === "do_not_retry") {
+      throw reason;
     }
 
     if (!this.#reconnectPromise) {

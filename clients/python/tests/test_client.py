@@ -348,3 +348,32 @@ async def test_on_going_away_fires(broker: FakeBroker) -> None:
         assert seen[0].message == "broker restarting for upgrade"
     finally:
         await client.shutdown()
+
+
+async def test_nonretryable_close_surfaces_without_reconnect(broker: FakeBroker) -> None:
+    from fibril.codec import build_frame
+    from fibril.errors import ServerError
+    from fibril.frames import encode_body
+    from fibril.protocol import Op
+
+    client = await _connect(broker)
+    try:
+        # Establish the session, then push a connection-level error (no correlated
+        # request) with a non-retryable code.
+        await client.fetch_topology()
+        connections_before = len(broker._writers)
+        err = wire.ErrorMsg(code=403, message="forbidden")
+        await broker.push(build_frame(Op.ERROR, 0, encode_body(Op.ERROR, err)))
+        # Let the reader loop dispatch the error and close the engine.
+        for _ in range(50):
+            if client._engine.is_closed():
+                break
+            await asyncio.sleep(0.01)
+        # The next op surfaces the broker error instead of storming reconnects.
+        with pytest.raises(ServerError) as exc:
+            await client.fetch_topology()
+        assert exc.value.code == 403
+        # No reconnect was attempted: the broker saw no new connection.
+        assert len(broker._writers) == connections_before
+    finally:
+        await client.shutdown()

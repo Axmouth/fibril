@@ -8,6 +8,7 @@ import pytest
 import pytest_asyncio
 
 from fibril import wire
+from fibril.codec import Frame, build_frame
 from fibril.engine import (
     Delivered,
     Engine,
@@ -16,9 +17,16 @@ from fibril.engine import (
     SubscriptionRegistry,
     _Registered,
 )
-from fibril.errors import DisconnectionError, RedirectError, ServerError
+from fibril.errors import DisconnectionError, RedirectError, ServerError, retry_advice
+from fibril.frames import encode_body
+from fibril.protocol import Op
 
 from fake_broker import FakeBroker
+
+
+def _connection_error(code: int, message: str) -> Frame:
+    """A connection-level ERROR frame (request id 0, so no waiter matches)."""
+    return build_frame(Op.ERROR, 0, encode_body(Op.ERROR, wire.ErrorMsg(code=code, message=message)))
 
 
 @pytest_asyncio.fixture
@@ -198,3 +206,27 @@ async def test_reconnect_reconciles_registered_subs(broker: FakeBroker) -> None:
         assert broker.reconciles[0].subscriptions[0].sub_id == 55
     finally:
         eng.shutdown()
+
+
+async def test_nonretryable_connection_error_preserves_code(broker: FakeBroker) -> None:
+    # A connection-level error frame (no correlated request) with a non-retryable
+    # code closes the engine preserving the broker code, so the reconnect path can
+    # surface it instead of storming back into the same rejection.
+    eng = await _connect(broker)
+    await broker.push(_connection_error(403, "forbidden"))
+    await eng.wait_closed()
+    reason = eng.close_reason()
+    assert isinstance(reason, ServerError)
+    assert reason.code == 403
+    assert retry_advice(reason) == "do_not_retry"
+
+
+async def test_retryable_connection_error_stays_transient(broker: FakeBroker) -> None:
+    # A retryable code (5xx) still closes as a transient disconnect, so the
+    # existing reconnect/failover path is unchanged.
+    eng = await _connect(broker)
+    await broker.push(_connection_error(503, "unavailable"))
+    await eng.wait_closed()
+    reason = eng.close_reason()
+    assert isinstance(reason, DisconnectionError)
+    assert retry_advice(reason) == "retry"
