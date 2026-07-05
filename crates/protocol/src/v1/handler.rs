@@ -4173,7 +4173,7 @@ pub fn print_banner(bind: &SocketAddr, tls: bool) {
     let art = ASCII_ARTS[idx];
     let transport = if tls { "TLS" } else { "plaintext" };
 
-    tracing::info!("\n{art}\nListening on {bind} ({transport})\n");
+    tracing::info!("\n{art}\n🚀 Listening on {bind} ({transport}) 🧵\n");
 }
 
 const ASCII_ARTS: &[&str] = &[
