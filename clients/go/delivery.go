@@ -68,6 +68,24 @@ func (e *Engine) Subscribe(req Subscribe) (*Subscription, error) {
 	}
 }
 
+// SubscribeStream opens a Plexus (fan-out stream) subscription of one partition.
+// The broker confirms it with the shared SUBSCRIBE_OK, so it delivers on a
+// per-subscription channel like a queue subscription.
+func (e *Engine) SubscribeStream(req SubscribeStream) (*Subscription, error) {
+	sr := make(chan subResult, 1)
+	select {
+	case e.cmdCh <- command{op: OpSubscribeStream, body: encodeSubscribeStream(req), subReply: sr, autoAck: req.AutoAck}:
+	case <-e.done:
+		return nil, e.err()
+	}
+	select {
+	case r := <-sr:
+		return r.sub, r.err
+	case <-e.done:
+		return nil, e.err()
+	}
+}
+
 // Ack settles a delivery as processed. It is a no-op-worthy call for an auto-ack
 // delivery (already settled server-side) but harmless. Fire-and-forget.
 func (e *Engine) Ack(d Delivery) error {

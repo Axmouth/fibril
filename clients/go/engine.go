@@ -251,6 +251,26 @@ func (e *Engine) PublishConfirmed(p Publish) (uint64, error) {
 	return ok.Offset, nil
 }
 
+// PublishDelayedUnconfirmed sends a fire-and-forget publish scheduled for later.
+func (e *Engine) PublishDelayedUnconfirmed(p PublishDelayed) error {
+	p.RequireConfirm = false
+	return e.send(OpPublishDelayed, encodePublishDelayed(p))
+}
+
+// PublishDelayedConfirmed sends a delayed publish and waits for the offset.
+func (e *Engine) PublishDelayedConfirmed(p PublishDelayed) (uint64, error) {
+	p.RequireConfirm = true
+	f, err := e.request(OpPublishDelayed, encodePublishDelayed(p))
+	if err != nil {
+		return 0, err
+	}
+	ok, err := decodePublishOk(f.Payload)
+	if err != nil {
+		return 0, err
+	}
+	return ok.Offset, nil
+}
+
 // DeclareQueue declares a queue and waits for the broker's confirmation.
 func (e *Engine) DeclareQueue(d DeclareQueue) (DeclareQueueOk, error) {
 	f, err := e.request(OpDeclareQueue, encodeDeclareQueue(d))
@@ -258,6 +278,15 @@ func (e *Engine) DeclareQueue(d DeclareQueue) (DeclareQueueOk, error) {
 		return DeclareQueueOk{}, err
 	}
 	return decodeDeclareQueueOk(f.Payload)
+}
+
+// DeclarePlexus declares a Plexus (fan-out stream) channel.
+func (e *Engine) DeclarePlexus(d DeclarePlexus) (DeclarePlexusOk, error) {
+	f, err := e.request(OpDeclarePlexus, encodeDeclarePlexus(d))
+	if err != nil {
+		return DeclarePlexusOk{}, err
+	}
+	return decodeDeclarePlexusOk(f.Payload)
 }
 
 // FetchTopology requests the cluster topology, optionally filtered.

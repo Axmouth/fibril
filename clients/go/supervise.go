@@ -26,25 +26,37 @@ func (s *SupervisedSubscription) Close() {
 	s.cancelOnce.Do(func() { close(s.cancel) })
 }
 
-// SuperviseSubscribe subscribes to one partition and keeps it attached across
-// owner failovers. The first attach is synchronous (so a bad topic errors here);
-// later re-attaches happen in the background on the same Deliveries channel.
+// SuperviseSubscribe subscribes to one queue partition and keeps it attached
+// across owner failovers. The first attach is synchronous (so a bad topic errors
+// here); later re-attaches happen in the background on the same Deliveries
+// channel.
 func (c *Client) SuperviseSubscribe(req Subscribe) (*SupervisedSubscription, error) {
-	sub, err := c.Subscribe(req)
+	return c.superviseAttach(req.Topic, req.Prefetch, func() (*Subscription, error) { return c.Subscribe(req) })
+}
+
+// SuperviseSubscribeStream is SuperviseSubscribe for a Plexus stream partition.
+func (c *Client) SuperviseSubscribeStream(req SubscribeStream) (*SupervisedSubscription, error) {
+	return c.superviseAttach(req.Topic, req.Prefetch, func() (*Subscription, error) { return c.SubscribeStream(req) })
+}
+
+// superviseAttach opens the initial subscription via attach and supervises
+// re-attaches on the same channel. attach re-subscribes (queue or stream).
+func (c *Client) superviseAttach(topic string, prefetch uint32, attach func() (*Subscription, error)) (*SupervisedSubscription, error) {
+	sub, err := attach()
 	if err != nil {
 		return nil, err
 	}
-	capHint := int(req.Prefetch)
+	capHint := int(prefetch)
 	if capHint < 1 {
 		capHint = 1
 	}
 	out := make(chan Delivery, capHint)
 	ss := &SupervisedSubscription{Deliveries: out, cancel: make(chan struct{})}
-	go c.superviseLoop(req, sub, out, ss.cancel)
+	go c.superviseLoop(topic, attach, sub, out, ss.cancel)
 	return ss, nil
 }
 
-func (c *Client) superviseLoop(req Subscribe, sub *Subscription, out chan Delivery, cancel chan struct{}) {
+func (c *Client) superviseLoop(topic string, attach func() (*Subscription, error), sub *Subscription, out chan Delivery, cancel chan struct{}) {
 	defer close(out)
 	backoff := c.opts.SuperviseBackoff
 	if backoff <= 0 {
@@ -66,8 +78,8 @@ func (c *Client) superviseLoop(req Subscribe, sub *Subscription, out chan Delive
 			if !sleepOrCancel(backoff, cancel) {
 				return
 			}
-			_, _ = c.FetchTopology(TopologyRequest{Topic: &req.Topic}) // best effort
-			newSub, err := c.Subscribe(req)
+			_, _ = c.FetchTopology(TopologyRequest{Topic: &topic}) // best effort
+			newSub, err := attach()
 			if err == nil {
 				sub = newSub
 				break

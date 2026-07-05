@@ -298,16 +298,17 @@ func (c *Client) Publish(p Publish) error {
 	return &DisconnectionError{Message: "gave up publishing after reconnect attempts"}
 }
 
-// PublishConfirmed routes and sends a confirmed publish, following owner
-// redirects up to MaxRedirects, and returns the assigned offset.
-func (c *Client) PublishConfirmed(p Publish) (uint64, error) {
-	p.Partition = c.partitionFor(p.Topic, p.Group, p.PartitionKey)
+// routedConfirm routes a confirmed publish-style op to the partition owner,
+// following redirects and reconnecting on transient failure, and returns the
+// assigned offset.
+func (c *Client) routedConfirm(topic string, group *string, key []byte, do func(eng *Engine, partition uint32) (uint64, error)) (uint64, error) {
+	partition := c.partitionFor(topic, group, key)
 	for attempt := 0; attempt <= c.opts.MaxRedirects; attempt++ {
-		eng, err := c.engineFor(c.topo.ownerOf(p.Topic, p.Partition, p.Group))
+		eng, err := c.engineFor(c.topo.ownerOf(topic, partition, group))
 		if err != nil {
 			return 0, err
 		}
-		off, err := eng.PublishConfirmed(p)
+		off, err := do(eng, partition)
 		if err == nil {
 			return off, nil
 		}
@@ -322,6 +323,42 @@ func (c *Client) PublishConfirmed(p Publish) (uint64, error) {
 		return 0, err
 	}
 	return 0, &DisconnectionError{Message: "gave up after too many redirect/reconnect attempts on publish"}
+}
+
+// PublishConfirmed routes and sends a confirmed publish, following owner
+// redirects, and returns the assigned offset.
+func (c *Client) PublishConfirmed(p Publish) (uint64, error) {
+	return c.routedConfirm(p.Topic, p.Group, p.PartitionKey, func(eng *Engine, partition uint32) (uint64, error) {
+		p.Partition = partition
+		return eng.PublishConfirmed(p)
+	})
+}
+
+// PublishDelayedConfirmed routes and sends a delayed confirmed publish.
+func (c *Client) PublishDelayedConfirmed(p PublishDelayed) (uint64, error) {
+	return c.routedConfirm(p.Topic, p.Group, p.PartitionKey, func(eng *Engine, partition uint32) (uint64, error) {
+		p.Partition = partition
+		return eng.PublishDelayedConfirmed(p)
+	})
+}
+
+// PublishDelayed routes and sends a delayed fire-and-forget publish.
+func (c *Client) PublishDelayed(p PublishDelayed) error {
+	p.Partition = c.partitionFor(p.Topic, p.Group, p.PartitionKey)
+	for attempt := 0; attempt <= c.opts.MaxRedirects; attempt++ {
+		eng, err := c.engineFor(c.topo.ownerOf(p.Topic, p.Partition, p.Group))
+		if err != nil {
+			return err
+		}
+		if err = eng.PublishDelayedUnconfirmed(p); err == nil {
+			return nil
+		} else if isTransient(err) {
+			continue
+		} else {
+			return err
+		}
+	}
+	return &DisconnectionError{Message: "gave up publishing after reconnect attempts"}
 }
 
 // ---- subscribe ---------------------------------------------------------
@@ -351,6 +388,31 @@ func (c *Client) Subscribe(req Subscribe) (*Subscription, error) {
 	return nil, &DisconnectionError{Message: "gave up after too many redirect/reconnect attempts on subscribe"}
 }
 
+// SubscribeStream subscribes to one partition of a Plexus (fan-out stream),
+// routed to its owner and following owner redirects. Streams have no group.
+func (c *Client) SubscribeStream(req SubscribeStream) (*Subscription, error) {
+	for attempt := 0; attempt <= c.opts.MaxRedirects; attempt++ {
+		eng, err := c.engineFor(c.topo.ownerOf(req.Topic, req.Partition, nil))
+		if err != nil {
+			return nil, err
+		}
+		sub, err := eng.SubscribeStream(req)
+		if err == nil {
+			return sub, nil
+		}
+		var re *RedirectError
+		if errors.As(err, &re) {
+			c.topo.applyRedirect(re.Redirect)
+			continue
+		}
+		if isTransient(err) {
+			continue
+		}
+		return nil, err
+	}
+	return nil, &DisconnectionError{Message: "gave up after too many redirect/reconnect attempts on stream subscribe"}
+}
+
 // ---- cluster ops -------------------------------------------------------
 
 // DeclareQueue declares a queue (a cluster op, handled on the bootstrap
@@ -367,6 +429,22 @@ func (c *Client) DeclareQueue(d DeclareQueue) (DeclareQueueOk, error) {
 		}
 	}
 	return DeclareQueueOk{}, &DisconnectionError{Message: "declare failed after reconnect"}
+}
+
+// DeclarePlexus declares a Plexus (fan-out stream) channel (a cluster op on the
+// bootstrap connection), reconnecting once on a transient failure.
+func (c *Client) DeclarePlexus(d DeclarePlexus) (DeclarePlexusOk, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		eng, err := c.bootstrapEngine()
+		if err != nil {
+			return DeclarePlexusOk{}, err
+		}
+		ok, err := eng.DeclarePlexus(d)
+		if err == nil || !isTransient(err) {
+			return ok, err
+		}
+	}
+	return DeclarePlexusOk{}, &DisconnectionError{Message: "declare plexus failed after reconnect"}
 }
 
 // FetchTopology fetches the topology and warms the routing cache, reconnecting
