@@ -23,12 +23,23 @@ type Delivery struct {
 	// (an auto-ack subscription). Ack/Nack are then unnecessary.
 	AutoAck bool
 
-	reqID uint64 // the DELIVER frame's request id, reused when settling
+	reqID  uint64  // the DELIVER frame's request id, reused when settling
+	engine *Engine // the connection this arrived on, so Ack/Nack route correctly
 }
 
-// Subscription is a live subscription. Deliveries yields messages until the
-// connection closes (the channel is then closed). Settle a delivery with the
-// subscription's Ack/Nack.
+// Ack settles this delivery as processed, on the connection it arrived on (so it
+// stays correct even when deliveries from several partitions are fanned in).
+// Unnecessary for an auto-ack delivery, but harmless.
+func (d Delivery) Ack() error { return d.engine.Ack(d) }
+
+// Nack returns this delivery unprocessed, optionally requeuing it.
+func (d Delivery) Nack(requeue bool, notBefore *uint64) error {
+	return d.engine.Nack(d, requeue, notBefore)
+}
+
+// Subscription is a live single-partition subscription. Deliveries yields
+// messages until the connection closes (the channel is then closed); settle each
+// with its Ack/Nack.
 type Subscription struct {
 	SubID      uint64
 	Topic      string
@@ -38,15 +49,6 @@ type Subscription struct {
 	Deliveries <-chan Delivery
 
 	engine *Engine
-}
-
-// Ack settles a delivery from this subscription as processed. Unnecessary for an
-// auto-ack subscription (the broker already settled it), but harmless.
-func (s *Subscription) Ack(d Delivery) error { return s.engine.Ack(d) }
-
-// Nack returns a delivery unprocessed, optionally requeuing it.
-func (s *Subscription) Nack(d Delivery, requeue bool, notBefore *uint64) error {
-	return s.engine.Nack(d, requeue, notBefore)
 }
 
 // Subscribe opens a subscription and returns it once the broker confirms. The
@@ -149,6 +151,7 @@ func (e *Engine) handleDeliver(f Frame) {
 		SubID:           d.SubID,
 		AutoAck:         s.autoAck,
 		reqID:           f.RequestID,
+		engine:          e,
 	}
 	// The channel is prefetch-sized, so this send has room under normal flow.
 	// The stop guard keeps a full channel from wedging shutdown.

@@ -58,7 +58,7 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("delivered: %q offset=%d tag=%d\n", d.Payload, d.Offset, d.DeliveryTag.Epoch)
-		if err := sub.Ack(d); err != nil {
+		if err := d.Ack(); err != nil {
 			fmt.Println("ack:", err)
 			os.Exit(1)
 		}
