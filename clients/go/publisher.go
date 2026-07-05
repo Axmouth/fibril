@@ -17,6 +17,7 @@ type Publisher struct {
 	client *Client
 	topic  string
 	group  *string
+	ttl    time.Duration // default per-message TTL for immediate publishes, 0 = none
 }
 
 // Publisher returns a publisher bound to topic (default group).
@@ -29,9 +30,28 @@ func (c *Client) PublisherGrouped(topic, group string) *Publisher {
 	return &Publisher{client: c, topic: topic, group: &group}
 }
 
+// Expiring returns a publisher that stamps a default TTL on each immediate
+// publish that carries no TTL of its own, so the broker drops the message if it
+// is not consumed in time. It applies to immediate publishes only. Delayed
+// publishes carry no TTL. A per-message WithTTL still wins over this default.
+func (p *Publisher) Expiring(ttl time.Duration) *Publisher {
+	cp := *p
+	cp.ttl = ttl
+	return &cp
+}
+
+// toPublish builds the wire publish for an immediate send, applying the
+// publisher's default TTL when the message sets none.
+func (p *Publisher) toPublish(m Message) (Publish, error) {
+	if m.TTL == 0 && p.ttl > 0 {
+		m.TTL = p.ttl
+	}
+	return m.toPublish(p.topic, p.group)
+}
+
 // Publish sends a fire-and-forget message.
 func (p *Publisher) Publish(m Message) error {
-	pub, err := m.toPublish(p.topic, p.group)
+	pub, err := p.toPublish(m)
 	if err != nil {
 		return err
 	}
@@ -40,7 +60,7 @@ func (p *Publisher) Publish(m Message) error {
 
 // PublishConfirmed sends a message and waits for the broker-assigned offset.
 func (p *Publisher) PublishConfirmed(m Message) (uint64, error) {
-	pub, err := m.toPublish(p.topic, p.group)
+	pub, err := p.toPublish(m)
 	if err != nil {
 		return 0, err
 	}
@@ -51,7 +71,7 @@ func (p *Publisher) PublishConfirmed(m Message) (uint64, error) {
 // offset, without blocking on the confirm. Fire several and await each handle
 // afterward to pipeline the confirmations.
 func (p *Publisher) PublishWithConfirmation(m Message) (PublishConfirmation, error) {
-	pub, err := m.toPublish(p.topic, p.group)
+	pub, err := p.toPublish(m)
 	if err != nil {
 		return PublishConfirmation{}, err
 	}
@@ -131,7 +151,7 @@ func (c *Client) ReliablePublisherGrouped(topic, group string) *ReliablePublishe
 }
 
 func (p *ReliablePublisher) Publish(m Message) error {
-	pub, err := m.toPublish(p.topic, p.group)
+	pub, err := p.toPublish(m)
 	if err != nil {
 		return err
 	}
@@ -140,7 +160,7 @@ func (p *ReliablePublisher) Publish(m Message) error {
 }
 
 func (p *ReliablePublisher) PublishConfirmed(m Message) (uint64, error) {
-	pub, err := m.toPublish(p.topic, p.group)
+	pub, err := p.toPublish(m)
 	if err != nil {
 		return 0, err
 	}

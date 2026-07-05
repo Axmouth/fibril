@@ -80,3 +80,61 @@ func TestClientCohortMemberCaptureCarryAndAssignment(t *testing.T) {
 		t.Fatal("no assignment-changed event")
 	}
 }
+
+func TestSubscribeTopicExclusiveJoinsDefaultCohort(t *testing.T) {
+	client, server := net.Pipe()
+	gotCG := make(chan string, 4)
+
+	go func() {
+		br := bufio.NewReader(server)
+		var sid uint64
+		for {
+			f, err := readFrame(br)
+			if err != nil {
+				return
+			}
+			switch f.Opcode {
+			case OpHello:
+				ok := HelloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, Compliance: ComplianceString}
+				_, _ = server.Write(encodeFrame(buildFrame(OpHelloOk, f.RequestID, encodeHelloOk(ok))))
+			case OpTopology:
+				topo := TopologyOk{Generation: 1, Queues: []QueueTopologyEntry{{Topic: "orders", Partition: 0, PartitionCount: 1}}}
+				_, _ = server.Write(encodeFrame(buildFrame(OpTopologyOk, f.RequestID, encodeTopologyOk(topo))))
+			case OpSubscribe:
+				req, _ := decodeSubscribe(f.Payload)
+				cg := ""
+				if req.ConsumerGroup != nil {
+					cg = *req.ConsumerGroup
+				}
+				gotCG <- cg
+				sid++
+				so := SubscribeOk{SubID: sid, Topic: req.Topic, Partition: req.Partition, Prefetch: req.Prefetch, ConsumerGroup: req.ConsumerGroup}
+				_, _ = server.Write(encodeFrame(buildFrame(OpSubscribeOk, f.RequestID, encodeSubscribeOk(so))))
+			case OpPing:
+				_, _ = server.Write(encodeFrame(buildFrame(OpPong, f.RequestID, nil)))
+			}
+		}
+	}()
+
+	e, err := startEngine(client, EngineOptions{ClientName: "go-test", HeartbeatInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("startEngine: %v", err)
+	}
+	c := newClientWith("127.0.0.1:9999", e, ClientOptions{})
+	defer c.Shutdown()
+
+	fan, err := c.SubscribeTopicExclusive("orders", 8, true)
+	if err != nil {
+		t.Fatalf("SubscribeTopicExclusive: %v", err)
+	}
+	defer fan.Close()
+
+	select {
+	case cg := <-gotCG:
+		if cg != DefaultCohortID {
+			t.Errorf("consumer_group = %q, want %q", cg, DefaultCohortID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no subscribe observed")
+	}
+}

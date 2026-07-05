@@ -175,6 +175,30 @@ func (c *Client) SubscribeTopic(topic string, group *string, prefetch uint32, au
 	})
 }
 
+// DefaultCohortID is the exclusive cohort a queue subscription joins when it asks
+// for exclusive consumption without naming one.
+const DefaultCohortID = "default"
+
+// SubscribeTopicCohort fans a queue in as a member of the named exclusive cohort:
+// the broker assigns each partition to a single member, so several members
+// consume the partitioned topic in order with free failover. Prefetch is per
+// partition. Pass an empty group for the default queue namespace.
+func (c *Client) SubscribeTopicCohort(topic, consumerGroup string, group *string, prefetch uint32, autoAck bool) (*FanIn, error) {
+	return c.newFanIn(topic, group, prefetch, func(p uint32) (*SupervisedSubscription, error) {
+		return c.SuperviseSubscribe(Subscribe{
+			Topic: topic, Partition: p, Group: group,
+			ConsumerGroup: &consumerGroup, Prefetch: prefetch, AutoAck: autoAck,
+		})
+	})
+}
+
+// SubscribeTopicExclusive is SubscribeTopicCohort joining the default cohort, for
+// the common case of one exclusive cohort per queue. Run several instances that
+// all call this on the same queue and they self-organize into the cohort.
+func (c *Client) SubscribeTopicExclusive(topic string, prefetch uint32, autoAck bool) (*FanIn, error) {
+	return c.SubscribeTopicCohort(topic, DefaultCohortID, nil, prefetch, autoAck)
+}
+
 // StreamSubscribeOptions configure a whole-stream (Plexus) fan-in subscription.
 type StreamSubscribeOptions struct {
 	Start       StreamStart
