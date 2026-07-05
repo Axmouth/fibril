@@ -53,9 +53,15 @@ Go-specific decisions.
    `delivery_test.go`) and validated live end-to-end via `examples/smoke`
    (declare -> subscribe -> publish -> receive -> ack). Reconnect/resume lives in
    the client layer next.
-5. `client.go` - pool keyed by host:port, topology cache, partition routing,
-   bounded redirect-follow, reconnect. TODO.
-6. `publisher.go` / `subscription.go` / `message.go` - public API. TODO.
+5. `client.go` - pool keyed by host:port, topology cache, FNV partition routing
+   (round-robin for keyless), bounded redirect-follow. **Core DONE**: Dial,
+   Publish/PublishConfirmed (routed + redirect-follow), Subscribe (routed +
+   redirect-follow), DeclareQueue, FetchTopology, Shutdown; deliveries settle via
+   the Subscription (carries its engine). Race-clean tests (redirect follow, FNV
+   routing) + live via `examples/smoke`. **TODO**: reconnect/resume, topology-push
+   handling, multi-partition fan-in, supervised (failover) subscriptions.
+6. `publisher.go` / `subscription.go` / `message.go` - ergonomic handles
+   (reliable publisher, message encode/decode). TODO.
 
 Plus `errors.go` (typed `WireError` taxonomy; the `FibrilError` hierarchy grows
 as higher layers land).
