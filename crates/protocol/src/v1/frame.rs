@@ -55,19 +55,27 @@ impl Encoder<Frame> for ProtoCodec {
     type Error = io::Error;
 
     fn encode(&mut self, item: Frame, dst: &mut BytesMut) -> Result<(), io::Error> {
-        let started = Instant::now();
-        let opcode = item.opcode;
-        let request_id = item.request_id;
         let payload_len = item.payload.len();
-        dst.reserve(20 + payload_len);
+        // Timing the encode costs two clock reads per frame. Only pay it where the
+        // result is actually usable: large frames, or every frame when the
+        // codec-timing env flag is on. The hot path of small frames skips the
+        // clock entirely (it never hits the large-frame log, and a >5ms encode of
+        // a 1KB frame is not a case worth taxing every publish to catch).
+        const LARGE_FRAME_BYTES: usize = 1 << 20;
+        let started = (payload_len >= LARGE_FRAME_BYTES || protocol_frame_timing_enabled())
+            .then(Instant::now);
 
+        dst.reserve(20 + payload_len);
         dst.put_u32(payload_len as u32);
         dst.put_u16(item.version);
         dst.put_u16(item.opcode);
         dst.put_u32(item.flags);
         dst.put_u64(item.request_id);
         dst.extend_from_slice(&item.payload);
-        log_frame_encode_timing(opcode, request_id, payload_len, started.elapsed());
+
+        if let Some(started) = started {
+            log_frame_encode_timing(item.opcode, item.request_id, payload_len, started.elapsed());
+        }
 
         Ok(())
     }

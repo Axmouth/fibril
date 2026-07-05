@@ -2401,16 +2401,20 @@ impl Publisher {
     /// when you need the broker-assigned offset.
     #[tracing::instrument(level = "trace", skip(payload), fields(topic = %self.topic))]
     pub async fn publish<T: Publishable>(&self, payload: T) -> FibrilResult<()> {
+        let timers = engine_timers_enabled();
+        let t0 = timers.then(Instant::now);
         let message = payload.into_message()?;
+        let t1 = timers.then(Instant::now);
         let topic = self.topic.as_str();
         let group = self.group.as_ref().map(|group| group.as_str());
         let Route {
             partition,
             partitioning_version,
         } = self.route(message.partition_key.as_deref());
-        self.shared
-            .engine_for(topic, partition, group)
-            .await?
+        let t2 = timers.then(Instant::now);
+        let engine = self.shared.engine_for(topic, partition, group).await?;
+        let t3 = timers.then(Instant::now);
+        let res = engine
             .publish_unconfirmed(
                 topic.to_string(),
                 group.map(str::to_string),
@@ -2421,7 +2425,16 @@ impl Publisher {
                 message.payload,
                 self.default_message_ttl_ms,
             )
-            .await
+            .await;
+        if let (Some(t0), Some(t1), Some(t2), Some(t3)) = (t0, t1, t2, t3) {
+            record_publish_phases(
+                t1.duration_since(t0).as_nanos() as u64,
+                t2.duration_since(t1).as_nanos() as u64,
+                t3.duration_since(t2).as_nanos() as u64,
+                t3.elapsed().as_nanos() as u64,
+            );
+        }
+        res
         // TODO: use oneshot channel to wait for when the packet has left(better errors timing)?
     }
 
@@ -3869,6 +3882,21 @@ where
 
         let mut fatal_error: Option<FibrilError> = None;
 
+        // Env-gated write-task profiling: splits wall time into "busy" (draining
+        // and encoding commands) vs "idle" (waiting for work / other arms), counts
+        // batch sizes, and isolates flush cost, so we can tell whether the write
+        // task is the bottleneck or is starved by the publisher. Zero overhead
+        // when FIBRIL_ENGINE_TIMERS is unset.
+        let timers = engine_timers_enabled();
+        let mut t_busy_ns = 0u64;
+        let mut t_flush_ns = 0u64;
+        let mut n_msgs = 0u64;
+        let mut n_batches = 0u64;
+        let mut n_flushes = 0u64;
+        let mut report_anchor = Instant::now();
+        let mut prev_busy_end = Instant::now();
+        let mut idle_ns = 0u64;
+
         // Helper closure (or just an inline pattern):
         macro_rules! send_or_die {
             ($framed:expr, $op:expr, $request_id:expr, $msg:expr, $err_slot:expr) => {
@@ -3971,7 +3999,19 @@ where
                 }
 
                 _ = flush_ticker.tick(), if queued_publish_frames > 0 => {
-                    flush_publishes_or_die!(framed, fatal_error)
+                    let fs = if timers {
+                        let now = Instant::now();
+                        idle_ns += now.duration_since(prev_busy_end).as_nanos() as u64;
+                        Some(now)
+                    } else {
+                        None
+                    };
+                    flush_publishes_or_die!(framed, fatal_error);
+                    if let Some(fs) = fs {
+                        t_flush_ns += fs.elapsed().as_nanos() as u64;
+                        n_flushes += 1;
+                        prev_busy_end = Instant::now();
+                    }
                 }
 
                 _ = cancel.cancelled() => {
@@ -3985,6 +4025,13 @@ where
 
                 cmd = cmd_rx.recv() => {
                   let Some(cmd) = cmd else { break; };
+                  let batch_start = if timers {
+                      let now = Instant::now();
+                      idle_ns += now.duration_since(prev_busy_end).as_nanos() as u64;
+                      Some(now)
+                  } else {
+                      None
+                  };
                   let mut pending = Some(cmd);
                   let mut drained = 0usize;
                   while let Some(cmd) = pending.take() {
@@ -4141,6 +4188,32 @@ where
                         break;
                     }
                     pending = cmd_rx.try_recv().ok();
+                  }
+                  if let Some(bs) = batch_start {
+                      t_busy_ns += bs.elapsed().as_nanos() as u64;
+                      n_msgs += drained as u64;
+                      n_batches += 1;
+                      prev_busy_end = Instant::now();
+                      if report_anchor.elapsed().as_secs() >= 2 {
+                          let total = (t_busy_ns + idle_ns + t_flush_ns).max(1);
+                          eprintln!(
+                              "[engine_timers] msgs/s~{} avg_batch={:.1} busy={:.1}% idle={:.1}% flush={:.1}% busy_per_msg={}ns flushes={}",
+                              n_msgs * 1000 / report_anchor.elapsed().as_millis().max(1) as u64,
+                              n_msgs as f64 / n_batches.max(1) as f64,
+                              100.0 * t_busy_ns as f64 / total as f64,
+                              100.0 * idle_ns as f64 / total as f64,
+                              100.0 * t_flush_ns as f64 / total as f64,
+                              t_busy_ns / n_msgs.max(1),
+                              n_flushes,
+                          );
+                          t_busy_ns = 0;
+                          idle_ns = 0;
+                          t_flush_ns = 0;
+                          n_msgs = 0;
+                          n_batches = 0;
+                          n_flushes = 0;
+                          report_anchor = Instant::now();
+                      }
                   }
                 },
             }
@@ -4802,6 +4875,53 @@ fn lock_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+// Env-gated engine profiling toggle, read once. Set FIBRIL_ENGINE_TIMERS=1 to
+// have the write task and publisher print periodic timing breakdowns to stderr.
+fn engine_timers_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("FIBRIL_ENGINE_TIMERS").is_ok())
+}
+
+// Publisher-side send timing (cumulative), reported every N sends under
+// FIBRIL_ENGINE_TIMERS. A large average means the publisher is blocked on a full
+// command channel (the write task is the bottleneck); a small one means the
+// publisher runs ahead freely.
+static PUB_SEND_NS: AtomicU64 = AtomicU64::new(0);
+static PUB_SEND_N: AtomicU64 = AtomicU64::new(0);
+
+fn record_pub_send(elapsed_ns: u64) {
+    let tot = PUB_SEND_NS.fetch_add(elapsed_ns, Ordering::Relaxed) + elapsed_ns;
+    let n = PUB_SEND_N.fetch_add(1, Ordering::Relaxed) + 1;
+    if n.is_multiple_of(200_000) {
+        eprintln!("[pub_send] avg_send={}ns over {n} sends", tot / n);
+    }
+}
+
+// Publisher-side per-phase timing under FIBRIL_ENGINE_TIMERS: where each publish()
+// spends its pre-write CPU, to localize the single-client ceiling.
+static PP_INTO: AtomicU64 = AtomicU64::new(0);
+static PP_ROUTE: AtomicU64 = AtomicU64::new(0);
+static PP_ENGINE: AtomicU64 = AtomicU64::new(0);
+static PP_BUILD_SEND: AtomicU64 = AtomicU64::new(0);
+static PP_N: AtomicU64 = AtomicU64::new(0);
+
+fn record_publish_phases(into: u64, route: u64, engine: u64, build_send: u64) {
+    PP_INTO.fetch_add(into, Ordering::Relaxed);
+    PP_ROUTE.fetch_add(route, Ordering::Relaxed);
+    PP_ENGINE.fetch_add(engine, Ordering::Relaxed);
+    PP_BUILD_SEND.fetch_add(build_send, Ordering::Relaxed);
+    let n = PP_N.fetch_add(1, Ordering::Relaxed) + 1;
+    if n.is_multiple_of(200_000) {
+        eprintln!(
+            "[pub_phases] over {n}: into_message={}ns route={}ns engine_for={}ns build+send={}ns",
+            PP_INTO.load(Ordering::Relaxed) / n,
+            PP_ROUTE.load(Ordering::Relaxed) / n,
+            PP_ENGINE.load(Ordering::Relaxed) / n,
+            PP_BUILD_SEND.load(Ordering::Relaxed) / n,
+        );
+    }
+}
+
 // Record the first connection-level fault seen by either engine task. First
 // writer wins so the original cause is the one the supervisor reports.
 fn record_fatal(slot: &std::sync::Mutex<Option<FibrilError>>, err: FibrilError) {
@@ -4854,6 +4974,7 @@ impl EngineHandle {
         ttl_ms: Option<u64>,
     ) -> FibrilResult<()> {
         let published = unix_millis();
+        let send_start = engine_timers_enabled().then(Instant::now);
         self.tx
             .send(Command::PublishUnconfirmed {
                 topic,
@@ -4868,6 +4989,9 @@ impl EngineHandle {
             })
             .await
             .map_err(|_e| FibrilError::BrokenPipe)?;
+        if let Some(send_start) = send_start {
+            record_pub_send(send_start.elapsed().as_nanos() as u64);
+        }
         Ok(())
     }
 
