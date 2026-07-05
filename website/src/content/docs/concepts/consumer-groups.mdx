@@ -3,6 +3,8 @@ title: Consumer groups
 description: Ordered, scalable consumption of a partitioned queue with exclusive consumer groups.
 ---
 
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
 By default, several consumers on the same queue **compete**: each message is
 delivered to exactly one of them (fair dispatch). That maximizes throughput, but
 it makes no ordering promise — two messages can be processed at the same time by
@@ -26,6 +28,9 @@ group that jointly consumes the queue:
 You don't name or coordinate the group — every instance that calls `.exclusive()`
 on the same queue *is* the group.
 
+<Tabs syncKey="client-language">
+  <TabItem label="Rust">
+
 ```rust
 // Run several instances of this; they self-organize into the group.
 let mut sub = client
@@ -39,14 +44,80 @@ while let Some(msg) = sub.recv().await? {
 }
 ```
 
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```ts
+// Run several instances; they self-organize into the group.
+const sub = await client.subscribe("orders").exclusive().subAutoAck();
+
+for await (const msg of sub) {
+  await process(msg.content()); // per-key order preserved
+}
+```
+
+  </TabItem>
+  <TabItem label="Python">
+
+```python
+# Run several instances; they self-organize into the group.
+sub = await client.subscribe("orders").exclusive().sub_auto_ack()
+
+async for msg in sub:
+    await process(msg.text())  # per-key order preserved
+```
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+// Run several instances; they self-organize into the group.
+sub, err := client.SubscribeTopicExclusive("orders", 32, true)
+
+for msg := range sub.Deliveries {
+    process(msg.Text()) // per-key order preserved
+}
+```
+
+  </TabItem>
+</Tabs>
+
 Ordering is *per key*, so the producer chooses the key that groups related
 messages onto the same partition:
+
+<Tabs syncKey="client-language">
+  <TabItem label="Rust">
 
 ```rust
 publisher
     .publish(NewMessage::msg_pack(&order)?.partition_key(order.id))
     .await?;
 ```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```ts
+await publisher.publish(NewMessage.msgpack(order).partitionKey(order.id));
+```
+
+  </TabItem>
+  <TabItem label="Python">
+
+```python
+await publisher.publish(NewMessage.msgpack(order).partition_key(order.id))
+```
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+msg, _ := fibril.JSON(order)
+publisher.Publish(msg.Keyed([]byte(order.ID)))
+```
+
+  </TabItem>
+</Tabs>
 
 See [partition routing](/development/partition-routing/) for how keys map
 to partitions.

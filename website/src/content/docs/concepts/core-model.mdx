@@ -3,6 +3,8 @@ title: Core model
 description: How messages move through a Fibril queue.
 ---
 
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
 Fibril uses a strict queue state machine. Each offset exists in at most one of three states:
 
 ```txt
@@ -28,12 +30,48 @@ Acknowledgement is final. An acked offset does not re-enter delivery.
 
 Manual-ack consumers decide what happens after processing:
 
+<Tabs syncKey="client-language">
+  <TabItem label="Rust">
+
 ```rust
-msg.complete().await?; // terminal success
-msg.retry().await?;    // requeue immediately
+msg.complete().await?;      // terminal success
+msg.retry().await?;         // requeue immediately
 msg.retry_after(30).await?; // requeue after a delay
-msg.fail().await?;     // terminal failure
+msg.fail().await?;          // terminal failure
 ```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```ts
+await msg.complete();         // terminal success
+await msg.retry();            // requeue immediately
+await msg.retryAfter(30_000); // requeue after a delay
+await msg.fail();             // terminal failure
+```
+
+  </TabItem>
+  <TabItem label="Python">
+
+```python
+await msg.complete()      # terminal success
+await msg.retry()         # requeue immediately
+await msg.retry_after(30) # requeue after a delay
+await msg.fail()          # terminal failure
+```
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+msg.Ack()                        // terminal success
+msg.Retry()                      // requeue immediately
+msg.RetryAfter(30 * time.Second) // requeue after a delay
+msg.Fail()                       // terminal failure
+```
+
+  </TabItem>
+</Tabs>
 
 Delayed retry keeps the message out of ready delivery until its retry deadline.
 

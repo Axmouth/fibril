@@ -3,11 +3,16 @@ title: Backpressure
 description: Pull-based delivery and prefetch limits in Fibril.
 ---
 
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
 Fibril’s current backpressure model is intentionally plain: consumers pull work and each subscription has a prefetch limit.
 
 ## Prefetch
 
 Prefetch bounds the number of messages a consumer may have inflight at once.
+
+<Tabs syncKey="client-language">
+  <TabItem label="Rust">
 
 ```rust
 let mut sub = client
@@ -16,6 +21,34 @@ let mut sub = client
     .sub()
     .await?;
 ```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```ts
+const sub = await client
+  .subscribe("email.send")
+  .prefetch(32)
+  .sub();
+```
+
+  </TabItem>
+  <TabItem label="Python">
+
+```python
+sub = await client.subscribe("email.send").prefetch(32).sub()
+```
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+// SubscribeTopic's fourth arg is the per-partition prefetch.
+sub, err := client.SubscribeTopic("email.send", nil, 32, false)
+```
+
+  </TabItem>
+</Tabs>
 
 The default client subscription prefetch is small. The broker also clamps subscription prefetch to at least one.
 
