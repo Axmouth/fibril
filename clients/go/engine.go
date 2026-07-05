@@ -321,40 +321,68 @@ func (e *Engine) PublishDelayedConfirmed(p PublishDelayed) (uint64, error) {
 	return ok.Offset, nil
 }
 
-// PublishResult is the outcome of a pipelined confirmed publish.
-type PublishResult struct {
-	Offset uint64
-	Err    error
+// publishResult is the outcome of a with-confirmation publish, carried on the
+// handle's channel.
+type publishResult struct {
+	offset uint64
+	err    error
 }
 
-// PublishPipelined sends a confirmed publish and returns a channel that yields
-// its result later, without blocking. The frame is written before this returns,
-// so callers can pipeline several publishes (in send order) and collect each
-// offset afterward.
-func (e *Engine) PublishPipelined(p Publish) (<-chan PublishResult, error) {
-	p.RequireConfirm = true
+// PublishConfirmation is a handle to a confirmed publish that has been sent but
+// not yet awaited. Call Confirmed to get the broker-assigned offset. Because the
+// frame is written before the handle returns, callers can fire several publishes
+// (in send order) and collect their confirmations afterward to pipeline them.
+type PublishConfirmation struct {
+	ch <-chan publishResult
+}
+
+// Confirmed waits for the broker-assigned offset of this publish.
+func (c PublishConfirmation) Confirmed() (uint64, error) {
+	r := <-c.ch
+	return r.offset, r.err
+}
+
+// confirmation sends a confirm-required op and returns a handle that resolves to
+// the publish offset later, without blocking on the confirm.
+func (e *Engine) confirmation(op Op, body []byte) (PublishConfirmation, error) {
 	rc := make(chan reply, 1)
 	select {
-	case e.cmdCh <- command{op: OpPublish, body: encodePublish(p), reply: rc}:
+	case e.cmdCh <- command{op: op, body: body, reply: rc}:
 	case <-e.done:
-		return nil, e.err()
+		return PublishConfirmation{}, e.err()
 	}
-	out := make(chan PublishResult, 1)
+	out := make(chan publishResult, 1)
 	go func() {
 		select {
 		case r := <-rc:
 			if r.err != nil {
-				out <- PublishResult{Err: r.err}
+				out <- publishResult{err: r.err}
 				return
 			}
 			ok, err := decodePublishOk(r.frame.Payload)
-			out <- PublishResult{Offset: ok.Offset, Err: err}
+			out <- publishResult{offset: ok.Offset, err: err}
 		case <-e.done:
-			out <- PublishResult{Err: e.err()}
+			out <- publishResult{err: e.err()}
 		}
 	}()
-	return out, nil
+	return PublishConfirmation{ch: out}, nil
 }
+
+// PublishWithConfirmation sends a confirmed publish and returns a handle for its
+// offset, without blocking on the confirm.
+func (e *Engine) PublishWithConfirmation(p Publish) (PublishConfirmation, error) {
+	p.RequireConfirm = true
+	return e.confirmation(OpPublish, encodePublish(p))
+}
+
+// PublishDelayedWithConfirmation sends a delayed confirmed publish and returns a
+// handle for its offset, without blocking on the confirm.
+func (e *Engine) PublishDelayedWithConfirmation(p PublishDelayed) (PublishConfirmation, error) {
+	p.RequireConfirm = true
+	return e.confirmation(OpPublishDelayed, encodePublishDelayed(p))
+}
+
+// DeclareQueue declares a queue and waits for the broker's confirmation.
 
 // DeclareQueue declares a queue and waits for the broker's confirmation.
 func (e *Engine) DeclareQueue(d DeclareQueue) (DeclareQueueOk, error) {

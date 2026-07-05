@@ -47,6 +47,17 @@ func (p *Publisher) PublishConfirmed(m Message) (uint64, error) {
 	return p.client.PublishConfirmed(pub)
 }
 
+// PublishWithConfirmation sends a confirmed message and returns a handle for its
+// offset, without blocking on the confirm. Fire several and await each handle
+// afterward to pipeline the confirmations.
+func (p *Publisher) PublishWithConfirmation(m Message) (PublishConfirmation, error) {
+	pub, err := m.toPublish(p.topic, p.group)
+	if err != nil {
+		return PublishConfirmation{}, err
+	}
+	return p.client.PublishWithConfirmation(pub)
+}
+
 // PublishDelayed sends m fire-and-forget, to become visible after delay from now.
 func (p *Publisher) PublishDelayed(m Message, delay time.Duration) error {
 	pd, err := p.toDelayed(m, delay)
@@ -64,6 +75,16 @@ func (p *Publisher) PublishDelayedConfirmed(m Message, delay time.Duration) (uin
 		return 0, err
 	}
 	return p.client.PublishDelayedConfirmed(pd)
+}
+
+// PublishDelayedWithConfirmation sends a delayed message and returns a handle for
+// its offset, without blocking on the confirm.
+func (p *Publisher) PublishDelayedWithConfirmation(m Message, delay time.Duration) (PublishConfirmation, error) {
+	pd, err := p.toDelayed(m, delay)
+	if err != nil {
+		return PublishConfirmation{}, err
+	}
+	return p.client.PublishDelayedWithConfirmation(pd)
 }
 
 // toDelayed builds a delayed publish from a message, turning a relative delay into

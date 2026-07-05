@@ -466,18 +466,28 @@ func (c *Client) PublishConfirmed(p Publish) (uint64, error) {
 	})
 }
 
-// PublishPipelined routes a confirmed publish to the partition owner and returns
-// a handle for its result, without blocking on the confirm. Fire several to
-// pipeline confirmations and collect each offset afterward. It routes once (no
-// redirect-follow), since the confirmation resolves asynchronously; a stale route
-// surfaces as a RedirectError on the returned channel.
-func (c *Client) PublishPipelined(p Publish) (<-chan PublishResult, error) {
+// PublishWithConfirmation routes a confirmed publish to the partition owner and
+// returns a handle for its offset, without blocking on the confirm. Fire several
+// and await each handle afterward to pipeline the confirmations. It routes once
+// (no redirect-follow), since the confirmation resolves asynchronously; a stale
+// route surfaces as a RedirectError from Confirmed.
+func (c *Client) PublishWithConfirmation(p Publish) (PublishConfirmation, error) {
 	p.Partition = c.partitionFor(p.Topic, p.Group, p.PartitionKey)
 	eng, err := c.engineFor(c.topo.ownerOf(p.Topic, p.Partition, p.Group))
 	if err != nil {
-		return nil, err
+		return PublishConfirmation{}, err
 	}
-	return eng.PublishPipelined(p)
+	return eng.PublishWithConfirmation(p)
+}
+
+// PublishDelayedWithConfirmation is PublishWithConfirmation for a delayed publish.
+func (c *Client) PublishDelayedWithConfirmation(p PublishDelayed) (PublishConfirmation, error) {
+	p.Partition = c.partitionFor(p.Topic, p.Group, p.PartitionKey)
+	eng, err := c.engineFor(c.topo.ownerOf(p.Topic, p.Partition, p.Group))
+	if err != nil {
+		return PublishConfirmation{}, err
+	}
+	return eng.PublishDelayedWithConfirmation(p)
 }
 
 // PublishDelayedConfirmed routes and sends a delayed confirmed publish.

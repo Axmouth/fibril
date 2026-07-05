@@ -6,6 +6,8 @@ package fibril
 // prefetch, so the broker (which never sends beyond prefetch unacked) cannot
 // outrun it and the run goroutine never blocks.
 
+import "time"
+
 // Delivery is one message pushed to a subscription.
 type Delivery struct {
 	Topic           string
@@ -35,6 +37,19 @@ func (d Delivery) Ack() error { return d.engine.Ack(d) }
 // Nack returns this delivery unprocessed, optionally requeuing it.
 func (d Delivery) Nack(requeue bool, notBefore *uint64) error {
 	return d.engine.Nack(d, requeue, notBefore)
+}
+
+// Retry requeues this delivery immediately for redelivery.
+func (d Delivery) Retry() error { return d.engine.Nack(d, true, nil) }
+
+// RetryAfter requeues this delivery for redelivery no sooner than delay from now.
+func (d Delivery) RetryAfter(delay time.Duration) error {
+	notBefore := time.Now().UnixMilli() + delay.Milliseconds()
+	if notBefore < 0 {
+		notBefore = 0
+	}
+	nb := uint64(notBefore)
+	return d.engine.Nack(d, true, &nb)
 }
 
 // Subscription is a live single-partition subscription. Deliveries yields

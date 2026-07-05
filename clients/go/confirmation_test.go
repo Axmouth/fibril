@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func TestEnginePublishPipelined(t *testing.T) {
+func TestEnginePublishWithConfirmation(t *testing.T) {
 	client, server := net.Pipe()
 
 	go func() {
@@ -40,25 +40,21 @@ func TestEnginePublishPipelined(t *testing.T) {
 
 	// Fire several without awaiting each, then collect.
 	const n = 5
-	handles := make([]<-chan PublishResult, 0, n)
+	handles := make([]PublishConfirmation, 0, n)
 	for i := 0; i < n; i++ {
-		h, err := e.PublishPipelined(Publish{Topic: "t", Payload: []byte("x")})
+		h, err := e.PublishWithConfirmation(Publish{Topic: "t", Payload: []byte("x")})
 		if err != nil {
-			t.Fatalf("pipelined publish %d: %v", i, err)
+			t.Fatalf("with-confirmation publish %d: %v", i, err)
 		}
 		handles = append(handles, h)
 	}
 	seen := map[uint64]bool{}
 	for i, h := range handles {
-		select {
-		case r := <-h:
-			if r.Err != nil {
-				t.Fatalf("result %d: %v", i, r.Err)
-			}
-			seen[r.Offset] = true
-		case <-time.After(2 * time.Second):
-			t.Fatalf("pipelined result %d timed out", i)
+		offset, err := h.Confirmed()
+		if err != nil {
+			t.Fatalf("confirmation %d: %v", i, err)
 		}
+		seen[offset] = true
 	}
 	if len(seen) != n {
 		t.Errorf("got %d distinct offsets, want %d", len(seen), n)
