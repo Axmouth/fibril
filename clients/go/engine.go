@@ -32,16 +32,47 @@ type EngineOptions struct {
 }
 
 // command is a request from a public method to the run goroutine: send op(body),
-// and if reply is non-nil, correlate the broker's response back to it.
+// and if reply/subReply is non-nil, correlate the broker's response back to it.
 type command struct {
-	op    Op
-	body  []byte
-	reply chan reply // nil = fire-and-forget
+	op       Op
+	body     []byte
+	id       uint64         // if nonzero, use this request id instead of allocating one
+	reply    chan reply     // generic request/reply; nil = fire-and-forget
+	subReply chan subResult // set for a subscribe (delivers the created Subscription)
+	autoAck  bool           // carried to the sub state on SUBSCRIBE_OK
 }
 
 type reply struct {
 	frame Frame
 	err   error
+}
+
+type subResult struct {
+	sub *Subscription
+	err error
+}
+
+// waiter is a pending request awaiting its correlated reply. Exactly one of
+// reply/subReply is set.
+type waiter struct {
+	reply    chan reply
+	subReply chan subResult
+	autoAck  bool
+}
+
+func failWaiter(w *waiter, err error) {
+	if w.reply != nil {
+		w.reply <- reply{err: err}
+	}
+	if w.subReply != nil {
+		w.subReply <- subResult{err: err}
+	}
+}
+
+// subState is a live subscription's delivery channel, owned by the run goroutine.
+type subState struct {
+	ch      chan Delivery
+	autoAck bool
 }
 
 // Engine is one live broker connection.
@@ -59,7 +90,8 @@ type Engine struct {
 
 	// Owned exclusively by the run goroutine (no locks).
 	nextID   uint64
-	waiters  map[uint64]chan reply
+	waiters  map[uint64]*waiter
+	subs     map[uint64]*subState
 	lastSeen time.Time
 	closed   bool
 
@@ -155,7 +187,8 @@ func startEngine(conn net.Conn, opts EngineOptions) (*Engine, error) {
 		stop:           make(chan struct{}),
 		done:           make(chan struct{}),
 		nextID:         2, // 1 = HELLO, 2 = AUTH are already used
-		waiters:        make(map[uint64]chan reply),
+		waiters:        make(map[uint64]*waiter),
+		subs:           make(map[uint64]*subState),
 		lastSeen:       time.Now(),
 		ResumeIdentity: ResumeIdentity{OwnerID: helloOk.OwnerID, ClientID: helloOk.ClientID, ResumeToken: helloOk.ResumeToken},
 		ResumeOutcome:  helloOk.ResumeOutcome,
@@ -279,17 +312,23 @@ func (e *Engine) handleCommand(cmd command) {
 		if cmd.reply != nil {
 			cmd.reply <- reply{err: e.err()}
 		}
+		if cmd.subReply != nil {
+			cmd.subReply <- subResult{err: e.err()}
+		}
 		return
 	}
-	e.nextID++
-	id := e.nextID
-	if cmd.reply != nil {
-		e.waiters[id] = cmd.reply
+	id := cmd.id
+	if id == 0 {
+		e.nextID++
+		id = e.nextID
+	}
+	if cmd.reply != nil || cmd.subReply != nil {
+		e.waiters[id] = &waiter{reply: cmd.reply, subReply: cmd.subReply, autoAck: cmd.autoAck}
 	}
 	if err := e.write(BuildFrame(cmd.op, id, cmd.body)); err != nil {
-		if cmd.reply != nil {
+		if w, ok := e.waiters[id]; ok {
 			delete(e.waiters, id)
-			cmd.reply <- reply{err: err}
+			failWaiter(w, err)
 		}
 		e.markDead(err)
 	}
@@ -302,27 +341,33 @@ func (e *Engine) handleFrame(f Frame) {
 		return
 	case OpPing:
 		_ = e.write(BuildFrame(OpPong, f.RequestID, nil))
-	case OpPublishOk, OpDeclareQueueOk, OpDeclarePlexusOk, OpTopologyOk, OpSubscribeOk:
+	case OpPublishOk, OpDeclareQueueOk, OpDeclarePlexusOk, OpTopologyOk:
 		e.resolve(f.RequestID, reply{frame: f})
+	case OpSubscribeOk:
+		e.handleSubscribeOk(f)
+	case OpDeliver:
+		e.handleDeliver(f)
 	case OpError, OpSubscribeErr:
 		em, _ := DecodeError(f.Payload)
 		serr := &ServerError{Code: em.Code, Message: em.Message}
-		if rc, ok := e.waiters[f.RequestID]; ok {
+		if w, ok := e.waiters[f.RequestID]; ok {
 			delete(e.waiters, f.RequestID)
-			rc <- reply{err: serr}
+			failWaiter(w, serr)
 		} else if f.Opcode == OpError {
 			// A connection-level error with no correlated request is fatal.
 			e.markDead(&DisconnectionError{Message: serr.Error()})
 		}
 	default:
-		// Deliver and other pushes are handled in a later brick.
+		// Assignment/topology pushes and other frames are handled in a later brick.
 	}
 }
 
 func (e *Engine) resolve(id uint64, r reply) {
-	if rc, ok := e.waiters[id]; ok {
+	if w, ok := e.waiters[id]; ok {
 		delete(e.waiters, id)
-		rc <- r
+		if w.reply != nil {
+			w.reply <- r
+		}
 	}
 }
 
@@ -346,9 +391,14 @@ func (e *Engine) markDead(err error) {
 	}
 	e.closed = true
 	e.setErr(err)
-	for id, rc := range e.waiters {
-		rc <- reply{err: err}
+	for id, w := range e.waiters {
+		failWaiter(w, err)
 		delete(e.waiters, id)
+	}
+	// Closing each delivery channel ends the consumer's range over it.
+	for id, s := range e.subs {
+		close(s.ch)
+		delete(e.subs, id)
 	}
 	e.closeStop()
 	_ = e.conn.Close()
