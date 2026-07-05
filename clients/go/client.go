@@ -33,6 +33,10 @@ type ClientOptions struct {
 	// SuperviseBackoff is the pause between re-subscribe attempts after a drop in
 	// a supervised subscription (0 uses a sensible default).
 	SuperviseBackoff time.Duration
+	// RepartitionPollInterval is how often a whole-topic fan-in refreshes topology
+	// and picks up partitions added by a live repartition grow (0 uses a sensible
+	// default).
+	RepartitionPollInterval time.Duration
 	// TLS, if set, connects over TLS with these trust settings; nil is plaintext.
 	TLS *TLSOptions
 	// OnAssignmentChanged, if set, is called for each exclusive-cohort assignment

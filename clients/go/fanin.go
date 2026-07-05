@@ -5,69 +5,174 @@ package fibril
 // failover, and merges their deliveries into one channel. Ordering is
 // per-partition only (Kafka-style), as the invariants require. Deliveries settle
 // with d.Ack()/d.Nack(), which route to the partition they came from.
+//
+// A background growth loop refreshes topology on an interval and attaches any
+// partitions added by a live repartition grow, so a fan-in picks up new
+// partitions without the caller re-subscribing.
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
+
+const defaultRepartitionPoll = 2 * time.Second
 
 // FanIn is a subscription across all partitions of a topic. Deliveries yields
 // messages from every partition, merged. Call Close to stop it.
 type FanIn struct {
 	Deliveries <-chan Delivery
-	subs       []*SupervisedSubscription
+
+	merged chan Delivery
+	client *Client
+	topic  string
+	group  *string // nil for streams
+	attach func(partition uint32) (*SupervisedSubscription, error)
+	cancel chan struct{}
+
+	mu      sync.Mutex
+	covered map[uint32]bool
+	subs    []*SupervisedSubscription
+	closed  bool
+	wg      sync.WaitGroup // one per live forwarder
 }
 
-// Close stops every partition subscription; Deliveries closes once they drain.
-func (fi *FanIn) Close() {
-	for _, s := range fi.subs {
-		s.Close()
-	}
-}
-
-// mergeFanIn merges the supervised partition subscriptions into one channel, one
-// forwarder goroutine per partition, closing the merged channel once all close.
-func mergeFanIn(subs []*SupervisedSubscription, bufferPerSub uint32) *FanIn {
-	merged := make(chan Delivery, bufferPerSub*uint32(len(subs))+1)
-	fi := &FanIn{Deliveries: merged, subs: subs}
-	var wg sync.WaitGroup
-	for _, s := range subs {
-		wg.Add(1)
-		go func(ch <-chan Delivery) {
-			defer wg.Done()
-			for d := range ch {
-				merged <- d
-			}
-		}(s.Deliveries)
-	}
-	go func() {
-		wg.Wait()
-		close(merged)
-	}()
-	return fi
-}
-
-func closeAll(subs []*SupervisedSubscription) {
-	for _, s := range subs {
-		s.Close()
-	}
-}
-
-// SubscribeTopic subscribes to every partition of a queue topic and fans the
-// deliveries into one channel, supervising each partition. Prefetch is per
-// partition.
-func (c *Client) SubscribeTopic(topic string, group *string, prefetch uint32, autoAck bool) (*FanIn, error) {
+// newFanIn subscribes the current partition set (strictly, failing the call if a
+// partition cannot be attached) and starts the growth loop.
+func (c *Client) newFanIn(topic string, group *string, bufferPerSub uint32, attach func(uint32) (*SupervisedSubscription, error)) (*FanIn, error) {
 	if _, err := c.FetchTopology(TopologyRequest{Topic: &topic}); err != nil {
 		return nil, err
 	}
 	count := c.topo.partitionCount(topic, group)
-	subs := make([]*SupervisedSubscription, 0, count)
+	merged := make(chan Delivery, bufferPerSub*count+1)
+	fi := &FanIn{
+		Deliveries: merged,
+		merged:     merged,
+		client:     c,
+		topic:      topic,
+		group:      group,
+		attach:     attach,
+		cancel:     make(chan struct{}),
+		covered:    map[uint32]bool{},
+	}
 	for p := uint32(0); p < count; p++ {
-		ss, err := c.SuperviseSubscribe(Subscribe{Topic: topic, Partition: p, Group: group, Prefetch: prefetch, AutoAck: autoAck})
-		if err != nil {
-			closeAll(subs)
+		if err := fi.attachPartition(p, true); err != nil {
+			fi.Close()
 			return nil, err
 		}
-		subs = append(subs, ss)
 	}
-	return mergeFanIn(subs, prefetch), nil
+	interval := c.opts.RepartitionPollInterval
+	if interval == 0 {
+		interval = defaultRepartitionPoll
+	}
+	go fi.growthLoop(interval)
+	return fi, nil
+}
+
+// attachPartition attaches one partition, reserving it first so concurrent polls
+// and the initial pass do not double-subscribe. When strict is false a failed
+// attach is un-reserved so a later poll retries. Holds no lock across the network
+// subscribe.
+func (fi *FanIn) attachPartition(p uint32, strict bool) error {
+	fi.mu.Lock()
+	if fi.closed || fi.covered[p] {
+		fi.mu.Unlock()
+		return nil
+	}
+	fi.covered[p] = true
+	fi.mu.Unlock()
+
+	ss, err := fi.attach(p)
+	if err != nil {
+		fi.mu.Lock()
+		delete(fi.covered, p)
+		fi.mu.Unlock()
+		if strict {
+			return err
+		}
+		return nil // best effort: retried on the next poll
+	}
+
+	fi.mu.Lock()
+	if fi.closed {
+		fi.mu.Unlock()
+		ss.Close()
+		return nil
+	}
+	fi.subs = append(fi.subs, ss)
+	fi.wg.Add(1)
+	fi.mu.Unlock()
+	go fi.forward(ss.Deliveries)
+	return nil
+}
+
+func (fi *FanIn) forward(ch <-chan Delivery) {
+	defer fi.wg.Done()
+	for {
+		select {
+		case d, ok := <-ch:
+			if !ok {
+				return
+			}
+			select {
+			case fi.merged <- d:
+			case <-fi.cancel:
+				return
+			}
+		case <-fi.cancel:
+			return
+		}
+	}
+}
+
+func (fi *FanIn) growthLoop(interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-fi.cancel:
+			return
+		case <-t.C:
+			if fi.client.closed.Load() {
+				return
+			}
+			_, _ = fi.client.FetchTopology(TopologyRequest{Topic: &fi.topic})
+			count := fi.client.topo.partitionCount(fi.topic, fi.group)
+			for p := uint32(0); p < count; p++ {
+				_ = fi.attachPartition(p, false)
+			}
+		}
+	}
+}
+
+// Close stops the growth loop and every partition subscription; Deliveries closes
+// once the forwarders drain.
+func (fi *FanIn) Close() {
+	fi.mu.Lock()
+	if fi.closed {
+		fi.mu.Unlock()
+		return
+	}
+	fi.closed = true
+	close(fi.cancel)
+	subs := append([]*SupervisedSubscription(nil), fi.subs...)
+	fi.mu.Unlock()
+
+	for _, s := range subs {
+		s.Close()
+	}
+	go func() {
+		fi.wg.Wait()
+		close(fi.merged)
+	}()
+}
+
+// SubscribeTopic subscribes to every partition of a queue topic and fans the
+// deliveries into one channel, supervising each partition and picking up
+// partitions added by a live repartition grow. Prefetch is per partition.
+func (c *Client) SubscribeTopic(topic string, group *string, prefetch uint32, autoAck bool) (*FanIn, error) {
+	return c.newFanIn(topic, group, prefetch, func(p uint32) (*SupervisedSubscription, error) {
+		return c.SuperviseSubscribe(Subscribe{Topic: topic, Partition: p, Group: group, Prefetch: prefetch, AutoAck: autoAck})
+	})
 }
 
 // StreamSubscribeOptions configure a whole-stream (Plexus) fan-in subscription.
@@ -80,16 +185,12 @@ type StreamSubscribeOptions struct {
 }
 
 // SubscribeStreamTopic subscribes to every partition of a Plexus stream and fans
-// the records into one channel, supervising each partition. Every consumer sees
-// every record (fan-out); the client reads all partitions and fans them in.
+// the records into one channel, supervising each partition and picking up
+// partitions added by a live repartition grow. Every consumer sees every record
+// (fan-out); the client reads all partitions and fans them in.
 func (c *Client) SubscribeStreamTopic(topic string, opts StreamSubscribeOptions) (*FanIn, error) {
-	if _, err := c.FetchTopology(TopologyRequest{Topic: &topic}); err != nil {
-		return nil, err
-	}
-	count := c.topo.partitionCount(topic, nil) // streams have no group
-	subs := make([]*SupervisedSubscription, 0, count)
-	for p := uint32(0); p < count; p++ {
-		ss, err := c.SuperviseSubscribeStream(SubscribeStream{
+	return c.newFanIn(topic, nil, opts.Prefetch, func(p uint32) (*SupervisedSubscription, error) {
+		return c.SuperviseSubscribeStream(SubscribeStream{
 			Topic:       topic,
 			Partition:   p,
 			DurableName: opts.DurableName,
@@ -98,11 +199,5 @@ func (c *Client) SubscribeStreamTopic(topic string, opts StreamSubscribeOptions)
 			Prefetch:    opts.Prefetch,
 			AutoAck:     opts.AutoAck,
 		})
-		if err != nil {
-			closeAll(subs)
-			return nil, err
-		}
-		subs = append(subs, ss)
-	}
-	return mergeFanIn(subs, opts.Prefetch), nil
+	})
 }
