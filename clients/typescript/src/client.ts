@@ -8,6 +8,9 @@ import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import {
   Engine,
+  WRITE_COALESCE_BYTES,
+  WRITE_COALESCE_COUNT,
+  WRITE_COALESCE_WINDOW_MS,
   type InternalDelivered,
   type InternalInflight,
   type SubscribeResult,
@@ -141,6 +144,16 @@ export interface ClientOptionsInit {
    * detect a graceful owner move that did not drop the connection.
    */
   subscriptionSuperviseIntervalMs?: number;
+  /**
+   * Coalesce fire-and-forget writes (unconfirmed publishes) until this many
+   * buffered bytes, then flush in one socket write. Tune with
+   * {@link ClientOptions.withWriteCoalescing}.
+   */
+  writeCoalesceBytes?: number;
+  /** Coalesce fire-and-forget writes until this many buffered frames. */
+  writeCoalesceCount?: number;
+  /** Flush coalesced fire-and-forget writes within this many ms of the last flush. */
+  writeCoalesceWindowMs?: number;
 }
 
 const DEFAULT_CLIENT_NAME = "Fibril TS Client";
@@ -165,6 +178,9 @@ export class ClientOptions {
   readonly superviseSubscriptions: boolean;
   readonly subscriptionSuperviseIntervalMs: number;
   readonly tls: TlsOptions | undefined;
+  readonly writeCoalesceBytes: number;
+  readonly writeCoalesceCount: number;
+  readonly writeCoalesceWindowMs: number;
 
   constructor(init: ClientOptionsInit = {}) {
     this.tls = init.tls;
@@ -180,6 +196,9 @@ export class ClientOptions {
     this.topologyRefreshCooldownMs = init.topologyRefreshCooldownMs ?? 1_000;
     this.superviseSubscriptions = init.superviseSubscriptions ?? true;
     this.subscriptionSuperviseIntervalMs = init.subscriptionSuperviseIntervalMs ?? 1_000;
+    this.writeCoalesceBytes = init.writeCoalesceBytes ?? WRITE_COALESCE_BYTES;
+    this.writeCoalesceCount = init.writeCoalesceCount ?? WRITE_COALESCE_COUNT;
+    this.writeCoalesceWindowMs = init.writeCoalesceWindowMs ?? WRITE_COALESCE_WINDOW_MS;
   }
 
   /** Return a copy with the given fields overridden. */
@@ -198,7 +217,42 @@ export class ClientOptions {
       superviseSubscriptions: this.superviseSubscriptions,
       subscriptionSuperviseIntervalMs: this.subscriptionSuperviseIntervalMs,
       tls: this.tls,
+      writeCoalesceBytes: this.writeCoalesceBytes,
+      writeCoalesceCount: this.writeCoalesceCount,
+      writeCoalesceWindowMs: this.writeCoalesceWindowMs,
       ...overrides,
+    });
+  }
+
+  /**
+   * Return a copy with fire-and-forget write coalescing tuned. Unconfirmed
+   * publishes are buffered and sent in one socket write, flushed on whichever
+   * limit is reached first: `maxBytes` buffered, `maxFrames` buffered, or
+   * `windowMs` since the last flush. Reply-bearing frames (confirmed publishes,
+   * acks, requests) always flush immediately. Larger limits trade a little
+   * latency for fewer syscalls; the defaults already sit at the throughput
+   * plateau, so this is mainly for tightening latency or memory, or disabling
+   * coalescing (`maxFrames: 1`). Only the limits passed change.
+   */
+  withWriteCoalescing(limits: {
+    maxBytes?: number;
+    maxFrames?: number;
+    windowMs?: number;
+  }): ClientOptions {
+    const { maxBytes, maxFrames, windowMs } = limits;
+    if (maxBytes !== undefined && (!Number.isFinite(maxBytes) || maxBytes < 1)) {
+      throw new Error("maxBytes must be a positive number");
+    }
+    if (maxFrames !== undefined && (!Number.isInteger(maxFrames) || maxFrames < 1)) {
+      throw new Error("maxFrames must be a positive integer");
+    }
+    if (windowMs !== undefined && (!Number.isFinite(windowMs) || windowMs < 0)) {
+      throw new Error("windowMs must be a non-negative number");
+    }
+    return this.#copy({
+      ...(maxBytes !== undefined ? { writeCoalesceBytes: maxBytes } : {}),
+      ...(maxFrames !== undefined ? { writeCoalesceCount: maxFrames } : {}),
+      ...(windowMs !== undefined ? { writeCoalesceWindowMs: windowMs } : {}),
     });
   }
 

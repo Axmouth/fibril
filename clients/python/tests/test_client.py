@@ -350,6 +350,24 @@ async def test_on_going_away_fires(broker: FakeBroker) -> None:
         await client.shutdown()
 
 
+def test_write_coalescing_knobs_thread_to_engine() -> None:
+    opts = ClientOptions().with_write_coalescing(max_bytes=4096, max_frames=8, window_ms=2.0)
+    assert opts.write_coalesce_bytes == 4096
+    assert opts.write_coalesce_count == 8
+    assert opts.write_coalesce_window_ms == 2.0
+    eng = opts.engine_options()
+    assert eng.write_coalesce_bytes == 4096
+    assert eng.write_coalesce_count == 8
+    assert eng.write_coalesce_window_s == 0.002  # ms converted to seconds
+    # Only the passed limits change; the rest keep their defaults.
+    only_frames = ClientOptions().with_write_coalescing(max_frames=1)
+    assert only_frames.write_coalesce_count == 1
+    assert only_frames.write_coalesce_bytes == ClientOptions().write_coalesce_bytes
+    for bad in (dict(max_bytes=0), dict(max_frames=0), dict(window_ms=-1)):
+        with pytest.raises(ValueError):
+            ClientOptions().with_write_coalescing(**bad)  # type: ignore[arg-type]
+
+
 async def test_nonretryable_close_surfaces_without_reconnect(broker: FakeBroker) -> None:
     from fibril.codec import build_frame
     from fibril.errors import ServerError

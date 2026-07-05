@@ -124,9 +124,9 @@ const RECONCILE_REQUEST_ID = 3n;
 // fire-and-forget frames, and never past the window. Mirrors the Python client;
 // see its engine.py for the sizing rationale (memory/latency ceiling, not a
 // throughput knob).
-const WRITE_COALESCE_BYTES = 128 * 1024;
-const WRITE_COALESCE_COUNT = 128;
-const WRITE_COALESCE_WINDOW_MS = 0.5;
+export const WRITE_COALESCE_BYTES = 128 * 1024;
+export const WRITE_COALESCE_COUNT = 128;
+export const WRITE_COALESCE_WINDOW_MS = 0.5;
 
 export interface RegisteredSubscription {
   reconcile: ReconcileSubscription;
@@ -353,6 +353,9 @@ export class Engine {
       initialSubscriptions: restoredSubscriptions,
       shutdownMode,
       closeReason,
+      writeCoalesceBytes: opts.writeCoalesceBytes,
+      writeCoalesceCount: opts.writeCoalesceCount,
+      writeCoalesceWindowMs: opts.writeCoalesceWindowMs,
       onAssignmentChanged,
       onTopologyUpdate,
       onGoingAway,
@@ -453,6 +456,9 @@ interface EngineLoopArgs {
   initialSubscriptions: Map<bigint, SubState>;
   shutdownMode: ShutdownMode;
   closeReason: CloseReason;
+  writeCoalesceBytes: number;
+  writeCoalesceCount: number;
+  writeCoalesceWindowMs: number;
   onAssignmentChanged?: (msg: AssignmentChangedMsg) => void;
   onTopologyUpdate?: (topology: TopologyOkMsg) => bigint;
   onGoingAway?: (notice: GoingAwayMsg) => void;
@@ -468,6 +474,9 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
     initialSubscriptions,
     shutdownMode,
     closeReason,
+    writeCoalesceBytes,
+    writeCoalesceCount,
+    writeCoalesceWindowMs,
     onAssignmentChanged,
     onTopologyUpdate,
     onGoingAway,
@@ -567,7 +576,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
 
   const scheduleFlush = (): void => {
     if (flushTimer !== null || flushInFlight !== null || socketDead) return;
-    const delayMs = Math.max(0, lastFlush + WRITE_COALESCE_WINDOW_MS - performance.now());
+    const delayMs = Math.max(0, lastFlush + writeCoalesceWindowMs - performance.now());
     flushTimer = setTimeout(() => {
       flushTimer = null;
       void flush();
@@ -596,7 +605,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
   const sendBuffered = async (frame: Frame): Promise<boolean> => {
     if (socketDead) return false;
     bufferFrame(frame);
-    if (pendingBytes >= WRITE_COALESCE_BYTES || pendingCount >= WRITE_COALESCE_COUNT) {
+    if (pendingBytes >= writeCoalesceBytes || pendingCount >= writeCoalesceCount) {
       await flush();
     } else {
       scheduleFlush();

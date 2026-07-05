@@ -18,7 +18,15 @@ from datetime import timedelta
 from typing import Callable, Optional, Union
 
 from . import wire
-from .engine import Engine, EngineOptions, SubscribeResult, SubscriptionRegistry
+from .engine import (
+    DEFAULT_WRITE_COALESCE_BYTES,
+    DEFAULT_WRITE_COALESCE_COUNT,
+    DEFAULT_WRITE_COALESCE_WINDOW_S,
+    Engine,
+    EngineOptions,
+    SubscribeResult,
+    SubscriptionRegistry,
+)
 from .errors import (
     BrokenPipeError,
     DisconnectionError,
@@ -95,9 +103,49 @@ class ClientOptions:
     supervise_subscriptions: bool = True
     subscription_supervise_interval_ms: int = 1_000
     tls: Optional[TlsOptions] = None
+    #: Fire-and-forget writes (unconfirmed publishes) coalesce into one socket
+    #: write, flushed on whichever comes first: these many buffered bytes, this
+    #: many buffered frames, or ``write_coalesce_window_ms`` since the last flush.
+    #: Tune with :meth:`with_write_coalescing`.
+    write_coalesce_bytes: int = DEFAULT_WRITE_COALESCE_BYTES
+    write_coalesce_count: int = DEFAULT_WRITE_COALESCE_COUNT
+    write_coalesce_window_ms: float = DEFAULT_WRITE_COALESCE_WINDOW_S * 1000
 
     def with_auth(self, username: str, password: str) -> "ClientOptions":
         return replace(self, auth=wire.Auth(username=username, password=password))
+
+    def with_write_coalescing(
+        self,
+        *,
+        max_bytes: Optional[int] = None,
+        max_frames: Optional[int] = None,
+        window_ms: Optional[float] = None,
+    ) -> "ClientOptions":
+        """Tune coalescing of fire-and-forget writes (unconfirmed publishes).
+
+        Such frames are buffered and sent in one socket write, flushed on
+        whichever limit is reached first: ``max_bytes`` buffered, ``max_frames``
+        buffered, or ``window_ms`` since the last flush. Reply-bearing frames
+        (confirmed publishes, acks, requests) always flush immediately. Larger
+        limits trade a little latency for fewer syscalls. The defaults already sit
+        at the throughput plateau, so this is mainly for tightening latency or
+        memory, or disabling coalescing (``max_frames=1``). Only the limits you
+        pass change.
+        """
+        result = self
+        if max_bytes is not None:
+            if max_bytes < 1:
+                raise ValueError("max_bytes must be >= 1")
+            result = replace(result, write_coalesce_bytes=max_bytes)
+        if max_frames is not None:
+            if max_frames < 1:
+                raise ValueError("max_frames must be >= 1")
+            result = replace(result, write_coalesce_count=max_frames)
+        if window_ms is not None:
+            if window_ms < 0:
+                raise ValueError("window_ms must be >= 0")
+            result = replace(result, write_coalesce_window_ms=window_ms)
+        return result
 
     def with_tls(self) -> "ClientOptions":
         """TLS with the OS trust store, for publicly issued broker certificates."""
@@ -152,6 +200,9 @@ class ClientOptions:
             resume_identity=resume_identity if resume_identity is not None else self.resume_identity,
             reconnect_reconcile_policy=self.reconnect_reconcile_policy,
             heartbeat_interval_seconds=self.heartbeat_interval_seconds,
+            write_coalesce_bytes=self.write_coalesce_bytes,
+            write_coalesce_count=self.write_coalesce_count,
+            write_coalesce_window_s=self.write_coalesce_window_ms / 1000,
         )
 
     async def connect(self, address: Address) -> "Client":

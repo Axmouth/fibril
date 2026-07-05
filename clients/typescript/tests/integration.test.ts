@@ -2033,6 +2033,21 @@ async function waitUntil(cond: () => boolean, timeoutMs = 1000): Promise<void> {
   }
 }
 
+test("withWriteCoalescing sets only the passed limits and validates", () => {
+  const base = new ClientOptions();
+  const tuned = base.withWriteCoalescing({ maxBytes: 4096, maxFrames: 8, windowMs: 2 });
+  assert.equal(tuned.writeCoalesceBytes, 4096);
+  assert.equal(tuned.writeCoalesceCount, 8);
+  assert.equal(tuned.writeCoalesceWindowMs, 2);
+  // Only the passed limit changes; the rest keep their defaults.
+  const onlyFrames = base.withWriteCoalescing({ maxFrames: 1 });
+  assert.equal(onlyFrames.writeCoalesceCount, 1);
+  assert.equal(onlyFrames.writeCoalesceBytes, base.writeCoalesceBytes);
+  assert.throws(() => base.withWriteCoalescing({ maxBytes: 0 }));
+  assert.throws(() => base.withWriteCoalescing({ maxFrames: 0 }));
+  assert.throws(() => base.withWriteCoalescing({ windowMs: -1 }));
+});
+
 test("buffered unconfirmed publishes all deliver in order", async () => {
   const broker = new FakeBroker();
   await broker.start();
