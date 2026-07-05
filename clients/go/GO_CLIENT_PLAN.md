@@ -58,12 +58,12 @@ Go-specific decisions.
    Publish/PublishConfirmed (routed + redirect-follow), Subscribe (routed +
    redirect-follow), DeclareQueue, FetchTopology, Shutdown; deliveries settle via
    the delivery (it carries its engine). Now also: **multi-partition fan-in**
-   (`SubscribeTopic`, merges all partitions) and **bootstrap reconnect/resume**
-   (reconnects on op with the resume identity; publish/subscribe retry on
-   transient). Race-clean tests (redirect, FNV routing, fan-in, reconnect via a
-   real TCP fake broker) + live via `examples/smoke`. **TODO**: topology-push
-   handling, supervised (failover) subscriptions (re-subscribe a dropped
-   partition).
+   (`SubscribeTopic`, supervised per partition), **bootstrap reconnect/resume**,
+   **topology-push handling** (applies broker TopologyUpdate + acks the
+   generation), and **supervised subscriptions** (`SuperviseSubscribe` re-attaches
+   across owner failover on a stable channel). Race-clean tests (redirect, FNV
+   routing, fan-in, reconnect + failover via real-TCP fake brokers, topology push)
+   + live via `examples/smoke`. **TODO**: per-sub Unsubscribe.
 6. `publisher.go` / `subscription.go` / `message.go` - ergonomic handles
    (reliable publisher, message encode/decode). TODO.
 
