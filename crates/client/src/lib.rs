@@ -2396,7 +2396,7 @@ impl Publisher {
     /// This is the common path. It only waits for the command to be accepted by
     /// the local engine. Use [`publish_confirmed`](Self::publish_confirmed)
     /// when you need the broker-assigned offset.
-    #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
+    #[tracing::instrument(level = "trace", skip(payload), fields(topic = %self.topic))]
     pub async fn publish<T: Publishable>(&self, payload: T) -> FibrilResult<()> {
         let message = payload.into_message()?;
         let topic = self.topic.as_str();
@@ -2484,7 +2484,7 @@ impl Publisher {
     /// Publish and wait for broker confirmation.
     ///
     /// Resolves with the broker-assigned topic offset.
-    #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
+    #[tracing::instrument(level = "trace", skip(payload), fields(topic = %self.topic))]
     pub async fn publish_confirmed<T: Publishable>(&self, payload: T) -> FibrilResult<u64> {
         let message = payload.into_message()?;
         let topic = self.topic.as_str();
@@ -2544,7 +2544,7 @@ impl Publisher {
     /// NOT retried here - re-sending an already-accepted message risks a duplicate
     /// and a reorder under the confirm window, so that is left to the caller (a
     /// future idempotent-producer feature).
-    #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
+    #[tracing::instrument(level = "trace", skip(payload), fields(topic = %self.topic))]
     pub async fn publish_with_confirmation<T: Publishable>(
         &self,
         payload: T,
@@ -2592,7 +2592,7 @@ impl Publisher {
     ///
     /// Numeric Rust delays are seconds; use [`std::time::Duration`] for
     /// explicit units.
-    #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
+    #[tracing::instrument(level = "trace", skip(payload), fields(topic = %self.topic))]
     pub async fn publish_delayed<T: Publishable, D: Delayable + Debug>(
         &self,
         payload: T,
@@ -2628,7 +2628,7 @@ impl Publisher {
     ///
     /// Resolves with the broker-assigned topic offset. Numeric Rust delays are
     /// seconds; use [`std::time::Duration`] for explicit units.
-    #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
+    #[tracing::instrument(level = "trace", skip(payload), fields(topic = %self.topic))]
     pub async fn publish_delayed_confirmed<T: Publishable, D: Delayable + Debug>(
         &self,
         payload: T,
@@ -2644,7 +2644,7 @@ impl Publisher {
     ///
     /// Numeric Rust delays are seconds; use [`std::time::Duration`] for
     /// explicit units.
-    #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
+    #[tracing::instrument(level = "trace", skip(payload), fields(topic = %self.topic))]
     pub async fn publish_delayed_with_confirmation<T: Publishable, D: Delayable + Debug>(
         &self,
         payload: T,
