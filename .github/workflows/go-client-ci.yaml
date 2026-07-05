@@ -73,7 +73,10 @@ jobs:
       - name: Start broker container
         run: |
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/fibril-server:main"
-          docker run -d --name fibril-server -p 9876:9876 -p 8081:8081 "$image"
+          # Host networking so the client connects over real loopback. The broker
+          # only accepts password auth from a loopback peer (cleartext), and
+          # Docker port-mapping would make the connection non-loopback and 401.
+          docker run -d --name fibril-server --network host "$image"
 
       - name: Wait for broker health
         run: |
