@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"syscall"
 )
 
 // TLSOptions configures a TLS connection to the broker.
@@ -38,6 +39,11 @@ func dial(addr string, opts *TLSOptions) (net.Conn, error) {
 	if opts == nil {
 		conn, err := net.Dial("tcp", addr)
 		if err != nil {
+			if errors.Is(err, syscall.ECONNREFUSED) {
+				return nil, &DisconnectionError{Message: "connection refused by " + addr +
+					". Is the broker running and reachable there? Clients connect to the broker port " +
+					"(default 9876), not the admin API or dashboard port (default 8081)"}
+			}
 			return nil, &DisconnectionError{Message: "failed to connect to " + addr + ": " + err.Error()}
 		}
 		return conn, nil

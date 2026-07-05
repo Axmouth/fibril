@@ -22,6 +22,13 @@ import (
 
 const defaultHeartbeatInterval = 5 * time.Second
 
+// heartbeatTimeoutMessage carries the shared client-local guide wording (see
+// clients/error_guides.json): a stalled connection, its likely cause, and that a
+// reconnect will be attempted.
+const heartbeatTimeoutMessage = "heartbeat timeout: no response from the broker within the timeout window. " +
+	"This usually means a network stall or an overloaded or stopped broker rather than a client bug. " +
+	"The client will attempt to reconnect if auto-reconnect is enabled."
+
 // The run goroutine buffers outgoing frames and flushes once per batch, so a
 // burst of fire-and-forget writes (unconfirmed publishes, acks) coalesces into
 // far fewer socket writes. writeBufSize caps a single flush; maxWriteBatch caps
@@ -449,7 +456,7 @@ func (e *Engine) tick() {
 		return
 	}
 	if time.Since(e.lastSeen) > 3*e.opts.HeartbeatInterval {
-		e.markDead(&DisconnectionError{Message: "heartbeat timeout: no response from the broker"})
+		e.markDead(&DisconnectionError{Message: heartbeatTimeoutMessage})
 		return
 	}
 	e.nextID++
