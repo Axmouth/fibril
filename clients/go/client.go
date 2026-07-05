@@ -45,14 +45,24 @@ func (o ClientOptions) engineOptions() EngineOptions {
 type Client struct {
 	opts              ClientOptions
 	bootstrapEndpoint string
-	bootstrap         *Engine
 	topo              *topologyCache
+
+	bootstrapMu sync.Mutex // guards bootstrap (reassigned on reconnect)
+	bootstrap   *Engine
 
 	poolMu sync.Mutex
 	pool   map[string]*Engine
 
 	rr     atomic.Uint64 // round-robin cursor for keyless publishes
 	closed atomic.Bool
+}
+
+// isTransient reports whether err is a transient transport failure worth
+// reconnecting and retrying (a severed or shut-down connection).
+func isTransient(err error) bool {
+	var d *DisconnectionError
+	var b *BrokenPipeError
+	return errors.As(err, &d) || errors.As(err, &b)
 }
 
 // Dial connects to a broker at addr and returns a cluster client. addr is the
@@ -188,11 +198,34 @@ func (c *Client) partitionFor(topic string, group *string, key []byte) uint32 {
 	return uint32(c.rr.Add(1) % uint64(pc))
 }
 
+// bootstrapEngine returns a live bootstrap engine, reconnecting it (offering the
+// previous session's resume identity) if the connection has dropped. Serialized
+// so concurrent callers reconnect once.
+func (c *Client) bootstrapEngine() (*Engine, error) {
+	c.bootstrapMu.Lock()
+	defer c.bootstrapMu.Unlock()
+	if !c.bootstrap.IsClosed() {
+		return c.bootstrap, nil
+	}
+	if c.closed.Load() {
+		return nil, &BrokenPipeError{Message: "client shut down"}
+	}
+	opts := c.opts.engineOptions()
+	resume := c.bootstrap.ResumeIdentity
+	opts.Resume = &resume
+	ne, err := Connect(c.bootstrapEndpoint, opts)
+	if err != nil {
+		return nil, err
+	}
+	c.bootstrap = ne
+	return ne, nil
+}
+
 // engineFor returns the engine for an endpoint, opening and pooling one if
-// needed. An empty or bootstrap endpoint uses the bootstrap connection.
+// needed. An empty or bootstrap endpoint uses the (reconnecting) bootstrap.
 func (c *Client) engineFor(endpoint string) (*Engine, error) {
 	if endpoint == "" || endpoint == c.bootstrapEndpoint {
-		return c.bootstrap, nil
+		return c.bootstrapEngine()
 	}
 	c.poolMu.Lock()
 	if e, ok := c.pool[endpoint]; ok && !e.IsClosed() {
@@ -223,11 +256,20 @@ func (c *Client) engineFor(endpoint string) (*Engine, error) {
 // PartitionKey drive routing; Partition is set by the client.
 func (c *Client) Publish(p Publish) error {
 	p.Partition = c.partitionFor(p.Topic, p.Group, p.PartitionKey)
-	eng, err := c.engineFor(c.topo.ownerOf(p.Topic, p.Partition, p.Group))
-	if err != nil {
-		return err
+	for attempt := 0; attempt <= c.opts.MaxRedirects; attempt++ {
+		eng, err := c.engineFor(c.topo.ownerOf(p.Topic, p.Partition, p.Group))
+		if err != nil {
+			return err
+		}
+		if err = eng.PublishUnconfirmed(p); err == nil {
+			return nil
+		} else if isTransient(err) {
+			continue
+		} else {
+			return err
+		}
 	}
-	return eng.PublishUnconfirmed(p)
+	return &DisconnectionError{Message: "gave up publishing after reconnect attempts"}
 }
 
 // PublishConfirmed routes and sends a confirmed publish, following owner
@@ -248,9 +290,12 @@ func (c *Client) PublishConfirmed(p Publish) (uint64, error) {
 			c.topo.applyRedirect(re.Redirect)
 			continue
 		}
+		if isTransient(err) {
+			continue // engineFor reconnects on the next attempt
+		}
 		return 0, err
 	}
-	return 0, &DisconnectionError{Message: "too many redirects following the publish owner"}
+	return 0, &DisconnectionError{Message: "gave up after too many redirect/reconnect attempts on publish"}
 }
 
 // ---- subscribe ---------------------------------------------------------
@@ -272,27 +317,50 @@ func (c *Client) Subscribe(req Subscribe) (*Subscription, error) {
 			c.topo.applyRedirect(re.Redirect)
 			continue
 		}
+		if isTransient(err) {
+			continue // engineFor reconnects on the next attempt
+		}
 		return nil, err
 	}
-	return nil, &DisconnectionError{Message: "too many redirects following the subscribe owner"}
+	return nil, &DisconnectionError{Message: "gave up after too many redirect/reconnect attempts on subscribe"}
 }
 
 // ---- cluster ops -------------------------------------------------------
 
 // DeclareQueue declares a queue (a cluster op, handled on the bootstrap
-// connection).
+// connection), reconnecting once on a transient failure.
 func (c *Client) DeclareQueue(d DeclareQueue) (DeclareQueueOk, error) {
-	return c.bootstrap.DeclareQueue(d)
+	for attempt := 0; attempt < 2; attempt++ {
+		eng, err := c.bootstrapEngine()
+		if err != nil {
+			return DeclareQueueOk{}, err
+		}
+		ok, err := eng.DeclareQueue(d)
+		if err == nil || !isTransient(err) {
+			return ok, err
+		}
+	}
+	return DeclareQueueOk{}, &DisconnectionError{Message: "declare failed after reconnect"}
 }
 
-// FetchTopology fetches the topology and warms the routing cache.
+// FetchTopology fetches the topology and warms the routing cache, reconnecting
+// once on a transient failure.
 func (c *Client) FetchTopology(req TopologyRequest) (TopologyOk, error) {
-	topo, err := c.bootstrap.FetchTopology(req)
-	if err != nil {
-		return TopologyOk{}, err
+	for attempt := 0; attempt < 2; attempt++ {
+		eng, err := c.bootstrapEngine()
+		if err != nil {
+			return TopologyOk{}, err
+		}
+		topo, err := eng.FetchTopology(req)
+		if err == nil {
+			c.topo.replace(topo)
+			return topo, nil
+		}
+		if !isTransient(err) {
+			return TopologyOk{}, err
+		}
 	}
-	c.topo.replace(topo)
-	return topo, nil
+	return TopologyOk{}, &DisconnectionError{Message: "topology fetch failed after reconnect"}
 }
 
 // Shutdown closes the bootstrap connection and every pooled connection.
@@ -300,7 +368,9 @@ func (c *Client) Shutdown() {
 	if c.closed.Swap(true) {
 		return
 	}
+	c.bootstrapMu.Lock()
 	c.bootstrap.Shutdown()
+	c.bootstrapMu.Unlock()
 	c.poolMu.Lock()
 	for endpoint, e := range c.pool {
 		e.Shutdown()

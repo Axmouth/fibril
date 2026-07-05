@@ -1,0 +1,86 @@
+package fibril
+
+import (
+	"bufio"
+	"net"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// TestClientReconnectsBootstrap drives a real TCP fake broker that drops the
+// connection after the first publish; the client must reconnect (re-dialing,
+// offering its resume identity) and the next publish must succeed on the new
+// connection.
+func TestClientReconnectsBootstrap(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	var conns atomic.Int32
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			n := conns.Add(1)
+			go serveOneConn(conn, n)
+		}
+	}()
+
+	c, err := Dial(ln.Addr().String(), ClientOptions{ClientName: "go-test", HeartbeatInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Shutdown()
+
+	off1, err := c.PublishConfirmed(Publish{Topic: "t", Payload: []byte("a")})
+	if err != nil {
+		t.Fatalf("first publish: %v", err)
+	}
+	if off1 != 1 {
+		t.Errorf("first offset = %d, want 1 (connection 1)", off1)
+	}
+
+	// The broker dropped connection 1 after that publish. The next publish must
+	// transparently reconnect and land on connection 2.
+	off2, err := c.PublishConfirmed(Publish{Topic: "t", Payload: []byte("b")})
+	if err != nil {
+		t.Fatalf("second publish (after reconnect): %v", err)
+	}
+	if off2 != 2 {
+		t.Errorf("second offset = %d, want 2 (connection 2)", off2)
+	}
+	if n := conns.Load(); n != 2 {
+		t.Errorf("broker accepted %d connections, want 2", n)
+	}
+}
+
+// serveOneConn answers HELLO and PUBLISH. Connection 1 drops right after its
+// first publish reply, to force a reconnect. The publish offset echoes the
+// connection number so the test can tell them apart.
+func serveOneConn(conn net.Conn, n int32) {
+	defer conn.Close()
+	br := bufio.NewReader(conn)
+	for {
+		f, err := readFrame(br)
+		if err != nil {
+			return
+		}
+		switch f.Opcode {
+		case OpHello:
+			ok := HelloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, Compliance: ComplianceString}
+			_, _ = conn.Write(EncodeFrame(BuildFrame(OpHelloOk, f.RequestID, EncodeHelloOk(ok))))
+		case OpPublish:
+			_, _ = conn.Write(EncodeFrame(BuildFrame(OpPublishOk, f.RequestID, EncodePublishOk(PublishOk{Offset: uint64(n)}))))
+			if n == 1 {
+				return // drop connection 1 to force a reconnect
+			}
+		case OpPing:
+			_, _ = conn.Write(EncodeFrame(BuildFrame(OpPong, f.RequestID, nil)))
+		}
+	}
+}
