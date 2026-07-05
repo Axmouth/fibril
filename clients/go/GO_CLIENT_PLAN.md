@@ -38,7 +38,9 @@ Go-specific decisions.
    ack/nack, subscribe(+ok), deliver, declare queue/plexus(+ok), topology
    (ok/req/update/ack), reconcile_client, redirect, assignment, going_away,
    subscribe_stream). `wire_test.go` also guards that every vector has a case.
-3. `codec.go` - 20-byte frame header + TCP stream framing. TODO.
+3. `codec.go` - 20-byte frame header + opcode table + buffer-level
+   `TryDecodeFrame`. **DONE** (`codec_test.go`: byte layout, round-trip,
+   partial/back-to-back framing).
 4. `engine.go` - one connection: handshake/auth/heartbeat, request-id->reply
    channel, per-subscription delivery, read/write goroutines. TODO.
 5. `client.go` - pool keyed by host:port, topology cache, partition routing,
