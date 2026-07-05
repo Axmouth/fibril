@@ -29,6 +29,11 @@ type EngineOptions struct {
 	Auth              *Auth
 	HeartbeatInterval time.Duration
 	Resume            *ResumeIdentity
+	// OnTopologyUpdate, if set, is called on the run goroutine for each broker
+	// topology push; it applies the snapshot and returns the generation the
+	// client now reflects, which the engine acks so the broker can fence a
+	// repartition cutover.
+	OnTopologyUpdate func(TopologyOk) uint64
 }
 
 // command is a request from a public method to the run goroutine: send op(body),
@@ -347,6 +352,15 @@ func (e *Engine) handleFrame(f Frame) {
 		e.handleSubscribeOk(f)
 	case OpDeliver:
 		e.handleDeliver(f)
+	case OpTopologyUpdate:
+		// Unsolicited routing refresh. Apply it and ack the generation now
+		// reflected so the broker can fence a repartition cutover.
+		if e.opts.OnTopologyUpdate != nil {
+			if topo, err := DecodeTopologyUpdate(f.Payload); err == nil {
+				gen := e.opts.OnTopologyUpdate(topo)
+				_ = e.write(BuildFrame(OpTopologyUpdateAck, f.RequestID, EncodeTopologyUpdateAck(TopologyUpdateAck{Generation: gen})))
+			}
+		}
 	case OpRedirect:
 		// The broker routed us to a different owner. Fail the waiter with a typed
 		// redirect the client layer acts on; not fatal to the connection.

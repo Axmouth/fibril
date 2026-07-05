@@ -71,17 +71,28 @@ func Dial(addr string, opts ClientOptions) (*Client, error) {
 	if opts.MaxRedirects <= 0 {
 		opts.MaxRedirects = defaultMaxRedirects
 	}
-	boot, err := Connect(addr, opts.engineOptions())
+	// Build the client (and its cache) first, so the engine's topology-push
+	// callback can point at the cache before the bootstrap connection starts.
+	c := &Client{
+		opts:              opts,
+		bootstrapEndpoint: addr,
+		topo:              newTopologyCache(),
+		pool:              make(map[string]*Engine),
+	}
+	boot, err := Connect(addr, c.engineOpts())
 	if err != nil {
 		return nil, err
 	}
-	return &Client{
-		opts:              opts,
-		bootstrapEndpoint: addr,
-		bootstrap:         boot,
-		topo:              newTopologyCache(),
-		pool:              make(map[string]*Engine),
-	}, nil
+	c.bootstrap = boot
+	return c, nil
+}
+
+// engineOpts is the per-engine options the client opens connections with,
+// including the topology-push callback that keeps the routing cache warm.
+func (c *Client) engineOpts() EngineOptions {
+	o := c.opts.engineOptions()
+	o.OnTopologyUpdate = c.topo.applyPush
+	return o
 }
 
 // newClientWith builds a client around an already-connected bootstrap engine,
@@ -157,6 +168,15 @@ func (t *topologyCache) replace(topo TopologyOk) {
 	}
 }
 
+// applyPush installs a broker-pushed snapshot and returns the generation the
+// cache now reflects (for the ack). Signature matches EngineOptions.OnTopologyUpdate.
+func (t *topologyCache) applyPush(topo TopologyOk) uint64 {
+	t.replace(topo)
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.generation
+}
+
 func (t *topologyCache) applyRedirect(rd Redirect) {
 	if len(rd.OwnerEndpoints) == 0 {
 		return
@@ -210,7 +230,7 @@ func (c *Client) bootstrapEngine() (*Engine, error) {
 	if c.closed.Load() {
 		return nil, &BrokenPipeError{Message: "client shut down"}
 	}
-	opts := c.opts.engineOptions()
+	opts := c.engineOpts()
 	resume := c.bootstrap.ResumeIdentity
 	opts.Resume = &resume
 	ne, err := Connect(c.bootstrapEndpoint, opts)
@@ -235,7 +255,7 @@ func (c *Client) engineFor(endpoint string) (*Engine, error) {
 	c.poolMu.Unlock()
 
 	// Dial outside the lock so a slow connect does not block other routing.
-	ne, err := Connect(endpoint, c.opts.engineOptions())
+	ne, err := Connect(endpoint, c.engineOpts())
 	if err != nil {
 		return nil, err
 	}
