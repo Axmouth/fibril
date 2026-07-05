@@ -116,6 +116,18 @@ const HANDSHAKE_REQUEST_ID = 1n;
 const AUTH_REQUEST_ID = 2n;
 const RECONCILE_REQUEST_ID = 3n;
 
+// Coalesce fire-and-forget writes and flush in one socket write. Node does one
+// write syscall per socket.write, so an unconfirmed-publish burst is otherwise
+// one syscall per message. Three triggers flush the buffer, whichever comes
+// first: a byte cap, a frame-count cap, and a short time window. Reply-bearing
+// and control frames flush immediately, so coalescing only ever delays
+// fire-and-forget frames, and never past the window. Mirrors the Python client;
+// see its engine.py for the sizing rationale (memory/latency ceiling, not a
+// throughput knob).
+const WRITE_COALESCE_BYTES = 128 * 1024;
+const WRITE_COALESCE_COUNT = 128;
+const WRITE_COALESCE_WINDOW_MS = 0.5;
+
 export interface RegisteredSubscription {
   reconcile: ReconcileSubscription;
   delivery: SubDelivery;
@@ -489,25 +501,107 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
     // Record the terminal reason before the socket is destroyed, so the
     // reconnect gate can read it the instant isClosed() flips.
     closeReason.reason = fatalError;
+    // Drop any buffered fire-and-forget frames the dead socket can't take.
+    cancelScheduledFlush();
+    pending = [];
+    pendingBytes = 0;
+    pendingCount = 0;
     // Unblock command consumer.
     commandQueue.close(err);
     // Unblock frame producer.
     if (!socket.destroyed) socket.destroy();
   };
 
+  // ---- write coalescing (shared by the command and frame tasks) ----
+  // Both tasks append to one pending buffer, so global write order is preserved
+  // even when a reply-bearing frame from one task flushes fire-and-forget frames
+  // buffered by the other. A single in-flight flush drains the buffer (awaiting
+  // socket drain for backpressure) and never overlaps itself.
+  let pending: Uint8Array[] = [];
+  let pendingBytes = 0;
+  let pendingCount = 0;
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+  let flushInFlight: Promise<void> | null = null;
+  // Window measured from the last flush, not the first buffered frame, so a lone
+  // low-rate frame after an idle stretch flushes promptly. Seeded in the past so
+  // the first frame flushes promptly too.
+  let lastFlush = 0;
+
+  const cancelScheduledFlush = (): void => {
+    if (flushTimer !== null) {
+      clearTimeout(flushTimer);
+      flushTimer = null;
+    }
+  };
+
+  const takePending = (): Uint8Array => {
+    const data = concatChunks(pending, pendingBytes);
+    pending = [];
+    pendingBytes = 0;
+    pendingCount = 0;
+    lastFlush = performance.now();
+    return data;
+  };
+
+  // Drain the buffer to the socket, awaiting drain between writes so a slow
+  // consumer applies backpressure. Only one runs at a time; concurrent callers
+  // await the same in-flight flush, which keeps going while frames remain.
+  const flush = (): Promise<void> => {
+    if (flushInFlight) return flushInFlight;
+    cancelScheduledFlush();
+    flushInFlight = (async () => {
+      try {
+        while (!socketDead && pending.length > 0) {
+          await writeBytes(socket, takePending());
+        }
+      } catch (err) {
+        markDead(
+          new DisconnectionError(`Socket write failed: ${(err as Error).message}`),
+        );
+      } finally {
+        flushInFlight = null;
+      }
+    })();
+    return flushInFlight;
+  };
+
+  const scheduleFlush = (): void => {
+    if (flushTimer !== null || flushInFlight !== null || socketDead) return;
+    const delayMs = Math.max(0, lastFlush + WRITE_COALESCE_WINDOW_MS - performance.now());
+    flushTimer = setTimeout(() => {
+      flushTimer = null;
+      void flush();
+    }, delayMs);
+  };
+
+  const bufferFrame = (frame: Frame): void => {
+    const bytes = encodeFrame(frame);
+    pending.push(bytes);
+    pendingBytes += bytes.byteLength;
+    pendingCount += 1;
+  };
+
+  // Reply-bearing and control frames flush immediately, in order behind any
+  // buffered fire-and-forget frames, because a reply is about to be awaited.
   const sendOrDie = async (frame: Frame): Promise<boolean> => {
     if (socketDead) return false;
-    try {
-      await writeFrame(socket, frame);
-      return true;
-    } catch (err) {
-      markDead(
-        new DisconnectionError(
-          `Socket write failed: ${(err as Error).message}`,
-        ),
-      );
-      return false;
+    bufferFrame(frame);
+    await flush();
+    return !socketDead;
+  };
+
+  // Fire-and-forget frames coalesce: buffer, and flush only on a cap (which also
+  // applies backpressure), else leave it to the window. A saturating publish loop
+  // keeps the queue near empty, so the window is what batches the send syscalls.
+  const sendBuffered = async (frame: Frame): Promise<boolean> => {
+    if (socketDead) return false;
+    bufferFrame(frame);
+    if (pendingBytes >= WRITE_COALESCE_BYTES || pendingCount >= WRITE_COALESCE_COUNT) {
+      await flush();
+    } else {
+      scheduleFlush();
     }
+    return !socketDead;
   };
 
   // ---- heartbeat ----
@@ -585,7 +679,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
           published: cmd.published,
           ttl_ms: cmd.ttl_ms,
         };
-        await sendOrDie(buildFrame(Op.Publish, reqId, msg));
+        await sendBuffered(buildFrame(Op.Publish, reqId, msg));
         return;
       }
       case "publishConfirmed": {
@@ -624,7 +718,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
           payload: cmd.payload,
           published: cmd.published,
         };
-        await sendOrDie(buildFrame(Op.PublishDelayed, reqId, msg));
+        await sendBuffered(buildFrame(Op.PublishDelayed, reqId, msg));
         return;
       }
       case "publishDelayedConfirmed": {
@@ -1085,7 +1179,10 @@ function failWaiter(w: Waiter, err: FibrilError): void {
 }
 
 function writeFrame(socket: Socket, frame: Frame): Promise<void> {
-  const bytes = encodeFrame(frame);
+  return writeBytes(socket, encodeFrame(frame));
+}
+
+function writeBytes(socket: Socket, bytes: Uint8Array): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const ok = socket.write(bytes, (err) => {
       if (err) reject(err);
@@ -1098,6 +1195,17 @@ function writeFrame(socket: Socket, frame: Frame): Promise<void> {
       socket.once("drain", resolve);
     }
   });
+}
+
+function concatChunks(chunks: Uint8Array[], totalBytes: number): Uint8Array {
+  if (chunks.length === 1) return chunks[0]!;
+  const out = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.byteLength;
+  }
+  return out;
 }
 
 async function nextFrameOrEof(

@@ -2033,6 +2033,39 @@ async function waitUntil(cond: () => boolean, timeoutMs = 1000): Promise<void> {
   }
 }
 
+test("buffered unconfirmed publishes all deliver in order", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      }
+    };
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    const pub = client.publisher("jobs");
+    // A burst of fire-and-forget publishes is coalesced into far fewer socket
+    // writes. Every frame must still reach the broker, in order, none dropped.
+    const n = 200;
+    for (let i = 0; i < n; i++) {
+      await pub.publish(NewMessage.raw(new Uint8Array([i & 0xff])));
+    }
+    await waitUntil(
+      () => broker.received.filter((f) => f.opcode === Op.Publish).length >= n,
+    );
+    const payloads = broker.received
+      .filter((f) => f.opcode === Op.Publish)
+      .map((f) => Uint8Array.from(decodeFrameBody<PublishMsg>(f).payload));
+    assert.equal(payloads.length, n);
+    for (let i = 0; i < n; i++) {
+      assert.deepEqual(payloads[i], new Uint8Array([i & 0xff]));
+    }
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
 test("non-retryable connection error surfaces without reconnect", async () => {
   const broker = new FakeBroker();
   await broker.start();
