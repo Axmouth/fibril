@@ -33,6 +33,8 @@ type ClientOptions struct {
 	// SuperviseBackoff is the pause between re-subscribe attempts after a drop in
 	// a supervised subscription (0 uses a sensible default).
 	SuperviseBackoff time.Duration
+	// TLS, if set, connects over TLS with these trust settings; nil is plaintext.
+	TLS *TLSOptions
 }
 
 func (o ClientOptions) engineOptions() EngineOptions {
@@ -41,6 +43,7 @@ func (o ClientOptions) engineOptions() EngineOptions {
 		ClientVersion:     o.ClientVersion,
 		Auth:              o.Auth,
 		HeartbeatInterval: o.HeartbeatInterval,
+		TLS:               o.TLS,
 	}
 }
 

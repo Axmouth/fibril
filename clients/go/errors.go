@@ -53,6 +53,44 @@ type DeserializationError struct {
 
 func (e *DeserializationError) Error() string { return e.Message }
 
+// errTLSRequired is the broker error code for a plaintext connection to a TLS
+// listener: the broker replies with it before closing, so the mismatch is
+// definitive.
+const errTLSRequired = 426
+
+// TlsRequiredByBrokerError means the broker requires TLS but this client
+// connected plaintext. Reported by the broker itself, so it is definitive.
+type TlsRequiredByBrokerError struct{}
+
+func (e *TlsRequiredByBrokerError) Error() string {
+	return "the broker requires TLS: set ClientOptions.TLS (trust a CA file, pin a fingerprint, or use the OS roots)"
+}
+
+// TlsCertificateUntrustedError means the broker certificate failed verification
+// (chain or pin). A trust-configuration problem, distinct from a transport error.
+type TlsCertificateUntrustedError struct {
+	Detail string
+}
+
+func (e *TlsCertificateUntrustedError) Error() string {
+	return "broker certificate verification failed: " + e.Detail
+}
+
+// TlsConfigError is a client-side TLS configuration problem: an unreadable CA
+// file, a malformed fingerprint, or missing client-cert material.
+type TlsConfigError struct {
+	Message string
+}
+
+func (e *TlsConfigError) Error() string { return e.Message }
+
+// TlsHandshakeError is any other TLS handshake failure.
+type TlsHandshakeError struct {
+	Message string
+}
+
+func (e *TlsHandshakeError) Error() string { return e.Message }
+
 // RedirectError means the broker told the client to retry this op against a
 // different owner. It is not a failure: the routing layer applies the target and
 // retries, so the per-connection engine surfaces it as this typed error.

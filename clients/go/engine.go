@@ -29,6 +29,9 @@ type EngineOptions struct {
 	Auth              *Auth
 	HeartbeatInterval time.Duration
 	Resume            *ResumeIdentity
+	// TLS, if set, connects over TLS with these trust settings; nil connects
+	// plaintext.
+	TLS *TLSOptions
 	// OnTopologyUpdate, if set, is called on the run goroutine for each broker
 	// topology push; it applies the snapshot and returns the generation the
 	// client now reflects, which the engine acks so the broker can fence a
@@ -111,9 +114,9 @@ type Engine struct {
 // Connect dials addr and performs the handshake (and optional auth), returning a
 // ready engine.
 func Connect(addr string, opts EngineOptions) (*Engine, error) {
-	conn, err := net.Dial("tcp", addr)
+	conn, err := dial(addr, opts.TLS)
 	if err != nil {
-		return nil, &DisconnectionError{Message: "failed to connect to " + addr + ": " + err.Error()}
+		return nil, err
 	}
 	e, err := startEngine(conn, opts)
 	if err != nil {
@@ -150,6 +153,10 @@ func startEngine(conn net.Conn, opts EngineOptions) (*Engine, error) {
 	case OpHelloOk:
 	case OpHelloErr, OpError:
 		em, _ := DecodeError(hf.Payload)
+		// A plaintext connection to a TLS listener draws this definitive code.
+		if em.Code == errTLSRequired {
+			return nil, &TlsRequiredByBrokerError{}
+		}
 		return nil, &ServerError{Code: em.Code, Message: em.Message}
 	default:
 		return nil, &UnexpectedError{Message: "unexpected frame during HELLO"}
