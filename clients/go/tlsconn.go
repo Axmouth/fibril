@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -132,6 +133,12 @@ func classifyTLSDialError(err error, addr string) error {
 	var hostnameErr x509.HostnameError
 	if errors.As(err, &unknownAuthority) || errors.As(err, &invalidCert) || errors.As(err, &hostnameErr) {
 		return &TlsCertificateUntrustedError{Detail: err.Error()}
+	}
+	// A handshake that ends early, or non-TLS bytes where the ServerHello should
+	// be, means the broker listener is almost certainly speaking plaintext.
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		strings.Contains(err.Error(), "first record does not look like a TLS handshake") {
+		return &TlsNotSupportedByBrokerError{Addr: addr}
 	}
 	return &TlsHandshakeError{Message: "TLS handshake with " + addr + " failed: " + err.Error()}
 }

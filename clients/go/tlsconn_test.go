@@ -113,3 +113,35 @@ func TestTLSBadFingerprintIsConfigError(t *testing.T) {
 		t.Errorf("error = %T, want *TlsConfigError", err)
 	}
 }
+
+func TestTLSAgainstPlaintextBrokerIsNotSupported(t *testing.T) {
+	// A plaintext TCP listener that accepts and closes: the TLS handshake ends
+	// before completing.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+
+	_, err = Connect(ln.Addr().String(), EngineOptions{
+		ClientName:        "go-test",
+		HeartbeatInterval: time.Hour,
+		TLS:               &TLSOptions{},
+	})
+	if err == nil {
+		t.Fatal("expected an error dialing TLS to a plaintext broker")
+	}
+	var notSupported *TlsNotSupportedByBrokerError
+	if !errors.As(err, &notSupported) {
+		t.Errorf("error = %T (%v), want *TlsNotSupportedByBrokerError", err, err)
+	}
+}

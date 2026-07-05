@@ -87,6 +87,17 @@ type TlsConfigError struct {
 
 func (e *TlsConfigError) Error() string { return e.Message }
 
+// TlsNotSupportedByBrokerError means TLS is enabled on the client but the
+// handshake ended before completing, which usually means the broker listener
+// speaks plaintext.
+type TlsNotSupportedByBrokerError struct {
+	Addr string
+}
+
+func (e *TlsNotSupportedByBrokerError) Error() string {
+	return "TLS handshake with " + e.Addr + " ended early, the broker listener is probably plaintext. Disable TLS in the client options, or enable TLS on the broker"
+}
+
 // TlsHandshakeError is any other TLS handshake failure.
 type TlsHandshakeError struct {
 	Message string
