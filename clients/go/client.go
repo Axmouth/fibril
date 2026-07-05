@@ -35,15 +35,19 @@ type ClientOptions struct {
 	SuperviseBackoff time.Duration
 	// TLS, if set, connects over TLS with these trust settings; nil is plaintext.
 	TLS *TLSOptions
+	// OnAssignmentChanged, if set, is called for each exclusive-cohort assignment
+	// change pushed by the broker.
+	OnAssignmentChanged func(AssignmentChanged)
 }
 
 func (o ClientOptions) engineOptions() EngineOptions {
 	return EngineOptions{
-		ClientName:        o.ClientName,
-		ClientVersion:     o.ClientVersion,
-		Auth:              o.Auth,
-		HeartbeatInterval: o.HeartbeatInterval,
-		TLS:               o.TLS,
+		ClientName:          o.ClientName,
+		ClientVersion:       o.ClientVersion,
+		Auth:                o.Auth,
+		HeartbeatInterval:   o.HeartbeatInterval,
+		TLS:                 o.TLS,
+		OnAssignmentChanged: o.OnAssignmentChanged,
 	}
 }
 
@@ -59,8 +63,30 @@ type Client struct {
 	poolMu sync.Mutex
 	pool   map[string]*Engine
 
-	rr     atomic.Uint64 // round-robin cursor for keyless publishes
-	closed atomic.Bool
+	rr             atomic.Uint64        // round-robin cursor for keyless publishes
+	cohortMemberID atomic.Pointer[UUID] // captured once, carried across cohort subscribes
+	closed         atomic.Bool
+}
+
+// applyCohortMember offers the client's captured cohort member id on a
+// consumer-group subscribe, so re-subscribes and sibling partitions present the
+// same identity to the cohort.
+func (c *Client) applyCohortMember(req *Subscribe) {
+	if req.ConsumerGroup == nil || req.MemberID != nil {
+		return
+	}
+	if mid := c.cohortMemberID.Load(); mid != nil {
+		req.MemberID = mid
+	}
+}
+
+// captureCohortMember records the broker-minted member id from the first
+// consumer-group subscribe.
+func (c *Client) captureCohortMember(req Subscribe, sub *Subscription) {
+	if req.ConsumerGroup == nil || sub.MemberID == nil {
+		return
+	}
+	c.cohortMemberID.CompareAndSwap(nil, sub.MemberID)
 }
 
 // isTransient reports whether err is a transient transport failure worth
@@ -366,6 +392,7 @@ func (c *Client) PublishDelayed(p PublishDelayed) error {
 // Subscribe subscribes to one partition, routed to its owner and following owner
 // redirects up to MaxRedirects.
 func (c *Client) Subscribe(req Subscribe) (*Subscription, error) {
+	c.applyCohortMember(&req)
 	for attempt := 0; attempt <= c.opts.MaxRedirects; attempt++ {
 		eng, err := c.engineFor(c.topo.ownerOf(req.Topic, req.Partition, req.Group))
 		if err != nil {
@@ -373,6 +400,7 @@ func (c *Client) Subscribe(req Subscribe) (*Subscription, error) {
 		}
 		sub, err := eng.Subscribe(req)
 		if err == nil {
+			c.captureCohortMember(req, sub)
 			return sub, nil
 		}
 		var re *RedirectError

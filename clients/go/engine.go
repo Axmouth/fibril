@@ -54,6 +54,9 @@ type EngineOptions struct {
 	// client now reflects, which the engine acks so the broker can fence a
 	// repartition cutover.
 	OnTopologyUpdate func(TopologyOk) uint64
+	// OnAssignmentChanged, if set, is called on the run goroutine for each
+	// exclusive-cohort assignment push.
+	OnAssignmentChanged func(AssignmentChanged)
 }
 
 // command is a request from a public method to the run goroutine: send op(body),
@@ -441,6 +444,12 @@ func (e *Engine) handleFrame(f Frame) {
 			if topo, err := decodeTopologyUpdate(f.Payload); err == nil {
 				gen := e.opts.OnTopologyUpdate(topo)
 				_ = e.write(buildFrame(OpTopologyUpdateAck, f.RequestID, encodeTopologyUpdateAck(TopologyUpdateAck{Generation: gen})))
+			}
+		}
+	case OpAssignmentChanged:
+		if e.opts.OnAssignmentChanged != nil {
+			if a, err := decodeAssignmentChanged(f.Payload); err == nil {
+				e.opts.OnAssignmentChanged(a)
 			}
 		}
 	case OpRedirect:
