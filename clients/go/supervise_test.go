@@ -2,6 +2,7 @@ package fibril
 
 import (
 	"bufio"
+	"context"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -29,13 +30,13 @@ func TestSupervisedSubscriptionSurvivesFailover(t *testing.T) {
 		}
 	}()
 
-	c, err := Dial(ln.Addr().String(), ClientOptions{ClientName: "go-test", HeartbeatInterval: time.Hour, SuperviseBackoff: 20 * time.Millisecond})
+	c, err := Dial(context.Background(), ln.Addr().String(), ClientOptions{ClientName: "go-test", HeartbeatInterval: time.Hour, SuperviseBackoff: 20 * time.Millisecond})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
 	defer c.Shutdown()
 
-	ss, err := c.SuperviseSubscribe(Subscribe{Topic: "t", Partition: 0, Prefetch: 8, AutoAck: true})
+	ss, err := c.SuperviseSubscribe(context.Background(), Subscribe{Topic: "t", Partition: 0, Prefetch: 8, AutoAck: true})
 	if err != nil {
 		t.Fatalf("SuperviseSubscribe: %v", err)
 	}

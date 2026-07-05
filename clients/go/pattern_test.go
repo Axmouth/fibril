@@ -2,6 +2,7 @@ package fibril
 
 import (
 	"bufio"
+	"context"
 	"net"
 	"testing"
 	"time"
@@ -59,13 +60,13 @@ func TestPatternSubscribeFansInMatching(t *testing.T) {
 		}
 	}()
 
-	c, err := Dial(addr, ClientOptions{ClientName: "t", HeartbeatInterval: time.Hour})
+	c, err := Dial(context.Background(), addr, ClientOptions{ClientName: "t", HeartbeatInterval: time.Hour})
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 	defer c.Shutdown()
 
-	ps, err := c.Routing().SubscribePattern("events.*", PatternSubscribeOptions{Prefetch: 4, AutoAck: true})
+	ps, err := c.Routing().SubscribePattern(context.Background(), "events.*", PatternSubscribeOptions{Prefetch: 4, AutoAck: true})
 	if err != nil {
 		t.Fatalf("subscribe pattern: %v", err)
 	}

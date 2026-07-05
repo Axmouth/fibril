@@ -2,6 +2,7 @@ package fibril
 
 import (
 	"bufio"
+	"context"
 	"net"
 	"testing"
 	"time"
@@ -40,7 +41,7 @@ func TestClientAppliesTopologyPush(t *testing.T) {
 	}()
 
 	cache := newTopologyCache()
-	e, err := startEngine(client, EngineOptions{ClientName: "go-test", HeartbeatInterval: time.Hour, OnTopologyUpdate: cache.applyPush})
+	e, err := startEngine(context.Background(), client, EngineOptions{ClientName: "go-test", HeartbeatInterval: time.Hour, OnTopologyUpdate: cache.applyPush})
 	if err != nil {
 		t.Fatalf("startEngine: %v", err)
 	}

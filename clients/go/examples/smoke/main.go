@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"time"
@@ -17,7 +18,7 @@ func main() {
 	if addr == "" {
 		addr = "127.0.0.1:9876"
 	}
-	c, err := fibril.Dial(addr, fibril.ClientOptions{
+	c, err := fibril.Dial(context.Background(), addr, fibril.ClientOptions{
 		ClientName: "go-smoke",
 		Auth:       &fibril.Auth{Username: "fibril", Password: "fibril"},
 	})
@@ -29,22 +30,22 @@ func main() {
 	fmt.Println("connected")
 
 	one := uint32(1)
-	if _, err := c.DeclareQueue(fibril.DeclareQueue{Topic: "gosmoke", PartitionCount: &one}); err != nil {
+	if _, err := c.DeclareQueue(context.Background(), fibril.DeclareQueue{Topic: "gosmoke", PartitionCount: &one}); err != nil {
 		fmt.Println("declare:", err)
 		os.Exit(1)
 	}
-	if _, err := c.FetchTopology(fibril.TopologyRequest{}); err != nil {
+	if _, err := c.FetchTopology(context.Background(), fibril.TopologyRequest{}); err != nil {
 		fmt.Println("topology:", err)
 		os.Exit(1)
 	}
 
-	sub, err := c.Subscribe(fibril.Subscribe{Topic: "gosmoke", Partition: 0, Prefetch: 16})
+	sub, err := c.Subscribe(context.Background(), fibril.Subscribe{Topic: "gosmoke", Partition: 0, Prefetch: 16})
 	if err != nil {
 		fmt.Println("subscribe:", err)
 		os.Exit(1)
 	}
 
-	off, err := c.Publisher("gosmoke").PublishConfirmed(fibril.Text("hello from go"))
+	off, err := c.Publisher("gosmoke").PublishConfirmed(context.Background(), fibril.Text("hello from go"))
 	if err != nil {
 		fmt.Println("publish:", err)
 		os.Exit(1)

@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"time"
 
 	fibril "github.com/Axmouth/fibril/clients/go"
@@ -19,18 +20,18 @@ func main() {
 
 		topic := exharness.UniqueTopic("plexus")
 		one := uint32(1)
-		_, err := c.DeclarePlexus(fibril.DeclarePlexus{Topic: topic, PartitionCount: &one, Durability: fibril.StreamDurable})
+		_, err := c.DeclarePlexus(context.Background(), fibril.DeclarePlexus{Topic: topic, PartitionCount: &one, Durability: fibril.StreamDurable})
 		exharness.Check(err == nil, "declare plexus")
 
 		opts := fibril.StreamSubscribeOptions{Start: fibril.StreamStart{Kind: fibril.StreamLatest}, Prefetch: 16, AutoAck: true}
-		subA, err := c.SubscribeStreamTopic(topic, opts)
+		subA, err := c.SubscribeStreamTopic(context.Background(), topic, opts)
 		exharness.Check(err == nil, "subscribe A")
 		defer subA.Close()
-		subB, err := c.SubscribeStreamTopic(topic, opts)
+		subB, err := c.SubscribeStreamTopic(context.Background(), topic, opts)
 		exharness.Check(err == nil, "subscribe B")
 		defer subB.Close()
 
-		_, err = c.Publisher(topic).PublishConfirmed(fibril.Text("stream hello"))
+		_, err = c.Publisher(topic).PublishConfirmed(context.Background(), fibril.Text("stream hello"))
 		exharness.Check(err == nil, "publish")
 
 		a := exharness.Recv(subA.Deliveries, 5*time.Second, "record on subscriber A")

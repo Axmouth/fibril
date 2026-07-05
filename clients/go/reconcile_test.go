@@ -2,6 +2,7 @@ package fibril
 
 import (
 	"bufio"
+	"context"
 	"net"
 	"testing"
 	"time"
@@ -31,13 +32,13 @@ func TestReconcileRestoresSubscriptionAcrossReconnect(t *testing.T) {
 		}
 	}()
 
-	c, err := Dial(addr, ClientOptions{ClientName: "t", HeartbeatInterval: time.Hour})
+	c, err := Dial(context.Background(), addr, ClientOptions{ClientName: "t", HeartbeatInterval: time.Hour})
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 	defer c.Shutdown()
 
-	sub, err := c.Subscribe(Subscribe{Topic: "t", Partition: 0, Prefetch: 4, AutoAck: true})
+	sub, err := c.Subscribe(context.Background(), Subscribe{Topic: "t", Partition: 0, Prefetch: 4, AutoAck: true})
 	if err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
@@ -54,7 +55,7 @@ func TestReconcileRestoresSubscriptionAcrossReconnect(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	// An operation reconnects, which runs the reconcile handshake.
-	_, _ = c.FetchTopology(TopologyRequest{})
+	_, _ = c.FetchTopology(context.Background(), TopologyRequest{})
 
 	select {
 	case rc := <-reconcileSent:

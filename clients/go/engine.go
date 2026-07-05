@@ -13,6 +13,7 @@ package fibril
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"io"
 	"net"
@@ -148,13 +149,13 @@ type Engine struct {
 }
 
 // Connect dials addr and performs the handshake (and optional auth), returning a
-// ready engine.
-func Connect(addr string, opts EngineOptions) (*Engine, error) {
+// ready engine. A deadline on ctx bounds the dial and handshake.
+func Connect(ctx context.Context, addr string, opts EngineOptions) (*Engine, error) {
 	conn, err := dial(addr, opts.TLS)
 	if err != nil {
 		return nil, err
 	}
-	e, err := startEngine(conn, opts)
+	e, err := startEngine(ctx, conn, opts)
 	if err != nil {
 		_ = conn.Close()
 		return nil, err
@@ -164,10 +165,15 @@ func Connect(addr string, opts EngineOptions) (*Engine, error) {
 
 // startEngine runs the handshake synchronously over conn, then starts the read
 // and run goroutines. Split out from Connect so tests can supply any net.Conn
-// (e.g. an in-memory pipe) instead of dialing.
-func startEngine(conn net.Conn, opts EngineOptions) (*Engine, error) {
+// (e.g. an in-memory pipe) instead of dialing. A deadline on ctx applies to the
+// blocking handshake reads, then is cleared.
+func startEngine(ctx context.Context, conn net.Conn, opts EngineOptions) (*Engine, error) {
 	if opts.HeartbeatInterval <= 0 {
 		opts.HeartbeatInterval = defaultHeartbeatInterval
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+		defer conn.SetDeadline(time.Time{})
 	}
 	br := bufio.NewReader(conn)
 
@@ -282,15 +288,15 @@ func startEngine(conn net.Conn, opts EngineOptions) (*Engine, error) {
 // ---- public request methods --------------------------------------------
 
 // PublishUnconfirmed sends a fire-and-forget publish.
-func (e *Engine) PublishUnconfirmed(p Publish) error {
+func (e *Engine) PublishUnconfirmed(ctx context.Context, p Publish) error {
 	p.RequireConfirm = false
-	return e.send(opPublish, encodePublish(p))
+	return e.send(ctx, opPublish, encodePublish(p))
 }
 
 // PublishConfirmed sends a publish and waits for the broker-assigned offset.
-func (e *Engine) PublishConfirmed(p Publish) (uint64, error) {
+func (e *Engine) PublishConfirmed(ctx context.Context, p Publish) (uint64, error) {
 	p.RequireConfirm = true
-	f, err := e.request(opPublish, encodePublish(p))
+	f, err := e.request(ctx, opPublish, encodePublish(p))
 	if err != nil {
 		return 0, err
 	}
@@ -302,15 +308,15 @@ func (e *Engine) PublishConfirmed(p Publish) (uint64, error) {
 }
 
 // PublishDelayedUnconfirmed sends a fire-and-forget publish scheduled for later.
-func (e *Engine) PublishDelayedUnconfirmed(p PublishDelayed) error {
+func (e *Engine) PublishDelayedUnconfirmed(ctx context.Context, p PublishDelayed) error {
 	p.RequireConfirm = false
-	return e.send(opPublishDelayed, encodePublishDelayed(p))
+	return e.send(ctx, opPublishDelayed, encodePublishDelayed(p))
 }
 
 // PublishDelayedConfirmed sends a delayed publish and waits for the offset.
-func (e *Engine) PublishDelayedConfirmed(p PublishDelayed) (uint64, error) {
+func (e *Engine) PublishDelayedConfirmed(ctx context.Context, p PublishDelayed) (uint64, error) {
 	p.RequireConfirm = true
-	f, err := e.request(opPublishDelayed, encodePublishDelayed(p))
+	f, err := e.request(ctx, opPublishDelayed, encodePublishDelayed(p))
 	if err != nil {
 		return 0, err
 	}
@@ -336,18 +342,26 @@ type PublishConfirmation struct {
 	ch <-chan publishResult
 }
 
-// Confirmed waits for the broker-assigned offset of this publish.
-func (c PublishConfirmation) Confirmed() (uint64, error) {
-	r := <-c.ch
-	return r.offset, r.err
+// Confirmed waits for the broker-assigned offset of this publish, or until ctx is
+// cancelled.
+func (c PublishConfirmation) Confirmed(ctx context.Context) (uint64, error) {
+	select {
+	case r := <-c.ch:
+		return r.offset, r.err
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
 }
 
 // confirmation sends a confirm-required op and returns a handle that resolves to
-// the publish offset later, without blocking on the confirm.
-func (e *Engine) confirmation(op op, body []byte) (PublishConfirmation, error) {
+// the publish offset later, without blocking on the confirm. ctx bounds only the
+// send; the returned handle is awaited with its own context via Confirmed.
+func (e *Engine) confirmation(ctx context.Context, op op, body []byte) (PublishConfirmation, error) {
 	rc := make(chan reply, 1)
 	select {
 	case e.cmdCh <- command{op: op, body: body, reply: rc}:
+	case <-ctx.Done():
+		return PublishConfirmation{}, ctx.Err()
 	case <-e.done:
 		return PublishConfirmation{}, e.err()
 	}
@@ -370,23 +384,21 @@ func (e *Engine) confirmation(op op, body []byte) (PublishConfirmation, error) {
 
 // PublishWithConfirmation sends a confirmed publish and returns a handle for its
 // offset, without blocking on the confirm.
-func (e *Engine) PublishWithConfirmation(p Publish) (PublishConfirmation, error) {
+func (e *Engine) PublishWithConfirmation(ctx context.Context, p Publish) (PublishConfirmation, error) {
 	p.RequireConfirm = true
-	return e.confirmation(opPublish, encodePublish(p))
+	return e.confirmation(ctx, opPublish, encodePublish(p))
 }
 
 // PublishDelayedWithConfirmation sends a delayed confirmed publish and returns a
 // handle for its offset, without blocking on the confirm.
-func (e *Engine) PublishDelayedWithConfirmation(p PublishDelayed) (PublishConfirmation, error) {
+func (e *Engine) PublishDelayedWithConfirmation(ctx context.Context, p PublishDelayed) (PublishConfirmation, error) {
 	p.RequireConfirm = true
-	return e.confirmation(opPublishDelayed, encodePublishDelayed(p))
+	return e.confirmation(ctx, opPublishDelayed, encodePublishDelayed(p))
 }
 
 // DeclareQueue declares a queue and waits for the broker's confirmation.
-
-// DeclareQueue declares a queue and waits for the broker's confirmation.
-func (e *Engine) DeclareQueue(d DeclareQueue) (DeclareQueueOk, error) {
-	f, err := e.request(opDeclareQueue, encodeDeclareQueue(d))
+func (e *Engine) DeclareQueue(ctx context.Context, d DeclareQueue) (DeclareQueueOk, error) {
+	f, err := e.request(ctx, opDeclareQueue, encodeDeclareQueue(d))
 	if err != nil {
 		return DeclareQueueOk{}, err
 	}
@@ -394,8 +406,8 @@ func (e *Engine) DeclareQueue(d DeclareQueue) (DeclareQueueOk, error) {
 }
 
 // DeclarePlexus declares a Plexus (fan-out stream) channel.
-func (e *Engine) DeclarePlexus(d DeclarePlexus) (DeclarePlexusOk, error) {
-	f, err := e.request(opDeclarePlexus, encodeDeclarePlexus(d))
+func (e *Engine) DeclarePlexus(ctx context.Context, d DeclarePlexus) (DeclarePlexusOk, error) {
+	f, err := e.request(ctx, opDeclarePlexus, encodeDeclarePlexus(d))
 	if err != nil {
 		return DeclarePlexusOk{}, err
 	}
@@ -403,8 +415,8 @@ func (e *Engine) DeclarePlexus(d DeclarePlexus) (DeclarePlexusOk, error) {
 }
 
 // FetchTopology requests the cluster topology, optionally filtered.
-func (e *Engine) FetchTopology(req TopologyRequest) (TopologyOk, error) {
-	f, err := e.request(opTopology, encodeTopologyRequest(req))
+func (e *Engine) FetchTopology(ctx context.Context, req TopologyRequest) (TopologyOk, error) {
+	f, err := e.request(ctx, opTopology, encodeTopologyRequest(req))
 	if err != nil {
 		return TopologyOk{}, err
 	}
@@ -436,25 +448,31 @@ func (e *Engine) IsClosed() bool {
 
 // ---- command submission ------------------------------------------------
 
-func (e *Engine) send(op op, body []byte) error {
+func (e *Engine) send(ctx context.Context, op op, body []byte) error {
 	select {
 	case e.cmdCh <- command{op: op, body: body}:
 		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-e.done:
 		return e.err()
 	}
 }
 
-func (e *Engine) request(op op, body []byte) (frame, error) {
+func (e *Engine) request(ctx context.Context, op op, body []byte) (frame, error) {
 	rc := make(chan reply, 1)
 	select {
 	case e.cmdCh <- command{op: op, body: body, reply: rc}:
+	case <-ctx.Done():
+		return frame{}, ctx.Err()
 	case <-e.done:
 		return frame{}, e.err()
 	}
 	select {
 	case r := <-rc:
 		return r.frame, r.err
+	case <-ctx.Done():
+		return frame{}, ctx.Err()
 	case <-e.done:
 		return frame{}, e.err()
 	}

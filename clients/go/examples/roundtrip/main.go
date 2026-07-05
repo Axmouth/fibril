@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"time"
 
 	fibril "github.com/Axmouth/fibril/clients/go"
@@ -18,17 +19,18 @@ type payload struct {
 
 func main() {
 	exharness.Run("roundtrip", func() {
+		ctx := context.Background()
 		c := exharness.Connect("example-roundtrip")
 		defer c.Shutdown()
 
 		topic := exharness.UniqueTopic("roundtrip")
-		fan, err := c.SubscribeTopic(topic, nil, 1, true)
+		fan, err := c.SubscribeTopic(ctx, topic, nil, 1, true)
 		exharness.Check(err == nil, "subscribe")
 		defer fan.Close()
 
 		msg, err := fibril.JSON(payload{Hello: "world", N: 42})
 		exharness.Check(err == nil, "encode json")
-		offset, err := c.Publisher(topic).PublishConfirmed(msg)
+		offset, err := c.Publisher(topic).PublishConfirmed(ctx, msg)
 		exharness.Check(err == nil, "confirmed publish")
 		exharness.Check(offset >= 0, "confirmed publish returns a broker offset")
 

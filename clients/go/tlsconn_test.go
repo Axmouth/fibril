@@ -1,6 +1,7 @@
 package fibril
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -66,7 +67,7 @@ func TestTLSConnectWithFingerprintPin(t *testing.T) {
 	ln := startTLSBroker(t, cert)
 	defer ln.Close()
 
-	e, err := Connect(ln.Addr().String(), EngineOptions{
+	e, err := Connect(context.Background(), ln.Addr().String(), EngineOptions{
 		ClientName:        "go-test",
 		HeartbeatInterval: time.Hour,
 		TLS:               &TLSOptions{CAFingerprint: hex.EncodeToString(sum[:])},
@@ -76,7 +77,7 @@ func TestTLSConnectWithFingerprintPin(t *testing.T) {
 	}
 	defer e.Shutdown()
 
-	off, err := e.PublishConfirmed(Publish{Topic: "t", Payload: []byte("x")})
+	off, err := e.PublishConfirmed(context.Background(), Publish{Topic: "t", Payload: []byte("x")})
 	if err != nil {
 		t.Fatalf("publish over TLS: %v", err)
 	}
@@ -92,7 +93,7 @@ func TestTLSFingerprintMismatchIsUntrusted(t *testing.T) {
 
 	// A pin that does not match the presented certificate.
 	wrong := hex.EncodeToString(make([]byte, sha256.Size))
-	_, err := Connect(ln.Addr().String(), EngineOptions{
+	_, err := Connect(context.Background(), ln.Addr().String(), EngineOptions{
 		ClientName:        "go-test",
 		HeartbeatInterval: time.Hour,
 		TLS:               &TLSOptions{CAFingerprint: wrong},
@@ -132,7 +133,7 @@ func TestTLSAgainstPlaintextBrokerIsNotSupported(t *testing.T) {
 		}
 	}()
 
-	_, err = Connect(ln.Addr().String(), EngineOptions{
+	_, err = Connect(context.Background(), ln.Addr().String(), EngineOptions{
 		ClientName:        "go-test",
 		HeartbeatInterval: time.Hour,
 		TLS:               &TLSOptions{},

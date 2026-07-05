@@ -2,6 +2,7 @@ package fibril
 
 import (
 	"bufio"
+	"context"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -39,14 +40,14 @@ func TestClientFollowsPublishRedirect(t *testing.T) {
 		}
 	}()
 
-	e, err := startEngine(client, EngineOptions{ClientName: "go-test", HeartbeatInterval: time.Hour})
+	e, err := startEngine(context.Background(), client, EngineOptions{ClientName: "go-test", HeartbeatInterval: time.Hour})
 	if err != nil {
 		t.Fatalf("startEngine: %v", err)
 	}
 	c := newClientWith(bootEndpoint, e, ClientOptions{})
 	defer c.Shutdown()
 
-	off, err := c.PublishConfirmed(Publish{Topic: "t", Payload: []byte("x")})
+	off, err := c.PublishConfirmed(context.Background(), Publish{Topic: "t", Payload: []byte("x")})
 	if err != nil {
 		t.Fatalf("PublishConfirmed: %v", err)
 	}

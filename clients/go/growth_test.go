@@ -2,6 +2,7 @@ package fibril
 
 import (
 	"bufio"
+	"context"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -49,14 +50,14 @@ func TestFanInPicksUpGrownPartition(t *testing.T) {
 		}
 	}()
 
-	e, err := startEngine(client, EngineOptions{ClientName: "go-test", HeartbeatInterval: time.Hour})
+	e, err := startEngine(context.Background(), client, EngineOptions{ClientName: "go-test", HeartbeatInterval: time.Hour})
 	if err != nil {
 		t.Fatalf("startEngine: %v", err)
 	}
 	c := newClientWith("127.0.0.1:9999", e, ClientOptions{RepartitionPollInterval: 40 * time.Millisecond})
 	defer c.Shutdown()
 
-	fi, err := c.SubscribeTopic("t", nil, 4, true)
+	fi, err := c.SubscribeTopic(context.Background(), "t", nil, 4, true)
 	if err != nil {
 		t.Fatalf("SubscribeTopic: %v", err)
 	}

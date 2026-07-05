@@ -7,6 +7,7 @@ package fibril
 // keep working across a re-subscribe.
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -30,19 +31,20 @@ func (s *SupervisedSubscription) Close() {
 // across owner failovers. The first attach is synchronous (so a bad topic errors
 // here); later re-attaches happen in the background on the same Deliveries
 // channel.
-func (c *Client) SuperviseSubscribe(req Subscribe) (*SupervisedSubscription, error) {
-	return c.superviseAttach(req.Topic, req.Prefetch, func() (*Subscription, error) { return c.subscribeSupervised(req) })
+func (c *Client) SuperviseSubscribe(ctx context.Context, req Subscribe) (*SupervisedSubscription, error) {
+	return c.superviseAttach(ctx, req.Topic, req.Prefetch, func(ctx context.Context) (*Subscription, error) { return c.subscribeSupervised(ctx, req) })
 }
 
 // SuperviseSubscribeStream is SuperviseSubscribe for a Plexus stream partition.
-func (c *Client) SuperviseSubscribeStream(req SubscribeStream) (*SupervisedSubscription, error) {
-	return c.superviseAttach(req.Topic, req.Prefetch, func() (*Subscription, error) { return c.SubscribeStream(req) })
+func (c *Client) SuperviseSubscribeStream(ctx context.Context, req SubscribeStream) (*SupervisedSubscription, error) {
+	return c.superviseAttach(ctx, req.Topic, req.Prefetch, func(ctx context.Context) (*Subscription, error) { return c.SubscribeStream(ctx, req) })
 }
 
-// superviseAttach opens the initial subscription via attach and supervises
-// re-attaches on the same channel. attach re-subscribes (queue or stream).
-func (c *Client) superviseAttach(topic string, prefetch uint32, attach func() (*Subscription, error)) (*SupervisedSubscription, error) {
-	sub, err := attach()
+// superviseAttach opens the initial subscription via attach (using the caller's
+// ctx) and supervises re-attaches on the same channel. attach re-subscribes
+// (queue or stream); background re-attaches use a fresh context bounded by Close.
+func (c *Client) superviseAttach(ctx context.Context, topic string, prefetch uint32, attach func(context.Context) (*Subscription, error)) (*SupervisedSubscription, error) {
+	sub, err := attach(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -56,7 +58,7 @@ func (c *Client) superviseAttach(topic string, prefetch uint32, attach func() (*
 	return ss, nil
 }
 
-func (c *Client) superviseLoop(topic string, attach func() (*Subscription, error), sub *Subscription, out chan Delivery, cancel chan struct{}) {
+func (c *Client) superviseLoop(topic string, attach func(context.Context) (*Subscription, error), sub *Subscription, out chan Delivery, cancel chan struct{}) {
 	defer close(out)
 	backoff := c.opts.SuperviseBackoff
 	if backoff <= 0 {
@@ -78,8 +80,8 @@ func (c *Client) superviseLoop(topic string, attach func() (*Subscription, error
 			if !sleepOrCancel(backoff, cancel) {
 				return
 			}
-			_, _ = c.FetchTopology(TopologyRequest{Topic: &topic}) // best effort
-			newSub, err := attach()
+			_, _ = c.FetchTopology(context.Background(), TopologyRequest{Topic: &topic}) // best effort
+			newSub, err := attach(context.Background())
 			if err == nil {
 				sub = newSub
 				break

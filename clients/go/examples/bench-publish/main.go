@@ -8,6 +8,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strconv"
@@ -38,7 +39,7 @@ func main() {
 	duration := time.Duration(envNum("DURATION_S", 8) * float64(time.Second))
 	warmup := time.Duration(envNum("WARMUP_S", 2) * float64(time.Second))
 
-	c, err := fibril.Dial(addr, fibril.ClientOptions{
+	c, err := fibril.Dial(context.Background(), addr, fibril.ClientOptions{
 		ClientName: "bench",
 		Auth:       &fibril.Auth{Username: env("FIBRIL_USER", "fibril"), Password: env("FIBRIL_PASS", "fibril")},
 	})
@@ -56,7 +57,7 @@ func main() {
 		count := 0
 		for time.Now().Before(deadline) {
 			for i := 0; i < 512; i++ {
-				_ = pub.Publish(msg)
+				_ = pub.Publish(context.Background(), msg)
 				count++
 			}
 		}

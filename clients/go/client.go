@@ -12,6 +12,7 @@ package fibril
 // caller's goroutines, so the pool and topology cache are guarded by locks.
 
 import (
+	"context"
 	"errors"
 	"net"
 	"strconv"
@@ -133,24 +134,30 @@ const (
 
 // afterTransient runs between retry attempts: it refreshes topology (throttled)
 // so the next attempt re-routes to the current owner, then backs off briefly.
-func (c *Client) afterTransient(topic string, group *string) {
+func (c *Client) afterTransient(ctx context.Context, topic string, group *string) {
 	cooldown := c.opts.TopologyRefreshCooldown
 	if cooldown <= 0 {
 		cooldown = defaultTopologyRefreshCooldown
 	}
 	if c.topo.dueForRefresh(cooldown) {
-		_, _ = c.FetchTopology(TopologyRequest{Topic: &topic, Group: group})
+		_, _ = c.FetchTopology(ctx, TopologyRequest{Topic: &topic, Group: group})
 	}
 	backoff := c.opts.RetryBackoff
 	if backoff <= 0 {
 		backoff = defaultRetryBackoff
 	}
-	time.Sleep(backoff)
+	t := time.NewTimer(backoff)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-ctx.Done():
+	}
 }
 
 // Dial connects to a broker at addr and returns a cluster client. addr is the
-// bootstrap endpoint; other owners are pooled lazily as routing discovers them.
-func Dial(addr string, opts ClientOptions) (*Client, error) {
+// bootstrap endpoint; other owners are pooled lazily as routing discovers them. A
+// deadline on ctx bounds the initial connect.
+func Dial(ctx context.Context, addr string, opts ClientOptions) (*Client, error) {
 	if opts.MaxRedirects <= 0 {
 		opts.MaxRedirects = defaultMaxRedirects
 	}
@@ -163,7 +170,7 @@ func Dial(addr string, opts ClientOptions) (*Client, error) {
 		pool:              make(map[string]*Engine),
 		reconcile:         make(map[string]*reconcileRegistry),
 	}
-	boot, err := Connect(addr, c.engineOpts(addr))
+	boot, err := Connect(ctx, addr, c.engineOpts(addr))
 	if err != nil {
 		return nil, err
 	}
@@ -349,7 +356,7 @@ func (c *Client) partitionFor(topic string, group *string, key []byte) uint32 {
 // bootstrapEngine returns a live bootstrap engine, reconnecting it (offering the
 // previous session's resume identity) if the connection has dropped. Serialized
 // so concurrent callers reconnect once.
-func (c *Client) bootstrapEngine() (*Engine, error) {
+func (c *Client) bootstrapEngine(ctx context.Context) (*Engine, error) {
 	c.bootstrapMu.Lock()
 	defer c.bootstrapMu.Unlock()
 	if !c.bootstrap.IsClosed() {
@@ -361,7 +368,7 @@ func (c *Client) bootstrapEngine() (*Engine, error) {
 	opts := c.engineOpts(c.bootstrapEndpoint)
 	resume := c.bootstrap.ResumeIdentity
 	opts.Resume = &resume
-	ne, err := Connect(c.bootstrapEndpoint, opts)
+	ne, err := Connect(ctx, c.bootstrapEndpoint, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -371,9 +378,9 @@ func (c *Client) bootstrapEngine() (*Engine, error) {
 
 // engineFor returns the engine for an endpoint, opening and pooling one if
 // needed. An empty or bootstrap endpoint uses the (reconnecting) bootstrap.
-func (c *Client) engineFor(endpoint string) (*Engine, error) {
+func (c *Client) engineFor(ctx context.Context, endpoint string) (*Engine, error) {
 	if endpoint == "" || endpoint == c.bootstrapEndpoint {
-		return c.bootstrapEngine()
+		return c.bootstrapEngine(ctx)
 	}
 	c.poolMu.Lock()
 	prev, existed := c.pool[endpoint]
@@ -391,7 +398,7 @@ func (c *Client) engineFor(endpoint string) (*Engine, error) {
 		resume := prev.ResumeIdentity
 		opts.Resume = &resume
 	}
-	ne, err := Connect(endpoint, opts)
+	ne, err := Connect(ctx, endpoint, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -410,17 +417,17 @@ func (c *Client) engineFor(endpoint string) (*Engine, error) {
 
 // Publish routes and sends a fire-and-forget publish. Topic, Group, and
 // PartitionKey drive routing; Partition is set by the client.
-func (c *Client) Publish(p Publish) error {
+func (c *Client) Publish(ctx context.Context, p Publish) error {
 	p.Partition = c.partitionFor(p.Topic, p.Group, p.PartitionKey)
 	for attempt := 0; attempt <= c.opts.MaxRedirects; attempt++ {
-		eng, err := c.engineFor(c.topo.ownerOf(p.Topic, p.Partition, p.Group))
+		eng, err := c.engineFor(ctx, c.topo.ownerOf(p.Topic, p.Partition, p.Group))
 		if err != nil {
 			return err
 		}
-		if err = eng.PublishUnconfirmed(p); err == nil {
+		if err = eng.PublishUnconfirmed(ctx, p); err == nil {
 			return nil
 		} else if isTransient(err) {
-			c.afterTransient(p.Topic, p.Group)
+			c.afterTransient(ctx, p.Topic, p.Group)
 			continue
 		} else {
 			return err
@@ -432,10 +439,10 @@ func (c *Client) Publish(p Publish) error {
 // routedConfirm routes a confirmed publish-style op to the partition owner,
 // following redirects and reconnecting on transient failure, and returns the
 // assigned offset.
-func (c *Client) routedConfirm(topic string, group *string, key []byte, do func(eng *Engine, partition uint32) (uint64, error)) (uint64, error) {
+func (c *Client) routedConfirm(ctx context.Context, topic string, group *string, key []byte, do func(eng *Engine, partition uint32) (uint64, error)) (uint64, error) {
 	partition := c.partitionFor(topic, group, key)
 	for attempt := 0; attempt <= c.opts.MaxRedirects; attempt++ {
-		eng, err := c.engineFor(c.topo.ownerOf(topic, partition, group))
+		eng, err := c.engineFor(ctx, c.topo.ownerOf(topic, partition, group))
 		if err != nil {
 			return 0, err
 		}
@@ -449,7 +456,7 @@ func (c *Client) routedConfirm(topic string, group *string, key []byte, do func(
 			continue
 		}
 		if isTransient(err) {
-			c.afterTransient(topic, group)
+			c.afterTransient(ctx, topic, group)
 			continue // engineFor reconnects on the next attempt
 		}
 		return 0, err
@@ -459,10 +466,10 @@ func (c *Client) routedConfirm(topic string, group *string, key []byte, do func(
 
 // PublishConfirmed routes and sends a confirmed publish, following owner
 // redirects, and returns the assigned offset.
-func (c *Client) PublishConfirmed(p Publish) (uint64, error) {
-	return c.routedConfirm(p.Topic, p.Group, p.PartitionKey, func(eng *Engine, partition uint32) (uint64, error) {
+func (c *Client) PublishConfirmed(ctx context.Context, p Publish) (uint64, error) {
+	return c.routedConfirm(ctx, p.Topic, p.Group, p.PartitionKey, func(eng *Engine, partition uint32) (uint64, error) {
 		p.Partition = partition
-		return eng.PublishConfirmed(p)
+		return eng.PublishConfirmed(ctx, p)
 	})
 }
 
@@ -471,45 +478,45 @@ func (c *Client) PublishConfirmed(p Publish) (uint64, error) {
 // and await each handle afterward to pipeline the confirmations. It routes once
 // (no redirect-follow), since the confirmation resolves asynchronously; a stale
 // route surfaces as a RedirectError from Confirmed.
-func (c *Client) PublishWithConfirmation(p Publish) (PublishConfirmation, error) {
+func (c *Client) PublishWithConfirmation(ctx context.Context, p Publish) (PublishConfirmation, error) {
 	p.Partition = c.partitionFor(p.Topic, p.Group, p.PartitionKey)
-	eng, err := c.engineFor(c.topo.ownerOf(p.Topic, p.Partition, p.Group))
+	eng, err := c.engineFor(ctx, c.topo.ownerOf(p.Topic, p.Partition, p.Group))
 	if err != nil {
 		return PublishConfirmation{}, err
 	}
-	return eng.PublishWithConfirmation(p)
+	return eng.PublishWithConfirmation(ctx, p)
 }
 
 // PublishDelayedWithConfirmation is PublishWithConfirmation for a delayed publish.
-func (c *Client) PublishDelayedWithConfirmation(p PublishDelayed) (PublishConfirmation, error) {
+func (c *Client) PublishDelayedWithConfirmation(ctx context.Context, p PublishDelayed) (PublishConfirmation, error) {
 	p.Partition = c.partitionFor(p.Topic, p.Group, p.PartitionKey)
-	eng, err := c.engineFor(c.topo.ownerOf(p.Topic, p.Partition, p.Group))
+	eng, err := c.engineFor(ctx, c.topo.ownerOf(p.Topic, p.Partition, p.Group))
 	if err != nil {
 		return PublishConfirmation{}, err
 	}
-	return eng.PublishDelayedWithConfirmation(p)
+	return eng.PublishDelayedWithConfirmation(ctx, p)
 }
 
 // PublishDelayedConfirmed routes and sends a delayed confirmed publish.
-func (c *Client) PublishDelayedConfirmed(p PublishDelayed) (uint64, error) {
-	return c.routedConfirm(p.Topic, p.Group, p.PartitionKey, func(eng *Engine, partition uint32) (uint64, error) {
+func (c *Client) PublishDelayedConfirmed(ctx context.Context, p PublishDelayed) (uint64, error) {
+	return c.routedConfirm(ctx, p.Topic, p.Group, p.PartitionKey, func(eng *Engine, partition uint32) (uint64, error) {
 		p.Partition = partition
-		return eng.PublishDelayedConfirmed(p)
+		return eng.PublishDelayedConfirmed(ctx, p)
 	})
 }
 
 // PublishDelayed routes and sends a delayed fire-and-forget publish.
-func (c *Client) PublishDelayed(p PublishDelayed) error {
+func (c *Client) PublishDelayed(ctx context.Context, p PublishDelayed) error {
 	p.Partition = c.partitionFor(p.Topic, p.Group, p.PartitionKey)
 	for attempt := 0; attempt <= c.opts.MaxRedirects; attempt++ {
-		eng, err := c.engineFor(c.topo.ownerOf(p.Topic, p.Partition, p.Group))
+		eng, err := c.engineFor(ctx, c.topo.ownerOf(p.Topic, p.Partition, p.Group))
 		if err != nil {
 			return err
 		}
-		if err = eng.PublishDelayedUnconfirmed(p); err == nil {
+		if err = eng.PublishDelayedUnconfirmed(ctx, p); err == nil {
 			return nil
 		} else if isTransient(err) {
-			c.afterTransient(p.Topic, p.Group)
+			c.afterTransient(ctx, p.Topic, p.Group)
 			continue
 		} else {
 			return err
@@ -523,28 +530,28 @@ func (c *Client) PublishDelayed(p PublishDelayed) error {
 // Subscribe subscribes to one partition, routed to its owner and following owner
 // redirects up to MaxRedirects. The subscription is remembered for reconnect
 // reconcile.
-func (c *Client) Subscribe(req Subscribe) (*Subscription, error) {
-	return c.subscribe(req, false)
+func (c *Client) Subscribe(ctx context.Context, req Subscribe) (*Subscription, error) {
+	return c.subscribe(ctx, req, false)
 }
 
 // subscribeSupervised is Subscribe for a supervised subscription, which recovers
 // by re-subscribing and so stays out of the reconcile registry.
-func (c *Client) subscribeSupervised(req Subscribe) (*Subscription, error) {
-	return c.subscribe(req, true)
+func (c *Client) subscribeSupervised(ctx context.Context, req Subscribe) (*Subscription, error) {
+	return c.subscribe(ctx, req, true)
 }
 
-func (c *Client) subscribe(req Subscribe, supervised bool) (*Subscription, error) {
+func (c *Client) subscribe(ctx context.Context, req Subscribe, supervised bool) (*Subscription, error) {
 	c.applyCohortMember(&req)
 	for attempt := 0; attempt <= c.opts.MaxRedirects; attempt++ {
-		eng, err := c.engineFor(c.topo.ownerOf(req.Topic, req.Partition, req.Group))
+		eng, err := c.engineFor(ctx, c.topo.ownerOf(req.Topic, req.Partition, req.Group))
 		if err != nil {
 			return nil, err
 		}
 		var sub *Subscription
 		if supervised {
-			sub, err = eng.subscribeSupervised(req)
+			sub, err = eng.subscribeSupervised(ctx, req)
 		} else {
-			sub, err = eng.Subscribe(req)
+			sub, err = eng.Subscribe(ctx, req)
 		}
 		if err == nil {
 			c.captureCohortMember(req, sub)
@@ -556,7 +563,7 @@ func (c *Client) subscribe(req Subscribe, supervised bool) (*Subscription, error
 			continue
 		}
 		if isTransient(err) {
-			c.afterTransient(req.Topic, req.Group)
+			c.afterTransient(ctx, req.Topic, req.Group)
 			continue // engineFor reconnects on the next attempt
 		}
 		return nil, err
@@ -566,13 +573,13 @@ func (c *Client) subscribe(req Subscribe, supervised bool) (*Subscription, error
 
 // SubscribeStream subscribes to one partition of a Plexus (fan-out stream),
 // routed to its owner and following owner redirects. Streams have no group.
-func (c *Client) SubscribeStream(req SubscribeStream) (*Subscription, error) {
+func (c *Client) SubscribeStream(ctx context.Context, req SubscribeStream) (*Subscription, error) {
 	for attempt := 0; attempt <= c.opts.MaxRedirects; attempt++ {
-		eng, err := c.engineFor(c.topo.ownerOf(req.Topic, req.Partition, nil))
+		eng, err := c.engineFor(ctx, c.topo.ownerOf(req.Topic, req.Partition, nil))
 		if err != nil {
 			return nil, err
 		}
-		sub, err := eng.SubscribeStream(req)
+		sub, err := eng.SubscribeStream(ctx, req)
 		if err == nil {
 			return sub, nil
 		}
@@ -582,7 +589,7 @@ func (c *Client) SubscribeStream(req SubscribeStream) (*Subscription, error) {
 			continue
 		}
 		if isTransient(err) {
-			c.afterTransient(req.Topic, nil)
+			c.afterTransient(ctx, req.Topic, nil)
 			continue
 		}
 		return nil, err
@@ -594,13 +601,13 @@ func (c *Client) SubscribeStream(req SubscribeStream) (*Subscription, error) {
 
 // DeclareQueue declares a queue (a cluster op, handled on the bootstrap
 // connection), reconnecting once on a transient failure.
-func (c *Client) DeclareQueue(d DeclareQueue) (DeclareQueueOk, error) {
+func (c *Client) DeclareQueue(ctx context.Context, d DeclareQueue) (DeclareQueueOk, error) {
 	for attempt := 0; attempt < 2; attempt++ {
-		eng, err := c.bootstrapEngine()
+		eng, err := c.bootstrapEngine(ctx)
 		if err != nil {
 			return DeclareQueueOk{}, err
 		}
-		ok, err := eng.DeclareQueue(d)
+		ok, err := eng.DeclareQueue(ctx, d)
 		if err == nil || !isTransient(err) {
 			return ok, err
 		}
@@ -610,13 +617,13 @@ func (c *Client) DeclareQueue(d DeclareQueue) (DeclareQueueOk, error) {
 
 // DeclarePlexus declares a Plexus (fan-out stream) channel (a cluster op on the
 // bootstrap connection), reconnecting once on a transient failure.
-func (c *Client) DeclarePlexus(d DeclarePlexus) (DeclarePlexusOk, error) {
+func (c *Client) DeclarePlexus(ctx context.Context, d DeclarePlexus) (DeclarePlexusOk, error) {
 	for attempt := 0; attempt < 2; attempt++ {
-		eng, err := c.bootstrapEngine()
+		eng, err := c.bootstrapEngine(ctx)
 		if err != nil {
 			return DeclarePlexusOk{}, err
 		}
-		ok, err := eng.DeclarePlexus(d)
+		ok, err := eng.DeclarePlexus(ctx, d)
 		if err == nil || !isTransient(err) {
 			return ok, err
 		}
@@ -626,13 +633,13 @@ func (c *Client) DeclarePlexus(d DeclarePlexus) (DeclarePlexusOk, error) {
 
 // FetchTopology fetches the topology and warms the routing cache, reconnecting
 // once on a transient failure.
-func (c *Client) FetchTopology(req TopologyRequest) (TopologyOk, error) {
+func (c *Client) FetchTopology(ctx context.Context, req TopologyRequest) (TopologyOk, error) {
 	for attempt := 0; attempt < 2; attempt++ {
-		eng, err := c.bootstrapEngine()
+		eng, err := c.bootstrapEngine(ctx)
 		if err != nil {
 			return TopologyOk{}, err
 		}
-		topo, err := eng.FetchTopology(req)
+		topo, err := eng.FetchTopology(ctx, req)
 		if err == nil {
 			c.topo.replace(topo)
 			return topo, nil

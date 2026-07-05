@@ -2,6 +2,7 @@ package fibril
 
 import (
 	"bufio"
+	"context"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -32,7 +33,7 @@ func TestEnginePublishWithConfirmation(t *testing.T) {
 		}
 	}()
 
-	e, err := startEngine(client, EngineOptions{ClientName: "go-test", HeartbeatInterval: time.Hour})
+	e, err := startEngine(context.Background(), client, EngineOptions{ClientName: "go-test", HeartbeatInterval: time.Hour})
 	if err != nil {
 		t.Fatalf("startEngine: %v", err)
 	}
@@ -42,7 +43,7 @@ func TestEnginePublishWithConfirmation(t *testing.T) {
 	const n = 5
 	handles := make([]PublishConfirmation, 0, n)
 	for i := 0; i < n; i++ {
-		h, err := e.PublishWithConfirmation(Publish{Topic: "t", Payload: []byte("x")})
+		h, err := e.PublishWithConfirmation(context.Background(), Publish{Topic: "t", Payload: []byte("x")})
 		if err != nil {
 			t.Fatalf("with-confirmation publish %d: %v", i, err)
 		}
@@ -50,7 +51,7 @@ func TestEnginePublishWithConfirmation(t *testing.T) {
 	}
 	seen := map[uint64]bool{}
 	for i, h := range handles {
-		offset, err := h.Confirmed()
+		offset, err := h.Confirmed(context.Background())
 		if err != nil {
 			t.Fatalf("confirmation %d: %v", i, err)
 		}

@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"time"
 
 	fibril "github.com/Axmouth/fibril/clients/go"
@@ -17,11 +18,11 @@ func main() {
 		defer c.Shutdown()
 
 		topic := exharness.UniqueTopic("ackretry")
-		fan, err := c.SubscribeTopic(topic, nil, 4, false) // manual ack
+		fan, err := c.SubscribeTopic(context.Background(), topic, nil, 4, false) // manual ack
 		exharness.Check(err == nil, "subscribe")
 		defer fan.Close()
 
-		_, err = c.Publisher(topic).PublishConfirmed(fibril.Text("work"))
+		_, err = c.Publisher(topic).PublishConfirmed(context.Background(), fibril.Text("work"))
 		exharness.Check(err == nil, "publish")
 
 		first := exharness.Recv(fan.Deliveries, 5*time.Second, "first delivery")

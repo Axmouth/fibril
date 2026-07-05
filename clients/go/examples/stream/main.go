@@ -12,6 +12,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
@@ -29,7 +30,7 @@ func main() {
 		defer c.Shutdown()
 
 		topic := exharness.UniqueTopic("stream")
-		fan, err := c.SubscribeTopic(topic, nil, 64, true)
+		fan, err := c.SubscribeTopic(context.Background(), topic, nil, 64, true)
 		exharness.Check(err == nil, "subscribe")
 		defer fan.Close()
 		pub := c.Publisher(topic)
@@ -37,7 +38,7 @@ func main() {
 		if exharness.CheckMode() {
 			for seq := 0; seq < burst; seq++ {
 				m, _ := fibril.JSON(map[string]int{"seq": seq})
-				exharness.Check(pub.Publish(m) == nil, "publish")
+				exharness.Check(pub.Publish(context.Background(), m) == nil, "publish")
 			}
 			received := 0
 			for received < burst {
@@ -56,7 +57,7 @@ func main() {
 		go func() {
 			for seq := 0; ; seq++ {
 				m, _ := fibril.JSON(map[string]int{"seq": seq})
-				if pub.Publish(m) != nil {
+				if pub.Publish(context.Background(), m) != nil {
 					return
 				}
 				time.Sleep(200 * time.Millisecond)

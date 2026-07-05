@@ -2,6 +2,7 @@ package fibril
 
 import (
 	"bufio"
+	"context"
 	"net"
 	"testing"
 	"time"
@@ -39,7 +40,7 @@ func TestEngineHandshakeAuthAndPublish(t *testing.T) {
 	client, server := net.Pipe()
 	fakeBroker(server, ComplianceString, 42)
 
-	e, err := startEngine(client, EngineOptions{
+	e, err := startEngine(context.Background(), client, EngineOptions{
 		ClientName:        "go-test",
 		Auth:              &Auth{Username: "u", Password: "p"},
 		HeartbeatInterval: time.Hour, // keep pings out of this test
@@ -51,7 +52,7 @@ func TestEngineHandshakeAuthAndPublish(t *testing.T) {
 		t.Errorf("resume outcome = %q, want new", e.ResumeOutcome)
 	}
 
-	off, err := e.PublishConfirmed(Publish{Topic: "t", Payload: []byte("hi")})
+	off, err := e.PublishConfirmed(context.Background(), Publish{Topic: "t", Payload: []byte("hi")})
 	if err != nil {
 		t.Fatalf("PublishConfirmed: %v", err)
 	}
@@ -59,7 +60,7 @@ func TestEngineHandshakeAuthAndPublish(t *testing.T) {
 		t.Errorf("offset = %d, want 42", off)
 	}
 
-	if err := e.PublishUnconfirmed(Publish{Topic: "t", Payload: []byte("x")}); err != nil {
+	if err := e.PublishUnconfirmed(context.Background(), Publish{Topic: "t", Payload: []byte("x")}); err != nil {
 		t.Errorf("PublishUnconfirmed: %v", err)
 	}
 
@@ -73,7 +74,7 @@ func TestEngineComplianceMismatchFailsHandshake(t *testing.T) {
 	client, server := net.Pipe()
 	fakeBroker(server, "v=0;wrong", 0)
 
-	_, err := startEngine(client, EngineOptions{ClientName: "go-test", HeartbeatInterval: time.Hour})
+	_, err := startEngine(context.Background(), client, EngineOptions{ClientName: "go-test", HeartbeatInterval: time.Hour})
 	if err == nil {
 		t.Fatal("expected handshake to fail on a compliance mismatch")
 	}
@@ -86,13 +87,13 @@ func TestEngineRequestAfterShutdownErrors(t *testing.T) {
 	client, server := net.Pipe()
 	fakeBroker(server, ComplianceString, 1)
 
-	e, err := startEngine(client, EngineOptions{ClientName: "go-test", HeartbeatInterval: time.Hour})
+	e, err := startEngine(context.Background(), client, EngineOptions{ClientName: "go-test", HeartbeatInterval: time.Hour})
 	if err != nil {
 		t.Fatalf("startEngine: %v", err)
 	}
 	e.Shutdown()
 
-	if _, err := e.PublishConfirmed(Publish{Topic: "t"}); err == nil {
+	if _, err := e.PublishConfirmed(context.Background(), Publish{Topic: "t"}); err == nil {
 		t.Error("expected an error publishing after shutdown")
 	}
 }

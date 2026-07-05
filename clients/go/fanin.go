@@ -11,6 +11,7 @@ package fibril
 // partitions without the caller re-subscribing.
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -26,7 +27,7 @@ type FanIn struct {
 	client *Client
 	topic  string
 	group  *string // nil for streams
-	attach func(partition uint32) (*SupervisedSubscription, error)
+	attach func(ctx context.Context, partition uint32) (*SupervisedSubscription, error)
 	cancel chan struct{}
 
 	mu      sync.Mutex
@@ -38,8 +39,8 @@ type FanIn struct {
 
 // newFanIn subscribes the current partition set (strictly, failing the call if a
 // partition cannot be attached) and starts the growth loop.
-func (c *Client) newFanIn(topic string, group *string, bufferPerSub uint32, attach func(uint32) (*SupervisedSubscription, error)) (*FanIn, error) {
-	if _, err := c.FetchTopology(TopologyRequest{Topic: &topic}); err != nil {
+func (c *Client) newFanIn(ctx context.Context, topic string, group *string, bufferPerSub uint32, attach func(context.Context, uint32) (*SupervisedSubscription, error)) (*FanIn, error) {
+	if _, err := c.FetchTopology(ctx, TopologyRequest{Topic: &topic}); err != nil {
 		return nil, err
 	}
 	count := c.topo.partitionCount(topic, group)
@@ -55,7 +56,7 @@ func (c *Client) newFanIn(topic string, group *string, bufferPerSub uint32, atta
 		covered:    map[uint32]bool{},
 	}
 	for p := uint32(0); p < count; p++ {
-		if err := fi.attachPartition(p, true); err != nil {
+		if err := fi.attachPartition(ctx, p, true); err != nil {
 			fi.Close()
 			return nil, err
 		}
@@ -72,7 +73,7 @@ func (c *Client) newFanIn(topic string, group *string, bufferPerSub uint32, atta
 // and the initial pass do not double-subscribe. When strict is false a failed
 // attach is un-reserved so a later poll retries. Holds no lock across the network
 // subscribe.
-func (fi *FanIn) attachPartition(p uint32, strict bool) error {
+func (fi *FanIn) attachPartition(ctx context.Context, p uint32, strict bool) error {
 	fi.mu.Lock()
 	if fi.closed || fi.covered[p] {
 		fi.mu.Unlock()
@@ -81,7 +82,7 @@ func (fi *FanIn) attachPartition(p uint32, strict bool) error {
 	fi.covered[p] = true
 	fi.mu.Unlock()
 
-	ss, err := fi.attach(p)
+	ss, err := fi.attach(ctx, p)
 	if err != nil {
 		fi.mu.Lock()
 		delete(fi.covered, p)
@@ -135,10 +136,13 @@ func (fi *FanIn) growthLoop(interval time.Duration) {
 			if fi.client.closed.Load() {
 				return
 			}
-			_, _ = fi.client.FetchTopology(TopologyRequest{Topic: &fi.topic})
+			// The growth loop is background work bounded by Close, not the caller's
+			// setup context.
+			bg := context.Background()
+			_, _ = fi.client.FetchTopology(bg, TopologyRequest{Topic: &fi.topic})
 			count := fi.client.topo.partitionCount(fi.topic, fi.group)
 			for p := uint32(0); p < count; p++ {
-				_ = fi.attachPartition(p, false)
+				_ = fi.attachPartition(bg, p, false)
 			}
 		}
 	}
@@ -169,9 +173,9 @@ func (fi *FanIn) Close() {
 // SubscribeTopic subscribes to every partition of a queue topic and fans the
 // deliveries into one channel, supervising each partition and picking up
 // partitions added by a live repartition grow. Prefetch is per partition.
-func (c *Client) SubscribeTopic(topic string, group *string, prefetch uint32, autoAck bool) (*FanIn, error) {
-	return c.newFanIn(topic, group, prefetch, func(p uint32) (*SupervisedSubscription, error) {
-		return c.SuperviseSubscribe(Subscribe{Topic: topic, Partition: p, Group: group, Prefetch: prefetch, AutoAck: autoAck})
+func (c *Client) SubscribeTopic(ctx context.Context, topic string, group *string, prefetch uint32, autoAck bool) (*FanIn, error) {
+	return c.newFanIn(ctx, topic, group, prefetch, func(ctx context.Context, p uint32) (*SupervisedSubscription, error) {
+		return c.SuperviseSubscribe(ctx, Subscribe{Topic: topic, Partition: p, Group: group, Prefetch: prefetch, AutoAck: autoAck})
 	})
 }
 
@@ -183,9 +187,9 @@ const DefaultCohortID = "default"
 // the broker assigns each partition to a single member, so several members
 // consume the partitioned topic in order with free failover. Prefetch is per
 // partition. Pass an empty group for the default queue namespace.
-func (c *Client) SubscribeTopicCohort(topic, consumerGroup string, group *string, prefetch uint32, autoAck bool) (*FanIn, error) {
-	return c.newFanIn(topic, group, prefetch, func(p uint32) (*SupervisedSubscription, error) {
-		return c.SuperviseSubscribe(Subscribe{
+func (c *Client) SubscribeTopicCohort(ctx context.Context, topic, consumerGroup string, group *string, prefetch uint32, autoAck bool) (*FanIn, error) {
+	return c.newFanIn(ctx, topic, group, prefetch, func(ctx context.Context, p uint32) (*SupervisedSubscription, error) {
+		return c.SuperviseSubscribe(ctx, Subscribe{
 			Topic: topic, Partition: p, Group: group,
 			ConsumerGroup: &consumerGroup, Prefetch: prefetch, AutoAck: autoAck,
 		})
@@ -195,8 +199,8 @@ func (c *Client) SubscribeTopicCohort(topic, consumerGroup string, group *string
 // SubscribeTopicExclusive is SubscribeTopicCohort joining the default cohort, for
 // the common case of one exclusive cohort per queue. Run several instances that
 // all call this on the same queue and they self-organize into the cohort.
-func (c *Client) SubscribeTopicExclusive(topic string, prefetch uint32, autoAck bool) (*FanIn, error) {
-	return c.SubscribeTopicCohort(topic, DefaultCohortID, nil, prefetch, autoAck)
+func (c *Client) SubscribeTopicExclusive(ctx context.Context, topic string, prefetch uint32, autoAck bool) (*FanIn, error) {
+	return c.SubscribeTopicCohort(ctx, topic, DefaultCohortID, nil, prefetch, autoAck)
 }
 
 // StreamSubscribeOptions configure a whole-stream (Plexus) fan-in subscription.
@@ -212,9 +216,9 @@ type StreamSubscribeOptions struct {
 // the records into one channel, supervising each partition and picking up
 // partitions added by a live repartition grow. Every consumer sees every record
 // (fan-out); the client reads all partitions and fans them in.
-func (c *Client) SubscribeStreamTopic(topic string, opts StreamSubscribeOptions) (*FanIn, error) {
-	return c.newFanIn(topic, nil, opts.Prefetch, func(p uint32) (*SupervisedSubscription, error) {
-		return c.SuperviseSubscribeStream(SubscribeStream{
+func (c *Client) SubscribeStreamTopic(ctx context.Context, topic string, opts StreamSubscribeOptions) (*FanIn, error) {
+	return c.newFanIn(ctx, topic, nil, opts.Prefetch, func(ctx context.Context, p uint32) (*SupervisedSubscription, error) {
+		return c.SuperviseSubscribeStream(ctx, SubscribeStream{
 			Topic:       topic,
 			Partition:   p,
 			DurableName: opts.DurableName,

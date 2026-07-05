@@ -2,6 +2,7 @@ package fibril
 
 import (
 	"bufio"
+	"context"
 	"net"
 	"testing"
 	"time"
@@ -43,7 +44,7 @@ func TestClientCohortMemberCaptureCarryAndAssignment(t *testing.T) {
 		}
 	}()
 
-	e, err := startEngine(client, EngineOptions{
+	e, err := startEngine(context.Background(), client, EngineOptions{
 		ClientName: "go-test", HeartbeatInterval: time.Hour,
 		OnAssignmentChanged: func(a AssignmentChanged) { assignments <- a },
 	})
@@ -54,10 +55,10 @@ func TestClientCohortMemberCaptureCarryAndAssignment(t *testing.T) {
 	defer c.Shutdown()
 
 	cg := "cg"
-	if _, err := c.Subscribe(Subscribe{Topic: "t", Partition: 0, ConsumerGroup: &cg}); err != nil {
+	if _, err := c.Subscribe(context.Background(), Subscribe{Topic: "t", Partition: 0, ConsumerGroup: &cg}); err != nil {
 		t.Fatalf("first subscribe: %v", err)
 	}
-	if _, err := c.Subscribe(Subscribe{Topic: "t", Partition: 1, ConsumerGroup: &cg}); err != nil {
+	if _, err := c.Subscribe(context.Background(), Subscribe{Topic: "t", Partition: 1, ConsumerGroup: &cg}); err != nil {
 		t.Fatalf("second subscribe: %v", err)
 	}
 
@@ -116,14 +117,14 @@ func TestSubscribeTopicExclusiveJoinsDefaultCohort(t *testing.T) {
 		}
 	}()
 
-	e, err := startEngine(client, EngineOptions{ClientName: "go-test", HeartbeatInterval: time.Hour})
+	e, err := startEngine(context.Background(), client, EngineOptions{ClientName: "go-test", HeartbeatInterval: time.Hour})
 	if err != nil {
 		t.Fatalf("startEngine: %v", err)
 	}
 	c := newClientWith("127.0.0.1:9999", e, ClientOptions{})
 	defer c.Shutdown()
 
-	fan, err := c.SubscribeTopicExclusive("orders", 8, true)
+	fan, err := c.SubscribeTopicExclusive(context.Background(), "orders", 8, true)
 	if err != nil {
 		t.Fatalf("SubscribeTopicExclusive: %v", err)
 	}

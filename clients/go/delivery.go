@@ -6,7 +6,10 @@ package fibril
 // prefetch, so the broker (which never sends beyond prefetch unacked) cannot
 // outrun it and the run goroutine never blocks.
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // Delivery is one message pushed to a subscription.
 type Delivery struct {
@@ -73,27 +76,31 @@ type Subscription struct {
 // Subscribe opens a subscription and returns it once the broker confirms. The
 // returned Subscription's Deliveries channel receives pushed messages. A plain
 // subscribe is remembered for reconnect reconcile.
-func (e *Engine) Subscribe(req Subscribe) (*Subscription, error) {
-	return e.subscribe(req, false)
+func (e *Engine) Subscribe(ctx context.Context, req Subscribe) (*Subscription, error) {
+	return e.subscribe(ctx, req, false)
 }
 
 // subscribeSupervised opens a subscription that is not remembered for reconcile,
 // since its supervisor re-subscribes on a drop instead.
-func (e *Engine) subscribeSupervised(req Subscribe) (*Subscription, error) {
-	return e.subscribe(req, true)
+func (e *Engine) subscribeSupervised(ctx context.Context, req Subscribe) (*Subscription, error) {
+	return e.subscribe(ctx, req, true)
 }
 
-func (e *Engine) subscribe(req Subscribe, noReconcile bool) (*Subscription, error) {
+func (e *Engine) subscribe(ctx context.Context, req Subscribe, noReconcile bool) (*Subscription, error) {
 	sr := make(chan subResult, 1)
 	reqCopy := req
 	select {
 	case e.cmdCh <- command{op: opSubscribe, body: encodeSubscribe(req), subReply: sr, autoAck: req.AutoAck, noReconcile: noReconcile, sub: &reqCopy}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	case <-e.done:
 		return nil, e.err()
 	}
 	select {
 	case r := <-sr:
 		return r.sub, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	case <-e.done:
 		return nil, e.err()
 	}
@@ -102,17 +109,21 @@ func (e *Engine) subscribe(req Subscribe, noReconcile bool) (*Subscription, erro
 // SubscribeStream opens a Plexus (fan-out stream) subscription of one partition.
 // The broker confirms it with the shared SUBSCRIBE_OK, so it delivers on a
 // per-subscription channel like a queue subscription.
-func (e *Engine) SubscribeStream(req SubscribeStream) (*Subscription, error) {
+func (e *Engine) SubscribeStream(ctx context.Context, req SubscribeStream) (*Subscription, error) {
 	sr := make(chan subResult, 1)
 	// Streams resume by durable cursor, not the reconcile registry.
 	select {
 	case e.cmdCh <- command{op: opSubscribeStream, body: encodeSubscribeStream(req), subReply: sr, autoAck: req.AutoAck, noReconcile: true}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	case <-e.done:
 		return nil, e.err()
 	}
 	select {
 	case r := <-sr:
 		return r.sub, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	case <-e.done:
 		return nil, e.err()
 	}

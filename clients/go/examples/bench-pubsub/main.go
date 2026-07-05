@@ -10,6 +10,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strconv"
@@ -49,7 +50,7 @@ func main() {
 
 	auth := &fibril.Auth{Username: env("FIBRIL_USER", "fibril"), Password: env("FIBRIL_PASS", "fibril")}
 	dial := func() *fibril.Client {
-		c, err := fibril.Dial(addr, fibril.ClientOptions{ClientName: "bench", Auth: auth})
+		c, err := fibril.Dial(context.Background(), addr, fibril.ClientOptions{ClientName: "bench", Auth: auth})
 		if err != nil {
 			fmt.Println("connect:", err)
 			os.Exit(1)
@@ -65,7 +66,7 @@ func main() {
 	if doSub {
 		consumer = dial()
 		defer consumer.Shutdown()
-		fi, err := consumer.SubscribeTopic(topic, nil, prefetch, autoAck)
+		fi, err := consumer.SubscribeTopic(context.Background(), topic, nil, prefetch, autoAck)
 		if err != nil {
 			fmt.Println("subscribe:", err)
 			os.Exit(1)
@@ -86,7 +87,7 @@ func main() {
 		msg := fibril.Raw(make([]byte, size))
 		go func() {
 			for running.Load() {
-				_ = pub.Publish(msg)
+				_ = pub.Publish(context.Background(), msg)
 				published.Add(1)
 			}
 		}()

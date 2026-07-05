@@ -2,6 +2,7 @@ package fibril
 
 import (
 	"bufio"
+	"context"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -31,13 +32,13 @@ func TestClientReconnectsBootstrap(t *testing.T) {
 		}
 	}()
 
-	c, err := Dial(ln.Addr().String(), ClientOptions{ClientName: "go-test", HeartbeatInterval: time.Hour})
+	c, err := Dial(context.Background(), ln.Addr().String(), ClientOptions{ClientName: "go-test", HeartbeatInterval: time.Hour})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
 	defer c.Shutdown()
 
-	off1, err := c.PublishConfirmed(Publish{Topic: "t", Payload: []byte("a")})
+	off1, err := c.PublishConfirmed(context.Background(), Publish{Topic: "t", Payload: []byte("a")})
 	if err != nil {
 		t.Fatalf("first publish: %v", err)
 	}
@@ -47,7 +48,7 @@ func TestClientReconnectsBootstrap(t *testing.T) {
 
 	// The broker dropped connection 1 after that publish. The next publish must
 	// transparently reconnect and land on connection 2.
-	off2, err := c.PublishConfirmed(Publish{Topic: "t", Payload: []byte("b")})
+	off2, err := c.PublishConfirmed(context.Background(), Publish{Topic: "t", Payload: []byte("b")})
 	if err != nil {
 		t.Fatalf("second publish (after reconnect): %v", err)
 	}

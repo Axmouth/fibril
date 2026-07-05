@@ -1,6 +1,7 @@
 package fibril
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"os"
@@ -53,7 +54,7 @@ func TestConnectionRefusedCarriesGuide(t *testing.T) {
 	addr := l.Addr().String()
 	_ = l.Close()
 
-	_, err = Connect(addr, EngineOptions{ClientName: "go-test", HeartbeatInterval: time.Hour})
+	_, err = Connect(context.Background(), addr, EngineOptions{ClientName: "go-test", HeartbeatInterval: time.Hour})
 	if err == nil {
 		t.Fatal("expected a connection-refused error")
 	}

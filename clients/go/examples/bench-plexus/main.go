@@ -12,6 +12,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strconv"
@@ -53,7 +54,7 @@ func main() {
 
 	auth := &fibril.Auth{Username: env("FIBRIL_USER", "fibril"), Password: env("FIBRIL_PASS", "fibril")}
 	dial := func() *fibril.Client {
-		c, err := fibril.Dial(addr, fibril.ClientOptions{ClientName: "bench", Auth: auth})
+		c, err := fibril.Dial(context.Background(), addr, fibril.ClientOptions{ClientName: "bench", Auth: auth})
 		if err != nil {
 			fmt.Println("connect:", err)
 			os.Exit(1)
@@ -64,7 +65,7 @@ func main() {
 	// Declare the stream once up front (on a throwaway connection) so both roles
 	// can run as separate processes.
 	admin := dial()
-	if _, err := admin.DeclarePlexus(fibril.DeclarePlexus{Topic: topic, PartitionCount: &partitions, Durability: durability}); err != nil {
+	if _, err := admin.DeclarePlexus(context.Background(), fibril.DeclarePlexus{Topic: topic, PartitionCount: &partitions, Durability: durability}); err != nil {
 		fmt.Println("declare plexus:", err)
 		os.Exit(1)
 	}
@@ -78,7 +79,7 @@ func main() {
 		for i := 0; i < consumers; i++ {
 			consumer := dial()
 			defer consumer.Shutdown()
-			fi, err := consumer.SubscribeStreamTopic(topic, fibril.StreamSubscribeOptions{
+			fi, err := consumer.SubscribeStreamTopic(context.Background(), topic, fibril.StreamSubscribeOptions{
 				Start: fibril.StreamStart{Kind: fibril.StreamLatest}, Prefetch: prefetch, AutoAck: true,
 			})
 			if err != nil {
@@ -99,7 +100,7 @@ func main() {
 		msg := fibril.Raw(make([]byte, size))
 		go func() {
 			for running.Load() {
-				_ = pub.Publish(msg)
+				_ = pub.Publish(context.Background(), msg)
 				published.Add(1)
 			}
 		}()

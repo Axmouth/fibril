@@ -10,6 +10,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 
 	fibril "github.com/Axmouth/fibril/clients/go"
@@ -20,7 +21,7 @@ func main() {
 	c := exharness.Connect("example-pattern")
 	defer c.Shutdown()
 
-	ps, err := c.Routing().SubscribePattern("events.*", fibril.PatternSubscribeOptions{Prefetch: 16, AutoAck: true})
+	ps, err := c.Routing().SubscribePattern(context.Background(), "events.*", fibril.PatternSubscribeOptions{Prefetch: 16, AutoAck: true})
 	if err != nil {
 		fmt.Println("subscribe pattern:", err)
 		return

@@ -9,6 +9,7 @@
 package exharness
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"os"
@@ -29,7 +30,7 @@ func Addr() string {
 func Connect(clientName string) *fibril.Client {
 	user := envOr("FIBRIL_USER", "fibril")
 	pass := envOr("FIBRIL_PASS", "fibril")
-	c, err := fibril.Dial(Addr(), fibril.ClientOptions{
+	c, err := fibril.Dial(context.Background(), Addr(), fibril.ClientOptions{
 		ClientName: clientName,
 		Auth:       &fibril.Auth{Username: user, Password: pass},
 	})

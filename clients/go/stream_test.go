@@ -2,6 +2,7 @@ package fibril
 
 import (
 	"bufio"
+	"context"
 	"net"
 	"testing"
 	"time"
@@ -35,13 +36,13 @@ func TestEngineSubscribeStreamDelivers(t *testing.T) {
 		}
 	}()
 
-	e, err := startEngine(client, EngineOptions{ClientName: "go-test", HeartbeatInterval: time.Hour})
+	e, err := startEngine(context.Background(), client, EngineOptions{ClientName: "go-test", HeartbeatInterval: time.Hour})
 	if err != nil {
 		t.Fatalf("startEngine: %v", err)
 	}
 	defer e.Shutdown()
 
-	sub, err := e.SubscribeStream(SubscribeStream{Topic: "s", Partition: 0, Prefetch: 8, Start: StreamStart{Kind: StreamEarliest}, AutoAck: true})
+	sub, err := e.SubscribeStream(context.Background(), SubscribeStream{Topic: "s", Partition: 0, Prefetch: 8, Start: StreamStart{Kind: StreamEarliest}, AutoAck: true})
 	if err != nil {
 		t.Fatalf("SubscribeStream: %v", err)
 	}

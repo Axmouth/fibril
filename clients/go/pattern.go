@@ -8,6 +8,7 @@ package fibril
 // default client API.
 
 import (
+	"context"
 	"strings"
 	"sync"
 )
@@ -98,38 +99,38 @@ type StreamPatternSubscribeOptions struct {
 
 // SubscribePattern fans in across every work queue whose topic matches pattern (a
 // *-wildcard glob, "*" matches all), attaching queues that start matching later.
-func (r *RoutingClient) SubscribePattern(pattern string, opts PatternSubscribeOptions) (*PatternSubscription, error) {
+func (r *RoutingClient) SubscribePattern(ctx context.Context, pattern string, opts PatternSubscribeOptions) (*PatternSubscription, error) {
 	prefetch := opts.Prefetch
 	if prefetch == 0 {
 		prefetch = 1
 	}
-	attach := func(topic string, group *string) (*FanIn, error) {
-		return r.client.newFanIn(topic, group, prefetch, func(p uint32) (*SupervisedSubscription, error) {
-			return r.client.SuperviseSubscribe(Subscribe{
+	attach := func(ctx context.Context, topic string, group *string) (*FanIn, error) {
+		return r.client.newFanIn(ctx, topic, group, prefetch, func(ctx context.Context, p uint32) (*SupervisedSubscription, error) {
+			return r.client.SuperviseSubscribe(ctx, Subscribe{
 				Topic: topic, Partition: p, Group: group,
 				ConsumerGroup: opts.ConsumerGroup, Prefetch: prefetch, AutoAck: opts.AutoAck,
 			})
 		})
 	}
-	return r.client.subscribePattern(pattern, false, attach), nil
+	return r.client.subscribePattern(ctx, pattern, false, attach), nil
 }
 
 // SubscribeStreamPattern fans in across every Plexus stream whose topic matches
 // pattern, attaching streams that start matching later.
-func (r *RoutingClient) SubscribeStreamPattern(pattern string, opts StreamPatternSubscribeOptions) (*PatternSubscription, error) {
+func (r *RoutingClient) SubscribeStreamPattern(ctx context.Context, pattern string, opts StreamPatternSubscribeOptions) (*PatternSubscription, error) {
 	prefetch := opts.Prefetch
 	if prefetch == 0 {
 		prefetch = 16
 	}
-	attach := func(topic string, _ *string) (*FanIn, error) {
-		return r.client.newFanIn(topic, nil, prefetch, func(p uint32) (*SupervisedSubscription, error) {
-			return r.client.SuperviseSubscribeStream(SubscribeStream{
+	attach := func(ctx context.Context, topic string, _ *string) (*FanIn, error) {
+		return r.client.newFanIn(ctx, topic, nil, prefetch, func(ctx context.Context, p uint32) (*SupervisedSubscription, error) {
+			return r.client.SuperviseSubscribeStream(ctx, SubscribeStream{
 				Topic: topic, Partition: p, DurableName: opts.DurableName,
 				Start: opts.Start, Filter: opts.Filter, Prefetch: prefetch, AutoAck: opts.AutoAck,
 			})
 		})
 	}
-	return r.client.subscribePattern(pattern, true, attach), nil
+	return r.client.subscribePattern(ctx, pattern, true, attach), nil
 }
 
 // PatternSubscription is a live fan-in over every channel matching a glob, with
@@ -147,7 +148,7 @@ type patternFanIn struct {
 	client  *Client
 	glob    *topicGlob
 	stream  bool // false = queue, true = stream
-	attach  func(topic string, group *string) (*FanIn, error)
+	attach  func(ctx context.Context, topic string, group *string) (*FanIn, error)
 	merged  chan Delivery
 	cancel  func() // catalogue listener cancel
 	trigger chan struct{}
@@ -159,7 +160,7 @@ type patternFanIn struct {
 	wg     sync.WaitGroup // one per live forwarder
 }
 
-func (c *Client) subscribePattern(pattern string, stream bool, attach func(topic string, group *string) (*FanIn, error)) *PatternSubscription {
+func (c *Client) subscribePattern(ctx context.Context, pattern string, stream bool, attach func(context.Context, string, *string) (*FanIn, error)) *PatternSubscription {
 	pf := &patternFanIn{
 		client:  c,
 		glob:    newTopicGlob(pattern),
@@ -173,8 +174,8 @@ func (c *Client) subscribePattern(pattern string, stream bool, attach func(topic
 	// Warm topology so the first reconcile sees the current catalogue, then watch
 	// for changes before reconciling so nothing is missed.
 	pf.cancel = c.OnCatalogueChange(func(Catalogue) { pf.signal() })
-	_, _ = c.FetchTopology(TopologyRequest{})
-	pf.reconcile()
+	_, _ = c.FetchTopology(ctx, TopologyRequest{})
+	pf.reconcile(ctx)
 	go pf.loop()
 	return &PatternSubscription{Deliveries: pf.merged, fan: pf}
 }
@@ -192,14 +193,15 @@ func (pf *patternFanIn) loop() {
 		case <-pf.done:
 			return
 		case <-pf.trigger:
-			pf.reconcile()
+			// Reconcile-driven attaches are background work bounded by Close.
+			pf.reconcile(context.Background())
 		}
 	}
 }
 
 // reconcile is only ever run by loop (and once synchronously at start), never
 // concurrently with itself, so it can snapshot the active set without racing.
-func (pf *patternFanIn) reconcile() {
+func (pf *patternFanIn) reconcile(ctx context.Context) {
 	cat := pf.client.Catalogue()
 	type match struct {
 		topic string
@@ -245,7 +247,7 @@ func (pf *patternFanIn) reconcile() {
 		if _, ok := current[k]; ok {
 			continue
 		}
-		fan, err := pf.attach(m.topic, m.group)
+		fan, err := pf.attach(ctx, m.topic, m.group)
 		if err != nil {
 			continue // best effort: retried on the next catalogue change
 		}

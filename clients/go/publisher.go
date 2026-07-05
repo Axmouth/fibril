@@ -5,6 +5,7 @@ package fibril
 // producer-dedup headers so a retried publish can be deduplicated by the broker.
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"strconv"
@@ -50,61 +51,61 @@ func (p *Publisher) toPublish(m Message) (Publish, error) {
 }
 
 // Publish sends a fire-and-forget message.
-func (p *Publisher) Publish(m Message) error {
+func (p *Publisher) Publish(ctx context.Context, m Message) error {
 	pub, err := p.toPublish(m)
 	if err != nil {
 		return err
 	}
-	return p.client.Publish(pub)
+	return p.client.Publish(ctx, pub)
 }
 
 // PublishConfirmed sends a message and waits for the broker-assigned offset.
-func (p *Publisher) PublishConfirmed(m Message) (uint64, error) {
+func (p *Publisher) PublishConfirmed(ctx context.Context, m Message) (uint64, error) {
 	pub, err := p.toPublish(m)
 	if err != nil {
 		return 0, err
 	}
-	return p.client.PublishConfirmed(pub)
+	return p.client.PublishConfirmed(ctx, pub)
 }
 
 // PublishWithConfirmation sends a confirmed message and returns a handle for its
 // offset, without blocking on the confirm. Fire several and await each handle
 // afterward to pipeline the confirmations.
-func (p *Publisher) PublishWithConfirmation(m Message) (PublishConfirmation, error) {
+func (p *Publisher) PublishWithConfirmation(ctx context.Context, m Message) (PublishConfirmation, error) {
 	pub, err := p.toPublish(m)
 	if err != nil {
 		return PublishConfirmation{}, err
 	}
-	return p.client.PublishWithConfirmation(pub)
+	return p.client.PublishWithConfirmation(ctx, pub)
 }
 
 // PublishDelayed sends m fire-and-forget, to become visible after delay from now.
-func (p *Publisher) PublishDelayed(m Message, delay time.Duration) error {
+func (p *Publisher) PublishDelayed(ctx context.Context, m Message, delay time.Duration) error {
 	pd, err := p.toDelayed(m, delay)
 	if err != nil {
 		return err
 	}
-	return p.client.PublishDelayed(pd)
+	return p.client.PublishDelayed(ctx, pd)
 }
 
 // PublishDelayedConfirmed sends m to become visible after delay and waits for the
 // broker-assigned offset.
-func (p *Publisher) PublishDelayedConfirmed(m Message, delay time.Duration) (uint64, error) {
+func (p *Publisher) PublishDelayedConfirmed(ctx context.Context, m Message, delay time.Duration) (uint64, error) {
 	pd, err := p.toDelayed(m, delay)
 	if err != nil {
 		return 0, err
 	}
-	return p.client.PublishDelayedConfirmed(pd)
+	return p.client.PublishDelayedConfirmed(ctx, pd)
 }
 
 // PublishDelayedWithConfirmation sends a delayed message and returns a handle for
 // its offset, without blocking on the confirm.
-func (p *Publisher) PublishDelayedWithConfirmation(m Message, delay time.Duration) (PublishConfirmation, error) {
+func (p *Publisher) PublishDelayedWithConfirmation(ctx context.Context, m Message, delay time.Duration) (PublishConfirmation, error) {
 	pd, err := p.toDelayed(m, delay)
 	if err != nil {
 		return PublishConfirmation{}, err
 	}
-	return p.client.PublishDelayedWithConfirmation(pd)
+	return p.client.PublishDelayedWithConfirmation(ctx, pd)
 }
 
 // toDelayed builds a delayed publish from a message, turning a relative delay into
@@ -150,22 +151,22 @@ func (c *Client) ReliablePublisherGrouped(topic, group string) *ReliablePublishe
 	return &ReliablePublisher{Publisher: c.PublisherGrouped(topic, group), producerID: newProducerID()}
 }
 
-func (p *ReliablePublisher) Publish(m Message) error {
+func (p *ReliablePublisher) Publish(ctx context.Context, m Message) error {
 	pub, err := p.toPublish(m)
 	if err != nil {
 		return err
 	}
 	p.stamp(&pub)
-	return p.client.Publish(pub)
+	return p.client.Publish(ctx, pub)
 }
 
-func (p *ReliablePublisher) PublishConfirmed(m Message) (uint64, error) {
+func (p *ReliablePublisher) PublishConfirmed(ctx context.Context, m Message) (uint64, error) {
 	pub, err := p.toPublish(m)
 	if err != nil {
 		return 0, err
 	}
 	p.stamp(&pub)
-	return p.client.PublishConfirmed(pub)
+	return p.client.PublishConfirmed(ctx, pub)
 }
 
 // stamp adds the library-owned producer-dedup headers directly (bypassing the
