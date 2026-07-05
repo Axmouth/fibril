@@ -38,6 +38,17 @@ type UnexpectedError struct {
 
 func (e *UnexpectedError) Error() string { return e.Message }
 
+// RedirectError means the broker told the client to retry this op against a
+// different owner. It is not a failure: the routing layer applies the target and
+// retries, so the per-connection engine surfaces it as this typed error.
+type RedirectError struct {
+	Redirect Redirect
+}
+
+func (e *RedirectError) Error() string {
+	return "redirected to a different owner for " + e.Redirect.Topic
+}
+
 // WireErrorKind is a stable discriminant for a wire decode failure, matching the
 // reference client and the other clients so callers can branch on the kind
 // rather than parse the message.

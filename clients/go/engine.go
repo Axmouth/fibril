@@ -347,6 +347,19 @@ func (e *Engine) handleFrame(f Frame) {
 		e.handleSubscribeOk(f)
 	case OpDeliver:
 		e.handleDeliver(f)
+	case OpRedirect:
+		// The broker routed us to a different owner. Fail the waiter with a typed
+		// redirect the client layer acts on; not fatal to the connection.
+		w, ok := e.waiters[f.RequestID]
+		if !ok {
+			return
+		}
+		delete(e.waiters, f.RequestID)
+		if rd, err := DecodeRedirect(f.Payload); err != nil {
+			failWaiter(w, err)
+		} else {
+			failWaiter(w, &RedirectError{Redirect: rd})
+		}
 	case OpError, OpSubscribeErr:
 		em, _ := DecodeError(f.Payload)
 		serr := &ServerError{Code: em.Code, Message: em.Message}

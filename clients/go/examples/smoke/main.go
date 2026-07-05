@@ -17,7 +17,7 @@ func main() {
 	if addr == "" {
 		addr = "127.0.0.1:9876"
 	}
-	e, err := fibril.Connect(addr, fibril.EngineOptions{
+	c, err := fibril.Dial(addr, fibril.ClientOptions{
 		ClientName: "go-smoke",
 		Auth:       &fibril.Auth{Username: "fibril", Password: "fibril"},
 	})
@@ -25,22 +25,26 @@ func main() {
 		fmt.Println("connect:", err)
 		os.Exit(1)
 	}
-	defer e.Shutdown()
-	fmt.Printf("connected: resume=%s\n", e.ResumeOutcome)
+	defer c.Shutdown()
+	fmt.Println("connected")
 
 	one := uint32(1)
-	if _, err := e.DeclareQueue(fibril.DeclareQueue{Topic: "gosmoke", PartitionCount: &one}); err != nil {
+	if _, err := c.DeclareQueue(fibril.DeclareQueue{Topic: "gosmoke", PartitionCount: &one}); err != nil {
 		fmt.Println("declare:", err)
 		os.Exit(1)
 	}
+	if _, err := c.FetchTopology(fibril.TopologyRequest{}); err != nil {
+		fmt.Println("topology:", err)
+		os.Exit(1)
+	}
 
-	sub, err := e.Subscribe(fibril.Subscribe{Topic: "gosmoke", Partition: 0, Prefetch: 16})
+	sub, err := c.Subscribe(fibril.Subscribe{Topic: "gosmoke", Partition: 0, Prefetch: 16})
 	if err != nil {
 		fmt.Println("subscribe:", err)
 		os.Exit(1)
 	}
 
-	off, err := e.PublishConfirmed(fibril.Publish{Topic: "gosmoke", Payload: []byte("hello from go")})
+	off, err := c.PublishConfirmed(fibril.Publish{Topic: "gosmoke", Payload: []byte("hello from go")})
 	if err != nil {
 		fmt.Println("publish:", err)
 		os.Exit(1)
@@ -54,7 +58,7 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("delivered: %q offset=%d tag=%d\n", d.Payload, d.Offset, d.DeliveryTag.Epoch)
-		if err := e.Ack(d); err != nil {
+		if err := sub.Ack(d); err != nil {
 			fmt.Println("ack:", err)
 			os.Exit(1)
 		}

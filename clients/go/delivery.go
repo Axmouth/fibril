@@ -27,7 +27,8 @@ type Delivery struct {
 }
 
 // Subscription is a live subscription. Deliveries yields messages until the
-// connection closes (the channel is then closed).
+// connection closes (the channel is then closed). Settle a delivery with the
+// subscription's Ack/Nack.
 type Subscription struct {
 	SubID      uint64
 	Topic      string
@@ -35,6 +36,17 @@ type Subscription struct {
 	Group      *string
 	MemberID   *UUID
 	Deliveries <-chan Delivery
+
+	engine *Engine
+}
+
+// Ack settles a delivery from this subscription as processed. Unnecessary for an
+// auto-ack subscription (the broker already settled it), but harmless.
+func (s *Subscription) Ack(d Delivery) error { return s.engine.Ack(d) }
+
+// Nack returns a delivery unprocessed, optionally requeuing it.
+func (s *Subscription) Nack(d Delivery, requeue bool, notBefore *uint64) error {
+	return s.engine.Nack(d, requeue, notBefore)
 }
 
 // Subscribe opens a subscription and returns it once the broker confirms. The
@@ -109,6 +121,7 @@ func (e *Engine) handleSubscribeOk(f Frame) {
 			Group:      ok2.Group,
 			MemberID:   ok2.MemberID,
 			Deliveries: ch,
+			engine:     e,
 		}}
 	}
 }
