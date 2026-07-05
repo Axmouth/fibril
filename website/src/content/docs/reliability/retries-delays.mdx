@@ -153,8 +153,8 @@ An expired message is **never** dropped while it is in flight. When it does
 drop, it follows the queue's dead-letter policy: discarded when no DLQ is
 configured, otherwise dead-lettered with reason `expired`.
 
-Per-message TTL. Rust, TypeScript, and Python bind it to an `expiring` publisher.
-Go sets it per message with `WithTTL`:
+Per-message TTL via an `expiring` publisher (a per-message `WithTTL`/`with_ttl`
+still overrides the default):
 
 <Tabs syncKey="client-language">
   <TabItem label="Rust">
@@ -184,8 +184,8 @@ await publisher.publish(reply)
   <TabItem label="Go">
 
 ```go
-publisher := client.Publisher("rpc.reply")
-publisher.Publish(fibril.Text("reply").WithTTL(30 * time.Second))
+publisher := client.Publisher("rpc.reply").Expiring(30 * time.Second)
+publisher.Publish(fibril.Text("reply"))
 ```
 
   </TabItem>

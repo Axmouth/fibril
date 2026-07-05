@@ -29,13 +29,13 @@ See also: [core model](/concepts/core-model/) and
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
-| Topic plus optional group | Implemented | Broker, protocol, Rust client, TypeScript client, Python client, admin API, CLI |
-| Default group normalization | Implemented | Empty group and `default` normalize to ungrouped on admin and CLI paths, and in Rust, TypeScript, and Python clients |
+| Topic plus optional group | Implemented | Broker, protocol, Rust client, TypeScript client, Python client, Go client, admin API, CLI |
+| Default group normalization | Implemented | Empty group and `default` normalize to ungrouped on admin and CLI paths, and in Rust, TypeScript, Python, and Go clients |
 | Partitioned queue declaration | Implemented | `DeclareQueue.partition_count`, Rust client declare builder, config default, coordination catalogue |
 | Producer partition routing | Implemented | Rust client topology cache, round-robin keyless routing, `partition_key` stable routing, version-fenced publish frames |
 | Subscription fan-in | Implemented | Rust client opens per-partition subscriptions from topology and merges deliveries into one logical stream |
-| Cluster catalogue (client) | Implemented | Rust, TypeScript, and Python clients expose the live set of declared queues and streams (with partition counts) via a snapshot accessor and a change-subscription, derived from topology and kept live by topology pushes (no extra round-trips) |
-| Pattern subscribe / discovery routing (client) | Implemented | Opt-in `client.routing()` returns a routing view. `subscribe_pattern` (queues) and `subscribe_stream_pattern` (streams) fan in across every channel whose topic matches a `*`-glob and auto-attach channels that start matching later (driven by the catalogue feed). Manual and auto-ack variants. Rust, TypeScript, and Python. Client-side only, no broker changes |
+| Cluster catalogue (client) | Implemented | Rust, TypeScript, Python, and Go clients expose the live set of declared queues and streams (with partition counts) via a snapshot accessor and a change-subscription, derived from topology and kept live by topology pushes (no extra round-trips) |
+| Pattern subscribe / discovery routing (client) | Implemented | Opt-in `client.routing()` returns a routing view. `subscribe_pattern` (queues) and `subscribe_stream_pattern` (streams) fan in across every channel whose topic matches a `*`-glob and auto-attach channels that start matching later (driven by the catalogue feed). Manual and auto-ack variants. Rust, TypeScript, Python, and Go. Client-side only, no broker changes |
 | Operator-chosen partition id | Out of scope | Normal user-facing paths should choose queue and optional key, not a partition number |
 
 Conditions and limits:
@@ -103,11 +103,11 @@ See also: [client usage](/clients/) and
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
-| Unconfirmed publish | Implemented | TCP protocol, Rust client, TypeScript client, Python client |
-| Confirmed publish | Implemented | TCP protocol, Rust client, TypeScript client, Python client |
+| Unconfirmed publish | Implemented | TCP protocol, Rust client, TypeScript client, Python client, Go client |
+| Confirmed publish | Implemented | TCP protocol, Rust client, TypeScript client, Python client, Go client |
 | Pipelined confirmation handles | Implemented | Rust `publish_with_confirmation`, TypeScript `publishWithConfirmation`, Python `publish_with_confirmation` |
-| Delayed publish | Implemented | TCP protocol, broker, Rust client, TypeScript client, Python client |
-| Content type metadata | Implemented | Protocol metadata, Rust client, TypeScript client, Python client, delivery path |
+| Delayed publish | Implemented | TCP protocol, broker, Rust client, TypeScript client, Python client, Go client |
+| Content type metadata | Implemented | Protocol metadata, Rust client, TypeScript client, Python client, Go client, delivery path |
 | Reserved metadata headers | Implemented | Broker protocol handler rejects `fibril.*` and `stroma.*` user headers |
 | Partition key routing | Implemented | Rust client `NewMessage::partition_key`, protocol publish metadata, server per-partition publish routing |
 | Partitioning-version fence | Implemented | Client stamps routed version, and server redirects stale publishes before appending |
@@ -141,8 +141,8 @@ See also: [backpressure](/concepts/backpressure/) and
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
-| Manual ack subscriptions | Implemented | TCP protocol, Rust client, TypeScript client, Python client |
-| Auto ack subscriptions | Implemented | TCP protocol, Rust client, TypeScript client, Python client |
+| Manual ack subscriptions | Implemented | TCP protocol, Rust client, TypeScript client, Python client, Go client |
+| Auto ack subscriptions | Implemented | TCP protocol, Rust client, TypeScript client, Python client, Go client |
 | Bounded prefetch | Implemented | Broker delivery path and clients |
 | Backpressure | Implemented | Pull-based delivery bounded by prefetch |
 | Unsubscribe redistribution | Implemented | Broker tests cover prefetched unacked messages returning to active subscribers |
@@ -203,10 +203,10 @@ See also: [reconnects](/reliability/reconnects/) and
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
-| Resume identity handshake | Implemented | TCP protocol, Rust client, TypeScript client, Python client |
+| Resume identity handshake | Implemented | TCP protocol, Rust client, TypeScript client, Python client, Go client |
 | Reconnect grace window | Implemented | Runtime settings and TCP handler. On by default in the server seed (`connection.reconnect_grace_ms`, 5s); opt out with 0. Both manual and auto-ack subscriptions participate |
-| Conservative subscription reconciliation | Implemented | Broker, Rust client, TypeScript client, Python client |
-| Restore-client-subscriptions policy | Implemented | Broker, Rust client, TypeScript client, Python client |
+| Conservative subscription reconciliation | Implemented | Broker, Rust client, TypeScript client, Python client, Go client |
+| Restore-client-subscriptions policy | Implemented | Broker, Rust client, TypeScript client, Python client, Go client |
 | Reconnect observability | Implemented | Admin overview, TCP metrics log, structured reconciliation logs |
 | Planned restart drain | Implemented | `POST /admin/api/drain` broadcasts a `GoingAway` push (grace deadline + message) to connected clients, surfaced by all three clients as an app-observable event. In coordinated mode the node also marks itself draining: the controller hands each partition with a caught-up follower to it through the same fenced promotion as failover, the draining node receives no new placements, and the call returns with handoff progress once ownership has moved or `connection.drain_handoff_timeout_ms` (default 30s) elapses. Follower-less partitions stay put and fail over reactively as before |
 | Durable broker restart reconciliation | Planned | Design notes only |
@@ -221,7 +221,7 @@ Conditions and limits:
   still valid.
 - Restore mode can recreate missing server-side subscriptions reported by the
   client after a successful resume.
-- Current Rust, TypeScript, and Python subscription receive APIs surface
+- Current Rust, TypeScript, Python, and Go subscription receive APIs surface
   reconciliation-closed streams as end-of-stream rather than a typed close
   reason.
 
@@ -233,10 +233,10 @@ See also: [core model](/concepts/core-model/),
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
-| Ack | Implemented | TCP protocol, Rust client, TypeScript client, Python client |
-| Nack without requeue | Implemented | TCP protocol, Rust client, TypeScript client, Python client |
-| Immediate retry | Implemented | TCP protocol, Rust client, TypeScript client, Python client |
-| Delayed retry | Implemented | TCP protocol, broker, Rust client, TypeScript client, Python client |
+| Ack | Implemented | TCP protocol, Rust client, TypeScript client, Python client, Go client |
+| Nack without requeue | Implemented | TCP protocol, Rust client, TypeScript client, Python client, Go client |
+| Immediate retry | Implemented | TCP protocol, Rust client, TypeScript client, Python client, Go client |
+| Delayed retry | Implemented | TCP protocol, broker, Rust client, TypeScript client, Python client, Go client |
 | Lease expiry | Implemented | Runtime delivery settings and broker/storage path |
 
 Conditions and limits:
@@ -255,7 +255,7 @@ See also: [dead lettering](/reliability/dead-lettering/) and
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
-| Per-queue DLQ policy | Implemented | Rust client, TypeScript client, Python client, `fibrilctl`, admin API |
+| Per-queue DLQ policy | Implemented | Rust client, TypeScript client, Python client, Go client, `fibrilctl`, admin API |
 | Global DLQ target | Implemented | Stroma-owned runtime state, admin UI/API, `fibrilctl` |
 | Max retry routing | Implemented | Broker/storage path and tests |
 | Dead-letter reasons | Implemented | `retries_exhausted`, `terminal_nack`, `pending_recovery`, `expired` (message TTL) |
@@ -576,12 +576,12 @@ See also: [configuration](/configuration/) for the `tls` section fields.
 | `fibrilctl cert` | Implemented | `cert generate` creates the per-deployment material ahead of first boot (extra SANs via `--san`), `cert fingerprint` prints a PEM certificate's SHA-256 |
 | First-boot setup mode | Implemented | `setup.mode = true` + no marker serves only a localhost setup page: TLS choice (generate, supply PEMs, or skip), an optional admin user, and an optional cluster secret. The choices persist as a config overlay layered below explicit config, plus the secret file |
 | Dashboard TLS status | Implemented | The settings startup summary reports the TLS state, material source, CA fingerprint, and admin coverage, with the enable guide when disabled |
-| Client TLS options | Implemented | Rust, TypeScript, and Python: OS-roots default, CA file, SHA-256 fingerprint pin, server-name override, and the shared typed error taxonomy (426 mismatch vs certificate trust vs config). Python chain pinning needs 3.13, older Pythons pin the leaf |
+| Client TLS options | Implemented | Rust, TypeScript, Python, and Go: OS-roots default, CA file, SHA-256 fingerprint pin, server-name override, and the shared typed error taxonomy (426 mismatch vs certificate trust vs config). Python chain pinning needs 3.13, older Pythons pin the leaf |
 | Admin dashboard HTTPS | Implemented | Served from the same `tls` material when enabled, `tls.admin_enabled = false` keeps it on plain HTTP for reverse-proxy setups |
 | Inter-broker TLS | Implemented | `tls.inter_broker` (follows `enabled`) wraps follower-to-owner replication dials and the coordination raft channel; peer trust via `tls.peer_ca_path`, the generated CA, or OS roots; mismatches named in both directions |
 | Shared-CA material lane | Implemented | A generated-material dir holding only `ca.pem` + `ca.key` mints that node's server certificate from the shared CA on boot (or via `fibrilctl cert generate`) |
 | Live certificate reload | Implemented | `POST /admin/api/tls/reload` + `fibrilctl admin reload-tls`: validated swap of the serving pair, old material keeps serving on rejection, established connections unaffected |
-| mTLS client auth | Implemented | `tls.client_auth = off/request/require` + `tls.client_ca_path` (falls back to the generated CA). A verified certificate whose identity (first DNS SAN, else CN) names an existing user authenticates with no AUTH frame; unknown identities are a transport pass only; `@` names never map. `require` rejects certless clients in the handshake. Client cert options + a typed required-cert error in Rust, TypeScript, and Python; `fibrilctl cert issue` mints workload certificates from the deployment CA; brokers present their own leaf on peer dials |
+| mTLS client auth | Implemented | `tls.client_auth = off/request/require` + `tls.client_ca_path` (falls back to the generated CA). A verified certificate whose identity (first DNS SAN, else CN) names an existing user authenticates with no AUTH frame; unknown identities are a transport pass only; `@` names never map. `require` rejects certless clients in the handshake. Client cert options + a typed required-cert error in Rust, TypeScript, Python, and Go; `fibrilctl cert issue` mints workload certificates from the deployment CA; brokers present their own leaf on peer dials |
 
 Conditions and limits:
 
@@ -633,7 +633,7 @@ See also: [clustering](/concepts/clustering/) and
 | `min_in_sync_replicas` | Implemented | Runtime setting, fail-fast publish refusal when healthy ISR is below floor |
 | Live repartitioning | Partial | Grow or shrink a queue's partition count in Ganglion mode (versioned routing, in-flight transition serialization, drain-and-retire on shrink); admin control + API |
 | Topology visibility | Partial | Admin API/page (with repartition + coordination-membership controls) and `fibrilctl topology`. Cross-broker lag aggregation is pending |
-| Live topology push | Partial | Broker pushes a `TopologyUpdate` to each connection when that connection's routing content changes (not on every coordination metadata bump); the Rust, TypeScript, and Python clients apply it to their routing cache and ack the generation |
+| Live topology push | Partial | Broker pushes a `TopologyUpdate` to each connection when that connection's routing content changes (not on every coordination metadata bump); the Rust, TypeScript, Python, and Go clients apply it to their routing cache and ack the generation |
 | Repartition cutover fencing | Partial | The controller fences a repartition's finalize (retiring shrunk-away partitions and clearing the marker) on cluster-wide client adoption of the new routing, derived from topology acks, bounded by `repartition_adoption_timeout_ms`. Publish version-fencing remains the correctness backstop. See [live routing and cutover](/development/live-routing-and-cutover/) |
 | Cohort visibility (admin) | Partial | Per-broker exclusive-cohort membership on the subscriptions page and `/admin/api/cohorts`; cluster-wide cohort assignment is broker-local, not centrally committed |
 | Multi-node cohort coordinator test | Partial | Coordination-level e2e covers cross-broker membership aggregation and rebalance. Full broker/client scenario coverage is still growing |

@@ -11,7 +11,7 @@ It is early-stage (0.x). The useful baseline works and is tested hard, but APIs,
 ## Where to start
 
 * Follow the [quickstart](/quickstart/) to run the broker from source.
-* Use the [client guide](/clients/) for Rust, TypeScript, and Python publishing and subscription examples.
+* Use the [client guide](/clients/) for Rust, TypeScript, Python, and Go publishing and subscription examples.
 * Use the [admin dashboard guide](/admin-dashboard/) for queues, streams, settings, message inspection, and DLQ replay.
 * Read the [core model](/concepts/core-model/) for the queue lifecycle.
 * Read [retries and delays](/reliability/retries-delays/) and [dead lettering](/reliability/dead-lettering/) for reliability features and their current limits.

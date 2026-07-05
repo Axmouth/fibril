@@ -152,7 +152,7 @@ Current limits:
   persisted runtime settings document exists yet.
 - Existing subscriptions are preserved server-side, and clients send
   subscription metadata after a successful resume.
-- Existing Rust, TypeScript, and Python publisher handles use the latest engine
+- Existing Rust, TypeScript, Python, and Go publisher handles use the latest engine
   after explicit or automatic reconnect. New subscriptions also use the latest
   engine.
 - Active subscription streams continue when reconciliation returns `keep`.
@@ -161,7 +161,7 @@ Current limits:
 - The opt-in restore-client-subscriptions policy recreates client-owned
   subscriptions that are missing server-side and remaps the stream to the new
   server subscription id.
-- Rust, TypeScript, and Python clients make one automatic reconnect attempt
+- Rust, TypeScript, Python, and Go clients make one automatic reconnect attempt
   before a new operation when the old engine is already known closed.
 - In-flight protocol requests from the old socket are not replayed.
 - Admin overview counters and TCP metrics logs expose resume, grace, and
@@ -173,7 +173,7 @@ Durable restart recovery and in-flight delivery reconstruction can come later.
 
 ## Implemented Subscription Reconciliation Metadata
 
-After a successful resume, Rust, TypeScript, and Python clients send a
+After a successful resume, Rust, TypeScript, Python, and Go clients send a
 lightweight subscription reconciliation frame. This frame tells the broker which
 subscriptions the client still believes belong to the resumed logical
 connection.
@@ -214,7 +214,7 @@ The current policy is conservative:
 - If the server has a subscription that the client did not report, the broker
   drops it and reports `close_server_side`.
 
-Current Rust, TypeScript, and Python receive APIs do not carry a typed
+Current Rust, TypeScript, Python, and Go receive APIs do not carry a typed
 reconciliation close reason. A closed subscription stream ends normally from the application
 view, so a future client-surface pass should decide whether to change the
 pre-0.1 receive API or add an explicit subscription status channel.
@@ -412,7 +412,7 @@ Broker tests:
 
 Client tests:
 
-- Rust, TypeScript, and Python clients store resume identity after connect
+- Rust, TypeScript, Python, and Go clients store resume identity after connect
   (implemented)
 - reconnect sends resume identity when available (implemented)
 - reconnect handles rejected resume by falling back to fresh state
