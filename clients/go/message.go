@@ -50,6 +50,17 @@ func JSON(v any) (Message, error) {
 	return Message{Payload: b, ContentType: ContentType{Kind: ContentJSON}}, nil
 }
 
+// Msgpack tags already-encoded MessagePack bytes with the msgpack content type.
+// Encoding is left to the caller so the client needs no serialization dependency.
+func Msgpack(payload []byte) Message {
+	return Message{Payload: payload, ContentType: ContentType{Kind: ContentMsgpack}}
+}
+
+// Custom builds a message with a custom MIME content type over opaque bytes.
+func Custom(contentType string, payload []byte) Message {
+	return Message{Payload: payload, ContentType: ContentType{Kind: ContentCustom, Custom: contentType}}
+}
+
 // Keyed sets the partition key (routing hashes it to a partition).
 func (m Message) Keyed(key []byte) Message {
 	m.PartitionKey = key
