@@ -81,13 +81,13 @@ type Frame struct {
 	Payload   []byte
 }
 
-// BuildFrame wraps an already-encoded body in a v1 frame for op.
-func BuildFrame(op Op, requestID uint64, payload []byte) Frame {
+// buildFrame wraps an already-encoded body in a v1 frame for op.
+func buildFrame(op Op, requestID uint64, payload []byte) Frame {
 	return Frame{Version: ProtocolV1, Opcode: op, RequestID: requestID, Payload: payload}
 }
 
-// EncodeFrame serializes a frame to its on-wire byte representation.
-func EncodeFrame(f Frame) []byte {
+// encodeFrame serializes a frame to its on-wire byte representation.
+func encodeFrame(f Frame) []byte {
 	out := make([]byte, frameHeaderSize+len(f.Payload))
 	binary.BigEndian.PutUint32(out[0:], uint32(len(f.Payload)))
 	binary.BigEndian.PutUint16(out[4:], f.Version)
@@ -98,11 +98,11 @@ func EncodeFrame(f Frame) []byte {
 	return out
 }
 
-// TryDecodeFrame decodes one frame from the head of buf. It returns the frame
+// tryDecodeFrame decodes one frame from the head of buf. It returns the frame
 // and the number of bytes consumed, or ok=false when buf does not yet hold a
 // full frame (the caller reads more and retries). The payload is copied, so it
 // does not alias buf.
-func TryDecodeFrame(buf []byte) (frame Frame, consumed int, ok bool) {
+func tryDecodeFrame(buf []byte) (frame Frame, consumed int, ok bool) {
 	if len(buf) < frameHeaderSize {
 		return Frame{}, 0, false
 	}

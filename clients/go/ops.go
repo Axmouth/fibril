@@ -102,7 +102,7 @@ type Hello struct {
 	Resume          *ResumeIdentity
 }
 
-func EncodeHello(h Hello) []byte {
+func encodeHello(h Hello) []byte {
 	w := writer{}
 	w.magic("FHL1")
 	w.writeStr(h.ClientName)
@@ -112,7 +112,7 @@ func EncodeHello(h Hello) []byte {
 	return w.buf
 }
 
-func DecodeHello(body []byte) (Hello, error) {
+func decodeHello(body []byte) (Hello, error) {
 	r := reader{buf: body}
 	r.expectMagic("FHL1")
 	h := Hello{
@@ -135,7 +135,7 @@ type HelloOk struct {
 	Compliance      string
 }
 
-func EncodeHelloOk(h HelloOk) []byte {
+func encodeHelloOk(h HelloOk) []byte {
 	w := writer{}
 	w.magic("FHO1")
 	w.u16(h.ProtocolVersion)
@@ -148,7 +148,7 @@ func EncodeHelloOk(h HelloOk) []byte {
 	return w.buf
 }
 
-func DecodeHelloOk(body []byte) (HelloOk, error) {
+func decodeHelloOk(body []byte) (HelloOk, error) {
 	r := reader{buf: body}
 	r.expectMagic("FHO1")
 	h := HelloOk{
@@ -169,7 +169,7 @@ type Auth struct {
 	Password string
 }
 
-func EncodeAuth(a Auth) []byte {
+func encodeAuth(a Auth) []byte {
 	w := writer{}
 	w.magic("FAU1")
 	w.writeStr(a.Username)
@@ -177,7 +177,7 @@ func EncodeAuth(a Auth) []byte {
 	return w.buf
 }
 
-func DecodeAuth(body []byte) (Auth, error) {
+func decodeAuth(body []byte) (Auth, error) {
 	r := reader{buf: body}
 	r.expectMagic("FAU1")
 	a := Auth{Username: r.readStr(), Password: r.readStr()}
@@ -190,7 +190,7 @@ type ErrorMsg struct {
 	Message string
 }
 
-func EncodeError(e ErrorMsg) []byte {
+func encodeError(e ErrorMsg) []byte {
 	w := writer{}
 	w.magic("FER1")
 	w.u16(e.Code)
@@ -198,7 +198,7 @@ func EncodeError(e ErrorMsg) []byte {
 	return w.buf
 }
 
-func DecodeError(body []byte) (ErrorMsg, error) {
+func decodeError(body []byte) (ErrorMsg, error) {
 	r := reader{buf: body}
 	r.expectMagic("FER1")
 	e := ErrorMsg{Code: r.u16(), Message: r.readStr()}
@@ -236,7 +236,7 @@ func (w *writer) publishCommon(p Publish) {
 	w.writeBytes(p.Payload)
 }
 
-func EncodePublish(p Publish) []byte {
+func encodePublish(p Publish) []byte {
 	w := writer{}
 	w.magic("FPB1")
 	w.publishCommon(p)
@@ -245,7 +245,7 @@ func EncodePublish(p Publish) []byte {
 	return w.buf
 }
 
-func DecodePublish(body []byte) (Publish, error) {
+func decodePublish(body []byte) (Publish, error) {
 	r := reader{buf: body}
 	r.expectMagic("FPB1")
 	p := Publish{
@@ -282,7 +282,7 @@ type PublishDelayed struct {
 	PartitioningVersion uint64
 }
 
-func EncodePublishDelayed(p PublishDelayed) []byte {
+func encodePublishDelayed(p PublishDelayed) []byte {
 	w := writer{}
 	w.magic("FPD1")
 	w.writeStr(p.Topic)
@@ -299,7 +299,7 @@ func EncodePublishDelayed(p PublishDelayed) []byte {
 	return w.buf
 }
 
-func DecodePublishDelayed(body []byte) (PublishDelayed, error) {
+func decodePublishDelayed(body []byte) (PublishDelayed, error) {
 	r := reader{buf: body}
 	r.expectMagic("FPD1")
 	p := PublishDelayed{
@@ -323,14 +323,14 @@ type PublishOk struct {
 	Offset uint64
 }
 
-func EncodePublishOk(o PublishOk) []byte {
+func encodePublishOk(o PublishOk) []byte {
 	w := writer{}
 	w.magic("FPO1")
 	w.u64(o.Offset)
 	return w.buf
 }
 
-func DecodePublishOk(body []byte) (PublishOk, error) {
+func decodePublishOk(body []byte) (PublishOk, error) {
 	r := reader{buf: body}
 	r.expectMagic("FPO1")
 	o := PublishOk{Offset: r.u64()}
@@ -352,7 +352,7 @@ type Ack struct {
 	Tags      []DeliveryTag
 }
 
-func EncodeAck(a Ack) []byte {
+func encodeAck(a Ack) []byte {
 	w := writer{}
 	w.magic("FAK1")
 	w.writeStr(a.Topic)
@@ -362,7 +362,7 @@ func EncodeAck(a Ack) []byte {
 	return w.buf
 }
 
-func DecodeAck(body []byte) (Ack, error) {
+func decodeAck(body []byte) (Ack, error) {
 	r := reader{buf: body}
 	r.expectMagic("FAK1")
 	a := Ack{Topic: r.readStr(), Group: r.optionalStr(), Partition: r.u32(), Tags: r.settleTags()}
@@ -380,7 +380,7 @@ type Nack struct {
 	NotBefore *uint64
 }
 
-func EncodeNack(n Nack) []byte {
+func encodeNack(n Nack) []byte {
 	w := writer{}
 	w.magic("FNK1")
 	w.writeStr(n.Topic)
@@ -392,7 +392,7 @@ func EncodeNack(n Nack) []byte {
 	return w.buf
 }
 
-func DecodeNack(body []byte) (Nack, error) {
+func decodeNack(body []byte) (Nack, error) {
 	r := reader{buf: body}
 	r.expectMagic("FNK1")
 	n := Nack{Topic: r.readStr(), Group: r.optionalStr(), Partition: r.u32(), Tags: r.settleTags()}
@@ -415,7 +415,7 @@ type Subscribe struct {
 	MemberID       *UUID
 }
 
-func EncodeSubscribe(s Subscribe) []byte {
+func encodeSubscribe(s Subscribe) []byte {
 	w := writer{}
 	w.magic("FSB1")
 	w.queueKey(s.Topic, s.Partition, s.Group)
@@ -427,7 +427,7 @@ func EncodeSubscribe(s Subscribe) []byte {
 	return w.buf
 }
 
-func DecodeSubscribe(body []byte) (Subscribe, error) {
+func decodeSubscribe(body []byte) (Subscribe, error) {
 	r := reader{buf: body}
 	r.expectMagic("FSB1")
 	s := Subscribe{}
@@ -453,7 +453,7 @@ type SubscribeOk struct {
 	MemberID       *UUID
 }
 
-func EncodeSubscribeOk(s SubscribeOk) []byte {
+func encodeSubscribeOk(s SubscribeOk) []byte {
 	w := writer{}
 	w.magic("FSO1")
 	w.u64(s.SubID)
@@ -465,7 +465,7 @@ func EncodeSubscribeOk(s SubscribeOk) []byte {
 	return w.buf
 }
 
-func DecodeSubscribeOk(body []byte) (SubscribeOk, error) {
+func decodeSubscribeOk(body []byte) (SubscribeOk, error) {
 	r := reader{buf: body}
 	r.expectMagic("FSO1")
 	s := SubscribeOk{SubID: r.u64()}
@@ -494,7 +494,7 @@ type Deliver struct {
 	Payload         []byte
 }
 
-func EncodeDeliver(d Deliver) []byte {
+func encodeDeliver(d Deliver) []byte {
 	w := writer{}
 	w.magic("FDL1")
 	w.u64(d.SubID)
@@ -511,7 +511,7 @@ func EncodeDeliver(d Deliver) []byte {
 	return w.buf
 }
 
-func DecodeDeliver(body []byte) (Deliver, error) {
+func decodeDeliver(body []byte) (Deliver, error) {
 	r := reader{buf: body}
 	r.expectMagic("FDL1")
 	d := Deliver{SubID: r.u64(), Topic: r.readStr(), Group: r.optionalStr(), Partition: r.u32()}

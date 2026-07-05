@@ -21,15 +21,15 @@ func fakeBroker(conn net.Conn, compliance string, offset uint64) {
 			switch f.Opcode {
 			case OpHello:
 				ok := HelloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, ServerName: "fake", Compliance: compliance}
-				_, _ = conn.Write(EncodeFrame(BuildFrame(OpHelloOk, f.RequestID, EncodeHelloOk(ok))))
+				_, _ = conn.Write(encodeFrame(buildFrame(OpHelloOk, f.RequestID, encodeHelloOk(ok))))
 			case OpAuth:
-				_, _ = conn.Write(EncodeFrame(BuildFrame(OpAuthOk, f.RequestID, nil)))
+				_, _ = conn.Write(encodeFrame(buildFrame(OpAuthOk, f.RequestID, nil)))
 			case OpPublish:
-				if p, _ := DecodePublish(f.Payload); p.RequireConfirm {
-					_, _ = conn.Write(EncodeFrame(BuildFrame(OpPublishOk, f.RequestID, EncodePublishOk(PublishOk{Offset: offset}))))
+				if p, _ := decodePublish(f.Payload); p.RequireConfirm {
+					_, _ = conn.Write(encodeFrame(buildFrame(OpPublishOk, f.RequestID, encodePublishOk(PublishOk{Offset: offset}))))
 				}
 			case OpPing:
-				_, _ = conn.Write(EncodeFrame(BuildFrame(OpPong, f.RequestID, nil)))
+				_, _ = conn.Write(encodeFrame(buildFrame(OpPong, f.RequestID, nil)))
 			}
 		}
 	}()

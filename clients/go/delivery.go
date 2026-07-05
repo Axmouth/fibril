@@ -56,7 +56,7 @@ type Subscription struct {
 func (e *Engine) Subscribe(req Subscribe) (*Subscription, error) {
 	sr := make(chan subResult, 1)
 	select {
-	case e.cmdCh <- command{op: OpSubscribe, body: EncodeSubscribe(req), subReply: sr, autoAck: req.AutoAck}:
+	case e.cmdCh <- command{op: OpSubscribe, body: encodeSubscribe(req), subReply: sr, autoAck: req.AutoAck}:
 	case <-e.done:
 		return nil, e.err()
 	}
@@ -71,14 +71,14 @@ func (e *Engine) Subscribe(req Subscribe) (*Subscription, error) {
 // Ack settles a delivery as processed. It is a no-op-worthy call for an auto-ack
 // delivery (already settled server-side) but harmless. Fire-and-forget.
 func (e *Engine) Ack(d Delivery) error {
-	body := EncodeAck(Ack{Topic: d.Topic, Group: d.Group, Partition: d.Partition, Tags: []DeliveryTag{d.DeliveryTag}})
+	body := encodeAck(Ack{Topic: d.Topic, Group: d.Group, Partition: d.Partition, Tags: []DeliveryTag{d.DeliveryTag}})
 	return e.sendWithID(OpAck, d.reqID, body)
 }
 
 // Nack returns a delivery unprocessed, optionally requeuing it (notBefore delays
 // the requeue). Fire-and-forget.
 func (e *Engine) Nack(d Delivery, requeue bool, notBefore *uint64) error {
-	body := EncodeNack(Nack{
+	body := encodeNack(Nack{
 		Topic: d.Topic, Group: d.Group, Partition: d.Partition,
 		Tags: []DeliveryTag{d.DeliveryTag}, Requeue: requeue, NotBefore: notBefore,
 	})
@@ -102,7 +102,7 @@ func (e *Engine) handleSubscribeOk(f Frame) {
 		return
 	}
 	delete(e.waiters, f.RequestID)
-	ok2, err := DecodeSubscribeOk(f.Payload)
+	ok2, err := decodeSubscribeOk(f.Payload)
 	if err != nil {
 		if w.subReply != nil {
 			w.subReply <- subResult{err: err}
@@ -129,7 +129,7 @@ func (e *Engine) handleSubscribeOk(f Frame) {
 }
 
 func (e *Engine) handleDeliver(f Frame) {
-	d, err := DecodeDeliver(f.Payload)
+	d, err := decodeDeliver(f.Payload)
 	if err != nil {
 		return
 	}

@@ -115,7 +115,7 @@ type DeclareQueue struct {
 	DefaultMessageTTLms *uint64
 }
 
-func EncodeDeclareQueue(d DeclareQueue) []byte {
+func encodeDeclareQueue(d DeclareQueue) []byte {
 	w := writer{}
 	w.magic("FDQ1")
 	w.writeStr(d.Topic)
@@ -128,7 +128,7 @@ func EncodeDeclareQueue(d DeclareQueue) []byte {
 	return w.buf
 }
 
-func DecodeDeclareQueue(body []byte) (DeclareQueue, error) {
+func decodeDeclareQueue(body []byte) (DeclareQueue, error) {
 	r := reader{buf: body}
 	r.expectMagic("FDQ1")
 	d := DeclareQueue{
@@ -150,7 +150,7 @@ type DeclareQueueOk struct {
 	PartitionCount uint32
 }
 
-func EncodeDeclareQueueOk(o DeclareQueueOk) []byte {
+func encodeDeclareQueueOk(o DeclareQueueOk) []byte {
 	w := writer{}
 	w.magic("FDK1")
 	w.writeStr(o.Status)
@@ -158,7 +158,7 @@ func EncodeDeclareQueueOk(o DeclareQueueOk) []byte {
 	return w.buf
 }
 
-func DecodeDeclareQueueOk(body []byte) (DeclareQueueOk, error) {
+func decodeDeclareQueueOk(body []byte) (DeclareQueueOk, error) {
 	r := reader{buf: body}
 	r.expectMagic("FDK1")
 	o := DeclareQueueOk{Status: r.readStr(), PartitionCount: r.u32()}
@@ -219,7 +219,7 @@ type DeclarePlexus struct {
 	ReplicationFactor *uint32
 }
 
-func EncodeDeclarePlexus(d DeclarePlexus) []byte {
+func encodeDeclarePlexus(d DeclarePlexus) []byte {
 	w := writer{}
 	w.magic("FDP1")
 	w.writeStr(d.Topic)
@@ -232,7 +232,7 @@ func EncodeDeclarePlexus(d DeclarePlexus) []byte {
 	return w.buf
 }
 
-func DecodeDeclarePlexus(body []byte) (DeclarePlexus, error) {
+func decodeDeclarePlexus(body []byte) (DeclarePlexus, error) {
 	r := reader{buf: body}
 	r.expectMagic("FDP1")
 	d := DeclarePlexus{Topic: r.readStr(), PartitionCount: r.optionalU32(), Durability: r.durability()}
@@ -247,7 +247,7 @@ type DeclarePlexusOk struct {
 	PartitionCount uint32
 }
 
-func EncodeDeclarePlexusOk(o DeclarePlexusOk) []byte {
+func encodeDeclarePlexusOk(o DeclarePlexusOk) []byte {
 	w := writer{}
 	w.magic("FPK1")
 	w.writeStr(o.Status)
@@ -255,7 +255,7 @@ func EncodeDeclarePlexusOk(o DeclarePlexusOk) []byte {
 	return w.buf
 }
 
-func DecodeDeclarePlexusOk(body []byte) (DeclarePlexusOk, error) {
+func decodeDeclarePlexusOk(body []byte) (DeclarePlexusOk, error) {
 	r := reader{buf: body}
 	r.expectMagic("FPK1")
 	o := DeclarePlexusOk{Status: r.readStr(), PartitionCount: r.u32()}
@@ -334,31 +334,31 @@ func (r *reader) topologyBody() TopologyOk {
 	return t
 }
 
-func EncodeTopologyOk(t TopologyOk) []byte {
+func encodeTopologyOk(t TopologyOk) []byte {
 	w := writer{}
 	w.magic("FTO1")
 	w.topologyBody(t)
 	return w.buf
 }
 
-func DecodeTopologyOk(body []byte) (TopologyOk, error) {
+func decodeTopologyOk(body []byte) (TopologyOk, error) {
 	r := reader{buf: body}
 	r.expectMagic("FTO1")
 	t := r.topologyBody()
 	return t, r.finish()
 }
 
-// EncodeTopologyUpdate encodes an unsolicited broker->client topology push: the
+// encodeTopologyUpdate encodes an unsolicited broker->client topology push: the
 // same body as TopologyOk under a distinct magic so a push is distinguishable
 // from a request reply.
-func EncodeTopologyUpdate(t TopologyOk) []byte {
+func encodeTopologyUpdate(t TopologyOk) []byte {
 	w := writer{}
 	w.magic("FTU1")
 	w.topologyBody(t)
 	return w.buf
 }
 
-func DecodeTopologyUpdate(body []byte) (TopologyOk, error) {
+func decodeTopologyUpdate(body []byte) (TopologyOk, error) {
 	r := reader{buf: body}
 	r.expectMagic("FTU1")
 	t := r.topologyBody()
@@ -371,7 +371,7 @@ type TopologyRequest struct {
 	Group *string
 }
 
-func EncodeTopologyRequest(req TopologyRequest) []byte {
+func encodeTopologyRequest(req TopologyRequest) []byte {
 	w := writer{}
 	w.magic("FTP1")
 	w.optionalStr(req.Topic)
@@ -379,7 +379,7 @@ func EncodeTopologyRequest(req TopologyRequest) []byte {
 	return w.buf
 }
 
-func DecodeTopologyRequest(body []byte) (TopologyRequest, error) {
+func decodeTopologyRequest(body []byte) (TopologyRequest, error) {
 	r := reader{buf: body}
 	r.expectMagic("FTP1")
 	req := TopologyRequest{Topic: r.optionalStr(), Group: r.optionalStr()}
@@ -392,14 +392,14 @@ type TopologyUpdateAck struct {
 	Generation uint64
 }
 
-func EncodeTopologyUpdateAck(a TopologyUpdateAck) []byte {
+func encodeTopologyUpdateAck(a TopologyUpdateAck) []byte {
 	w := writer{}
 	w.magic("FTA1")
 	w.u64(a.Generation)
 	return w.buf
 }
 
-func DecodeTopologyUpdateAck(body []byte) (TopologyUpdateAck, error) {
+func decodeTopologyUpdateAck(body []byte) (TopologyUpdateAck, error) {
 	r := reader{buf: body}
 	r.expectMagic("FTA1")
 	a := TopologyUpdateAck{Generation: r.u64()}
@@ -474,7 +474,7 @@ type ReconcileClient struct {
 	Subscriptions []ReconcileSubscription
 }
 
-func EncodeReconcileClient(rc ReconcileClient) []byte {
+func encodeReconcileClient(rc ReconcileClient) []byte {
 	w := writer{}
 	w.magic("FRC1")
 	w.reconcilePolicy(rc.Policy)
@@ -485,7 +485,7 @@ func EncodeReconcileClient(rc ReconcileClient) []byte {
 	return w.buf
 }
 
-func DecodeReconcileClient(body []byte) (ReconcileClient, error) {
+func decodeReconcileClient(body []byte) (ReconcileClient, error) {
 	r := reader{buf: body}
 	r.expectMagic("FRC1")
 	rc := ReconcileClient{Policy: r.reconcilePolicy()}
@@ -508,7 +508,7 @@ type Redirect struct {
 	PartitioningVersion uint64
 }
 
-func EncodeRedirect(rd Redirect) []byte {
+func encodeRedirect(rd Redirect) []byte {
 	w := writer{}
 	w.magic("FRD1")
 	w.queueKey(rd.Topic, rd.Partition, rd.Group)
@@ -517,7 +517,7 @@ func EncodeRedirect(rd Redirect) []byte {
 	return w.buf
 }
 
-func DecodeRedirect(body []byte) (Redirect, error) {
+func decodeRedirect(body []byte) (Redirect, error) {
 	r := reader{buf: body}
 	r.expectMagic("FRD1")
 	rd := Redirect{}
@@ -541,7 +541,7 @@ type AssignmentChanged struct {
 	Revoked       []uint32
 }
 
-func EncodeAssignmentChanged(a AssignmentChanged) []byte {
+func encodeAssignmentChanged(a AssignmentChanged) []byte {
 	w := writer{}
 	w.magic("FAC1")
 	w.writeStr(a.Topic)
@@ -554,7 +554,7 @@ func EncodeAssignmentChanged(a AssignmentChanged) []byte {
 	return w.buf
 }
 
-func DecodeAssignmentChanged(body []byte) (AssignmentChanged, error) {
+func decodeAssignmentChanged(body []byte) (AssignmentChanged, error) {
 	r := reader{buf: body}
 	r.expectMagic("FAC1")
 	a := AssignmentChanged{Topic: r.readStr(), Group: r.optionalStr(), ConsumerGroup: r.readStr(), Generation: r.u64()}
@@ -572,7 +572,7 @@ type GoingAway struct {
 	Message string
 }
 
-func EncodeGoingAway(g GoingAway) []byte {
+func encodeGoingAway(g GoingAway) []byte {
 	w := writer{}
 	w.magic("FGA1")
 	w.u64(g.GraceMs)
@@ -580,7 +580,7 @@ func EncodeGoingAway(g GoingAway) []byte {
 	return w.buf
 }
 
-func DecodeGoingAway(body []byte) (GoingAway, error) {
+func decodeGoingAway(body []byte) (GoingAway, error) {
 	r := reader{buf: body}
 	r.expectMagic("FGA1")
 	g := GoingAway{GraceMs: r.u64(), Message: r.readStr()}
@@ -648,7 +648,7 @@ type SubscribeStream struct {
 	AutoAck     bool
 }
 
-func EncodeSubscribeStream(s SubscribeStream) []byte {
+func encodeSubscribeStream(s SubscribeStream) []byte {
 	w := writer{}
 	w.magic("FSP1")
 	w.writeStr(s.Topic)
@@ -665,7 +665,7 @@ func EncodeSubscribeStream(s SubscribeStream) []byte {
 	return w.buf
 }
 
-func DecodeSubscribeStream(body []byte) (SubscribeStream, error) {
+func decodeSubscribeStream(body []byte) (SubscribeStream, error) {
 	r := reader{buf: body}
 	r.expectMagic("FSP1")
 	s := SubscribeStream{Topic: r.readStr(), Partition: r.u32(), DurableName: r.optionalStr(), Start: r.streamStart()}

@@ -21,22 +21,22 @@ func TestEngineSubscribeDeliverAck(t *testing.T) {
 			switch f.Opcode {
 			case OpHello:
 				ok := HelloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, ServerName: "fake", Compliance: ComplianceString}
-				_, _ = server.Write(EncodeFrame(BuildFrame(OpHelloOk, f.RequestID, EncodeHelloOk(ok))))
+				_, _ = server.Write(encodeFrame(buildFrame(OpHelloOk, f.RequestID, encodeHelloOk(ok))))
 			case OpSubscribe:
-				req, _ := DecodeSubscribe(f.Payload)
+				req, _ := decodeSubscribe(f.Payload)
 				so := SubscribeOk{SubID: 100, Topic: req.Topic, Partition: req.Partition, Group: req.Group, Prefetch: 16}
-				_, _ = server.Write(EncodeFrame(BuildFrame(OpSubscribeOk, f.RequestID, EncodeSubscribeOk(so))))
+				_, _ = server.Write(encodeFrame(buildFrame(OpSubscribeOk, f.RequestID, encodeSubscribeOk(so))))
 				d := Deliver{
 					SubID: 100, Topic: req.Topic, Group: req.Group, Partition: req.Partition,
 					Offset: 7, DeliveryTag: DeliveryTag{Epoch: 42}, Published: 1, PublishReceived: 2,
 					ContentType: ContentType{Kind: ContentText}, Payload: []byte("job"),
 				}
-				_, _ = server.Write(EncodeFrame(BuildFrame(OpDeliver, 5000, EncodeDeliver(d))))
+				_, _ = server.Write(encodeFrame(buildFrame(OpDeliver, 5000, encodeDeliver(d))))
 			case OpAck:
-				a, _ := DecodeAck(f.Payload)
+				a, _ := decodeAck(f.Payload)
 				acks <- a
 			case OpPing:
-				_, _ = server.Write(EncodeFrame(BuildFrame(OpPong, f.RequestID, nil)))
+				_, _ = server.Write(encodeFrame(buildFrame(OpPong, f.RequestID, nil)))
 			}
 		}
 	}()

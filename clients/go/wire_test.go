@@ -31,114 +31,114 @@ type vcase struct {
 
 func cases() []vcase {
 	return []vcase{
-		{"hello", EncodeHello(Hello{"py-client", "0.1.0", 1, &ResumeIdentity{fill(1), fill(2), fill(3)}}),
-			func(b []byte) ([]byte, error) { v, e := DecodeHello(b); return EncodeHello(v), e }},
-		{"hello_no_resume", EncodeHello(Hello{"c", "v", 1, nil}),
-			func(b []byte) ([]byte, error) { v, e := DecodeHello(b); return EncodeHello(v), e }},
-		{"hello_ok", EncodeHelloOk(HelloOk{1, fill(9), fill(8), fill(7), ResumeResumed, "srv", "v=1;x"}),
-			func(b []byte) ([]byte, error) { v, e := DecodeHelloOk(b); return EncodeHelloOk(v), e }},
-		{"auth", EncodeAuth(Auth{"u", "p"}),
-			func(b []byte) ([]byte, error) { v, e := DecodeAuth(b); return EncodeAuth(v), e }},
-		{"error", EncodeError(ErrorMsg{409, "not owner"}),
-			func(b []byte) ([]byte, error) { v, e := DecodeError(b); return EncodeError(v), e }},
-		{"publish", EncodePublish(Publish{
+		{"hello", encodeHello(Hello{"py-client", "0.1.0", 1, &ResumeIdentity{fill(1), fill(2), fill(3)}}),
+			func(b []byte) ([]byte, error) { v, e := decodeHello(b); return encodeHello(v), e }},
+		{"hello_no_resume", encodeHello(Hello{"c", "v", 1, nil}),
+			func(b []byte) ([]byte, error) { v, e := decodeHello(b); return encodeHello(v), e }},
+		{"hello_ok", encodeHelloOk(HelloOk{1, fill(9), fill(8), fill(7), ResumeResumed, "srv", "v=1;x"}),
+			func(b []byte) ([]byte, error) { v, e := decodeHelloOk(b); return encodeHelloOk(v), e }},
+		{"auth", encodeAuth(Auth{"u", "p"}),
+			func(b []byte) ([]byte, error) { v, e := decodeAuth(b); return encodeAuth(v), e }},
+		{"error", encodeError(ErrorMsg{409, "not owner"}),
+			func(b []byte) ([]byte, error) { v, e := decodeError(b); return encodeError(v), e }},
+		{"publish", encodePublish(Publish{
 			Topic: "orders", Partition: 3, Group: sp("g"), RequireConfirm: true,
 			ContentType: ContentType{Kind: ContentJSON}, Headers: Headers{"x-a": "1"},
 			Payload: []byte{1, 2, 3, 4}, Published: 1234567890, PartitionKey: []byte{9, 9},
 			PartitioningVersion: 5, TTLms: u64p(60000)}),
-			func(b []byte) ([]byte, error) { v, e := DecodePublish(b); return EncodePublish(v), e }},
-		{"publish_no_ttl", EncodePublish(Publish{Topic: "t", ContentType: ContentType{Kind: ContentNone}}),
-			func(b []byte) ([]byte, error) { v, e := DecodePublish(b); return EncodePublish(v), e }},
-		{"publish_custom_ct", EncodePublish(Publish{
+			func(b []byte) ([]byte, error) { v, e := decodePublish(b); return encodePublish(v), e }},
+		{"publish_no_ttl", encodePublish(Publish{Topic: "t", ContentType: ContentType{Kind: ContentNone}}),
+			func(b []byte) ([]byte, error) { v, e := decodePublish(b); return encodePublish(v), e }},
+		{"publish_custom_ct", encodePublish(Publish{
 			Topic: "t", ContentType: ContentType{Kind: ContentCustom, Custom: "application/x-thing"},
 			Payload: []byte{7}, Published: 1}),
-			func(b []byte) ([]byte, error) { v, e := DecodePublish(b); return EncodePublish(v), e }},
-		{"publish_delayed", EncodePublishDelayed(PublishDelayed{
+			func(b []byte) ([]byte, error) { v, e := decodePublish(b); return encodePublish(v), e }},
+		{"publish_delayed", encodePublishDelayed(PublishDelayed{
 			Topic: "t", Partition: 1, RequireConfirm: true, NotBefore: 999,
 			ContentType: ContentType{Kind: ContentText}, Headers: Headers{"k": "v"},
 			Payload: []byte{5, 6}, Published: 42, PartitioningVersion: 2}),
-			func(b []byte) ([]byte, error) { v, e := DecodePublishDelayed(b); return EncodePublishDelayed(v), e }},
-		{"publish_ok", EncodePublishOk(PublishOk{777}),
-			func(b []byte) ([]byte, error) { v, e := DecodePublishOk(b); return EncodePublishOk(v), e }},
-		{"deliver", EncodeDeliver(Deliver{
+			func(b []byte) ([]byte, error) { v, e := decodePublishDelayed(b); return encodePublishDelayed(v), e }},
+		{"publish_ok", encodePublishOk(PublishOk{777}),
+			func(b []byte) ([]byte, error) { v, e := decodePublishOk(b); return encodePublishOk(v), e }},
+		{"deliver", encodeDeliver(Deliver{
 			SubID: 11, Topic: "t", Group: sp("g"), Partition: 2, Offset: 100,
 			DeliveryTag: DeliveryTag{5}, Published: 7, PublishReceived: 8,
 			ContentType: ContentType{Kind: ContentMsgpack}, Headers: Headers{"h": "1"},
 			Payload: []byte{3, 2, 1}}),
-			func(b []byte) ([]byte, error) { v, e := DecodeDeliver(b); return EncodeDeliver(v), e }},
-		{"ack", EncodeAck(Ack{Topic: "t", Tags: []DeliveryTag{{1}, {2}}}),
-			func(b []byte) ([]byte, error) { v, e := DecodeAck(b); return EncodeAck(v), e }},
-		{"nack", EncodeNack(Nack{Topic: "t", Group: sp("g"), Partition: 1, Tags: []DeliveryTag{{9}}, Requeue: true, NotBefore: u64p(5000)}),
-			func(b []byte) ([]byte, error) { v, e := DecodeNack(b); return EncodeNack(v), e }},
-		{"nack_no_nb", EncodeNack(Nack{Topic: "t", Tags: []DeliveryTag{}}),
-			func(b []byte) ([]byte, error) { v, e := DecodeNack(b); return EncodeNack(v), e }},
-		{"subscribe", EncodeSubscribe(Subscribe{
+			func(b []byte) ([]byte, error) { v, e := decodeDeliver(b); return encodeDeliver(v), e }},
+		{"ack", encodeAck(Ack{Topic: "t", Tags: []DeliveryTag{{1}, {2}}}),
+			func(b []byte) ([]byte, error) { v, e := decodeAck(b); return encodeAck(v), e }},
+		{"nack", encodeNack(Nack{Topic: "t", Group: sp("g"), Partition: 1, Tags: []DeliveryTag{{9}}, Requeue: true, NotBefore: u64p(5000)}),
+			func(b []byte) ([]byte, error) { v, e := decodeNack(b); return encodeNack(v), e }},
+		{"nack_no_nb", encodeNack(Nack{Topic: "t", Tags: []DeliveryTag{}}),
+			func(b []byte) ([]byte, error) { v, e := decodeNack(b); return encodeNack(v), e }},
+		{"subscribe", encodeSubscribe(Subscribe{
 			Topic: "t", Partition: 1, Group: sp("g"), Prefetch: 32, AutoAck: false,
 			ConsumerGroup: sp("cg"), ConsumerTarget: u32p(2), MemberID: uup(fill(4))}),
-			func(b []byte) ([]byte, error) { v, e := DecodeSubscribe(b); return EncodeSubscribe(v), e }},
-		{"subscribe_min", EncodeSubscribe(Subscribe{Topic: "t", AutoAck: true}),
-			func(b []byte) ([]byte, error) { v, e := DecodeSubscribe(b); return EncodeSubscribe(v), e }},
-		{"subscribe_ok", EncodeSubscribeOk(SubscribeOk{
+			func(b []byte) ([]byte, error) { v, e := decodeSubscribe(b); return encodeSubscribe(v), e }},
+		{"subscribe_min", encodeSubscribe(Subscribe{Topic: "t", AutoAck: true}),
+			func(b []byte) ([]byte, error) { v, e := decodeSubscribe(b); return encodeSubscribe(v), e }},
+		{"subscribe_ok", encodeSubscribeOk(SubscribeOk{
 			SubID: 5, Topic: "t", Partition: 1, Group: sp("g"), Prefetch: 16,
 			ConsumerGroup: sp("cg"), MemberID: uup(fill(4))}),
-			func(b []byte) ([]byte, error) { v, e := DecodeSubscribeOk(b); return EncodeSubscribeOk(v), e }},
-		{"declare", EncodeDeclareQueue(DeclareQueue{
+			func(b []byte) ([]byte, error) { v, e := decodeSubscribeOk(b); return encodeSubscribeOk(v), e }},
+		{"declare", encodeDeclareQueue(DeclareQueue{
 			Topic: "t", Group: sp("g"), DlqPolicy: &DlqPolicy{Kind: DlqCustom, Topic: "dlq"},
 			DlqMaxRetries: u32p(3), PartitionCount: u32p(4), DefaultMessageTTLms: u64p(30000)}),
-			func(b []byte) ([]byte, error) { v, e := DecodeDeclareQueue(b); return EncodeDeclareQueue(v), e }},
-		{"declare_min", EncodeDeclareQueue(DeclareQueue{Topic: "t"}),
-			func(b []byte) ([]byte, error) { v, e := DecodeDeclareQueue(b); return EncodeDeclareQueue(v), e }},
-		{"declare_ok", EncodeDeclareQueueOk(DeclareQueueOk{Status: "created", PartitionCount: 4}),
-			func(b []byte) ([]byte, error) { v, e := DecodeDeclareQueueOk(b); return EncodeDeclareQueueOk(v), e }},
-		{"declare_plexus", EncodeDeclarePlexus(DeclarePlexus{
+			func(b []byte) ([]byte, error) { v, e := decodeDeclareQueue(b); return encodeDeclareQueue(v), e }},
+		{"declare_min", encodeDeclareQueue(DeclareQueue{Topic: "t"}),
+			func(b []byte) ([]byte, error) { v, e := decodeDeclareQueue(b); return encodeDeclareQueue(v), e }},
+		{"declare_ok", encodeDeclareQueueOk(DeclareQueueOk{Status: "created", PartitionCount: 4}),
+			func(b []byte) ([]byte, error) { v, e := decodeDeclareQueueOk(b); return encodeDeclareQueueOk(v), e }},
+		{"declare_plexus", encodeDeclarePlexus(DeclarePlexus{
 			Topic: "t", PartitionCount: u32p(4), Durability: StreamSpeculative,
 			Retention:         StreamRetention{MaxAgeMs: u64p(60000), MaxRecords: u64p(1000000)},
 			ReplicationFactor: u32p(2)}),
-			func(b []byte) ([]byte, error) { v, e := DecodeDeclarePlexus(b); return EncodeDeclarePlexus(v), e }},
-		{"declare_plexus_min", EncodeDeclarePlexus(DeclarePlexus{Topic: "t"}),
-			func(b []byte) ([]byte, error) { v, e := DecodeDeclarePlexus(b); return EncodeDeclarePlexus(v), e }},
-		{"declare_plexus_ok", EncodeDeclarePlexusOk(DeclarePlexusOk{Status: "created", PartitionCount: 4}),
-			func(b []byte) ([]byte, error) { v, e := DecodeDeclarePlexusOk(b); return EncodeDeclarePlexusOk(v), e }},
-		{"topology_ok", EncodeTopologyOk(TopologyOk{
+			func(b []byte) ([]byte, error) { v, e := decodeDeclarePlexus(b); return encodeDeclarePlexus(v), e }},
+		{"declare_plexus_min", encodeDeclarePlexus(DeclarePlexus{Topic: "t"}),
+			func(b []byte) ([]byte, error) { v, e := decodeDeclarePlexus(b); return encodeDeclarePlexus(v), e }},
+		{"declare_plexus_ok", encodeDeclarePlexusOk(DeclarePlexusOk{Status: "created", PartitionCount: 4}),
+			func(b []byte) ([]byte, error) { v, e := decodeDeclarePlexusOk(b); return encodeDeclarePlexusOk(v), e }},
+		{"topology_ok", encodeTopologyOk(TopologyOk{
 			Generation: 12,
 			Queues: []QueueTopologyEntry{
 				{Topic: "t", Partition: 0, OwnerEndpoints: []AdvertisedAddress{{Host: "127.0.0.1", Port: 7000}}, PartitioningVersion: 1, PartitionCount: 2},
 				{Topic: "t", Partition: 1, PartitioningVersion: 1, PartitionCount: 2},
 			},
 			Streams: []StreamTopologyEntry{{Topic: "s", Partition: 2, OwnerEndpoints: []AdvertisedAddress{{Host: "10.0.0.9", Port: 7100}}, PartitioningVersion: 4, PartitionCount: 3}}}),
-			func(b []byte) ([]byte, error) { v, e := DecodeTopologyOk(b); return EncodeTopologyOk(v), e }},
-		{"topology_req", EncodeTopologyRequest(TopologyRequest{Topic: sp("t")}),
-			func(b []byte) ([]byte, error) { v, e := DecodeTopologyRequest(b); return EncodeTopologyRequest(v), e }},
-		{"topology_update", EncodeTopologyUpdate(TopologyOk{
+			func(b []byte) ([]byte, error) { v, e := decodeTopologyOk(b); return encodeTopologyOk(v), e }},
+		{"topology_req", encodeTopologyRequest(TopologyRequest{Topic: sp("t")}),
+			func(b []byte) ([]byte, error) { v, e := decodeTopologyRequest(b); return encodeTopologyRequest(v), e }},
+		{"topology_update", encodeTopologyUpdate(TopologyOk{
 			Generation: 12,
 			Queues:     []QueueTopologyEntry{{Topic: "t", Partition: 0, OwnerEndpoints: []AdvertisedAddress{{Host: "127.0.0.1", Port: 7000}}, PartitioningVersion: 1, PartitionCount: 2}},
 			Streams:    []StreamTopologyEntry{{Topic: "s", Partition: 2, OwnerEndpoints: []AdvertisedAddress{{Host: "10.0.0.9", Port: 7100}}, PartitioningVersion: 4, PartitionCount: 3}}}),
-			func(b []byte) ([]byte, error) { v, e := DecodeTopologyUpdate(b); return EncodeTopologyUpdate(v), e }},
-		{"topology_update_ack", EncodeTopologyUpdateAck(TopologyUpdateAck{Generation: 12}),
+			func(b []byte) ([]byte, error) { v, e := decodeTopologyUpdate(b); return encodeTopologyUpdate(v), e }},
+		{"topology_update_ack", encodeTopologyUpdateAck(TopologyUpdateAck{Generation: 12}),
 			func(b []byte) ([]byte, error) {
-				v, e := DecodeTopologyUpdateAck(b)
-				return EncodeTopologyUpdateAck(v), e
+				v, e := decodeTopologyUpdateAck(b)
+				return encodeTopologyUpdateAck(v), e
 			}},
-		{"reconcile_client", EncodeReconcileClient(ReconcileClient{
+		{"reconcile_client", encodeReconcileClient(ReconcileClient{
 			Policy:        ReconcileRestore,
 			Subscriptions: []ReconcileSubscription{{SubID: 1, Topic: "t", Partition: 0, AutoAck: false, Prefetch: 8}}}),
-			func(b []byte) ([]byte, error) { v, e := DecodeReconcileClient(b); return EncodeReconcileClient(v), e }},
-		{"redirect", EncodeRedirect(Redirect{Topic: "t", Partition: 1, Group: sp("g"), OwnerEndpoints: []AdvertisedAddress{{Host: "h", Port: 1}}, PartitioningVersion: 3}),
-			func(b []byte) ([]byte, error) { v, e := DecodeRedirect(b); return EncodeRedirect(v), e }},
-		{"assignment", EncodeAssignmentChanged(AssignmentChanged{
+			func(b []byte) ([]byte, error) { v, e := decodeReconcileClient(b); return encodeReconcileClient(v), e }},
+		{"redirect", encodeRedirect(Redirect{Topic: "t", Partition: 1, Group: sp("g"), OwnerEndpoints: []AdvertisedAddress{{Host: "h", Port: 1}}, PartitioningVersion: 3}),
+			func(b []byte) ([]byte, error) { v, e := decodeRedirect(b); return encodeRedirect(v), e }},
+		{"assignment", encodeAssignmentChanged(AssignmentChanged{
 			Topic: "t", ConsumerGroup: "cg", Generation: 6, Assigned: []uint32{0, 1, 2}, Added: []uint32{2}, Revoked: []uint32{}}),
 			func(b []byte) ([]byte, error) {
-				v, e := DecodeAssignmentChanged(b)
-				return EncodeAssignmentChanged(v), e
+				v, e := decodeAssignmentChanged(b)
+				return encodeAssignmentChanged(v), e
 			}},
-		{"going_away", EncodeGoingAway(GoingAway{GraceMs: 30000, Message: "broker restarting for upgrade"}),
-			func(b []byte) ([]byte, error) { v, e := DecodeGoingAway(b); return EncodeGoingAway(v), e }},
-		{"subscribe_stream", EncodeSubscribeStream(SubscribeStream{
+		{"going_away", encodeGoingAway(GoingAway{GraceMs: 30000, Message: "broker restarting for upgrade"}),
+			func(b []byte) ([]byte, error) { v, e := decodeGoingAway(b); return encodeGoingAway(v), e }},
+		{"subscribe_stream", encodeSubscribeStream(SubscribeStream{
 			Topic: "t", Partition: 1, DurableName: sp("c1"), Start: StreamStart{Kind: StreamByTime, Value: 1234},
 			Filter: []StreamFilter{{"region", "eu-*"}, {"kind", "order"}}, Prefetch: 16, AutoAck: false}),
-			func(b []byte) ([]byte, error) { v, e := DecodeSubscribeStream(b); return EncodeSubscribeStream(v), e }},
-		{"subscribe_stream_min", EncodeSubscribeStream(SubscribeStream{Topic: "t", Start: StreamStart{Kind: StreamLatest}, AutoAck: true}),
-			func(b []byte) ([]byte, error) { v, e := DecodeSubscribeStream(b); return EncodeSubscribeStream(v), e }},
+			func(b []byte) ([]byte, error) { v, e := decodeSubscribeStream(b); return encodeSubscribeStream(v), e }},
+		{"subscribe_stream_min", encodeSubscribeStream(SubscribeStream{Topic: "t", Start: StreamStart{Kind: StreamLatest}, AutoAck: true}),
+			func(b []byte) ([]byte, error) { v, e := decodeSubscribeStream(b); return encodeSubscribeStream(v), e }},
 	}
 }
 

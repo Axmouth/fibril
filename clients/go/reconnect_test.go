@@ -73,14 +73,14 @@ func serveOneConn(conn net.Conn, n int32) {
 		switch f.Opcode {
 		case OpHello:
 			ok := HelloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, Compliance: ComplianceString}
-			_, _ = conn.Write(EncodeFrame(BuildFrame(OpHelloOk, f.RequestID, EncodeHelloOk(ok))))
+			_, _ = conn.Write(encodeFrame(buildFrame(OpHelloOk, f.RequestID, encodeHelloOk(ok))))
 		case OpPublish:
-			_, _ = conn.Write(EncodeFrame(BuildFrame(OpPublishOk, f.RequestID, EncodePublishOk(PublishOk{Offset: uint64(n)}))))
+			_, _ = conn.Write(encodeFrame(buildFrame(OpPublishOk, f.RequestID, encodePublishOk(PublishOk{Offset: uint64(n)}))))
 			if n == 1 {
 				return // drop connection 1 to force a reconnect
 			}
 		case OpPing:
-			_, _ = conn.Write(EncodeFrame(BuildFrame(OpPong, f.RequestID, nil)))
+			_, _ = conn.Write(encodeFrame(buildFrame(OpPong, f.RequestID, nil)))
 		}
 	}
 }

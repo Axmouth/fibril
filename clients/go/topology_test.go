@@ -21,19 +21,19 @@ func TestClientAppliesTopologyPush(t *testing.T) {
 			return
 		}
 		ok := HelloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, Compliance: ComplianceString}
-		_, _ = server.Write(EncodeFrame(BuildFrame(OpHelloOk, f.RequestID, EncodeHelloOk(ok))))
+		_, _ = server.Write(encodeFrame(buildFrame(OpHelloOk, f.RequestID, encodeHelloOk(ok))))
 		// Push a topology snapshot for "t" with 4 partitions.
 		topo := TopologyOk{Generation: 7, Queues: []QueueTopologyEntry{
 			{Topic: "t", Partition: 0, PartitionCount: 4, OwnerEndpoints: owner},
 		}}
-		_, _ = server.Write(EncodeFrame(BuildFrame(OpTopologyUpdate, 0, EncodeTopologyUpdate(topo))))
+		_, _ = server.Write(encodeFrame(buildFrame(OpTopologyUpdate, 0, encodeTopologyUpdate(topo))))
 		for {
 			f, err := readFrame(br)
 			if err != nil {
 				return
 			}
 			if f.Opcode == OpTopologyUpdateAck {
-				a, _ := DecodeTopologyUpdateAck(f.Payload)
+				a, _ := decodeTopologyUpdateAck(f.Payload)
 				acks <- a
 			}
 		}
