@@ -42,6 +42,10 @@ func (d Delivery) Nack(requeue bool, notBefore *uint64) error {
 // Retry requeues this delivery immediately for redelivery.
 func (d Delivery) Retry() error { return d.engine.Nack(d, true, nil) }
 
+// Fail settles this delivery as a terminal failure: it is not requeued, so it is
+// dead-lettered or dropped per the queue's policy.
+func (d Delivery) Fail() error { return d.engine.Nack(d, false, nil) }
+
 // RetryAfter requeues this delivery for redelivery no sooner than delay from now.
 func (d Delivery) RetryAfter(delay time.Duration) error {
 	notBefore := time.Now().UnixMilli() + delay.Milliseconds()
