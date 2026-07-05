@@ -3339,11 +3339,21 @@ impl EngineSlot {
     }
 
     async fn reconnect_if_closed(&self) -> FibrilResult<()> {
-        if !self.current().is_closed() {
+        let current = self.current();
+        if !current.is_closed() {
             return Ok(());
         }
         if self.user_shutdown.load(Ordering::Acquire) {
             return Err(FibrilError::BrokenPipe);
+        }
+        // A non-retryable close (bad credentials, forbidden, malformed request)
+        // will fail again on reconnect, so surface it instead of storming the
+        // broker with doomed handshakes while the real error never reaches the
+        // caller.
+        if let Some(reason) = current.close_reason()
+            && reason.retry_advice() == RetryAdvice::DoNotRetry
+        {
+            return Err(reason);
         }
 
         let attempts = self.opts.auto_reconnect.max_attempts;
@@ -3377,8 +3387,22 @@ impl EngineSlot {
 struct EngineHandle {
     tx: mpsc::Sender<Command>,
     shutdown: Arc<Notify>,
+    // Why this engine's connection ended, set once as it tears down. Read by the
+    // reconnect path: a non-retryable close (bad credentials, forbidden) must not
+    // be retried, or the client storms the broker reconnecting into the same
+    // rejection while the real error never surfaces.
+    close_reason: Arc<std::sync::Mutex<Option<FibrilError>>>,
     resume_identity: ResumeIdentity,
     resume_outcome: ResumeOutcome,
+}
+
+impl EngineHandle {
+    fn close_reason(&self) -> Option<FibrilError> {
+        self.close_reason
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
 }
 
 #[derive(Debug)]
@@ -3782,9 +3806,11 @@ where
     }
 
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<Command>(8192);
+    let close_reason = Arc::new(std::sync::Mutex::new(None::<FibrilError>));
     let handle = Arc::new(EngineHandle {
         tx: cmd_tx.clone(),
         shutdown: shutdown.clone(),
+        close_reason: close_reason.clone(),
         resume_identity,
         resume_outcome,
     });
@@ -4585,12 +4611,27 @@ where
                                     }
                                 }
                             } else {
-                                // connection-level error
-                                // fail all waiters
-                                let msg = format!("connection error {}: {}", err.code, err.message);
-                                fatal_error = Some(FibrilError::Disconnection { msg: msg.clone() });
+                                // Connection-level error (no correlated request).
+                                // A non-retryable code (bad credentials, forbidden,
+                                // malformed) is kept as a Failure so the reconnect
+                                // path surfaces it instead of storming into the same
+                                // rejection. A retryable code (owner moved, 5xx)
+                                // stays a Disconnection so the existing transient
+                                // reconnect/failover path is unchanged.
+                                let failure = FibrilError::Failure {
+                                    code: err.code,
+                                    msg: err.message,
+                                };
+                                let fatal = if failure.retry_advice() == RetryAdvice::DoNotRetry {
+                                    failure
+                                } else {
+                                    FibrilError::Disconnection {
+                                        msg: format!("connection error {}", failure),
+                                    }
+                                };
+                                fatal_error = Some(fatal.clone());
                                 for (_, w) in waiters.drain() {
-                                    fail_waiter(w, FibrilError::Disconnection { msg: msg.clone() });
+                                    fail_waiter(w, fatal.clone());
                                 }
 
                                 // subs cleared
@@ -4625,6 +4666,12 @@ where
         // ================================
         // FAIL ALL PENDING WAITERS
         // ================================
+
+        // Record why the connection ended so the reconnect path can tell a
+        // retryable transport drop from a fatal rejection (auth, forbidden).
+        if let Ok(mut slot) = close_reason.lock() {
+            *slot = fatal_error.clone();
+        }
 
         for (_, waiter) in waiters.drain() {
             fail_waiter(
@@ -5335,6 +5382,7 @@ mod tests {
         let engine = Arc::new(EngineHandle {
             tx,
             shutdown: Arc::new(Notify::new()),
+            close_reason: Arc::new(std::sync::Mutex::new(None)),
             resume_identity: ResumeIdentity {
                 owner_id: uuid::Uuid::nil(),
                 client_id: uuid::Uuid::nil(),
