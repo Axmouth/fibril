@@ -43,6 +43,7 @@ func main() {
 	topic := env("TOPIC", "benchpubsub")
 	prefetch := uint32(envNum("PREFETCH", 4096))
 	mode := env("MODE", "both")
+	autoAck := env("ACK", "auto") != "manual"
 	doPub := mode == "both" || mode == "pub"
 	doSub := mode == "both" || mode == "sub"
 
@@ -64,13 +65,16 @@ func main() {
 	if doSub {
 		consumer = dial()
 		defer consumer.Shutdown()
-		fi, err := consumer.SubscribeTopic(topic, nil, prefetch, true)
+		fi, err := consumer.SubscribeTopic(topic, nil, prefetch, autoAck)
 		if err != nil {
 			fmt.Println("subscribe:", err)
 			os.Exit(1)
 		}
 		go func() {
-			for range fi.Deliveries {
+			for d := range fi.Deliveries {
+				if !autoAck {
+					_ = d.Ack()
+				}
 				delivered.Add(1)
 			}
 		}()

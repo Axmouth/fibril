@@ -22,6 +22,16 @@ import (
 
 const defaultHeartbeatInterval = 5 * time.Second
 
+// The run goroutine buffers outgoing frames and flushes once per batch, so a
+// burst of fire-and-forget writes (unconfirmed publishes, acks) coalesces into
+// far fewer socket writes. writeBufSize caps a single flush; maxWriteBatch caps
+// how many queued commands one drain absorbs before flushing, keeping the loop
+// responsive to incoming frames.
+const (
+	writeBufSize  = 128 * 1024
+	maxWriteBatch = 256
+)
+
 // EngineOptions are the connection-level settings for one session.
 type EngineOptions struct {
 	ClientName        string
@@ -86,6 +96,7 @@ type subState struct {
 // Engine is one live broker connection.
 type Engine struct {
 	conn net.Conn
+	bw   *bufio.Writer // buffered write side, flushed per batch by the run goroutine
 	opts EngineOptions
 
 	cmdCh   chan command
@@ -193,6 +204,7 @@ func startEngine(conn net.Conn, opts EngineOptions) (*Engine, error) {
 
 	e := &Engine{
 		conn:           conn,
+		bw:             bufio.NewWriterSize(conn, writeBufSize),
 		opts:           opts,
 		cmdCh:          make(chan command, 64),
 		frameCh:        make(chan Frame, 64),
@@ -302,6 +314,7 @@ func (e *Engine) run() {
 		select {
 		case cmd := <-e.cmdCh:
 			e.handleCommand(cmd)
+			e.drainCommands() // coalesce any queued commands into this batch
 		case f, ok := <-e.frameCh:
 			if !ok {
 				e.markDead(&DisconnectionError{Message: "connection closed by peer"})
@@ -311,11 +324,37 @@ func (e *Engine) run() {
 		case <-ticker.C:
 			e.tick()
 		case <-e.stop:
+			e.flush() // push buffered fire-and-forget frames before closing
 			e.markDead(&BrokenPipeError{Message: "engine shutdown"})
 		}
 		if e.closed {
 			return
 		}
+		e.flush() // one socket write for everything buffered this iteration
+	}
+}
+
+// drainCommands buffers any immediately-available commands (up to a cap) without
+// blocking, so their writes coalesce into the batch the run loop then flushes.
+func (e *Engine) drainCommands() {
+	for n := 0; n < maxWriteBatch; n++ {
+		select {
+		case cmd := <-e.cmdCh:
+			e.handleCommand(cmd)
+		default:
+			return
+		}
+	}
+}
+
+// flush writes the buffered frames to the socket in one syscall (a no-op when
+// nothing is buffered).
+func (e *Engine) flush() {
+	if e.closed {
+		return
+	}
+	if err := e.bw.Flush(); err != nil {
+		e.markDead(&DisconnectionError{Message: "socket write failed: " + err.Error()})
 	}
 }
 
@@ -440,8 +479,10 @@ func (e *Engine) markDead(err error) {
 
 // write is only ever called from the run goroutine, so the engine has a single
 // writer and needs no write lock.
+// write buffers a frame. The run goroutine flushes the buffer once per batch;
+// errors surface at flush time (or as a sticky error on the next write).
 func (e *Engine) write(f Frame) error {
-	_, err := e.conn.Write(EncodeFrame(f))
+	_, err := e.bw.Write(EncodeFrame(f))
 	return err
 }
 
