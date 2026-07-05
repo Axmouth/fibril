@@ -30,6 +30,9 @@ type ClientOptions struct {
 	HeartbeatInterval time.Duration
 	// MaxRedirects bounds how many owner redirects a single op will follow.
 	MaxRedirects int
+	// SuperviseBackoff is the pause between re-subscribe attempts after a drop in
+	// a supervised subscription (0 uses a sensible default).
+	SuperviseBackoff time.Duration
 }
 
 func (o ClientOptions) engineOptions() EngineOptions {

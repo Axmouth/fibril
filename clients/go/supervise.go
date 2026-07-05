@@ -11,8 +11,7 @@ import (
 	"time"
 )
 
-// superviseBackoff is the pause between re-subscribe attempts after a drop.
-var superviseBackoff = 250 * time.Millisecond
+const defaultSuperviseBackoff = 250 * time.Millisecond
 
 // SupervisedSubscription is a subscription that re-attaches across owner
 // failovers. Deliveries yields messages until Close is called (then it closes).
@@ -47,6 +46,10 @@ func (c *Client) SuperviseSubscribe(req Subscribe) (*SupervisedSubscription, err
 
 func (c *Client) superviseLoop(req Subscribe, sub *Subscription, out chan Delivery, cancel chan struct{}) {
 	defer close(out)
+	backoff := c.opts.SuperviseBackoff
+	if backoff <= 0 {
+		backoff = defaultSuperviseBackoff
+	}
 	for {
 		// Forward until this attachment's channel closes (a drop) or we are asked
 		// to stop.
@@ -54,10 +57,13 @@ func (c *Client) superviseLoop(req Subscribe, sub *Subscription, out chan Delive
 			return
 		}
 		// The connection dropped. Re-attach: back off, refresh the topology so a
-		// failed-over owner is picked up, then re-subscribe. A permanent error
-		// (e.g. the topic is gone) ends supervision.
+		// failed-over owner is picked up, then re-subscribe. Stop if the client
+		// is shutting down or a permanent error (e.g. the topic is gone) occurs.
 		for {
-			if !sleepOrCancel(superviseBackoff, cancel) {
+			if c.closed.Load() {
+				return
+			}
+			if !sleepOrCancel(backoff, cancel) {
 				return
 			}
 			_, _ = c.FetchTopology(TopologyRequest{Topic: &req.Topic}) // best effort
@@ -66,7 +72,7 @@ func (c *Client) superviseLoop(req Subscribe, sub *Subscription, out chan Delive
 				sub = newSub
 				break
 			}
-			if !isTransient(err) {
+			if !isTransient(err) || c.closed.Load() {
 				return
 			}
 		}

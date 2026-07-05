@@ -12,9 +12,6 @@ import (
 // after one delivery; the supervised subscription must re-attach on a fresh
 // connection and keep delivering on the same channel.
 func TestSupervisedSubscriptionSurvivesFailover(t *testing.T) {
-	superviseBackoff = 20 * time.Millisecond // speed the test up
-	defer func() { superviseBackoff = 250 * time.Millisecond }()
-
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -32,7 +29,7 @@ func TestSupervisedSubscriptionSurvivesFailover(t *testing.T) {
 		}
 	}()
 
-	c, err := Dial(ln.Addr().String(), ClientOptions{ClientName: "go-test", HeartbeatInterval: time.Hour})
+	c, err := Dial(ln.Addr().String(), ClientOptions{ClientName: "go-test", HeartbeatInterval: time.Hour, SuperviseBackoff: 20 * time.Millisecond})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
