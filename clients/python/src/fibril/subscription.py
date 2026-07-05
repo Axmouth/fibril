@@ -40,6 +40,10 @@ def _normalize_group(group: Optional[str]) -> Optional[str]:
     return trimmed
 
 
+#: The exclusive cohort a queue subscription joins via ``exclusive()``.
+DEFAULT_COHORT_ID = "default"
+
+
 class Message:
     """A delivered message in auto-ack mode (server-settled, nothing to ack)."""
 
@@ -432,6 +436,14 @@ class SubscriptionBuilder:
         member, so the cohort consumes the partitioned topic in order with free
         failover. Without this, the subscription is a plain competing consumer."""
         self._consumer_group = consumer_group
+        return self
+
+    def exclusive(self) -> "SubscriptionBuilder":
+        """Join the queue's default exclusive cohort. Shorthand for
+        ``consumer_group("default")``: each partition goes to a single member, so
+        several instances that call this on the same queue self-organize into the
+        cohort with no coordination."""
+        self._consumer_group = DEFAULT_COHORT_ID
         return self
 
     def consumer_target(self, target: int) -> "SubscriptionBuilder":

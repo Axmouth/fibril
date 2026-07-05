@@ -29,6 +29,9 @@ function normalizeGroup(group: string | null): string | null {
   return trimmed;
 }
 
+/** The exclusive cohort a queue subscription joins via `exclusive()`. */
+const DEFAULT_COHORT_ID = "default";
+
 /**
  * A delivered message in auto-ack mode (no settle action required).
  *
@@ -715,6 +718,17 @@ export class SubscriptionBuilder {
    */
   consumerGroup(consumerGroup: string): this {
     this.#consumerGroup = consumerGroup;
+    return this;
+  }
+
+  /**
+   * Join the queue's default exclusive cohort. Shorthand for
+   * `consumerGroup("default")`: each partition goes to a single member, so
+   * several instances that call this on the same queue self-organize into the
+   * cohort with no coordination.
+   */
+  exclusive(): this {
+    this.#consumerGroup = DEFAULT_COHORT_ID;
     return this;
   }
 

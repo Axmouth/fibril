@@ -218,6 +218,10 @@ class BlockingSubscriptionBuilder:
         self._builder.consumer_group(consumer_group)
         return self
 
+    def exclusive(self) -> "BlockingSubscriptionBuilder":
+        self._builder.exclusive()
+        return self
+
     def consumer_target(self, target: int) -> "BlockingSubscriptionBuilder":
         self._builder.consumer_target(target)
         return self
