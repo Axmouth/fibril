@@ -130,17 +130,24 @@ func isTransient(err error) bool {
 const (
 	defaultRetryBackoff            = 100 * time.Millisecond
 	defaultTopologyRefreshCooldown = time.Second
+	// topologyRefreshTimeout bounds the best-effort refresh between retries so a
+	// broker that accepts the connection but does not answer cannot wedge the
+	// retry loop.
+	topologyRefreshTimeout = 5 * time.Second
 )
 
-// afterTransient runs between retry attempts: it refreshes topology (throttled)
-// so the next attempt re-routes to the current owner, then backs off briefly.
+// afterTransient runs between retry attempts: it refreshes topology (throttled
+// and time-bounded) so the next attempt re-routes to the current owner, then
+// backs off briefly.
 func (c *Client) afterTransient(ctx context.Context, topic string, group *string) {
 	cooldown := c.opts.TopologyRefreshCooldown
 	if cooldown <= 0 {
 		cooldown = defaultTopologyRefreshCooldown
 	}
 	if c.topo.dueForRefresh(cooldown) {
-		_, _ = c.FetchTopology(ctx, TopologyRequest{Topic: &topic, Group: group})
+		tctx, cancel := context.WithTimeout(ctx, topologyRefreshTimeout)
+		_, _ = c.FetchTopology(tctx, TopologyRequest{Topic: &topic, Group: group})
+		cancel()
 	}
 	backoff := c.opts.RetryBackoff
 	if backoff <= 0 {
