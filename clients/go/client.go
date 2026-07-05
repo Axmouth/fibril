@@ -40,6 +40,12 @@ type ClientOptions struct {
 	// ReconcilePolicy governs how the broker reconciles a client's non-supervised
 	// subscriptions after a reconnect ("" defaults to restoring them).
 	ReconcilePolicy ReconcilePolicy
+	// RetryBackoff is the pause before retrying an op after a transient failure
+	// (0 uses a sensible default).
+	RetryBackoff time.Duration
+	// TopologyRefreshCooldown throttles how often a transient failure triggers a
+	// topology refresh (0 uses a sensible default).
+	TopologyRefreshCooldown time.Duration
 	// TLS, if set, connects over TLS with these trust settings; nil is plaintext.
 	TLS *TLSOptions
 	// OnAssignmentChanged, if set, is called for each exclusive-cohort assignment
@@ -120,6 +126,28 @@ func isTransient(err error) bool {
 	return errors.As(err, &d) || errors.As(err, &b)
 }
 
+const (
+	defaultRetryBackoff            = 100 * time.Millisecond
+	defaultTopologyRefreshCooldown = time.Second
+)
+
+// afterTransient runs between retry attempts: it refreshes topology (throttled)
+// so the next attempt re-routes to the current owner, then backs off briefly.
+func (c *Client) afterTransient(topic string, group *string) {
+	cooldown := c.opts.TopologyRefreshCooldown
+	if cooldown <= 0 {
+		cooldown = defaultTopologyRefreshCooldown
+	}
+	if c.topo.dueForRefresh(cooldown) {
+		_, _ = c.FetchTopology(TopologyRequest{Topic: &topic, Group: group})
+	}
+	backoff := c.opts.RetryBackoff
+	if backoff <= 0 {
+		backoff = defaultRetryBackoff
+	}
+	time.Sleep(backoff)
+}
+
 // Dial connects to a broker at addr and returns a cluster client. addr is the
 // bootstrap endpoint; other owners are pooled lazily as routing discovers them.
 func Dial(addr string, opts ClientOptions) (*Client, error) {
@@ -173,14 +201,28 @@ func newClientWith(endpoint string, boot *Engine, opts ClientOptions) *Client {
 // ---- topology cache ----------------------------------------------------
 
 type topologyCache struct {
-	mu         sync.RWMutex
-	generation uint64
-	partitions map[string]uint32 // (topic,group) -> partition count
-	owners     map[string]string // (topic,partition,group) -> endpoint
+	mu          sync.RWMutex
+	generation  uint64
+	partitions  map[string]uint32 // (topic,group) -> partition count
+	owners      map[string]string // (topic,partition,group) -> endpoint
+	lastRefresh time.Time         // last throttled refresh, to rate-limit re-fetches
 }
 
 func newTopologyCache() *topologyCache {
 	return &topologyCache{partitions: map[string]uint32{}, owners: map[string]string{}}
+}
+
+// dueForRefresh reports whether a throttled refresh may run now, recording the
+// time when it may. Rate-limits re-fetches under a burst of transient failures.
+func (t *topologyCache) dueForRefresh(cooldown time.Duration) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := time.Now()
+	if !t.lastRefresh.IsZero() && now.Sub(t.lastRefresh) < cooldown {
+		return false
+	}
+	t.lastRefresh = now
+	return true
 }
 
 func groupStr(group *string) string {
@@ -351,6 +393,7 @@ func (c *Client) Publish(p Publish) error {
 		if err = eng.PublishUnconfirmed(p); err == nil {
 			return nil
 		} else if isTransient(err) {
+			c.afterTransient(p.Topic, p.Group)
 			continue
 		} else {
 			return err
@@ -379,6 +422,7 @@ func (c *Client) routedConfirm(topic string, group *string, key []byte, do func(
 			continue
 		}
 		if isTransient(err) {
+			c.afterTransient(topic, group)
 			continue // engineFor reconnects on the next attempt
 		}
 		return 0, err
@@ -428,6 +472,7 @@ func (c *Client) PublishDelayed(p PublishDelayed) error {
 		if err = eng.PublishDelayedUnconfirmed(p); err == nil {
 			return nil
 		} else if isTransient(err) {
+			c.afterTransient(p.Topic, p.Group)
 			continue
 		} else {
 			return err
@@ -474,6 +519,7 @@ func (c *Client) subscribe(req Subscribe, supervised bool) (*Subscription, error
 			continue
 		}
 		if isTransient(err) {
+			c.afterTransient(req.Topic, req.Group)
 			continue // engineFor reconnects on the next attempt
 		}
 		return nil, err
@@ -499,6 +545,7 @@ func (c *Client) SubscribeStream(req SubscribeStream) (*Subscription, error) {
 			continue
 		}
 		if isTransient(err) {
+			c.afterTransient(req.Topic, nil)
 			continue
 		}
 		return nil, err

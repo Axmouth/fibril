@@ -1,6 +1,9 @@
 package fibril
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // ServerError is a structured error the broker returned in response to a request.
 type ServerError struct {
@@ -125,3 +128,51 @@ type WireError struct {
 }
 
 func (e *WireError) Error() string { return e.Message }
+
+// RetryAdvice tells a caller whether re-issuing an operation is worthwhile.
+type RetryAdvice string
+
+const (
+	RetryRetry      RetryAdvice = "retry"
+	RetryDoNotRetry RetryAdvice = "do_not_retry"
+)
+
+// Broker error codes that change the retry decision.
+const (
+	errCodeInvalid  = 400 // malformed request: fix it, do not retry
+	errCodeNotFound = 404 // topic/partition not in the cluster: do not retry
+	errCodeNotOwner = 409 // topology conflict: a retry re-routes
+)
+
+// AdviseRetry reports how a caller should treat an error when deciding whether to
+// re-issue an operation. Transport failures, redirects, topology conflicts, and
+// server-transient (5xx) errors are worth retrying; not-found, invalid, and local
+// request errors are not. A confirmed publish that fails after the broker may
+// have accepted it can duplicate on retry until owner-side dedup ships.
+func AdviseRetry(err error) RetryAdvice {
+	var d *DisconnectionError
+	var b *BrokenPipeError
+	var re *RedirectError
+	if errors.As(err, &d) || errors.As(err, &b) || errors.As(err, &re) {
+		return RetryRetry
+	}
+	var se *ServerError
+	if errors.As(err, &se) {
+		switch {
+		case se.Code == errCodeNotOwner:
+			return RetryRetry
+		case se.Code == errCodeNotFound || se.Code == errCodeInvalid:
+			return RetryDoNotRetry
+		case se.Code >= 500:
+			return RetryRetry
+		default:
+			return RetryDoNotRetry
+		}
+	}
+	return RetryDoNotRetry
+}
+
+// IsRetryable is the simple "should I retry this?" check.
+func IsRetryable(err error) bool {
+	return AdviseRetry(err) == RetryRetry
+}
