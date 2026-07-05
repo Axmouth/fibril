@@ -38,6 +38,21 @@ type UnexpectedError struct {
 
 func (e *UnexpectedError) Error() string { return e.Message }
 
+// SerializationError means a message could not be prepared for sending (a bad
+// value to encode, or a reserved header key).
+type SerializationError struct {
+	Message string
+}
+
+func (e *SerializationError) Error() string { return e.Message }
+
+// DeserializationError means a delivered payload could not be decoded.
+type DeserializationError struct {
+	Message string
+}
+
+func (e *DeserializationError) Error() string { return e.Message }
+
 // RedirectError means the broker told the client to retry this op against a
 // different owner. It is not a failure: the routing layer applies the target and
 // retries, so the per-connection engine surfaces it as this typed error.

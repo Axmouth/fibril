@@ -1,7 +1,7 @@
 package fibril
 
 // Cluster, declaration, and stream ops: the second half of the wire surface.
-// Same byte-exact rules as messages.go, pinned by clients/wire_vectors.json.
+// Same byte-exact rules as ops.go, pinned by clients/wire_vectors.json.
 
 // ---- shared composite types --------------------------------------------
 

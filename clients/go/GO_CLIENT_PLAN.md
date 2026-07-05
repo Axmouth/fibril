@@ -34,7 +34,7 @@ Go-specific decisions.
 1. `wire.go` - byte-exact codec primitives (writer/reader), field types
    (`UUID`, `ContentType`, `Headers`), FNV-1a. **DONE**, pinned by
    `wire_test.go` against `../wire_vectors.json` + canonical FNV vectors.
-2. `messages.go` + `messages_ext.go` - op structs <-> wire, both directions.
+2. `ops.go` + `ops_ext.go` - op structs <-> wire, both directions.
    **DONE for ALL 33 shared vectors** (handshake, auth, error, publish family,
    ack/nack, subscribe(+ok), deliver, declare queue/plexus(+ok), topology
    (ok/req/update/ack), reconcile_client, redirect, assignment, going_away,
@@ -64,8 +64,10 @@ Go-specific decisions.
    across owner failover on a stable channel). Race-clean tests (redirect, FNV
    routing, fan-in, reconnect + failover via real-TCP fake brokers, topology push)
    + live via `examples/smoke`. **TODO**: per-sub Unsubscribe.
-6. `publisher.go` / `subscription.go` / `message.go` - ergonomic handles
-   (reliable publisher, message encode/decode). TODO.
+6. `message.go` + `publisher.go` - ergonomic handles. **DONE**: Message builder
+   (Raw/Text/JSON + fluent Keyed/WithTTL/WithHeader), reserved-header validation
+   (fibril.*/stroma.* rejected), Delivery decode helpers (Text/JSON), topic-bound
+   Publisher, and ReliablePublisher (stamps producer-dedup headers). `message_test.go`.
 
 Plus `errors.go` (typed `WireError` taxonomy; the `FibrilError` hierarchy grows
 as higher layers land).

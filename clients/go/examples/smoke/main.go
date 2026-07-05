@@ -44,7 +44,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	off, err := c.PublishConfirmed(fibril.Publish{Topic: "gosmoke", Payload: []byte("hello from go")})
+	off, err := c.Publisher("gosmoke").PublishConfirmed(fibril.Text("hello from go"))
 	if err != nil {
 		fmt.Println("publish:", err)
 		os.Exit(1)
@@ -57,7 +57,7 @@ func main() {
 			fmt.Println("delivery channel closed")
 			os.Exit(1)
 		}
-		fmt.Printf("delivered: %q offset=%d tag=%d\n", d.Payload, d.Offset, d.DeliveryTag.Epoch)
+		fmt.Printf("delivered: %q offset=%d tag=%d\n", d.Text(), d.Offset, d.DeliveryTag.Epoch)
 		if err := d.Ack(); err != nil {
 			fmt.Println("ack:", err)
 			os.Exit(1)
