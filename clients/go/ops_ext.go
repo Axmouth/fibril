@@ -497,6 +497,105 @@ func decodeReconcileClient(body []byte) (ReconcileClient, error) {
 	return rc, r.finish()
 }
 
+// ReconcileAction is the broker's verdict for one reconciled subscription.
+type ReconcileAction uint8
+
+const (
+	ReconcileKeep            ReconcileAction = 0
+	ReconcileCloseClientSide ReconcileAction = 1
+	ReconcileCloseServerSide ReconcileAction = 2
+	ReconcileRecreateClient  ReconcileAction = 3
+)
+
+func (w *writer) optionalReconcileSubscription(s *ReconcileSubscription) {
+	if s == nil {
+		w.u8(0)
+		return
+	}
+	w.u8(1)
+	w.reconcileSubscription(*s)
+}
+
+func (r *reader) optionalReconcileSubscription() *ReconcileSubscription {
+	if r.u8() != 1 {
+		return nil
+	}
+	s := r.reconcileSubscription()
+	return &s
+}
+
+// ReconcileSubscriptionResult is the broker's verdict for one subscription a
+// reconnecting client asked it to reconcile: the client's view, the server's
+// restored view (if any), the action, and a human-readable reason.
+type ReconcileSubscriptionResult struct {
+	Client *ReconcileSubscription
+	Server *ReconcileSubscription
+	Action ReconcileAction
+	Reason string
+}
+
+// ReconcileServer is an unsolicited broker->client push of the subscriptions the
+// broker believes a client holds (op 71).
+type ReconcileServer struct {
+	Subscriptions []ReconcileSubscription
+}
+
+func encodeReconcileServer(rs ReconcileServer) []byte {
+	w := writer{}
+	w.magic("FRS1")
+	w.u32(uint32(len(rs.Subscriptions)))
+	for _, s := range rs.Subscriptions {
+		w.reconcileSubscription(s)
+	}
+	return w.buf
+}
+
+func decodeReconcileServer(body []byte) (ReconcileServer, error) {
+	r := reader{buf: body}
+	r.expectMagic("FRS1")
+	n := r.u32()
+	rs := ReconcileServer{Subscriptions: make([]ReconcileSubscription, 0, n)}
+	for i := uint32(0); i < n && r.err == nil; i++ {
+		rs.Subscriptions = append(rs.Subscriptions, r.reconcileSubscription())
+	}
+	return rs, r.finish()
+}
+
+// ReconcileResult is the broker's reply to a RECONCILE_CLIENT: one verdict per
+// reconciled subscription.
+type ReconcileResult struct {
+	Subscriptions []ReconcileSubscriptionResult
+}
+
+func encodeReconcileResult(rr ReconcileResult) []byte {
+	w := writer{}
+	w.magic("FRR1")
+	w.u32(uint32(len(rr.Subscriptions)))
+	for _, s := range rr.Subscriptions {
+		w.optionalReconcileSubscription(s.Client)
+		w.optionalReconcileSubscription(s.Server)
+		w.u8(uint8(s.Action))
+		w.writeStr(s.Reason)
+	}
+	return w.buf
+}
+
+func decodeReconcileResult(body []byte) (ReconcileResult, error) {
+	r := reader{buf: body}
+	r.expectMagic("FRR1")
+	n := r.u32()
+	rr := ReconcileResult{Subscriptions: make([]ReconcileSubscriptionResult, 0, n)}
+	for i := uint32(0); i < n && r.err == nil; i++ {
+		rr.Subscriptions = append(rr.Subscriptions, ReconcileSubscriptionResult{
+			Client: r.optionalReconcileSubscription(),
+			Server: r.optionalReconcileSubscription(),
+			Action: ReconcileAction(r.u8()),
+			Reason: r.readStr(),
+		})
+	}
+	return rr, r.finish()
+}
+
 // ---- redirect ----------------------------------------------------------
 
 // Redirect tells the client to retry an op against a different owner.

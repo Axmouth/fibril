@@ -37,6 +37,9 @@ type ClientOptions struct {
 	// and picks up partitions added by a live repartition grow (0 uses a sensible
 	// default).
 	RepartitionPollInterval time.Duration
+	// ReconcilePolicy governs how the broker reconciles a client's non-supervised
+	// subscriptions after a reconnect ("" defaults to restoring them).
+	ReconcilePolicy ReconcilePolicy
 	// TLS, if set, connects over TLS with these trust settings; nil is plaintext.
 	TLS *TLSOptions
 	// OnAssignmentChanged, if set, is called for each exclusive-cohort assignment
@@ -67,9 +70,25 @@ type Client struct {
 	poolMu sync.Mutex
 	pool   map[string]*Engine
 
+	reconcileMu sync.Mutex
+	reconcile   map[string]*reconcileRegistry // per-endpoint, survives engine reconnects
+
 	rr             atomic.Uint64        // round-robin cursor for keyless publishes
 	cohortMemberID atomic.Pointer[UUID] // captured once, carried across cohort subscribes
 	closed         atomic.Bool
+}
+
+// reconcileFor returns the endpoint's reconcile registry, creating it on first
+// use. Shared across the reconnects of that endpoint's engine.
+func (c *Client) reconcileFor(endpoint string) *reconcileRegistry {
+	c.reconcileMu.Lock()
+	defer c.reconcileMu.Unlock()
+	reg, ok := c.reconcile[endpoint]
+	if !ok {
+		reg = newReconcileRegistry(c.opts.ReconcilePolicy)
+		c.reconcile[endpoint] = reg
+	}
+	return reg
 }
 
 // applyCohortMember offers the client's captured cohort member id on a
@@ -114,8 +133,9 @@ func Dial(addr string, opts ClientOptions) (*Client, error) {
 		bootstrapEndpoint: addr,
 		topo:              newTopologyCache(),
 		pool:              make(map[string]*Engine),
+		reconcile:         make(map[string]*reconcileRegistry),
 	}
-	boot, err := Connect(addr, c.engineOpts())
+	boot, err := Connect(addr, c.engineOpts(addr))
 	if err != nil {
 		return nil, err
 	}
@@ -124,10 +144,12 @@ func Dial(addr string, opts ClientOptions) (*Client, error) {
 }
 
 // engineOpts is the per-engine options the client opens connections with,
-// including the topology-push callback that keeps the routing cache warm.
-func (c *Client) engineOpts() EngineOptions {
+// including the topology-push callback that keeps the routing cache warm and the
+// endpoint's reconcile registry so a reconnect restores its subscriptions.
+func (c *Client) engineOpts(endpoint string) EngineOptions {
 	o := c.opts.engineOptions()
 	o.OnTopologyUpdate = c.topo.applyPush
+	o.ReconcileRegistry = c.reconcileFor(endpoint)
 	return o
 }
 
@@ -144,6 +166,7 @@ func newClientWith(endpoint string, boot *Engine, opts ClientOptions) *Client {
 		bootstrap:         boot,
 		topo:              newTopologyCache(),
 		pool:              make(map[string]*Engine),
+		reconcile:         make(map[string]*reconcileRegistry),
 	}
 }
 
@@ -266,7 +289,7 @@ func (c *Client) bootstrapEngine() (*Engine, error) {
 	if c.closed.Load() {
 		return nil, &BrokenPipeError{Message: "client shut down"}
 	}
-	opts := c.engineOpts()
+	opts := c.engineOpts(c.bootstrapEndpoint)
 	resume := c.bootstrap.ResumeIdentity
 	opts.Resume = &resume
 	ne, err := Connect(c.bootstrapEndpoint, opts)
@@ -284,14 +307,22 @@ func (c *Client) engineFor(endpoint string) (*Engine, error) {
 		return c.bootstrapEngine()
 	}
 	c.poolMu.Lock()
-	if e, ok := c.pool[endpoint]; ok && !e.IsClosed() {
+	prev, existed := c.pool[endpoint]
+	if existed && !prev.IsClosed() {
 		c.poolMu.Unlock()
-		return e, nil
+		return prev, nil
 	}
 	c.poolMu.Unlock()
 
-	// Dial outside the lock so a slow connect does not block other routing.
-	ne, err := Connect(endpoint, c.engineOpts())
+	// Dial outside the lock so a slow connect does not block other routing. A
+	// reconnect offers the prior session's resume identity so the broker (and the
+	// endpoint's reconcile registry) can restore subscriptions.
+	opts := c.engineOpts(endpoint)
+	if existed {
+		resume := prev.ResumeIdentity
+		opts.Resume = &resume
+	}
+	ne, err := Connect(endpoint, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -408,15 +439,31 @@ func (c *Client) PublishDelayed(p PublishDelayed) error {
 // ---- subscribe ---------------------------------------------------------
 
 // Subscribe subscribes to one partition, routed to its owner and following owner
-// redirects up to MaxRedirects.
+// redirects up to MaxRedirects. The subscription is remembered for reconnect
+// reconcile.
 func (c *Client) Subscribe(req Subscribe) (*Subscription, error) {
+	return c.subscribe(req, false)
+}
+
+// subscribeSupervised is Subscribe for a supervised subscription, which recovers
+// by re-subscribing and so stays out of the reconcile registry.
+func (c *Client) subscribeSupervised(req Subscribe) (*Subscription, error) {
+	return c.subscribe(req, true)
+}
+
+func (c *Client) subscribe(req Subscribe, supervised bool) (*Subscription, error) {
 	c.applyCohortMember(&req)
 	for attempt := 0; attempt <= c.opts.MaxRedirects; attempt++ {
 		eng, err := c.engineFor(c.topo.ownerOf(req.Topic, req.Partition, req.Group))
 		if err != nil {
 			return nil, err
 		}
-		sub, err := eng.Subscribe(req)
+		var sub *Subscription
+		if supervised {
+			sub, err = eng.subscribeSupervised(req)
+		} else {
+			sub, err = eng.Subscribe(req)
+		}
 		if err == nil {
 			c.captureCohortMember(req, sub)
 			return sub, nil
@@ -527,4 +574,11 @@ func (c *Client) Shutdown() {
 		delete(c.pool, endpoint)
 	}
 	c.poolMu.Unlock()
+	// Close any preserved subscription channels the engines left for a reconnect
+	// that will not come now.
+	c.reconcileMu.Lock()
+	for _, reg := range c.reconcile {
+		reg.closeAll()
+	}
+	c.reconcileMu.Unlock()
 }

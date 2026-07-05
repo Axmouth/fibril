@@ -57,6 +57,10 @@ type EngineOptions struct {
 	// OnAssignmentChanged, if set, is called on the run goroutine for each
 	// exclusive-cohort assignment push.
 	OnAssignmentChanged func(AssignmentChanged)
+	// ReconcileRegistry, if set, remembers non-supervised subscriptions on this
+	// endpoint so a reconnect can restore them. On (re)connect the engine sends
+	// RECONCILE_CLIENT for any it holds and adopts the restored delivery channels.
+	ReconcileRegistry *reconcileRegistry
 }
 
 // command is a request from a public method to the run goroutine: send op(body),
@@ -68,6 +72,12 @@ type command struct {
 	reply    chan reply     // generic request/reply; nil = fire-and-forget
 	subReply chan subResult // set for a subscribe (delivers the created Subscription)
 	autoAck  bool           // carried to the sub state on SUBSCRIBE_OK
+	// noReconcile keeps this subscribe out of the reconnect reconcile registry
+	// (supervised subscriptions and streams recover another way).
+	noReconcile bool
+	// sub carries the full subscribe request so SUBSCRIBE_OK can register it for
+	// reconcile without re-decoding.
+	sub *Subscribe
 }
 
 type reply struct {
@@ -83,9 +93,11 @@ type subResult struct {
 // waiter is a pending request awaiting its correlated reply. Exactly one of
 // reply/subReply is set.
 type waiter struct {
-	reply    chan reply
-	subReply chan subResult
-	autoAck  bool
+	reply       chan reply
+	subReply    chan subResult
+	autoAck     bool
+	noReconcile bool
+	sub         *Subscribe
 }
 
 func failWaiter(w *waiter, err error) {
@@ -98,9 +110,12 @@ func failWaiter(w *waiter, err error) {
 }
 
 // subState is a live subscription's delivery channel, owned by the run goroutine.
+// A preserve subscription's channel is not closed when the engine dies (the
+// reconcile registry owns it across a reconnect).
 type subState struct {
-	ch      chan Delivery
-	autoAck bool
+	ch       chan Delivery
+	autoAck  bool
+	preserve bool
 }
 
 // Engine is one live broker connection.
@@ -212,6 +227,38 @@ func startEngine(conn net.Conn, opts EngineOptions) (*Engine, error) {
 		}
 	}
 
+	// RECONCILE on any reconnect that has remembered subscriptions: a bounced
+	// owner reconnects into a fresh session that forgot them, so the client
+	// re-announces them and adopts the restored delivery channels.
+	subs := make(map[uint64]*subState)
+	nextID := uint64(2) // 1 = HELLO, 2 = AUTH
+	if reg := opts.ReconcileRegistry; reg != nil && !reg.isEmpty() {
+		nextID = 3
+		if _, err := conn.Write(encodeFrame(buildFrame(OpReconcileClient, 3, encodeReconcileClient(ReconcileClient{
+			Policy:        reg.policy,
+			Subscriptions: reg.snapshot(),
+		})))); err != nil {
+			return nil, &DisconnectionError{Message: "write RECONCILE_CLIENT: " + err.Error()}
+		}
+		rf, err := readFrame(br)
+		if err != nil {
+			return nil, &DisconnectionError{Message: "read RECONCILE reply: " + err.Error()}
+		}
+		switch rf.Opcode {
+		case OpReconcileResult:
+			res, derr := decodeReconcileResult(rf.Payload)
+			if derr != nil {
+				return nil, derr
+			}
+			subs = reg.applyResult(res)
+		case OpError:
+			em, _ := decodeError(rf.Payload)
+			return nil, &ServerError{Code: em.Code, Message: em.Message}
+		default:
+			return nil, &UnexpectedError{Message: "unexpected frame during reconciliation"}
+		}
+	}
+
 	e := &Engine{
 		conn:           conn,
 		bw:             bufio.NewWriterSize(conn, writeBufSize),
@@ -220,9 +267,9 @@ func startEngine(conn net.Conn, opts EngineOptions) (*Engine, error) {
 		frameCh:        make(chan Frame, 64),
 		stop:           make(chan struct{}),
 		done:           make(chan struct{}),
-		nextID:         2, // 1 = HELLO, 2 = AUTH are already used
+		nextID:         nextID,
 		waiters:        make(map[uint64]*waiter),
-		subs:           make(map[uint64]*subState),
+		subs:           subs,
 		lastSeen:       time.Now(),
 		ResumeIdentity: ResumeIdentity{OwnerID: helloOk.OwnerID, ClientID: helloOk.ClientID, ResumeToken: helloOk.ResumeToken},
 		ResumeOutcome:  helloOk.ResumeOutcome,
@@ -448,7 +495,7 @@ func (e *Engine) handleCommand(cmd command) {
 		id = e.nextID
 	}
 	if cmd.reply != nil || cmd.subReply != nil {
-		e.waiters[id] = &waiter{reply: cmd.reply, subReply: cmd.subReply, autoAck: cmd.autoAck}
+		e.waiters[id] = &waiter{reply: cmd.reply, subReply: cmd.subReply, autoAck: cmd.autoAck, noReconcile: cmd.noReconcile, sub: cmd.sub}
 	}
 	if err := e.write(buildFrame(cmd.op, id, cmd.body)); err != nil {
 		if w, ok := e.waiters[id]; ok {
@@ -548,9 +595,13 @@ func (e *Engine) markDead(err error) {
 		failWaiter(w, err)
 		delete(e.waiters, id)
 	}
-	// Closing each delivery channel ends the consumer's range over it.
+	// Closing each delivery channel ends the consumer's range over it. A preserve
+	// subscription's channel is left open: the reconcile registry owns it and
+	// either carries it onto the reconnected engine or closes it there.
 	for id, s := range e.subs {
-		close(s.ch)
+		if !s.preserve {
+			close(s.ch)
+		}
 		delete(e.subs, id)
 	}
 	e.closeStop()

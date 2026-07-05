@@ -31,7 +31,7 @@ func (s *SupervisedSubscription) Close() {
 // here); later re-attaches happen in the background on the same Deliveries
 // channel.
 func (c *Client) SuperviseSubscribe(req Subscribe) (*SupervisedSubscription, error) {
-	return c.superviseAttach(req.Topic, req.Prefetch, func() (*Subscription, error) { return c.Subscribe(req) })
+	return c.superviseAttach(req.Topic, req.Prefetch, func() (*Subscription, error) { return c.subscribeSupervised(req) })
 }
 
 // SuperviseSubscribeStream is SuperviseSubscribe for a Plexus stream partition.

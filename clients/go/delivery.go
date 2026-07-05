@@ -52,11 +52,23 @@ type Subscription struct {
 }
 
 // Subscribe opens a subscription and returns it once the broker confirms. The
-// returned Subscription's Deliveries channel receives pushed messages.
+// returned Subscription's Deliveries channel receives pushed messages. A plain
+// subscribe is remembered for reconnect reconcile.
 func (e *Engine) Subscribe(req Subscribe) (*Subscription, error) {
+	return e.subscribe(req, false)
+}
+
+// subscribeSupervised opens a subscription that is not remembered for reconcile,
+// since its supervisor re-subscribes on a drop instead.
+func (e *Engine) subscribeSupervised(req Subscribe) (*Subscription, error) {
+	return e.subscribe(req, true)
+}
+
+func (e *Engine) subscribe(req Subscribe, noReconcile bool) (*Subscription, error) {
 	sr := make(chan subResult, 1)
+	reqCopy := req
 	select {
-	case e.cmdCh <- command{op: OpSubscribe, body: encodeSubscribe(req), subReply: sr, autoAck: req.AutoAck}:
+	case e.cmdCh <- command{op: OpSubscribe, body: encodeSubscribe(req), subReply: sr, autoAck: req.AutoAck, noReconcile: noReconcile, sub: &reqCopy}:
 	case <-e.done:
 		return nil, e.err()
 	}
@@ -73,8 +85,9 @@ func (e *Engine) Subscribe(req Subscribe) (*Subscription, error) {
 // per-subscription channel like a queue subscription.
 func (e *Engine) SubscribeStream(req SubscribeStream) (*Subscription, error) {
 	sr := make(chan subResult, 1)
+	// Streams resume by durable cursor, not the reconcile registry.
 	select {
-	case e.cmdCh <- command{op: OpSubscribeStream, body: encodeSubscribeStream(req), subReply: sr, autoAck: req.AutoAck}:
+	case e.cmdCh <- command{op: OpSubscribeStream, body: encodeSubscribeStream(req), subReply: sr, autoAck: req.AutoAck, noReconcile: true}:
 	case <-e.done:
 		return nil, e.err()
 	}
@@ -132,7 +145,24 @@ func (e *Engine) handleSubscribeOk(f Frame) {
 		prefetch = 1
 	}
 	ch := make(chan Delivery, prefetch)
-	e.subs[ok2.SubID] = &subState{ch: ch, autoAck: w.autoAck}
+	// A plain subscribe is remembered so a reconnect can restore it on the same
+	// channel. The registry then owns the channel across the engine's death.
+	preserve := false
+	if reg := e.opts.ReconcileRegistry; reg != nil && !w.noReconcile && w.sub != nil {
+		reg.register(ReconcileSubscription{
+			SubID:          ok2.SubID,
+			Topic:          ok2.Topic,
+			Partition:      ok2.Partition,
+			Group:          ok2.Group,
+			AutoAck:        w.autoAck,
+			Prefetch:       ok2.Prefetch,
+			ConsumerGroup:  w.sub.ConsumerGroup,
+			ConsumerTarget: w.sub.ConsumerTarget,
+			MemberID:       ok2.MemberID,
+		}, ch, w.autoAck)
+		preserve = true
+	}
+	e.subs[ok2.SubID] = &subState{ch: ch, autoAck: w.autoAck, preserve: preserve}
 	if w.subReply != nil {
 		w.subReply <- subResult{sub: &Subscription{
 			SubID:      ok2.SubID,
