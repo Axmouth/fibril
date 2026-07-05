@@ -1,0 +1,39 @@
+// Example + light test: a manually-acked delivery that is nacked with requeue is
+// redelivered, and after it is acked no further copy arrives.
+//
+//	FIBRIL_ADDR=127.0.0.1:9876 go run ./examples/manual-ack-retry
+package main
+
+import (
+	"time"
+
+	fibril "github.com/Axmouth/fibril/clients/go"
+	"github.com/Axmouth/fibril/clients/go/examples/internal/exharness"
+)
+
+func main() {
+	exharness.Run("manual-ack-retry", func() {
+		c := exharness.Connect("example-manual-ack-retry")
+		defer c.Shutdown()
+
+		topic := exharness.UniqueTopic("ackretry")
+		fan, err := c.SubscribeTopic(topic, nil, 4, false) // manual ack
+		exharness.Check(err == nil, "subscribe")
+		defer fan.Close()
+
+		_, err = c.Publisher(topic).PublishConfirmed(fibril.Text("work"))
+		exharness.Check(err == nil, "publish")
+
+		first := exharness.Recv(fan.Deliveries, 5*time.Second, "first delivery")
+		exharness.AssertEq(first.Text(), "work", "first payload")
+		exharness.Check(first.Nack(true, nil) == nil, "nack with requeue")
+
+		second := exharness.Recv(fan.Deliveries, 5*time.Second, "redelivery after nack")
+		exharness.AssertEq(second.Text(), "work", "redelivered payload")
+		exharness.Check(second.Ack() == nil, "ack")
+
+		if _, ok := exharness.TryRecv(fan.Deliveries, 500*time.Millisecond); ok {
+			exharness.Check(false, "no further delivery after ack")
+		}
+	})
+}

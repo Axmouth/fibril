@@ -1,65 +1,41 @@
-// Stream smoke: declare a Plexus stream, subscribe (fan-in across partitions),
-// publish a record, and receive it.
+// Example + light test: Plexus fan-out. Declare a stream, attach two independent
+// subscribers, publish one record, and verify both subscribers receive it (a
+// stream fans out to every consumer, unlike a work queue).
 //
-//	go run ./examples/stream        (broker on 127.0.0.1:9876, fibril/fibril)
+//	FIBRIL_ADDR=127.0.0.1:9876 go run ./examples/plexus
 package main
 
 import (
-	"fmt"
-	"os"
 	"time"
 
 	fibril "github.com/Axmouth/fibril/clients/go"
+	"github.com/Axmouth/fibril/clients/go/examples/internal/exharness"
 )
 
 func main() {
-	addr := os.Getenv("FIBRIL_ADDR")
-	if addr == "" {
-		addr = "127.0.0.1:9876"
-	}
-	c, err := fibril.Dial(addr, fibril.ClientOptions{
-		ClientName: "go-stream",
-		Auth:       &fibril.Auth{Username: "fibril", Password: "fibril"},
+	exharness.Run("plexus", func() {
+		c := exharness.Connect("example-plexus")
+		defer c.Shutdown()
+
+		topic := exharness.UniqueTopic("plexus")
+		one := uint32(1)
+		_, err := c.DeclarePlexus(fibril.DeclarePlexus{Topic: topic, PartitionCount: &one, Durability: fibril.StreamDurable})
+		exharness.Check(err == nil, "declare plexus")
+
+		opts := fibril.StreamSubscribeOptions{Start: fibril.StreamStart{Kind: fibril.StreamLatest}, Prefetch: 16, AutoAck: true}
+		subA, err := c.SubscribeStreamTopic(topic, opts)
+		exharness.Check(err == nil, "subscribe A")
+		defer subA.Close()
+		subB, err := c.SubscribeStreamTopic(topic, opts)
+		exharness.Check(err == nil, "subscribe B")
+		defer subB.Close()
+
+		_, err = c.Publisher(topic).PublishConfirmed(fibril.Text("stream hello"))
+		exharness.Check(err == nil, "publish")
+
+		a := exharness.Recv(subA.Deliveries, 5*time.Second, "record on subscriber A")
+		b := exharness.Recv(subB.Deliveries, 5*time.Second, "record on subscriber B")
+		exharness.AssertEq(a.Text(), "stream hello", "subscriber A payload")
+		exharness.AssertEq(b.Text(), "stream hello", "subscriber B payload (fan-out)")
 	})
-	if err != nil {
-		fmt.Println("connect:", err)
-		os.Exit(1)
-	}
-	defer c.Shutdown()
-
-	one := uint32(1)
-	if _, err := c.DeclarePlexus(fibril.DeclarePlexus{Topic: "gostream", PartitionCount: &one, Durability: fibril.StreamDurable}); err != nil {
-		fmt.Println("declare plexus:", err)
-		os.Exit(1)
-	}
-
-	// Subscribe from the latest position before publishing, so we see the record.
-	fi, err := c.SubscribeStreamTopic("gostream", fibril.StreamSubscribeOptions{
-		Start:    fibril.StreamStart{Kind: fibril.StreamLatest},
-		Prefetch: 16,
-		AutoAck:  true,
-	})
-	if err != nil {
-		fmt.Println("subscribe stream:", err)
-		os.Exit(1)
-	}
-	defer fi.Close()
-
-	if _, err := c.Publisher("gostream").PublishConfirmed(fibril.Text("stream hello")); err != nil {
-		fmt.Println("publish:", err)
-		os.Exit(1)
-	}
-	fmt.Println("published to stream")
-
-	select {
-	case d, ok := <-fi.Deliveries:
-		if !ok {
-			fmt.Println("stream channel closed")
-			os.Exit(1)
-		}
-		fmt.Printf("stream delivered: %q offset=%d partition=%d\n", d.Text(), d.Offset, d.Partition)
-	case <-time.After(3 * time.Second):
-		fmt.Println("no stream record within 3s")
-		os.Exit(1)
-	}
 }
