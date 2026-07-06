@@ -121,6 +121,85 @@ func startMTLSBroker(t *testing.T, serverCert tls.Certificate, clientCA tls.Cert
 	return ln
 }
 
+// caAndServerCert returns a self-signed CA (as PEM, to trust via CAFile) and a
+// server certificate it signs with a 127.0.0.1 IP SAN so hostname verification
+// passes.
+func caAndServerCert(t *testing.T) (caPEM []byte, server tls.Certificate) {
+	t.Helper()
+	caPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("ca key: %v", err)
+	}
+	caTmpl := x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "fibril-test-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, &caTmpl, &caTmpl, &caPriv.PublicKey, caPriv)
+	if err != nil {
+		t.Fatalf("ca cert: %v", err)
+	}
+	caLeaf, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatalf("parse ca: %v", err)
+	}
+
+	srvPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("server key: %v", err)
+	}
+	srvTmpl := x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "localhost"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	srvDER, err := x509.CreateCertificate(rand.Reader, &srvTmpl, caLeaf, &srvPriv.PublicKey, caPriv)
+	if err != nil {
+		t.Fatalf("server cert: %v", err)
+	}
+	caPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER})
+	server = tls.Certificate{Certificate: [][]byte{srvDER}, PrivateKey: srvPriv}
+	return caPEM, server
+}
+
+// TestTLSCaFileTrustCompletesHandshake checks that trusting a CA via CAFile (not a
+// fingerprint pin) verifies a server certificate that chains to it and can publish.
+func TestTLSCaFileTrustCompletesHandshake(t *testing.T) {
+	caPEM, server := caAndServerCert(t)
+	caPath := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(caPath, caPEM, 0o600); err != nil {
+		t.Fatalf("write ca: %v", err)
+	}
+	ln := startTLSBroker(t, server)
+	defer ln.Close()
+
+	e, err := Connect(context.Background(), ln.Addr().String(), EngineOptions{
+		ClientName:        "go-test",
+		HeartbeatInterval: time.Hour,
+		TLS:               &TLSOptions{CAFile: caPath},
+	})
+	if err != nil {
+		t.Fatalf("TLS connect trusting the CA file: %v", err)
+	}
+	defer e.Shutdown()
+
+	off, err := e.PublishConfirmed(context.Background(), Publish{Topic: "t", Payload: []byte("x")})
+	if err != nil {
+		t.Fatalf("publish over TLS: %v", err)
+	}
+	if off != 2 {
+		t.Errorf("offset = %d, want 2", off)
+	}
+}
+
 // TestMTLSClientCertificatePassesRequiringBroker checks that a client presenting a
 // certificate the broker trusts completes the handshake and can publish.
 func TestMTLSClientCertificatePassesRequiringBroker(t *testing.T) {

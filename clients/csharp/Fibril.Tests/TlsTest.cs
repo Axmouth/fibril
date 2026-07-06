@@ -111,6 +111,47 @@ public class TlsTest
         return (certPath, keyPath);
     }
 
+    // A self-signed CA plus a server certificate it signs, with a "localhost" DNS
+    // SAN so hostname verification passes. Returns the CA (public, to trust via a CA
+    // file) and the server certificate with its key (for the broker to present).
+    private static (X509Certificate2 Ca, X509Certificate2 Server) CaAndServerCert()
+    {
+        using var caRsa = RSA.Create(2048);
+        var caReq = new CertificateRequest("CN=fibril-test-ca", caRsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        caReq.CertificateExtensions.Add(new X509BasicConstraintsExtension(certificateAuthority: true, hasPathLengthConstraint: false, pathLengthConstraint: 0, critical: true));
+        using var ca = caReq.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+
+        using var srvRsa = RSA.Create(2048);
+        var srvReq = new CertificateRequest("CN=localhost", srvRsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        var san = new SubjectAlternativeNameBuilder();
+        san.AddDnsName("localhost");
+        srvReq.CertificateExtensions.Add(san.Build());
+        using var srvCert = srvReq.Create(ca, DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1), new byte[] { 1, 2, 3, 4 });
+        using var withKey = srvCert.CopyWithPrivateKey(srvRsa);
+        // Re-import through PKCS#12 so the private key is usable server-side on any platform.
+        var server = X509CertificateLoader.LoadPkcs12(withKey.Export(X509ContentType.Pfx), null);
+        var caPublic = X509CertificateLoader.LoadCertificate(ca.Export(X509ContentType.Cert));
+        return (caPublic, server);
+    }
+
+    [Fact]
+    public async Task CaFileTrustCompletesHandshake()
+    {
+        var (ca, server) = CaAndServerCert();
+        using (ca)
+        using (server)
+        {
+            var caPath = Path.Combine(Directory.CreateTempSubdirectory().FullName, "ca.crt");
+            File.WriteAllText(caPath, ca.ExportCertificatePem());
+            await using var broker = new FakeBroker { ServerCertificate = server };
+            // Trust the CA (no fingerprint pin), and verify the "localhost" SAN.
+            await using var client = await Client.ConnectAsync(broker.Address, Opts(new TlsOptions { CaFile = caPath, ServerName = "localhost" }), Timeout());
+
+            var offset = await client.Publisher("t").PublishConfirmedAsync(Message.Text("hello"), Timeout());
+            Assert.Equal(FakeBroker.FirstOffset, offset);
+        }
+    }
+
     [Fact]
     public async Task ClientCertificatePassesRequiringBroker()
     {
