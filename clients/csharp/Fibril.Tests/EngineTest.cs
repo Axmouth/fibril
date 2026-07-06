@@ -56,7 +56,7 @@ public class EngineTest
         }
 
         Assert.NotNull(got);
-        Assert.Equal("hello", got!.Text());
+        Assert.Equal("hello", got!.Value.Text());
         Assert.True(await broker.WaitForAsync(Op.Ack, Timeout()));
     }
 

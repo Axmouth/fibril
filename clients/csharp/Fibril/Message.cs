@@ -8,8 +8,9 @@ namespace Fibril;
 /// optional partition key, and an optional per-message TTL. Build it with
 /// Raw/Text/Json and the fluent With helpers.
 /// </summary>
-public sealed record Message
+public readonly record struct Message
 {
+    public Message() { }
     public byte[] Payload { get; init; } = Array.Empty<byte>();
     public ContentType ContentType { get; init; }
     public IReadOnlyDictionary<string, string>? Headers { get; init; }

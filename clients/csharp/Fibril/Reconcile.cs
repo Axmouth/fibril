@@ -73,7 +73,7 @@ internal sealed class ReconcileRegistry
                 {
                     continue;
                 }
-                var oldId = verdict.Client.SubId;
+                var oldId = verdict.Client.Value.SubId;
                 visited.Add(oldId);
                 if (!_subs.TryGetValue(oldId, out var entry))
                 {

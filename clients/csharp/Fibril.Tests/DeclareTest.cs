@@ -28,8 +28,8 @@ public class DeclareTest
         Assert.Equal(4u, declare.PartitionCount);
         Assert.Equal(5u, declare.DlqMaxRetries);
         Assert.Equal(30000ul, declare.DefaultMessageTtlMs);
-        Assert.Equal(DlqKind.Custom, declare.DlqPolicy!.Kind);
-        Assert.Equal("orders.dlq", declare.DlqPolicy.Topic);
+        Assert.Equal(DlqKind.Custom, declare.DlqPolicy!.Value.Kind);
+        Assert.Equal("orders.dlq", declare.DlqPolicy.Value.Topic);
     }
 
     [Fact]

@@ -15,13 +15,13 @@ internal enum ResumeOutcome : byte
 }
 
 /// <summary>Identity the broker returns and the client offers on reconnect to resume a session.</summary>
-internal sealed record ResumeIdentity(Uuid OwnerId, Uuid ClientId, Uuid ResumeToken);
+internal readonly record struct ResumeIdentity(Uuid OwnerId, Uuid ClientId, Uuid ResumeToken);
 
 /// <summary>The client's opening handshake frame.</summary>
-internal sealed record Hello(string ClientName, string ClientVersion, ushort ProtocolVersion, ResumeIdentity? Resume);
+internal readonly record struct Hello(string ClientName, string ClientVersion, ushort ProtocolVersion, ResumeIdentity? Resume);
 
 /// <summary>The broker's handshake reply.</summary>
-internal sealed record HelloOk(
+internal readonly record struct HelloOk(
     ushort ProtocolVersion,
     Uuid OwnerId,
     Uuid ClientId,
@@ -31,17 +31,18 @@ internal sealed record HelloOk(
     string Compliance);
 
 /// <summary>A username/password authentication frame.</summary>
-internal sealed record AuthFrame(string Username, string Password);
+internal readonly record struct AuthFrame(string Username, string Password);
 
 /// <summary>A structured broker error.</summary>
-internal sealed record ErrorMsg(ushort Code, string Message);
+internal readonly record struct ErrorMsg(ushort Code, string Message);
 
 /// <summary>Identifies a delivery to ack or nack.</summary>
 internal readonly record struct DeliveryTag(ulong Epoch);
 
 /// <summary>A publish request. Group, PartitionKey, and TtlMs are optional (null = absent).</summary>
-internal sealed record PublishFrame
+internal readonly record struct PublishFrame
 {
+    public PublishFrame() { }
     public string Topic { get; init; } = "";
     public uint Partition { get; init; }
     public string? Group { get; init; }
@@ -56,8 +57,9 @@ internal sealed record PublishFrame
 }
 
 /// <summary>A publish scheduled to become visible at NotBefore.</summary>
-internal sealed record PublishDelayedFrame
+internal readonly record struct PublishDelayedFrame
 {
+    public PublishDelayedFrame() { }
     public string Topic { get; init; } = "";
     public uint Partition { get; init; }
     public string? Group { get; init; }
@@ -72,11 +74,12 @@ internal sealed record PublishDelayedFrame
 }
 
 /// <summary>The broker's confirmed-publish reply carrying the assigned offset.</summary>
-internal sealed record PublishOk(ulong Offset);
+internal readonly record struct PublishOk(ulong Offset);
 
 /// <summary>Settles one or more deliveries as processed.</summary>
-internal sealed record AckFrame
+internal readonly record struct AckFrame
 {
+    public AckFrame() { }
     public string Topic { get; init; } = "";
     public string? Group { get; init; }
     public uint Partition { get; init; }
@@ -84,8 +87,9 @@ internal sealed record AckFrame
 }
 
 /// <summary>Returns deliveries unprocessed, optionally requeuing them (NotBefore delays the requeue).</summary>
-internal sealed record NackFrame
+internal readonly record struct NackFrame
 {
+    public NackFrame() { }
     public string Topic { get; init; } = "";
     public string? Group { get; init; }
     public uint Partition { get; init; }
@@ -95,8 +99,9 @@ internal sealed record NackFrame
 }
 
 /// <summary>Requests delivery of one partition of a topic.</summary>
-internal sealed record SubscribeFrame
+internal readonly record struct SubscribeFrame
 {
+    public SubscribeFrame() { }
     public string Topic { get; init; } = "";
     public uint Partition { get; init; }
     public string? Group { get; init; }
@@ -108,8 +113,9 @@ internal sealed record SubscribeFrame
 }
 
 /// <summary>The broker's subscribe reply, echoing the assignment and the server-chosen sub id.</summary>
-internal sealed record SubscribeOk
+internal readonly record struct SubscribeOk
 {
+    public SubscribeOk() { }
     public ulong SubId { get; init; }
     public string Topic { get; init; } = "";
     public uint Partition { get; init; }
@@ -121,8 +127,9 @@ internal sealed record SubscribeOk
 }
 
 /// <summary>A broker-pushed message delivery.</summary>
-internal sealed record Deliver
+internal readonly record struct Deliver
 {
+    public Deliver() { }
     public ulong SubId { get; init; }
     public string Topic { get; init; } = "";
     public string? Group { get; init; }
@@ -193,9 +200,9 @@ internal static class WireComposites
             return;
         }
         w.U8(1);
-        w.WriteUuid(ri.OwnerId);
-        w.WriteUuid(ri.ClientId);
-        w.WriteUuid(ri.ResumeToken);
+        w.WriteUuid(ri.Value.OwnerId);
+        w.WriteUuid(ri.Value.ClientId);
+        w.WriteUuid(ri.Value.ResumeToken);
     }
 
     public static ResumeIdentity? OptionalResumeIdentity(this WireReader r)

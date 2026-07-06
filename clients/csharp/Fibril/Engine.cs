@@ -248,7 +248,7 @@ internal sealed partial class Engine : IAsyncDisposable
         // AUTH (optional).
         if (opts.Auth is not null)
         {
-            await WriteFrameAsync(stream, Frame.Build(Op.Auth, HandshakeId.Auth, WireOps.EncodeAuth(opts.Auth)), ct).ConfigureAwait(false);
+            await WriteFrameAsync(stream, Frame.Build(Op.Auth, HandshakeId.Auth, WireOps.EncodeAuth(opts.Auth.Value)), ct).ConfigureAwait(false);
             var af = await ReadFrameAsync(stream, ct).ConfigureAwait(false);
             switch (af.Opcode)
             {

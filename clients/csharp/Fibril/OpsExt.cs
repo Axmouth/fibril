@@ -4,8 +4,9 @@ namespace Fibril;
 // Same byte-exact rules as Ops.cs, pinned by clients/wire_vectors.json.
 
 /// <summary>A broker endpoint the client can connect to, with optional routing tags.</summary>
-internal sealed record AdvertisedAddress
+internal readonly record struct AdvertisedAddress
 {
+    public AdvertisedAddress() { }
     public string Host { get; init; } = "";
     public ushort Port { get; init; }
     public IReadOnlyList<string> Tags { get; init; } = Array.Empty<string>();
@@ -20,16 +21,18 @@ internal enum DlqKind : byte
 }
 
 /// <summary>A queue's dead-letter policy. Topic and Group apply only when Kind is Custom.</summary>
-internal sealed record DlqPolicy
+internal readonly record struct DlqPolicy
 {
+    public DlqPolicy() { }
     public DlqKind Kind { get; init; }
     public string Topic { get; init; } = "";
     public string? Group { get; init; }
 }
 
 /// <summary>Declares a queue with optional dead-letter, retry, partition, and per-message TTL settings.</summary>
-internal sealed record DeclareQueueFrame
+internal readonly record struct DeclareQueueFrame
 {
+    public DeclareQueueFrame() { }
     public string Topic { get; init; } = "";
     public string? Group { get; init; }
     public DlqPolicy? DlqPolicy { get; init; }
@@ -39,7 +42,7 @@ internal sealed record DeclareQueueFrame
 }
 
 /// <summary>The broker's declare reply.</summary>
-internal sealed record DeclareQueueOk(string Status, uint PartitionCount);
+internal readonly record struct DeclareQueueOk(string Status, uint PartitionCount);
 
 /// <summary>A Plexus stream's durability tier.</summary>
 internal enum StreamDurability : byte
@@ -50,16 +53,18 @@ internal enum StreamDurability : byte
 }
 
 /// <summary>Bounds how much of a stream is retained. Each limit is optional (null = unbounded on that axis).</summary>
-internal sealed record StreamRetention
+internal readonly record struct StreamRetention
 {
+    public StreamRetention() { }
     public ulong? MaxAgeMs { get; init; }
     public ulong? MaxBytes { get; init; }
     public ulong? MaxRecords { get; init; }
 }
 
 /// <summary>Declares a Plexus (fan-out stream) channel.</summary>
-internal sealed record DeclarePlexusFrame
+internal readonly record struct DeclarePlexusFrame
 {
+    public DeclarePlexusFrame() { }
     public string Topic { get; init; } = "";
     public uint? PartitionCount { get; init; }
 
@@ -70,11 +75,12 @@ internal sealed record DeclarePlexusFrame
 }
 
 /// <summary>The broker's stream-declare reply.</summary>
-internal sealed record DeclarePlexusOk(string Status, uint PartitionCount);
+internal readonly record struct DeclarePlexusOk(string Status, uint PartitionCount);
 
 /// <summary>One partition's ownership in the topology.</summary>
-internal sealed record QueueTopologyEntry
+internal readonly record struct QueueTopologyEntry
 {
+    public QueueTopologyEntry() { }
     public string Topic { get; init; } = "";
     public uint Partition { get; init; }
     public string? Group { get; init; }
@@ -84,8 +90,9 @@ internal sealed record QueueTopologyEntry
 }
 
 /// <summary>One stream partition's ownership in the topology.</summary>
-internal sealed record StreamTopologyEntry
+internal readonly record struct StreamTopologyEntry
 {
+    public StreamTopologyEntry() { }
     public string Topic { get; init; } = "";
     public uint Partition { get; init; }
     public IReadOnlyList<AdvertisedAddress> OwnerEndpoints { get; init; } = Array.Empty<AdvertisedAddress>();
@@ -97,22 +104,24 @@ internal sealed record StreamTopologyEntry
 /// A topology snapshot: the ownership of every queue and stream partition the
 /// broker knows about, at a generation.
 /// </summary>
-internal sealed record TopologyOk
+internal readonly record struct TopologyOk
 {
+    public TopologyOk() { }
     public ulong Generation { get; init; }
     public IReadOnlyList<QueueTopologyEntry> Queues { get; init; } = Array.Empty<QueueTopologyEntry>();
     public IReadOnlyList<StreamTopologyEntry> Streams { get; init; } = Array.Empty<StreamTopologyEntry>();
 }
 
 /// <summary>Asks for the topology, optionally filtered to one topic/group.</summary>
-internal sealed record TopologyRequest
+internal readonly record struct TopologyRequest
 {
+    public TopologyRequest() { }
     public string? Topic { get; init; }
     public string? Group { get; init; }
 }
 
 /// <summary>Acknowledges the generation a client now reflects, so the broker can fence a repartition cutover.</summary>
-internal sealed record TopologyUpdateAck(ulong Generation);
+internal readonly record struct TopologyUpdateAck(ulong Generation);
 
 /// <summary>Governs how the broker reconciles a client's subscriptions after a reconnect.</summary>
 /// <summary>Governs how the broker reconciles a client's subscriptions after a reconnect.</summary>
@@ -126,8 +135,9 @@ public enum ReconcilePolicy : byte
 }
 
 /// <summary>Describes a subscription a reconnecting client wants the broker to restore.</summary>
-internal sealed record ReconcileSubscription
+internal readonly record struct ReconcileSubscription
 {
+    public ReconcileSubscription() { }
     public ulong SubId { get; init; }
     public string Topic { get; init; } = "";
     public uint Partition { get; init; }
@@ -140,8 +150,9 @@ internal sealed record ReconcileSubscription
 }
 
 /// <summary>Asks the broker to reconcile the listed subscriptions under a policy after a reconnect.</summary>
-internal sealed record ReconcileClient
+internal readonly record struct ReconcileClient
 {
+    public ReconcileClient() { }
     public ReconcilePolicy Policy { get; init; }
     public IReadOnlyList<ReconcileSubscription> Subscriptions { get; init; } = Array.Empty<ReconcileSubscription>();
 }
@@ -160,8 +171,9 @@ internal enum ReconcileAction : byte
 /// reconcile: the client's view, the server's restored view (if any), the
 /// action, and a human-readable reason.
 /// </summary>
-internal sealed record ReconcileSubscriptionResult
+internal readonly record struct ReconcileSubscriptionResult
 {
+    public ReconcileSubscriptionResult() { }
     public ReconcileSubscription? Client { get; init; }
     public ReconcileSubscription? Server { get; init; }
     public ReconcileAction Action { get; init; }
@@ -169,20 +181,23 @@ internal sealed record ReconcileSubscriptionResult
 }
 
 /// <summary>An unsolicited broker to client push of the subscriptions the broker believes a client holds.</summary>
-internal sealed record ReconcileServer
+internal readonly record struct ReconcileServer
 {
+    public ReconcileServer() { }
     public IReadOnlyList<ReconcileSubscription> Subscriptions { get; init; } = Array.Empty<ReconcileSubscription>();
 }
 
 /// <summary>The broker's reply to a RECONCILE_CLIENT: one verdict per reconciled subscription.</summary>
-internal sealed record ReconcileResult
+internal readonly record struct ReconcileResult
 {
+    public ReconcileResult() { }
     public IReadOnlyList<ReconcileSubscriptionResult> Subscriptions { get; init; } = Array.Empty<ReconcileSubscriptionResult>();
 }
 
 /// <summary>Tells the client to retry an op against a different owner.</summary>
-internal sealed record Redirect
+internal readonly record struct Redirect
 {
+    public Redirect() { }
     public string Topic { get; init; } = "";
     public uint Partition { get; init; }
     public string? Group { get; init; }
@@ -191,8 +206,9 @@ internal sealed record Redirect
 }
 
 /// <summary>Notifies an exclusive-cohort member of its new partition assignment.</summary>
-internal sealed record AssignmentChanged
+internal readonly record struct AssignmentChanged
 {
+    public AssignmentChanged() { }
     public string Topic { get; init; } = "";
     public string? Group { get; init; }
     public string ConsumerGroup { get; init; } = "";
@@ -203,7 +219,7 @@ internal sealed record AssignmentChanged
 }
 
 /// <summary>The broker's drain notice ahead of a planned shutdown or upgrade.</summary>
-internal sealed record GoingAway(ulong GraceMs, string Message);
+internal readonly record struct GoingAway(ulong GraceMs, string Message);
 
 /// <summary>Where a stream subscription begins reading.</summary>
 internal enum StreamStartKind : byte
@@ -225,8 +241,9 @@ internal readonly record struct StreamStart(StreamStartKind Kind, ulong Value = 
 internal readonly record struct StreamFilter(string Key, string Pattern);
 
 /// <summary>Requests a Plexus (fan-out stream) subscription of one partition.</summary>
-internal sealed record SubscribeStream
+internal readonly record struct SubscribeStream
 {
+    public SubscribeStream() { }
     public string Topic { get; init; } = "";
     public uint Partition { get; init; }
     public string? DurableName { get; init; }
@@ -301,11 +318,11 @@ internal static class WireCompositesExt
             return;
         }
         w.U8(1);
-        w.U8((byte)p.Kind);
-        if (p.Kind == DlqKind.Custom)
+        w.U8((byte)p.Value.Kind);
+        if (p.Value.Kind == DlqKind.Custom)
         {
-            w.WriteStr(p.Topic);
-            w.OptionalStr(p.Group);
+            w.WriteStr(p.Value.Topic);
+            w.OptionalStr(p.Value.Group);
         }
     }
 
@@ -405,7 +422,7 @@ internal static class WireCompositesExt
             return;
         }
         w.U8(1);
-        w.ReconcileSubscription(s);
+        w.ReconcileSubscription(s.Value);
     }
 
     public static ReconcileSubscription? OptionalReconcileSubscription(this WireReader r)

@@ -9,7 +9,7 @@ namespace Fibril;
 // cancellation-token-free, matching the reference client's complete/retry.
 
 /// <summary>One message pushed to a subscription.</summary>
-public sealed class Delivery
+public readonly struct Delivery
 {
     public string Topic { get; }
     public string? Group { get; }
@@ -29,7 +29,7 @@ public sealed class Delivery
 
     internal DeliveryTag Tag { get; }
     internal ulong SubId { get; }
-    private readonly ulong _reqId;   // the DELIVER frame id, reused when settling
+    internal ulong ReqId { get; }   // the DELIVER frame id, reused when settling
     private readonly Engine _engine; // the connection this arrived on
 
     internal Delivery(Deliver d, ulong reqId, bool autoAck, Engine engine)
@@ -46,7 +46,7 @@ public sealed class Delivery
         Tag = d.DeliveryTag;
         SubId = d.SubId;
         AutoAck = autoAck;
-        _reqId = reqId;
+        ReqId = reqId;
         _engine = engine;
     }
 
@@ -217,7 +217,7 @@ internal sealed partial class Engine
     internal void Ack(Delivery d)
     {
         var body = WireOps.EncodeAck(new AckFrame { Topic = d.Topic, Group = d.Group, Partition = d.Partition, Tags = new[] { d.Tag } });
-        SendWithId(Op.Ack, DeliveryReqId(d), body);
+        SendWithId(Op.Ack, d.ReqId, body);
     }
 
     internal void Nack(Delivery d, bool requeue, ulong? notBefore)
@@ -231,14 +231,8 @@ internal sealed partial class Engine
             Requeue = requeue,
             NotBefore = notBefore,
         });
-        SendWithId(Op.Nack, DeliveryReqId(d), body);
+        SendWithId(Op.Nack, d.ReqId, body);
     }
-
-    private static ulong DeliveryReqId(Delivery d) => DeliveryReqIds.GetValue(d, _ => new StrongBox<ulong>()).Value;
-
-    // The DELIVER frame id travels with the Delivery so settle reuses it. It is kept
-    // in a side table so Delivery stays a clean public type without an internal id field.
-    private static readonly ConditionalWeakTable<Delivery, StrongBox<ulong>> DeliveryReqIds = new();
 
     // ---- actor-side handlers ----
 
@@ -300,7 +294,6 @@ internal sealed partial class Engine
             return; // delivery for a sub we no longer track
         }
         var delivery = new Delivery(d, f.RequestId, s.AutoAck, this);
-        DeliveryReqIds.GetValue(delivery, _ => new StrongBox<ulong>()).Value = f.RequestId;
         s.Channel.Writer.TryWrite(delivery);
     }
 }
