@@ -3575,6 +3575,15 @@ const PUBLISH_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_mi
 // The bound keeps a fast producer from starving the heartbeat, flush, and shutdown arms.
 const ENGINE_CMD_DRAIN_MAX: usize = 256;
 
+// Reserved request ids for the fixed handshake exchanges, one per op. The
+// handshake replies are matched by opcode (the request-response task is not
+// running yet), and live ops number after the last id used here, so these never
+// collide with a later request. A distinct id space from the opcodes, and the
+// values match the other clients.
+const HELLO_REQUEST_ID: u64 = 1;
+const AUTH_REQUEST_ID: u64 = 2;
+const RECONCILE_REQUEST_ID: u64 = 3;
+
 async fn feed_protocol_frame<S, T>(
     framed: &mut Framed<S, ProtoCodec>,
     op: Op,
@@ -3663,7 +3672,7 @@ where
     send_protocol_frame(
         &mut framed,
         Op::Hello,
-        1,
+        HELLO_REQUEST_ID,
         &Hello {
             client_name: opts.client_name.clone(),
             client_version: opts.client_version.clone(),
@@ -3734,7 +3743,7 @@ where
     };
 
     if let Some(auth) = opts.auth {
-        send_protocol_frame(&mut framed, Op::Auth, 2, &auth).await?;
+        send_protocol_frame(&mut framed, Op::Auth, AUTH_REQUEST_ID, &auth).await?;
         let frame = framed
             .next()
             .await
@@ -3779,7 +3788,13 @@ where
             policy: opts.reconcile_policy,
             subscriptions: reconcile_subs,
         };
-        send_protocol_frame(&mut framed, Op::ReconcileClient, 3, &reconcile).await?;
+        send_protocol_frame(
+            &mut framed,
+            Op::ReconcileClient,
+            RECONCILE_REQUEST_ID,
+            &reconcile,
+        )
+        .await?;
         let frame = framed
             .next()
             .await

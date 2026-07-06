@@ -23,6 +23,17 @@ import (
 
 const defaultHeartbeatInterval = 5 * time.Second
 
+// Reserved request ids for the fixed handshake exchanges, one per op. The
+// handshake replies are matched by opcode (the request-response machinery is not
+// running yet), and live ops number after the last id used here, so these never
+// collide with a later request. This is a distinct id space from the opcodes, and
+// the values match the other clients.
+const (
+	helloRequestID     uint64 = 1
+	authRequestID      uint64 = 2
+	reconcileRequestID uint64 = 3
+)
+
 // heartbeatTimeoutMessage carries the shared client-local guide wording (see
 // clients/error_guides.json): a stalled connection, its likely cause, and that a
 // reconnect will be attempted.
@@ -184,7 +195,7 @@ func startEngine(ctx context.Context, conn net.Conn, opts EngineOptions) (*Engin
 		ProtocolVersion: ProtocolV1,
 		Resume:          opts.Resume,
 	}
-	if _, err := conn.Write(encodeFrame(buildFrame(opHello, 1, encodeHello(hello)))); err != nil {
+	if _, err := conn.Write(encodeFrame(buildFrame(opHello, helloRequestID, encodeHello(hello)))); err != nil {
 		return nil, &DisconnectionError{Message: "write HELLO: " + err.Error()}
 	}
 	hf, err := readFrame(br)
@@ -219,7 +230,7 @@ func startEngine(ctx context.Context, conn net.Conn, opts EngineOptions) (*Engin
 
 	// AUTH (optional).
 	if opts.Auth != nil {
-		if _, err := conn.Write(encodeFrame(buildFrame(opAuth, 2, encodeAuth(*opts.Auth)))); err != nil {
+		if _, err := conn.Write(encodeFrame(buildFrame(opAuth, authRequestID, encodeAuth(*opts.Auth)))); err != nil {
 			return nil, &DisconnectionError{Message: "write AUTH: " + err.Error()}
 		}
 		af, err := readFrame(br)
@@ -240,10 +251,10 @@ func startEngine(ctx context.Context, conn net.Conn, opts EngineOptions) (*Engin
 	// owner reconnects into a fresh session that forgot them, so the client
 	// re-announces them and adopts the restored delivery channels.
 	subs := make(map[uint64]*subState)
-	nextID := uint64(2) // 1 = HELLO, 2 = AUTH
+	nextID := authRequestID // reserve the fixed handshake ids; live ops number after
 	if reg := opts.ReconcileRegistry; reg != nil && !reg.isEmpty() {
-		nextID = 3
-		if _, err := conn.Write(encodeFrame(buildFrame(opReconcileClient, 3, encodeReconcileClient(reconcileClient{
+		nextID = reconcileRequestID
+		if _, err := conn.Write(encodeFrame(buildFrame(opReconcileClient, reconcileRequestID, encodeReconcileClient(reconcileClient{
 			Policy:        reg.policy,
 			Subscriptions: reg.snapshot(),
 		})))); err != nil {
