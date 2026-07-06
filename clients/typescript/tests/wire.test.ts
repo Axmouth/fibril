@@ -528,19 +528,300 @@ const CODEC_OP: Record<string, string> = {
 const decoders = wireModule as unknown as Record<string, (b: Uint8Array) => unknown>;
 const encoders = wireModule as unknown as Record<string, (v: unknown) => Uint8Array>;
 
-// Byte-exact conformance for the WHOLE fixture: decoding each shared vector and
-// re-encoding it must reproduce the exact bytes, so a TS codec that diverges from
-// the cross-client spec on any op is caught (not just the handful checked with a
-// hand-built value above).
-test("every shared vector decodes and re-encodes to identical bytes", () => {
+// The canonical decoded value each shared vector encodes from. These are the
+// authoritative cross-client inputs (the same values the reference and the other
+// clients pin), so the test below checks both directions against them.
+const CANONICAL: Record<string, unknown> = {
+  ack: { topic: "t", group: null, partition: 0, tags: [{ epoch: 1n }, { epoch: 2n }] },
+  assignment: {
+    topic: "t",
+    group: null,
+    consumerGroup: "cg",
+    generation: 6n,
+    assigned: [0, 1, 2],
+    added: [2],
+    revoked: [],
+  },
+  auth: { username: "u", password: "p" },
+  declare: {
+    topic: "t",
+    group: "g",
+    dlqPolicy: { custom: { topic: "dlq", group: null } },
+    dlqMaxRetries: 3,
+    partitionCount: 4,
+    defaultMessageTtlMs: 30000n,
+  },
+  declare_min: {
+    topic: "t",
+    group: null,
+    dlqPolicy: null,
+    dlqMaxRetries: null,
+    partitionCount: null,
+    defaultMessageTtlMs: null,
+  },
+  declare_ok: { status: "created", partitionCount: 4 },
+  declare_plexus: {
+    topic: "t",
+    partitionCount: 4,
+    durability: "speculative",
+    retention: { maxAgeMs: 60000n, maxBytes: null, maxRecords: 1000000n },
+    replicationFactor: 2,
+  },
+  declare_plexus_min: {
+    topic: "t",
+    partitionCount: null,
+    durability: "durable",
+    retention: { maxAgeMs: null, maxBytes: null, maxRecords: null },
+    replicationFactor: null,
+  },
+  declare_plexus_ok: { status: "created", partitionCount: 4 },
+  deliver: {
+    subId: 11n,
+    topic: "t",
+    group: "g",
+    partition: 2,
+    offset: 100n,
+    deliveryTag: { epoch: 5n },
+    published: 7n,
+    publishReceived: 8n,
+    contentType: "msgpack",
+    headers: { h: "1" },
+    payload: new Uint8Array([3, 2, 1]),
+  },
+  error: { code: 409, message: "not owner" },
+  going_away: { graceMs: 30000n, message: "broker restarting for upgrade" },
+  hello: {
+    clientName: "py-client",
+    clientVersion: "0.1.0",
+    protocolVersion: 1,
+    resume: {
+      ownerId: new Uint8Array(16).fill(1),
+      clientId: new Uint8Array(16).fill(2),
+      resumeToken: new Uint8Array(16).fill(3),
+    },
+  },
+  hello_no_resume: { clientName: "c", clientVersion: "v", protocolVersion: 1, resume: null },
+  hello_ok: {
+    protocolVersion: 1,
+    ownerId: new Uint8Array(16).fill(9),
+    clientId: new Uint8Array(16).fill(8),
+    resumeToken: new Uint8Array(16).fill(7),
+    resumeOutcome: "resumed",
+    serverName: "srv",
+    compliance: "v=1;x",
+  },
+  nack: {
+    topic: "t",
+    group: "g",
+    partition: 1,
+    tags: [{ epoch: 9n }],
+    requeue: true,
+    notBefore: 5000n,
+  },
+  nack_no_nb: { topic: "t", group: null, partition: 0, tags: [], requeue: false, notBefore: null },
+  publish: {
+    topic: "orders",
+    group: "g",
+    partition: 3,
+    requireConfirm: true,
+    contentType: "json",
+    headers: { "x-a": "1" },
+    published: 1234567890n,
+    partitionKey: new Uint8Array([9, 9]),
+    partitioningVersion: 5n,
+    payload: new Uint8Array([1, 2, 3, 4]),
+    ttlMs: 60000n,
+  },
+  publish_custom_ct: {
+    topic: "t",
+    group: null,
+    partition: 0,
+    requireConfirm: false,
+    contentType: { custom: "application/x-thing" },
+    headers: {},
+    published: 1n,
+    partitionKey: null,
+    partitioningVersion: 0n,
+    payload: new Uint8Array([7]),
+    ttlMs: null,
+  },
+  publish_delayed: {
+    topic: "t",
+    group: null,
+    partition: 1,
+    requireConfirm: true,
+    notBefore: 999n,
+    contentType: "text",
+    headers: { k: "v" },
+    published: 42n,
+    partitionKey: null,
+    partitioningVersion: 2n,
+    payload: new Uint8Array([5, 6]),
+  },
+  publish_no_ttl: {
+    topic: "t",
+    group: null,
+    partition: 0,
+    requireConfirm: false,
+    contentType: null,
+    headers: {},
+    published: 0n,
+    partitionKey: null,
+    partitioningVersion: 0n,
+    payload: new Uint8Array([]),
+    ttlMs: null,
+  },
+  publish_ok: { offset: 777n },
+  reconcile_client: {
+    policy: "restore_client_subscriptions",
+    subscriptions: [
+      {
+        subId: 1n,
+        topic: "t",
+        partition: 0,
+        group: null,
+        autoAck: false,
+        prefetch: 8,
+        consumerGroup: null,
+        consumerTarget: null,
+        memberId: null,
+      },
+    ],
+  },
+  redirect: {
+    topic: "t",
+    partition: 1,
+    group: "g",
+    ownerEndpoints: [{ host: "h", port: 1, tags: [] }],
+    partitioningVersion: 3n,
+  },
+  subscribe: {
+    topic: "t",
+    partition: 1,
+    group: "g",
+    prefetch: 32,
+    autoAck: false,
+    consumerGroup: "cg",
+    consumerTarget: 2,
+    memberId: new Uint8Array(16).fill(4),
+  },
+  subscribe_min: {
+    topic: "t",
+    partition: 0,
+    group: null,
+    prefetch: 0,
+    autoAck: true,
+    consumerGroup: null,
+    consumerTarget: null,
+    memberId: null,
+  },
+  subscribe_ok: {
+    subId: 5n,
+    topic: "t",
+    partition: 1,
+    group: "g",
+    prefetch: 16,
+    consumerGroup: "cg",
+    consumerTarget: null,
+    memberId: new Uint8Array(16).fill(4),
+  },
+  subscribe_stream: {
+    topic: "t",
+    partition: 1,
+    durableName: "c1",
+    start: { kind: "bytime", value: 1234n },
+    filter: [
+      ["region", "eu-*"],
+      ["kind", "order"],
+    ],
+    prefetch: 16,
+    autoAck: false,
+  },
+  subscribe_stream_min: {
+    topic: "t",
+    partition: 0,
+    durableName: null,
+    start: { kind: "latest" },
+    filter: [],
+    prefetch: 0,
+    autoAck: true,
+  },
+  topology_ok: {
+    generation: 12n,
+    queues: [
+      {
+        topic: "t",
+        partition: 0,
+        group: null,
+        ownerEndpoints: [{ host: "127.0.0.1", port: 7000, tags: [] }],
+        partitioningVersion: 1n,
+        partitionCount: 2,
+      },
+      {
+        topic: "t",
+        partition: 1,
+        group: null,
+        ownerEndpoints: [],
+        partitioningVersion: 1n,
+        partitionCount: 2,
+      },
+    ],
+    streams: [
+      {
+        topic: "s",
+        partition: 2,
+        ownerEndpoints: [{ host: "10.0.0.9", port: 7100, tags: [] }],
+        partitioningVersion: 4n,
+        partitionCount: 3,
+      },
+    ],
+  },
+  topology_req: { topic: "t", group: null },
+  topology_update: {
+    generation: 12n,
+    queues: [
+      {
+        topic: "t",
+        partition: 0,
+        group: null,
+        ownerEndpoints: [{ host: "127.0.0.1", port: 7000, tags: [] }],
+        partitioningVersion: 1n,
+        partitionCount: 2,
+      },
+    ],
+    streams: [
+      {
+        topic: "s",
+        partition: 2,
+        ownerEndpoints: [{ host: "10.0.0.9", port: 7100, tags: [] }],
+        partitioningVersion: 4n,
+        partitionCount: 3,
+      },
+    ],
+  },
+  topology_update_ack: { generation: 12n },
+};
+
+// Byte-exact conformance for the WHOLE fixture, both directions: every shared
+// vector encodes from its canonical value to the exact bytes, and decodes back to
+// that value. Data-driven over the fixture, so a TS codec that diverges from the
+// cross-client spec on any op is caught (not just the handful checked inline
+// above), and a new vector with no CODEC_OP / CANONICAL entry fails the guard.
+test("every shared vector encodes from and decodes to its canonical value", () => {
   for (const [name, hex] of Object.entries(VECTORS)) {
     const op = CODEC_OP[name];
     assert.ok(op, `shared vector "${name}" has no TS codec mapped in CODEC_OP`);
-    const decoded = decoders[`decode${op}Body`](fromHex(hex));
+    assert.ok(name in CANONICAL, `shared vector "${name}" has no canonical value in CANONICAL`);
+    const input = CANONICAL[name];
     assert.equal(
-      toHex(encoders[`encode${op}Body`](decoded)),
+      toHex(encoders[`encode${op}Body`](input)),
       hex,
-      `${name} does not re-encode to the shared vector bytes`,
+      `${name} does not encode to the shared vector bytes`,
+    );
+    assert.deepEqual(
+      decoders[`decode${op}Body`](fromHex(hex)),
+      input,
+      `${name} does not decode to its canonical value`,
     );
   }
 });
