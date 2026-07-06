@@ -15,6 +15,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
+    Any,
     Awaitable,
     Callable,
     Dict,
@@ -26,11 +27,14 @@ from typing import (
     Union,
 )
 
+from . import wire
 from .internal.bounded_queue import BoundedQueue
 from .subscription import AutoAckedSubscription, InflightMessage, Message, Subscription
 
 if TYPE_CHECKING:
     from .client import Catalogue, Client
+    from .publisher import Publisher
+    from .subscription import StreamSubscriptionBuilder, SubscriptionBuilder
 
 # Per-channel buffering for the merged pattern stream, multiplied by prefetch.
 _CHANNEL_FANIN_BUFFER = 32
@@ -75,13 +79,13 @@ class RoutingClient:
         """The underlying client, for any operation not surfaced here directly."""
         return self._client
 
-    def publisher(self, topic: str):
+    def publisher(self, topic: str) -> "Publisher":
         return self._client.publisher(topic)
 
-    def subscribe(self, topic: str):
+    def subscribe(self, topic: str) -> "SubscriptionBuilder":
         return self._client.subscribe(topic)
 
-    def stream(self, topic: str):
+    def stream(self, topic: str) -> "StreamSubscriptionBuilder":
         return self._client.stream(topic)
 
     def catalogue(self) -> "Catalogue":
@@ -134,10 +138,10 @@ class PatternSubscribeBuilder:
         consumer_group = self._consumer_group
         out: BoundedQueue[PatternMessage[InflightMessage]] = _merged_queue(prefetch)
 
-        async def attach(client, source, dst):
+        async def attach(client: "Client", source: PatternSource, dst: "BoundedQueue[Any]") -> _ActiveChannel:
             return await _attach_queue(client, source, prefetch, consumer_group, dst, auto_ack=False)
 
-        fan = _PatternFanIn(self._client, self._glob, "queue", out, attach)
+        fan: _PatternFanIn[InflightMessage] = _PatternFanIn(self._client, self._glob, "queue", out, attach)
         await fan.start()
         return PatternSubscription(fan, out)
 
@@ -147,10 +151,10 @@ class PatternSubscribeBuilder:
         consumer_group = self._consumer_group
         out: BoundedQueue[PatternMessage[Message]] = _merged_queue(prefetch)
 
-        async def attach(client, source, dst):
+        async def attach(client: "Client", source: PatternSource, dst: "BoundedQueue[Any]") -> _ActiveChannel:
             return await _attach_queue(client, source, prefetch, consumer_group, dst, auto_ack=True)
 
-        fan = _PatternFanIn(self._client, self._glob, "queue", out, attach)
+        fan: _PatternFanIn[Message] = _PatternFanIn(self._client, self._glob, "queue", out, attach)
         await fan.start()
         return PatternSubscription(fan, out)
 
@@ -162,7 +166,7 @@ class StreamPatternSubscribeBuilder:
         self._client = client
         self._glob = glob
         self._prefetch = 16
-        self._start: Tuple[str, Optional[int]] = ("latest", None)
+        self._start: wire.StreamStart = wire.StreamStart(kind="latest")
         self._filter: List[Tuple[str, str]] = []
         self._durable_name: Optional[str] = None
 
@@ -173,22 +177,22 @@ class StreamPatternSubscribeBuilder:
 
     def from_latest(self) -> "StreamPatternSubscribeBuilder":
         """Begin each attached stream at the live tail (the default)."""
-        self._start = ("latest", None)
+        self._start = wire.StreamStart(kind="latest")
         return self
 
     def from_earliest(self) -> "StreamPatternSubscribeBuilder":
         """Begin each attached stream at the oldest retained record."""
-        self._start = ("earliest", None)
+        self._start = wire.StreamStart(kind="earliest")
         return self
 
     def from_last(self, count: int) -> "StreamPatternSubscribeBuilder":
         """Begin ``count`` records back from each stream's tail."""
-        self._start = ("nback", count)
+        self._start = wire.StreamStart(kind="nback", value=count)
         return self
 
     def from_time(self, time_ms: int) -> "StreamPatternSubscribeBuilder":
         """Begin at the first record at or after this wall-clock time (ms)."""
-        self._start = ("bytime", time_ms)
+        self._start = wire.StreamStart(kind="bytime", value=time_ms)
         return self
 
     def filter(self, header: str, pattern: str) -> "StreamPatternSubscribeBuilder":
@@ -208,10 +212,10 @@ class StreamPatternSubscribeBuilder:
         config = self._config()
         out: BoundedQueue[PatternMessage[InflightMessage]] = _merged_queue(config.prefetch)
 
-        async def attach(client, source, dst):
+        async def attach(client: "Client", source: PatternSource, dst: "BoundedQueue[Any]") -> _ActiveChannel:
             return await _attach_stream(client, source, config, dst, auto_ack=False)
 
-        fan = _PatternFanIn(self._client, self._glob, "stream", out, attach)
+        fan: _PatternFanIn[InflightMessage] = _PatternFanIn(self._client, self._glob, "stream", out, attach)
         await fan.start()
         return PatternSubscription(fan, out)
 
@@ -220,10 +224,10 @@ class StreamPatternSubscribeBuilder:
         config = self._config()
         out: BoundedQueue[PatternMessage[Message]] = _merged_queue(config.prefetch)
 
-        async def attach(client, source, dst):
+        async def attach(client: "Client", source: PatternSource, dst: "BoundedQueue[Any]") -> _ActiveChannel:
             return await _attach_stream(client, source, config, dst, auto_ack=True)
 
-        fan = _PatternFanIn(self._client, self._glob, "stream", out, attach)
+        fan: _PatternFanIn[Message] = _PatternFanIn(self._client, self._glob, "stream", out, attach)
         await fan.start()
         return PatternSubscription(fan, out)
 
@@ -270,7 +274,7 @@ class PatternSubscription(Generic[M]):
 @dataclass
 class _StreamAttachConfig:
     prefetch: int
-    start: Tuple[str, Optional[int]]
+    start: wire.StreamStart
     filter: List[Tuple[str, str]]
     durable_name: Optional[str]
 
@@ -287,10 +291,10 @@ class _ActiveChannel:
         self._sub.close()
 
 
-_AttachFn = Callable[["Client", PatternSource, BoundedQueue], Awaitable[_ActiveChannel]]
+_AttachFn = Callable[["Client", PatternSource, "BoundedQueue[Any]"], Awaitable[_ActiveChannel]]
 
 
-def _merged_queue(prefetch: int) -> BoundedQueue:
+def _merged_queue(prefetch: int) -> "BoundedQueue[Any]":
     return BoundedQueue(max(prefetch, 1) * _CHANNEL_FANIN_BUFFER)
 
 
@@ -299,7 +303,14 @@ class _PatternFanIn(Generic[M]):
     reconcile the attached set against the live catalogue on every change
     (attaching new matches, closing vanished ones). Stops on :meth:`close`."""
 
-    def __init__(self, client, glob, kind, out, attach: _AttachFn) -> None:
+    def __init__(
+        self,
+        client: "Client",
+        glob: "_TopicGlob",
+        kind: str,
+        out: "BoundedQueue[Any]",
+        attach: _AttachFn,
+    ) -> None:
         self._client = client
         self._glob = glob
         self._kind = kind
@@ -318,7 +329,7 @@ class _PatternFanIn(Generic[M]):
         # up without polling.
         self._unsubscribe = self._client.on_catalogue_change(self._on_change)
 
-    def _on_change(self, _catalogue) -> None:
+    def _on_change(self, _catalogue: "Catalogue") -> None:
         # The listener is synchronous, so schedule the async reconcile on the loop.
         if not self._closed:
             asyncio.create_task(self._reconcile())
@@ -376,7 +387,12 @@ def _matching_keys(catalogue: "Catalogue", glob: "_TopicGlob", kind: str) -> Lis
 
 
 async def _attach_queue(
-    client, source: PatternSource, prefetch: int, consumer_group: Optional[str], out, auto_ack: bool
+    client: "Client",
+    source: PatternSource,
+    prefetch: int,
+    consumer_group: Optional[str],
+    out: "BoundedQueue[Any]",
+    auto_ack: bool,
 ) -> _ActiveChannel:
     builder = client.subscribe(source.topic)
     if source.group is not None:
@@ -389,18 +405,22 @@ async def _attach_queue(
 
 
 async def _attach_stream(
-    client, source: PatternSource, config: _StreamAttachConfig, out, auto_ack: bool
+    client: "Client",
+    source: PatternSource,
+    config: _StreamAttachConfig,
+    out: "BoundedQueue[Any]",
+    auto_ack: bool,
 ) -> _ActiveChannel:
     builder = client.stream(source.topic).prefetch(config.prefetch)
-    kind, value = config.start
-    if kind == "latest":
+    start = config.start
+    if start.kind == "latest":
         builder = builder.from_latest()
-    elif kind == "earliest":
+    elif start.kind == "earliest":
         builder = builder.from_earliest()
-    elif kind == "nback":
-        builder = builder.from_last(value)
-    elif kind == "bytime":
-        builder = builder.from_time(value)
+    elif start.kind == "nback":
+        builder = builder.from_last(start.value)
+    elif start.kind == "bytime":
+        builder = builder.from_time(start.value)
     for header, pattern in config.filter:
         builder = builder.filter(header, pattern)
     if config.durable_name is not None:
@@ -409,12 +429,16 @@ async def _attach_stream(
     return _spawn_pump(sub, source, out)
 
 
-def _spawn_pump(sub, source: PatternSource, out) -> _ActiveChannel:
+def _spawn_pump(
+    sub: Union[Subscription, AutoAckedSubscription], source: PatternSource, out: "BoundedQueue[Any]"
+) -> _ActiveChannel:
     task = asyncio.create_task(_pump(sub, source, out))
     return _ActiveChannel(sub, task)
 
 
-async def _pump(sub, source: PatternSource, out) -> None:
+async def _pump(
+    sub: Union[Subscription, AutoAckedSubscription], source: PatternSource, out: "BoundedQueue[Any]"
+) -> None:
     """Forward a channel's deliveries into the merged stream, tagged with the
     source. Backpressure flows back to the channel because ``send`` awaits when
     the merged queue is full. Ends when the channel ends, the merged queue closes,

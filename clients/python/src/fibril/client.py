@@ -15,7 +15,7 @@ import socket as _socket
 import ssl
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
-from typing import Callable, Optional, Union
+from typing import TYPE_CHECKING, Callable, Optional, Union
 
 from . import wire
 from .engine import (
@@ -41,6 +41,9 @@ from .errors import (
 )
 from .internal.bounded_queue import BoundedQueue
 from .internal.topology import Route, RoundRobin, TopologyCache, route_partition
+
+if TYPE_CHECKING:
+    from .routing import RoutingClient
 
 Address = Union[str, tuple[str, int]]
 AssignmentHandler = Callable[[wire.AssignmentChanged], None]

@@ -512,7 +512,7 @@ class BlockingPatternSubscription:
     :class:`BlockingPatternMessage`."""
 
     def __init__(
-        self, owner: BlockingClient, sub: PatternSubscription, manual: bool
+        self, owner: BlockingClient, sub: "PatternSubscription[Any]", manual: bool
     ) -> None:
         self._owner = owner
         self._sub = sub

@@ -35,6 +35,10 @@ jobs:
         working-directory: clients/python
         run: uv sync --dev
 
+      - name: Type check
+        working-directory: clients/python
+        run: uv run mypy
+
       - name: Run tests
         working-directory: clients/python
         run: uv run pytest -q
