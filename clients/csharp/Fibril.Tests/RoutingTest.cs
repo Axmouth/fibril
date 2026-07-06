@@ -61,6 +61,49 @@ public class RoutingTest
     }
 
     [Fact]
+    public void IgnoresStaleTopologyPush()
+    {
+        // A newer generation installs its owner and partition count; a later stale
+        // (older-generation) push naming a different owner is ignored, so an
+        // out-of-order push from a bounced broker cannot regress routing.
+        var cache = new TopologyCache();
+        cache.Replace(new TopologyOk
+        {
+            Generation = 7,
+            Queues = new[]
+            {
+                new QueueTopologyEntry
+                {
+                    Topic = "jobs",
+                    Partition = 0,
+                    PartitionCount = 3,
+                    OwnerEndpoints = new[] { new AdvertisedAddress { Host = "127.0.0.1", Port = 7123 } },
+                },
+            },
+        });
+        Assert.Equal(3u, cache.PartitionCount("jobs", null));
+        Assert.Equal("127.0.0.1:7123", cache.OwnerOf("jobs", 0, null));
+
+        cache.Replace(new TopologyOk
+        {
+            Generation = 5,
+            Queues = new[]
+            {
+                new QueueTopologyEntry
+                {
+                    Topic = "jobs",
+                    Partition = 0,
+                    PartitionCount = 9,
+                    OwnerEndpoints = new[] { new AdvertisedAddress { Host = "127.0.0.1", Port = 7999 } },
+                },
+            },
+        });
+        // The stale push changed neither the partition count nor the owner.
+        Assert.Equal(3u, cache.PartitionCount("jobs", null));
+        Assert.Equal("127.0.0.1:7123", cache.OwnerOf("jobs", 0, null));
+    }
+
+    [Fact]
     public async Task ReconnectsAfterConnectionDrop()
     {
         // The broker drops the connection after the first confirmed publish. The
