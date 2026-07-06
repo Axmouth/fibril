@@ -30,6 +30,37 @@ public class RoutingTest
     }
 
     [Fact]
+    public async Task KeylessPublishesRoundRobinKeyedPublishesStick()
+    {
+        // A three-partition topology: keyless publishes spread evenly across the
+        // partitions (round-robin), while publishes carrying the same key all land on
+        // one partition (FNV-1a of the key). All partitions route to the bootstrap
+        // here, so the fake broker records the routed partition of each publish.
+        await using var broker = new FakeBroker { TopologyQueuePartitions = 3 };
+        await using var client = await Client.ConnectAsync(broker.Address, Opts(), Timeout());
+        await client.FetchTopologyAsync("orders", Timeout());
+
+        var publisher = client.Publisher("orders");
+        for (var i = 0; i < 6; i++)
+        {
+            await publisher.PublishConfirmedAsync(Message.Text("x"), Timeout());
+        }
+        var keyless = broker.Publishes.Select(p => p.Partition).ToList();
+        Assert.Equal(new[] { 0u, 1u, 2u }, keyless.Distinct().OrderBy(x => x).ToArray());
+        // Six sends over three partitions land two on each (even round-robin spread).
+        Assert.All(Enumerable.Range(0, 3), p => Assert.Equal(2, keyless.Count(x => x == (uint)p)));
+
+        broker.Publishes.Clear();
+        var key = new byte[] { 7, 7, 7 };
+        for (var i = 0; i < 3; i++)
+        {
+            await publisher.PublishConfirmedAsync(Message.Text("x").Keyed(key), Timeout());
+        }
+        // Every keyed publish hashes to the same partition.
+        Assert.Single(broker.Publishes.Select(p => p.Partition).Distinct());
+    }
+
+    [Fact]
     public async Task ReconnectsAfterConnectionDrop()
     {
         // The broker drops the connection after the first confirmed publish. The
