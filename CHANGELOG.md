@@ -46,9 +46,6 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   clients.
 - A plaintext broker is named as such when a TLS client connects to it, rather
   than surfacing as a generic handshake failure.
-- The Go client now prunes pooled connections to a failed-over owner on a
-  topology refresh or push, instead of holding them until shutdown, matching the
-  other clients.
 
 ## [0.4.0] - 2026-07-04
 
