@@ -620,9 +620,12 @@ internal sealed partial class Engine : IAsyncDisposable
     {
         try
         {
+            // The handshake already consumed its frames exactly (no over-read), so the
+            // buffered reader starts clean on the first post-handshake frame.
+            var reader = new FrameReader(_stream);
             while (true)
             {
-                var f = await ReadFrameAsync(_stream, ct).ConfigureAwait(false);
+                var f = await reader.ReadFrameAsync(ct).ConfigureAwait(false);
                 if (!_inbox.Writer.TryWrite(new IncomingFrame(f)))
                 {
                     return;
