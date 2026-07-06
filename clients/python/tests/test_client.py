@@ -167,6 +167,48 @@ async def test_fan_in_over_two_partitions(broker: FakeBroker) -> None:
         await client.shutdown()
 
 
+async def test_fan_in_picks_up_grown_partition(broker: FakeBroker) -> None:
+    owners = [wire.AdvertisedAddress(broker.host, broker.port)]
+    # Start with a single partition; the fan-in subscribes it.
+    broker.topology = wire.TopologyOk(
+        generation=1, queues=[wire.QueueTopologyEntry("jobs", 0, None, owners, 1, 1)]
+    )
+    client = await Client.connect(
+        (broker.host, broker.port),
+        ClientOptions(
+            supervise_subscriptions=True,
+            subscription_supervise_interval_ms=20,
+            topology_refresh_cooldown_ms=0,
+        ),
+    )
+    try:
+        await client.fetch_topology("jobs")
+        sub = await client.subscribe("jobs").sub_auto_ack()
+        for _ in range(100):
+            if {s.partition for s in broker.subscribes} == {0}:
+                break
+            await asyncio.sleep(0.01)
+        assert {s.partition for s in broker.subscribes} == {0}
+
+        # Grow the topic to two partitions. The fan-in's growth loop refreshes
+        # topology and must attach the new partition without the caller re-subscribing.
+        broker.topology = wire.TopologyOk(
+            generation=2,
+            queues=[
+                wire.QueueTopologyEntry("jobs", 0, None, owners, 1, 2),
+                wire.QueueTopologyEntry("jobs", 1, None, owners, 1, 2),
+            ],
+        )
+        for _ in range(200):
+            if {s.partition for s in broker.subscribes} == {0, 1}:
+                break
+            await asyncio.sleep(0.01)
+        assert {s.partition for s in broker.subscribes} == {0, 1}
+        sub.close()
+    finally:
+        await client.shutdown()
+
+
 def _topology_three_queues(broker: FakeBroker) -> wire.TopologyOk:
     owners = [wire.AdvertisedAddress(broker.host, broker.port)]
     return wire.TopologyOk(
@@ -346,6 +388,23 @@ async def test_ignores_stale_topology_push_but_acks_current(broker: FakeBroker) 
         assert owner.endpoint == "127.0.0.1:7123"
         # The ack carried the current generation (7), not the stale 5.
         assert broker.topology_acks[-1].generation == 7
+    finally:
+        await client.shutdown()
+
+
+async def test_publish_gives_up_after_max_redirects(broker: FakeBroker) -> None:
+    from fibril.errors import RedirectError
+
+    # The broker redirects every publish back to itself, so the client keeps
+    # following the redirect. It must give up after max_redirects and surface the
+    # redirect rather than chase it forever.
+    broker.redirect_publish = wire.Redirect(
+        "jobs", 0, None, [wire.AdvertisedAddress(broker.host, broker.port)], 1
+    )
+    client = await Client.connect((broker.host, broker.port), ClientOptions(max_redirects=2))
+    try:
+        with pytest.raises(RedirectError):
+            await client.publisher("jobs").publish_confirmed({"id": 1})
     finally:
         await client.shutdown()
 
