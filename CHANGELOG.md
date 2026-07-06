@@ -10,6 +10,15 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ## [Unreleased]
 
+### Added
+
+- C# client (`clients/csharp`), the fifth first-party client, at full parity with
+  the others. Byte-exact wire codec pinned to the shared conformance vectors,
+  TLS and mTLS, cluster routing with reconnect and reconcile, supervised, fan-in,
+  cohort, stream, and pattern subscribe, and a reliable publisher. Ships unit
+  tests, real-broker examples, and CI. Adds a C# column to the client feature
+  matrix and C# tabs across the client docs.
+
 ## [0.4.0] - 2026-07-04
 
 The operations release. Running Fibril in production got materially easier on

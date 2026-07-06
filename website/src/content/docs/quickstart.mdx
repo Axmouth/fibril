@@ -50,9 +50,9 @@ multi-node bring-up.
 
 ## Client shape
 
-Fibril has Rust, TypeScript, Python, and Go clients over the same broker surface:
-publishers, delayed publish, and manual-ack subscriptions. The examples are for
-the current pre-alpha source tree, not a stable package contract.
+Fibril has Rust, TypeScript, Python, Go, and C# clients over the same broker
+surface: publishers, delayed publish, and manual-ack subscriptions. The examples
+are for the current pre-alpha source tree, not a stable package contract.
 
 <Tabs syncKey="client-language">
   <TabItem label="Rust">
@@ -186,6 +186,34 @@ sub, err := client.SubscribeTopic(ctx, "email.send", nil, 32, false)
 for msg := range sub.Deliveries {
     process(msg.Text())
     msg.Ack()
+}
+```
+
+  </TabItem>
+  <TabItem label="C#">
+
+The C# client lives in `clients/csharp`. Every network method takes an optional
+`CancellationToken`. Delays are a `TimeSpan`. Deliveries arrive as an
+`IAsyncEnumerable` and settle with `Ack`/`Nack`.
+
+```csharp
+using Fibril;
+
+await using var client = await Client.ConnectAsync("127.0.0.1:9876", new ClientOptions
+{
+    Auth = new Credentials("fibril", "fibril"),
+});
+
+var publisher = client.Publisher("email.send");
+await publisher.PublishAsync(Message.Text("hello"));
+await publisher.PublishDelayedAsync(Message.Text("hello later"), TimeSpan.FromSeconds(30));
+
+// SubscribeTopicAsync fans in every partition (prefetch 32, manual ack).
+await using var sub = await client.SubscribeTopicAsync("email.send", prefetch: 32);
+await foreach (var msg in sub.Deliveries())
+{
+    Process(msg.Text());
+    msg.Ack();
 }
 ```
 

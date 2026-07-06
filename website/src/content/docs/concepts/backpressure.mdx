@@ -48,6 +48,14 @@ sub, err := client.SubscribeTopic(ctx, "email.send", nil, 32, false)
 ```
 
   </TabItem>
+  <TabItem label="C#">
+
+```csharp
+// The prefetch argument is the per-partition prefetch.
+var sub = await client.SubscribeTopicAsync("email.send", prefetch: 32);
+```
+
+  </TabItem>
 </Tabs>
 
 The default client subscription prefetch is small. The broker also clamps subscription prefetch to at least one.

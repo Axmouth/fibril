@@ -42,7 +42,7 @@ all four of these hold.
 
 ### 0.1
 
-Durable single-node queues and Plexus streams, the Rust, TypeScript, Python, and Go
+Durable single-node queues and Plexus streams, the Rust, TypeScript, Python, Go, and C#
 clients, the admin dashboard, and an experimental cluster path (coordination,
 replication, failover, live repartitioning). Single-node features are Available,
 the cluster path is Experimental, and the API and wire protocol may still change.
@@ -71,7 +71,7 @@ The security release - **gate 4 (security baseline) is substantially met**:
 
 - TLS in transit: the broker listener serves TLS from operator PEMs or
   per-deployment generated material, the admin dashboard serves HTTPS from the
-  same material, and the Rust, TypeScript, Python, and Go clients connect with
+  same material, and the Rust, TypeScript, Python, Go, and C# clients connect with
   OS-root, CA-file, or fingerprint-pin trust and a typed error taxonomy.
 - Broker authentication against an argon2 user store, managed from the
   dashboard and `fibrilctl`, replicated across the cluster, with the built-in
@@ -180,7 +180,7 @@ feeds the milestones above.
   cluster-wide runtime locks need a replicated policy rather than node-local
   boot config.
 - Improve TCP protocol ergonomics and error behavior.
-- Keep the Rust, TypeScript, Python, and Go client APIs aligned as public-path
+- Keep the Rust, TypeScript, Python, Go, and C# client APIs aligned as public-path
   behavior changes.
 
 ## Medium term

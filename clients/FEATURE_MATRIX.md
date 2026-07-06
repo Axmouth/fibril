@@ -5,8 +5,9 @@ clients have a checklist to work against. The Rust client (`crates/client`) is
 the reference implementation, and other clients aim to match its behavior, not
 necessarily its internal structure (e.g. the TS and Python clients mirror the
 routing design with plain event-loop constructs rather than locks and atomics,
-and the Go client mirrors the reference actor design with a goroutine and
-channels).
+the Go client mirrors the reference actor design with a goroutine and channels,
+and the C# client mirrors it with a System.Threading.Channels actor and
+async/await).
 
 `ARCHITECTURE.md` covers the shared layering, invariants, and porting lessons.
 
@@ -24,43 +25,43 @@ Superscript numbers refer to the Notes under the tables.
 
 ## Core protocol
 
-| Feature | Rust | TypeScript | Python | Go |
-| --- | --- | --- | --- | --- |
-| Custom binary wire format (v1) | done | done | done <sup>6</sup> | done <sup>6</sup> |
-| Handshake + compliance marker | done | done | done | done |
-| Username/password auth | done | done | done | done |
-| TLS connect (OS roots / CA file / fingerprint pin) | done | done | done <sup>12</sup> | done |
-| Typed TLS error taxonomy (426 mismatch / trust / config) | done | done | done | done |
-| Client certificate (mTLS) + typed required-cert error | done | done | done <sup>13</sup> | done |
-| Heartbeat ping/pong + timeout | done | done | done | done |
-| Typed wire parse errors | done | done <sup>1</sup> | done <sup>1</sup> | done <sup>1</sup> |
+| Feature | Rust | TypeScript | Python | Go | C# |
+| --- | --- | --- | --- | --- | --- |
+| Custom binary wire format (v1) | done | done | done <sup>6</sup> | done <sup>6</sup> | done <sup>6</sup> |
+| Handshake + compliance marker | done | done | done | done | done |
+| Username/password auth | done | done | done | done | done |
+| TLS connect (OS roots / CA file / fingerprint pin) | done | done | done <sup>12</sup> | done | done |
+| Typed TLS error taxonomy (426 mismatch / trust / config) | done | done | done | done | done |
+| Client certificate (mTLS) + typed required-cert error | done | done | done <sup>13</sup> | done | done |
+| Heartbeat ping/pong + timeout | done | done | done | done | done |
+| Typed wire parse errors | done | done <sup>1</sup> | done <sup>1</sup> | done <sup>1</sup> | done <sup>1</sup> |
 
 ## Publish
 
-| Feature | Rust | TypeScript | Python | Go |
-| --- | --- | --- | --- | --- |
-| Unconfirmed publish | done | done | done | done |
-| Confirmed publish (awaits offset) | done | done | done | done |
-| Confirmation handle (publish_with_confirmation) | done | done | done | done |
-| Delayed publish with confirmation handle | done | done | done | done |
-| Delayed publish | done | done | done | done |
-| Raw bytes publish | done | done | done | done |
-| Content types (msgpack/json/text/raw/custom) | done | done | done | done <sup>15</sup> |
-| Custom headers | done | done | done | done |
-| Message TTL: `expiring` publisher | done | done | done <sup>7</sup> | done |
-| Message TTL: queue `default_message_ttl` on declare | done | done | done <sup>7</sup> | done |
+| Feature | Rust | TypeScript | Python | Go | C# |
+| --- | --- | --- | --- | --- | --- |
+| Unconfirmed publish | done | done | done | done | done |
+| Confirmed publish (awaits offset) | done | done | done | done | done |
+| Confirmation handle (publish_with_confirmation) | done | done | done | done | done |
+| Delayed publish with confirmation handle | done | done | done | done | done |
+| Delayed publish | done | done | done | done | done |
+| Raw bytes publish | done | done | done | done | done |
+| Content types (msgpack/json/text/raw/custom) | done | done | done | done <sup>15</sup> | done <sup>15</sup> |
+| Custom headers | done | done | done | done | done |
+| Message TTL: `expiring` publisher | done | done | done <sup>7</sup> | done | done |
+| Message TTL: queue `default_message_ttl` on declare | done | done | done <sup>7</sup> | done | done |
 
 ## Consume
 
-| Feature | Rust | TypeScript | Python | Go |
-| --- | --- | --- | --- | --- |
-| Subscribe manual ack | done | done | done | done |
-| Subscribe auto ack | done | done | done <sup>8</sup> | done <sup>8</sup> |
-| Ack / Nack / retry-after | done | done | done | done |
-| Prefetch / backpressure | done | done | done | done |
-| Declare queue + DLQ policies | done | done | done | done |
-| Multi-partition subscribe fan-in | done | done | done | done |
-| Live-repartition partition pickup (consumer grow) | done | done <sup>2</sup> | done <sup>2</sup> | done <sup>2</sup> |
+| Feature | Rust | TypeScript | Python | Go | C# |
+| --- | --- | --- | --- | --- | --- |
+| Subscribe manual ack | done | done | done | done | done |
+| Subscribe auto ack | done | done | done <sup>8</sup> | done <sup>8</sup> | done <sup>8</sup> |
+| Ack / Nack / retry-after | done | done | done | done | done |
+| Prefetch / backpressure | done | done | done | done | done |
+| Declare queue + DLQ policies | done | done | done | done | done |
+| Multi-partition subscribe fan-in | done | done | done | done | done |
+| Live-repartition partition pickup (consumer grow) | done | done <sup>2</sup> | done <sup>2</sup> | done <sup>2</sup> | done <sup>2</sup> |
 
 ## Plexus (fan-out streams)
 
@@ -68,82 +69,82 @@ Every consumer of a stream sees every record (vs a queue, where a message is
 consumed once). A stream subscription reads ALL partitions and fans them in, and
 the same durable name tracks an independent cursor per partition.
 
-| Feature | Rust | TypeScript | Python | Go |
-| --- | --- | --- | --- | --- |
-| Declare plexus (partitions, durability, retention) | done | done | done | done |
-| Publish to a stream (reuses Publish, routed by kind) | done | done | done | done |
-| Stream subscribe manual ack (cursor advance) | done | done | done | done |
-| Stream subscribe auto ack (server-settled cursor) | done | done | done | done |
-| Durable named cursor (resume/advance) | done | done | done | done |
-| Ephemeral start position (latest/earliest/offset/n-back/by-time) | done | done | done | done |
-| Header filter (AND of `header == pattern`, `*` glob) | done | done | done | done |
-| Client-side fan-in across all partitions | done | done | done | done |
-| Failover resubscribe + live-grow pickup | done | done | done | done |
-| Durability tiers honored end to end (express lane) | done <sup>11</sup> | done <sup>11</sup> | done <sup>11</sup> | done <sup>11</sup> |
+| Feature | Rust | TypeScript | Python | Go | C# |
+| --- | --- | --- | --- | --- | --- |
+| Declare plexus (partitions, durability, retention) | done | done | done | done | done |
+| Publish to a stream (reuses Publish, routed by kind) | done | done | done | done | done |
+| Stream subscribe manual ack (cursor advance) | done | done | done | done | done |
+| Stream subscribe auto ack (server-settled cursor) | done | done | done | done | done |
+| Durable named cursor (resume/advance) | done | done | done | done | done |
+| Ephemeral start position (latest/earliest/offset/n-back/by-time) | done | done | done | done | done |
+| Header filter (AND of `header == pattern`, `*` glob) | done | done | done | done | done |
+| Client-side fan-in across all partitions | done | done | done | done | done |
+| Failover resubscribe + live-grow pickup | done | done | done | done | done |
+| Durability tiers honored end to end (express lane) | done <sup>11</sup> | done <sup>11</sup> | done <sup>11</sup> | done <sup>11</sup> | done <sup>11</sup> |
 
 ## Reconnect and resume
 
-| Feature | Rust | TypeScript | Python | Go |
-| --- | --- | --- | --- | --- |
-| Resume identity on Hello | done | done | done | done |
-| Auto-reconnect before an operation | done | done | done | done |
-| Reconcile subscriptions on reconnect | done | done | done | done |
-| Owner-restart (reconcile on any reconnect, not just resumed) | done | done | done | done |
+| Feature | Rust | TypeScript | Python | Go | C# |
+| --- | --- | --- | --- | --- | --- |
+| Resume identity on Hello | done | done | done | done | done |
+| Auto-reconnect before an operation | done | done | done | done | done |
+| Reconcile subscriptions on reconnect | done | done | done | done | done |
+| Owner-restart (reconcile on any reconnect, not just resumed) | done | done | done | done | done |
 
 ## Cluster routing
 
-| Feature | Rust | TypeScript | Python | Go |
-| --- | --- | --- | --- | --- |
-| Topology fetch + cache | done | done | done | done |
-| Per-endpoint connection pool | done | done | done | done |
-| Owner routing per (topic, partition) | done | done | done | done |
-| Partition-key routing (FNV-1a, broker-exact) | done | done | done | done |
-| Keyless round-robin spread | done | done | done | done |
-| Follow owner redirects (bounded) | done | done | done | done |
-| Transient failover publish retry + backoff | done | done | done | done |
-| Topology refresh on transient failure (throttled) | done | done | done | done |
-| Subscription supervisor (re-subscribe on owner drop + graceful move) | done | done | done | done |
+| Feature | Rust | TypeScript | Python | Go | C# |
+| --- | --- | --- | --- | --- | --- |
+| Topology fetch + cache | done | done | done | done | done |
+| Per-endpoint connection pool | done | done | done | done | done |
+| Owner routing per (topic, partition) | done | done | done | done | done |
+| Partition-key routing (FNV-1a, broker-exact) | done | done | done | done | done |
+| Keyless round-robin spread | done | done | done | done | done |
+| Follow owner redirects (bounded) | done | done | done | done | done |
+| Transient failover publish retry + backoff | done | done | done | done | done |
+| Topology refresh on transient failure (throttled) | done | done | done | done | done |
+| Subscription supervisor (re-subscribe on owner drop + graceful move) | done | done | done | done | done |
 
 ## Discovery
 
 Discovery is an opt-in surface (a routing/discovery view over the client) that
 fans in across channels by a topic glob, driven by the cluster topology.
 
-| Feature | Rust | TypeScript | Python | Go |
-| --- | --- | --- | --- | --- |
-| Catalogue snapshot (declared queues + streams) | done | done | done | done |
-| Catalogue change events | done | done | done | done |
-| Pattern subscribe over queues (glob + auto-pickup) | done | done | done | done <sup>16</sup> |
-| Pattern subscribe over streams (glob + auto-pickup) | done | done | done | done <sup>16</sup> |
+| Feature | Rust | TypeScript | Python | Go | C# |
+| --- | --- | --- | --- | --- | --- |
+| Catalogue snapshot (declared queues + streams) | done | done | done | done | done |
+| Catalogue change events | done | done | done | done | done |
+| Pattern subscribe over queues (glob + auto-pickup) | done | done | done | done <sup>16</sup> | done <sup>16</sup> |
+| Pattern subscribe over streams (glob + auto-pickup) | done | done | done | done <sup>16</sup> | done <sup>16</sup> |
 
 ## Reliability and groups
 
-| Feature | Rust | TypeScript | Python | Go |
-| --- | --- | --- | --- | --- |
-| Retry classification (is_retryable / retry_advice) | done | done | done | done |
-| Reserved-namespace header validation | done | done | done | done |
-| ReliablePublisher helper | done | done | done | done |
-| Producer-id dedup headers | done | done <sup>3</sup> | done <sup>3</sup> | done <sup>3</sup> |
-| Exclusive consumer groups | done | done | done | done |
-| Exclusive cohort shorthand (`exclusive()`) | done | done | done | done <sup>17</sup> |
-| Cohort member id mint/carry | done | done | done | done |
-| Assignment events stream (AssignmentChanged) | done | done <sup>4</sup> | done <sup>4</sup> | done <sup>4</sup> |
+| Feature | Rust | TypeScript | Python | Go | C# |
+| --- | --- | --- | --- | --- | --- |
+| Retry classification (is_retryable / retry_advice) | done | done | done | done | done |
+| Reserved-namespace header validation | done | done | done | done | done |
+| ReliablePublisher helper | done | done | done | done | done |
+| Producer-id dedup headers | done | done <sup>3</sup> | done <sup>3</sup> | done <sup>3</sup> | done <sup>3</sup> |
+| Exclusive consumer groups | done | done | done | done | done |
+| Exclusive cohort shorthand (`exclusive()`) | done | done | done | done <sup>17</sup> | done <sup>17</sup> |
+| Cohort member id mint/carry | done | done | done | done | done |
+| Assignment events stream (AssignmentChanged) | done | done <sup>4</sup> | done <sup>4</sup> | done <sup>4</sup> | done <sup>4</sup> |
 
 ## Language ergonomics
 
-| Feature | Rust | TypeScript | Python | Go |
-| --- | --- | --- | --- | --- |
-| Async API | done | done | done | n/a <sup>14</sup> |
-| Blocking/sync API | done | n/a | done <sup>9</sup> | done <sup>14</sup> |
-| Delay / TTL units | seconds or Duration | milliseconds | seconds or timedelta | seconds or Duration |
+| Feature | Rust | TypeScript | Python | Go | C# |
+| --- | --- | --- | --- | --- | --- |
+| Async API | done | done | done | n/a <sup>14</sup> | done |
+| Blocking/sync API | done | n/a | done <sup>9</sup> | done <sup>14</sup> | n/a <sup>18</sup> |
+| Delay / TTL units | seconds or Duration | milliseconds | seconds or timedelta | seconds or Duration | TimeSpan |
 
 ## Tooling
 
-| Feature | Rust | TypeScript | Python | Go |
-| --- | --- | --- | --- | --- |
-| Examples | done | done | done | done |
-| Examples-as-light-tests runner | done | done | deferred <sup>10</sup> | done |
-| Real-broker integration smoke | done | done <sup>5</sup> | deferred <sup>5</sup> | done <sup>5</sup> |
+| Feature | Rust | TypeScript | Python | Go | C# |
+| --- | --- | --- | --- | --- | --- |
+| Examples | done | done | done | done | done |
+| Examples-as-light-tests runner | done | done | deferred <sup>10</sup> | done | done |
+| Real-broker integration smoke | done | done <sup>5</sup> | deferred <sup>5</sup> | done <sup>5</sup> | done <sup>5</sup> |
 
 ## Notes
 
@@ -151,7 +152,8 @@ fans in across channels by a topic glob, driven by the cluster topology.
    `unexpected_eof`, `invalid_magic`, `trailing_bytes`, `invalid_uuid`,
    `unknown_content_type`, `unknown_tag`), mirroring the Rust typed wire errors so
    callers branch on kind rather than parse messages. The Go client exposes the
-   same discriminants on `WireError.Kind`.
+   same discriminants on `WireError.Kind`; the C# client raises a `WireException`
+   with a `WireErrorKind`.
 2. The broker supports live repartition (grow/shrink) in cluster mode
    (`fibrilctl repartition`, `/admin/api/repartition`, broker transition
    machinery). A consumer must re-fan-in to pick up partitions added by a grow.
@@ -165,20 +167,21 @@ fans in across channels by a topic glob, driven by the cluster topology.
 4. The broker pushes `AssignmentChanged` to exclusive-cohort members. The Rust
    client exposes them via `assignment_events()`, the TS client via
    `client.onAssignmentChange(handler)`, the Python client via
-   `client.on_assignment_change(handler)`, and the Go client via the
+   `client.on_assignment_change(handler)`, the Go client via the
+   `OnAssignmentChanged` callback on `ClientOptions`, and the C# client via the
    `OnAssignmentChanged` callback on `ClientOptions`. Exclusivity is enforced by
    the per-partition gate regardless, so this is observability/narrowing, not
    correctness.
-5. CI runs the examples against the published single-node broker image for Rust
-   and TS. The Go client has the same runner (`clients/go/examples/run-all.sh`),
-   which boots a fresh release broker and runs each self-validating example, so
-   the real-broker smoke exists; wiring it into CI is the remaining step. A
-   multi-node ganglion cluster smoke for a real cross-owner redirect is still
-   pending across clients. The Python client's wire correctness is pinned by the
-   shared cross-client vectors (note 6); wiring its examples into CI is pending.
-6. The Python and Go wire codecs are cross-checked byte-for-byte against the
+5. CI runs the examples against the published single-node broker image for Rust,
+   TS, Go, and C# (each has a `run-all.sh` that self-validates every example
+   against a real broker, wired into its client CI workflow with `--network host`
+   so the client connects over real loopback). A multi-node ganglion cluster smoke
+   for a real cross-owner redirect is still pending across clients. The Python
+   client's wire correctness is pinned by the shared cross-client vectors (note 6);
+   wiring its examples into CI is pending.
+6. The Python, Go, and C# wire codecs are cross-checked byte-for-byte against the
    shared `clients/wire_vectors.json`, the same fixture the Rust protocol crate
-   pins its encoders to (`crates/protocol/tests/wire_vectors.rs`), so all four
+   pins its encoders to (`crates/protocol/tests/wire_vectors.rs`), so all five
    implementations agree on the bytes.
 7. Message TTL and the queue default TTL are seconds-native in Python (`expiring`
    takes a float of seconds or a `timedelta`). The wire field stays milliseconds.
@@ -205,17 +208,20 @@ fans in across channels by a topic glob, driven by the cluster topology.
     goroutine-safe calls, and deliveries arrive on channels. So the "blocking"
     row is the native model and the "async" row is n/a rather than a gap.
 15. Text, JSON, and raw have builders (`Text`/`JSON`/`Raw`); `Msgpack` and
-    `Custom` tag already-encoded bytes with the content type, so the Go client
-    needs no MessagePack serialization dependency.
-16. Discovery is reached via `Client.Routing()`. `SubscribePattern` and
-    `SubscribeStreamPattern` take an options struct (Go idiom) rather than the
-    fluent builder the other clients use, but the surface and behavior match. The
-    catalogue is empty against a single-node broker (which advertises no
-    topology), so the pattern example is a demo and the behavior is covered by a
-    fake-broker test.
-17. Go's exclusive shorthand is `SubscribeTopicExclusive` (a whole-topic fan-in
-    joining the default cohort), with `SubscribeTopicCohort` for a named cohort.
-    All four clients join the same default cohort id "default".
+    `Custom` tag already-encoded bytes with the content type, so the Go and C#
+    clients need no MessagePack serialization dependency.
+16. Discovery is reached via a routing view (`Client.Routing()` in Go and
+    `Client.Routing` in C#). `SubscribePattern` and `SubscribeStreamPattern` take
+    an options struct/record rather than the fluent builder the other clients use,
+    but the surface and behavior match. The catalogue is empty against a
+    single-node broker (which advertises no topology), so the pattern example is a
+    demo and the behavior is covered by a fake-broker test.
+17. Go's and C#'s exclusive shorthand is `SubscribeTopicExclusive` (a whole-topic
+    fan-in joining the default cohort), with `SubscribeTopicCohort` for a named
+    cohort. All five clients join the same default cohort id "default".
+18. The C# client is async-native (Task-based), like the TS client, so it exposes
+    no separate blocking facade. `CancellationToken` provides cancellation on every
+    network call.
 
 See the repo-root `FOLLOWUPS.md` "Clients" section for the brick-by-brick plan
 behind these rows.

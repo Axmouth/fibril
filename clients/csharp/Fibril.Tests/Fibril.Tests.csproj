@@ -1,0 +1,33 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Fibril\Fibril.csproj" />
+  </ItemGroup>
+
+  <!-- The cross-client conformance fixtures live at clients/. Copy them next to
+       the test assembly so tests read them from AppContext.BaseDirectory, the
+       same shared bytes every other client pins against. -->
+  <ItemGroup>
+    <None Include="..\..\wire_vectors.json" Link="wire_vectors.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\error_guides.json" Link="error_guides.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

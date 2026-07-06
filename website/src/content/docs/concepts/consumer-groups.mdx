@@ -80,6 +80,19 @@ for msg := range sub.Deliveries {
 ```
 
   </TabItem>
+  <TabItem label="C#">
+
+```csharp
+// Run several instances; they self-organize into the group.
+var sub = await client.SubscribeTopicExclusiveAsync("orders", prefetch: 32, autoAck: true);
+
+await foreach (var msg in sub.Deliveries())
+{
+    process(msg.Text()); // per-key order preserved
+}
+```
+
+  </TabItem>
 </Tabs>
 
 Ordering is *per key*, so the producer chooses the key that groups related
@@ -114,6 +127,13 @@ await publisher.publish(NewMessage.msgpack(order).partition_key(order.id))
 ```go
 msg, _ := fibril.JSON(order)
 publisher.Publish(ctx, msg.Keyed([]byte(order.ID)))
+```
+
+  </TabItem>
+  <TabItem label="C#">
+
+```csharp
+await publisher.PublishAsync(Message.Json(order).Keyed(Encoding.UTF8.GetBytes(order.Id)));
 ```
 
   </TabItem>

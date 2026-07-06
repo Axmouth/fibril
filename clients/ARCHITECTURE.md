@@ -63,6 +63,28 @@ language-agnostic.
   `fibril.*` or `stroma.*` headers. The library-owned `fibril.client.*` carve-out
   (producer dedup ids) is set only by the client itself.
 
+## Cross-client conformance (shared fixtures)
+
+Parity across the clients is not aspirational; it is pinned by two shared
+fixtures that every client's test suite asserts against, so a divergence fails a
+test rather than surfacing as a subtle runtime mismatch.
+
+- **`clients/wire_vectors.json`** — the byte-exact encoding of every v1 op (33
+  entries), as hex. Each client encodes its own structs and asserts the bytes
+  equal the vector, and decodes the canonical bytes and asserts they re-encode
+  identically. The Rust protocol crate pins its encoders to the same fixture
+  (`crates/protocol/tests/wire_vectors.rs`), so the reference and every client
+  agree on the wire. A coverage guard fails if a vector has no conformance case,
+  so a newly added op cannot silently skip a client.
+- **`clients/error_guides.json`** — the required wording for the errors a client
+  raises itself (no broker frame involved), the error-message analogue of the
+  wire vectors. Each client asserts its message for a case contains every required
+  substring, keeping the guided wording in parity.
+
+The upshot: bringing a client to parity, or verifying a new one, is a
+diff-the-fixtures exercise rather than a reread of the reference source. A new
+client is done on the wire when it passes both fixtures.
+
 ## Concurrency: mirror the shape, not the primitives
 
 The Rust client uses `ArcSwap`, `RwLock`, atomics, and `OnceLock` because it runs

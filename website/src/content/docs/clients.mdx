@@ -1,11 +1,11 @@
 ---
 title: Client usage
-description: Use the Rust, TypeScript, Python, and Go clients to publish, consume, and settle messages.
+description: Use the Rust, TypeScript, Python, Go, and C# clients to publish, consume, and settle messages.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-Fibril has Rust, TypeScript, Python, and Go clients for the same core broker surface:
+Fibril has Rust, TypeScript, Python, Go, and C# clients for the same core broker surface:
 
 - connect with optional auth
 - publish with or without confirmation
@@ -16,13 +16,15 @@ Fibril has Rust, TypeScript, Python, and Go clients for the same core broker sur
 
 The examples below are source-tree examples for the current pre-alpha API. They are useful for building against this repository, but not yet a stable package contract.
 
-Parity note: all four clients cover the branch's partition topology,
+Parity note: all five clients cover the branch's partition topology,
 owner-redirect, partition-key routing, exclusive consumer-group surface, and
 message TTL. The Rust client is the reference implementation. The TypeScript,
-Python, and Go clients mirror its behavior. The Python client also ships a
+Python, Go, and C# clients mirror its behavior. The Python client also ships a
 synchronous facade (`fibril.blocking.BlockingClient`) over the same async core.
 The Go client presents ordinary blocking, goroutine-safe calls and delivers on
-channels, so it has no separate async and sync split.
+channels, so it has no separate async and sync split. The C# client is
+async-native (Task-based) and takes an optional `CancellationToken` on every
+network call.
 
 ## Requirements
 
@@ -33,6 +35,9 @@ channels, so it has no separate async and sync split.
 - **Go**: Go 1.23 or newer. No third-party dependencies. Every network method
   takes a `context.Context` as its first argument (the snippets below use `ctx`;
   pass `context.Background()` when you have no deadline or cancellation).
+- **C#**: .NET 8 or newer (the library targets `net8.0`). No third-party
+  dependencies. Every network method takes an optional `CancellationToken` as its
+  last argument.
 
 For reconnect behavior and current limits, see [reconnects](/reliability/reconnects/).
 
@@ -102,6 +107,18 @@ ctx := context.Background()
 client, err := fibril.Dial(ctx, "127.0.0.1:9876", fibril.ClientOptions{
     Auth: &fibril.Auth{Username: "fibril", Password: "fibril"},
 })
+```
+
+  </TabItem>
+  <TabItem label="C#">
+
+```csharp
+using Fibril;
+
+var client = await Client.ConnectAsync("127.0.0.1:9876", new ClientOptions
+{
+    Auth = new Credentials("fibril", "fibril"),
+});
 ```
 
   </TabItem>
@@ -189,6 +206,21 @@ client, err := fibril.Dial(ctx, "broker.internal:9876", fibril.ClientOptions{
 The Go trust order matches the others: `CAFingerprint` pins the SHA-256
 fingerprint, else `CAFile` trusts a PEM, else an empty `TLSOptions{}` uses the OS
 roots. A client certificate is `ClientCertFile` with `ClientKeyFile`.
+
+  </TabItem>
+  <TabItem label="C#">
+
+```csharp
+var client = await Client.ConnectAsync("broker.internal:9876", new ClientOptions
+{
+    Auth = new Credentials("fibril", "fibril"),
+    Tls = new TlsOptions { CaFile = "/var/lib/fibril/tls/ca.pem" },
+});
+```
+
+The C# trust order matches the others: `CaFingerprint` pins the SHA-256
+fingerprint, else `CaFile` trusts a PEM, else a bare `new TlsOptions()` uses the
+OS roots. A client certificate is `ClientCertFile` with `ClientKeyFile`.
 
   </TabItem>
 </Tabs>
@@ -291,6 +323,16 @@ client, err := fibril.Dial(ctx, "127.0.0.1:9876", fibril.ClientOptions{
 ```
 
   </TabItem>
+  <TabItem label="C#">
+
+```csharp
+var client = await Client.ConnectAsync("127.0.0.1:9876", new ClientOptions
+{
+    ReconcilePolicy = ReconcilePolicy.Restore,
+});
+```
+
+  </TabItem>
 </Tabs>
 
 ## Publish
@@ -380,6 +422,20 @@ pipelinedOffset, err := confirmation.Confirmed(ctx)
 ```
 
   </TabItem>
+  <TabItem label="C#">
+
+```csharp
+var publisher = client.Publisher("email.send");
+
+await publisher.PublishAsync(Message.Text("hello"));
+
+var offset = await publisher.PublishConfirmedAsync(Message.Text("needs an offset"));
+
+var confirmation = await publisher.PublishWithConfirmationAsync(Message.Text("pipeline me"));
+var pipelinedOffset = await confirmation.Confirmed();
+```
+
+  </TabItem>
 </Tabs>
 
 ## Delayed Publish
@@ -458,6 +514,18 @@ offset, err := publisher.PublishDelayedConfirmed(ctx,
 Go delays are a `time.Duration`.
 
   </TabItem>
+  <TabItem label="C#">
+
+```csharp
+await publisher.PublishDelayedAsync(Message.Text("send later"), TimeSpan.FromSeconds(30));
+
+var offset = await publisher.PublishDelayedConfirmedAsync(
+    Message.Text("send later and return offset"), TimeSpan.FromSeconds(30));
+```
+
+C# delays are a `TimeSpan`.
+
+  </TabItem>
 </Tabs>
 
 ## Delayed Retry
@@ -519,6 +587,18 @@ msg.RetryAfter(30 * time.Second)
 ```
 
 `Retry()` requeues immediately. `RetryAfter(d)` takes a `time.Duration`.
+
+  </TabItem>
+  <TabItem label="C#">
+
+```csharp
+await foreach (var msg in sub.Deliveries())
+{
+    msg.RetryAfter(TimeSpan.FromSeconds(30));
+}
+```
+
+`Retry()` requeues immediately. `RetryAfter(d)` takes a `TimeSpan`.
 
   </TabItem>
 </Tabs>
@@ -623,6 +703,20 @@ publisher.Publish(ctx, fibril.Raw([]byte{1, 2, 3}))
 
 `fibril.Msgpack(bytes)` and `fibril.Custom(contentType, bytes)` tag already-encoded
 payloads, so the Go client needs no msgpack dependency.
+
+  </TabItem>
+  <TabItem label="C#">
+
+```csharp
+await publisher.PublishAsync(Message.Json(new { id = 42, kind = "welcome" }));
+
+await publisher.PublishAsync(Message.Text("plain text").WithHeader("x-trace-id", "abc123"));
+
+await publisher.PublishAsync(Message.Raw(new byte[] { 1, 2, 3 }));
+```
+
+`Message.Msgpack(bytes)` and `Message.Custom(contentType, bytes)` tag
+already-encoded payloads, so the C# client needs no MessagePack dependency.
 
   </TabItem>
 </Tabs>
@@ -736,9 +830,29 @@ for msg := range sub.Deliveries {
 ```
 
   </TabItem>
+  <TabItem label="C#">
+
+```csharp
+var sub = await client.SubscribeTopicAsync("email.send", group: "workers", prefetch: 32);
+
+await foreach (var msg in sub.Deliveries())
+{
+    var body = msg.Text();
+    if (await SendEmail(body))
+    {
+        msg.Ack();
+    }
+    else
+    {
+        msg.Retry();
+    }
+}
+```
+
+  </TabItem>
 </Tabs>
 
-`retry()` requeues immediately. Use `retry_after(..)` in Rust and Python, `retryAfter(..)` in TypeScript, or `RetryAfter(..)` in Go for delayed retry.
+`retry()` requeues immediately. Use `retry_after(..)` in Rust and Python, `retryAfter(..)` in TypeScript, or `RetryAfter(..)` in Go and C# for delayed retry.
 
 ## Dead Letter Workflow
 
@@ -841,6 +955,18 @@ client.DeclareQueue(ctx, fibril.DeclareQueue{
     DlqPolicy:     &fibril.DlqPolicy{Kind: fibril.DlqGlobal},
     DlqMaxRetries: &maxRetries,
 })
+```
+
+  </TabItem>
+  <TabItem label="C#">
+
+```csharp
+await client.DeclareQueueAsync("email.send", new QueueDeclareOptions
+{
+    Group = "workers",
+    DeadLetter = DeadLetterPolicy.Global,
+    MaxRetries = 3,
+});
 ```
 
   </TabItem>
@@ -953,6 +1079,29 @@ for msg := range sub.Deliveries {
 ```
 
   </TabItem>
+  <TabItem label="C#">
+
+```csharp
+var publisher = client.PublisherGrouped("email.send", "workers");
+await publisher.PublishConfirmedAsync(Message.Json(jobData));
+
+var sub = await client.SubscribeTopicAsync("email.send", group: "workers", prefetch: 32);
+
+await foreach (var msg in sub.Deliveries())
+{
+    var job = msg.Json<Job>();
+    if (job is not null && Process(job))
+    {
+        msg.Ack();
+    }
+    else
+    {
+        msg.Retry();
+    }
+}
+```
+
+  </TabItem>
 </Tabs>
 
 Once the configured retry limit is exhausted, the broker routes the failed message to `_dlq.email`. Subscribe to that queue like any other queue when you want inspection or replay tooling.
@@ -1012,6 +1161,19 @@ text := msg.Text()
 ```
 
 Go decode is explicit: `JSON(&v)` for JSON, `Payload` for raw bytes, `Text()` for text.
+
+  </TabItem>
+  <TabItem label="C#">
+
+```csharp
+record Job(ulong Id);
+
+var job = msg.Json<Job>();
+byte[] raw = msg.Payload;
+string text = msg.Text();
+```
+
+C# decode is explicit: `Json<T>()` for JSON, `Payload` for raw bytes, `Text()` for text.
 
   </TabItem>
 </Tabs>
@@ -1087,6 +1249,18 @@ for msg := range sub.Deliveries {
     var m Metric
     msg.JSON(&m)
     observe(m)
+}
+```
+
+  </TabItem>
+  <TabItem label="C#">
+
+```csharp
+var sub = await client.SubscribeTopicAsync("metrics", prefetch: 128, autoAck: true);
+
+await foreach (var msg in sub.Deliveries())
+{
+    observe(msg.Json<Metric>());
 }
 ```
 
@@ -1220,6 +1394,33 @@ for msg := range sub.Deliveries {
 ```
 
   </TabItem>
+  <TabItem label="C#">
+
+```csharp
+await client.DeclarePlexusAsync("events", new PlexusDeclareOptions
+{
+    PartitionCount = 4,
+    Retention = new StreamRetentionPolicy { MaxRecords = 1_000_000 },
+});
+
+// Publish uses the normal publisher.
+await client.Publisher("events").PublishAsync(Message.Text("hello"));
+
+var sub = await client.SubscribeStreamTopicAsync("events", new StreamSubscribeOptions
+{
+    DurableName = "analytics",
+    Filter = new[] { new StreamHeaderFilter("region", "eu-*") },
+    Prefetch = 16,
+});
+
+await foreach (var msg in sub.Deliveries())
+{
+    handle(msg.Text());
+    msg.Ack(); // advances the durable cursor
+}
+```
+
+  </TabItem>
 </Tabs>
 
 For a live tail without a durable cursor, drop `.durable(...)` and pick a start
@@ -1311,6 +1512,20 @@ for msg := range sub.Deliveries {
 ```
 
   </TabItem>
+  <TabItem label="C#">
+
+```csharp
+var sub = await client.Routing.SubscribePatternAsync("events.*");
+
+// Each delivery carries its source topic in msg.Topic.
+await foreach (var msg in sub.Deliveries())
+{
+    handle(msg.Topic, msg.Text());
+    msg.Ack();
+}
+```
+
+  </TabItem>
 </Tabs>
 
 ## Shutdown
@@ -1355,6 +1570,16 @@ client.shutdown()
 ```go
 client.Shutdown()
 ```
+
+  </TabItem>
+  <TabItem label="C#">
+
+```csharp
+await client.DisposeAsync();
+```
+
+`Client` is `IAsyncDisposable`, so `await using var client = ...` also disposes it
+automatically at the end of scope.
 
   </TabItem>
 </Tabs>

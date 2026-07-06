@@ -87,6 +87,18 @@ client.DeclareQueue(ctx, fibril.DeclareQueue{
 ```
 
   </TabItem>
+  <TabItem label="C#">
+
+```csharp
+await client.DeclareQueueAsync("orders.created", new QueueDeclareOptions
+{
+    Group = "workers",
+    DeadLetter = DeadLetterPolicy.Global,
+    MaxRetries = 3,
+});
+```
+
+  </TabItem>
 </Tabs>
 
 CLI:

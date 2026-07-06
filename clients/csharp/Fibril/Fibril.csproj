@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Target the prior LTS so net8/net9/net10 apps can all reference the client.
+         Every API used (Channels, IAsyncEnumerable, Span, nullable) is in net8.0,
+         so no polyfill packages are needed. The test project targets the locally
+         installed runtime (net10.0) and references this net8.0 library fine. -->
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>Fibril</RootNamespace>
+    <AssemblyName>Fibril</AssemblyName>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- Missing XML doc comments are not an error while the surface is in flux. -->
+    <NoWarn>CS1591</NoWarn>
+  </PropertyGroup>
+
+</Project>

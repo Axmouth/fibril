@@ -44,6 +44,13 @@ msg.Retry()
 ```
 
   </TabItem>
+  <TabItem label="C#">
+
+```csharp
+msg.Retry();
+```
+
+  </TabItem>
 </Tabs>
 
 At the state layer, this removes the offset from inflight, increments the retry count, and returns the offset to ready unless the retry policy is exhausted.
@@ -93,6 +100,14 @@ publisher.PublishDelayedConfirmed(ctx, payload, 30*time.Second)
 ```
 
   </TabItem>
+  <TabItem label="C#">
+
+```csharp
+await publisher.PublishDelayedAsync(payload, TimeSpan.FromSeconds(30));
+await publisher.PublishDelayedConfirmedAsync(payload, TimeSpan.FromSeconds(30));
+```
+
+  </TabItem>
 </Tabs>
 
 Delay units differ by client: Rust seconds (or a `Duration`), TypeScript milliseconds (or a `Date` deadline), Python seconds (or a `timedelta`), Go a `time.Duration`.
@@ -131,6 +146,13 @@ await msg.retry_after(30)
 
 ```go
 msg.RetryAfter(30 * time.Second)
+```
+
+  </TabItem>
+  <TabItem label="C#">
+
+```csharp
+msg.RetryAfter(TimeSpan.FromSeconds(30));
 ```
 
   </TabItem>
@@ -189,6 +211,14 @@ publisher.Publish(ctx, fibril.Text("reply"))
 ```
 
   </TabItem>
+  <TabItem label="C#">
+
+```csharp
+var publisher = client.Publisher("rpc.reply").Expiring(TimeSpan.FromSeconds(30));
+await publisher.PublishAsync(Message.Text("reply"));
+```
+
+  </TabItem>
 </Tabs>
 
 Per-queue default TTL at declare time:
@@ -227,6 +257,16 @@ client.DeclareQueue(ctx, fibril.DeclareQueue{
     Topic:               "rpc.reply",
     DefaultMessageTTLms: &ttl,
 })
+```
+
+  </TabItem>
+  <TabItem label="C#">
+
+```csharp
+await client.DeclareQueueAsync("rpc.reply", new QueueDeclareOptions
+{
+    DefaultMessageTtl = TimeSpan.FromSeconds(30),
+});
 ```
 
   </TabItem>

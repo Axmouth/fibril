@@ -71,6 +71,16 @@ msg.Fail()                       // terminal failure
 ```
 
   </TabItem>
+  <TabItem label="C#">
+
+```csharp
+msg.Ack();                                // terminal success
+msg.Retry();                              // requeue immediately
+msg.RetryAfter(TimeSpan.FromSeconds(30)); // requeue after a delay
+msg.Fail();                               // terminal failure
+```
+
+  </TabItem>
 </Tabs>
 
 Delayed retry keeps the message out of ready delivery until its retry deadline.

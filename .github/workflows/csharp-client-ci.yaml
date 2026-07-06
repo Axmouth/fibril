@@ -1,0 +1,99 @@
+name: C# client CI
+
+on:
+  workflow_call:
+  pull_request:
+    paths:
+      - ".github/workflows/csharp-client-ci.yaml"
+      - "clients/csharp/**"
+      - "clients/wire_vectors.json"
+      - "clients/error_guides.json"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/csharp-client-ci.yaml"
+      - "clients/csharp/**"
+      - "clients/wire_vectors.json"
+      - "clients/error_guides.json"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: C# client tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Check formatting
+        working-directory: clients/csharp
+        run: dotnet format --verify-no-changes
+
+      - name: Build
+        working-directory: clients/csharp
+        run: dotnet build -c Release Fibril/Fibril.csproj
+
+      - name: Run tests
+        working-directory: clients/csharp
+        run: dotnet test -c Release Fibril.Tests/Fibril.Tests.csproj
+
+  examples:
+    name: Examples against a real broker
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      # Reuse the published server image instead of building from source: client CI
+      # runs against the latest-main broker, which is what client-only changes want
+      # and is far faster than a Rust build.
+      - name: Log in to GitHub Container Registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Start broker container
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/fibril-server:main"
+          # Host networking so the client connects over real loopback. The broker
+          # only accepts password auth from a loopback peer (cleartext), and Docker
+          # port-mapping would make the connection non-loopback and 401.
+          docker run -d --name fibril-server --network host "$image"
+
+      - name: Wait for broker health
+        run: |
+          for _ in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:8081/healthz; then
+              echo "broker healthy"; exit 0
+            fi
+            sleep 1
+          done
+          echo "broker did not become healthy"; docker logs fibril-server; exit 1
+
+      - name: Run examples
+        env:
+          FIBRIL_EXTERNAL_BROKER: "1"
+          FIBRIL_ADDR: "127.0.0.1:9876"
+        run: clients/csharp/Fibril.Examples/run-all.sh
+
+      - name: Broker logs
+        if: always()
+        run: docker logs fibril-server || true
+
+      - name: Stop broker container
+        if: always()
+        run: docker rm -f fibril-server || true
