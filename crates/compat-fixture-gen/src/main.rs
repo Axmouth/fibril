@@ -78,9 +78,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await?;
 
     // The dead-letter target is a plain queue the failed messages land in.
-    client
-        .declare_queue(QueueConfig::new(DLQ_TOPIC)?)
-        .await?;
+    client.declare_queue(QueueConfig::new(DLQ_TOPIC)?).await?;
 
     client
         .declare_queue(

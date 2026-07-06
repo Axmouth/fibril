@@ -10,15 +10,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use fibril_client::{Client, ClientOptions, FibrilError, NewMessage, ReconnectOutcome};
-use fibril_protocol::v1::{
-    AdvertisedAddress, COMPLIANCE_STRING, Deliver, Hello, HelloOk, Op, PROTOCOL_V1, Publish,
-    PublishOk, QueueTopologyEntry, ReconcileResult, Redirect, ResumeOutcome, Subscribe,
-    SubscribeOk, TopologyOk,
+use fibril_wire::{
+    AdvertisedAddress, COMPLIANCE_STRING, Deliver, DeliveryTag, Hello, HelloOk, Op, PROTOCOL_V1,
+    Partition, Publish, PublishOk, QueueTopologyEntry, ReconcileResult, Redirect, ResumeOutcome,
+    Subscribe, SubscribeOk, TopologyOk,
     frame::ProtoCodec,
     helper::{try_decode, try_encode},
     wire,
 };
-use fibril_storage::{DeliveryTag, Partition};
 use futures::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::Framed;

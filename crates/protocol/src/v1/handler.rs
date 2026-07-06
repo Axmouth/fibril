@@ -2280,8 +2280,6 @@ where
     }
 }
 
-pub const DEFAULT_HEARTBEAT_INTERVAL: u64 = 5; // seconds
-
 pub enum LoopEvent {
     Heartbeat,
     Frame(Frame),
@@ -4295,8 +4293,9 @@ mod error_guide_tests {
 
     #[test]
     fn invalid_argument_is_a_client_error_not_a_server_fault() {
-        let (code, msg) =
-            broker_error_response(&BrokerError::InvalidArgument("partition 9 out of range".into()));
+        let (code, msg) = broker_error_response(&BrokerError::InvalidArgument(
+            "partition 9 out of range".into(),
+        ));
         assert_eq!(
             code, ERR_INVALID,
             "a malformed request is a 400 (DoNotRetry), not a retryable 500"
@@ -4315,7 +4314,10 @@ mod error_guide_tests {
             in_sync: 1,
             required: 2,
         });
-        assert_eq!(code, 500, "a transient durability shortfall stays retryable");
+        assert_eq!(
+            code, 500,
+            "a transient durability shortfall stays retryable"
+        );
         assert!(
             msg.contains("replication factor") && msg.contains("replicas"),
             "the guide names the two levers rather than a bare number: {msg}"

@@ -13,6 +13,7 @@ name = "encode"
 harness = false
 
 [dependencies]
+fibril-wire = { path = "../wire" }
 fibril-broker = { path = "../broker" }
 fibril-storage = { path = "../storage" }
 fibril-metrics = { path = "../metrics" }

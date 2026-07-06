@@ -39,6 +39,9 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 - Guided error surfaces. Broker-side and client-local errors now point at the
   likely fix, so a rejected declare, an authentication denial, or a content-kind
   mismatch names what to do rather than surfacing as an opaque failure.
+- Leaner Rust client dependencies. The wire codec moved into a standalone
+  `fibril-wire` crate that `fibril-client` depends on directly, so depending on the
+  client no longer pulls in the broker, storage, and coordination crates.
 
 ### Fixed
 

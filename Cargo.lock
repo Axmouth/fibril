@@ -1347,11 +1347,9 @@ dependencies = [
  "dashmap",
  "fastrand",
  "fibril",
- "fibril-broker",
  "fibril-config",
- "fibril-protocol",
- "fibril-storage",
  "fibril-util",
+ "fibril-wire",
  "futures",
  "parking_lot",
  "rmp-serde",
@@ -1445,6 +1443,7 @@ dependencies = [
  "fibril-storage",
  "fibril-tls",
  "fibril-util",
+ "fibril-wire",
  "futures",
  "ganglion",
  "ganglion-openraft",
@@ -1538,6 +1537,24 @@ dependencies = [
  "tracing-subscriber",
  "turmoil",
  "x509-parser",
+]
+
+[[package]]
+name = "fibril-wire"
+version = "0.4.0"
+dependencies = [
+ "bytes",
+ "fibril-common",
+ "fibril-util",
+ "serde",
+ "serde_json",
+ "stroma-common",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -8,7 +8,7 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_util::codec::Framed;
 
-use crate::v1::{
+use crate::{
     frame::{Frame, ProtoCodec},
     wire::{self, WireError},
     *,
@@ -430,12 +430,12 @@ pub fn error_frame(req_id: u64, code: u16, message: impl Into<String>) -> Protoc
 
 #[cfg(test)]
 mod tests {
+    use crate::Partition;
     use bytes::Bytes;
-    use fibril_storage::Partition;
     use uuid::Uuid;
 
     use super::*;
-    use crate::v1::{
+    use crate::{
         AssignmentChanged, Auth, DeclareQueue, DeclareQueueOk, Hello, HelloOk, QueueDlqPolicy,
         QueueTopologyEntry, ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult,
         ReconcileServer, ReconcileSubscription, ReconcileSubscriptionResult, Redirect,
@@ -525,7 +525,7 @@ mod tests {
             resume_token: resume.resume_token,
             resume_outcome: ResumeOutcome::Resumed,
             server_name: "fibril-test".into(),
-            compliance: crate::v1::COMPLIANCE_STRING.into(),
+            compliance: crate::COMPLIANCE_STRING.into(),
         };
         let frame = try_encode(Op::HelloOk, 2, &hello_ok).unwrap();
         let got = try_decode::<HelloOk>(&frame).unwrap();

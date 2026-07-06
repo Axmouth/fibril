@@ -30,8 +30,8 @@
 //! ```
 
 use arc_swap::ArcSwap;
-use fibril_storage::{DeliveryTag, Partition};
 use fibril_util::{UnixMillis, unix_millis};
+use fibril_wire::{DeliveryTag, Partition};
 use futures::{SinkExt, StreamExt};
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
@@ -54,10 +54,9 @@ use tokio::{
 use tokio_util::codec::Framed;
 use uuid::Uuid;
 
-use fibril_protocol::v1::{
-    AdvertisedAddress,
+use fibril_wire::{
+    AdvertisedAddress, DEFAULT_HEARTBEAT_INTERVAL,
     frame::{Frame, ProtoCodec},
-    handler::DEFAULT_HEARTBEAT_INTERVAL,
     helper::*,
     wire, *,
 };
@@ -77,10 +76,10 @@ mod tls;
 pub use tls::TlsClientOptions;
 use tls::establish_stream;
 
-pub use fibril_protocol::v1::ReconcilePolicy;
+pub use fibril_wire::ReconcilePolicy;
 // Shared header namespace constants (single source of truth in the protocol crate)
 // so the client guard and broker rejection cannot drift.
-pub use fibril_protocol::v1::{
+pub use fibril_wire::{
     CLIENT_HEADER_PREFIX, HEADER_PRODUCER_ID, HEADER_PRODUCER_SEQ, RESERVED_HEADER_PREFIXES,
 };
 
@@ -5271,7 +5270,7 @@ mod tests {
         // A stream topology entry must populate both the partitioning count and
         // the per-partition owner (keyed by group None), so a stream publish
         // routes to its owner the same way a queue publish does.
-        use fibril_protocol::v1::{StreamTopologyEntry, TopologyOk};
+        use fibril_wire::{StreamTopologyEntry, TopologyOk};
 
         let mut cache = TopologyCache {
             generation: 0,

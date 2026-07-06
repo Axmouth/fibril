@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc;
 
-use fibril_protocol::v1::{
+use fibril_wire::{
     ERR_INVALID, ERR_NOT_FOUND, ERR_NOT_OWNER, Partition, Subscribe, SubscribeStream,
 };
 
