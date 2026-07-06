@@ -1,8 +1,8 @@
 # Changelog
 
-All notable changes to the Fibril repo (the broker, the Rust/TypeScript/Python
-clients, the admin dashboard, and the CLI) are recorded here. Ganglion and
-Keratin track their own changelogs in their own repos.
+All notable changes to the Fibril repo (the broker, the Rust, TypeScript,
+Python, Go, and C# clients, the admin dashboard, and the CLI) are recorded here.
+Ganglion and Keratin track their own changelogs in their own repos.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project follows [Semantic Versioning](https://semver.org/). Pre-1.0, minor
@@ -12,12 +12,40 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- Go client (`clients/go`), the fourth first-party client, at full parity with
+  the others. Native `context.Context` on every network method, a byte-exact wire
+  codec pinned to the shared conformance vectors, TLS, cluster routing with
+  reconnect and reconcile, supervised, multi-partition fan-in, exclusive-cohort,
+  Plexus stream, and pattern subscribe, ergonomic message and publisher handles,
+  examples that double as integration tests, benchmarks, and CI.
 - C# client (`clients/csharp`), the fifth first-party client, at full parity with
-  the others. Byte-exact wire codec pinned to the shared conformance vectors,
+  the others. A byte-exact wire codec pinned to the shared conformance vectors,
   TLS and mTLS, cluster routing with reconnect and reconcile, supervised, fan-in,
-  cohort, stream, and pattern subscribe, and a reliable publisher. Ships unit
-  tests, real-broker examples, and CI. Adds a C# column to the client feature
-  matrix and C# tabs across the client docs.
+  cohort, Plexus stream, and pattern subscribe, and a reliable publisher. Ships
+  unit tests, real-broker examples, and CI.
+- Cross-client parity fills. The TypeScript and Python clients gained the
+  exclusive-cohort shorthand, and the Python client gained delayed publish with a
+  confirmation handle, so all clients cover the same surface. A shared feature
+  matrix and shared conformance fixtures (wire vectors and error-message guides)
+  keep the clients byte- and word-identical.
+
+### Changed
+
+- Client publish throughput. The Rust, TypeScript, and Python clients now coalesce
+  fire-and-forget writes into batched socket writes (exposed as a public client
+  option), coalesce consumer acks, and flush buffered frames on graceful shutdown,
+  and the per-publish tracing span moved off the hot path. Single-client publish
+  roughly doubles.
+- Guided error surfaces. Broker-side and client-local errors now point at the
+  likely fix, so a rejected declare, an authentication denial, or a content-kind
+  mismatch names what to do rather than surfacing as an opaque failure.
+
+### Fixed
+
+- A non-retryable connection close no longer triggers a reconnect storm in the
+  clients.
+- A plaintext broker is named as such when a TLS client connects to it, rather
+  than surfacing as a generic handshake failure.
 
 ## [0.4.0] - 2026-07-04
 
