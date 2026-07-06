@@ -11,6 +11,7 @@ var examples = new Dictionary<string, Func<Task>>(StringComparer.Ordinal)
     ["confirmed-delayed"] = Examples.ConfirmedDelayedAsync,
     ["manual-ack-retry"] = Examples.ManualAckRetryAsync,
     ["stream"] = Examples.StreamAsync,
+    ["pattern"] = Examples.PatternAsync, // demo only (needs a multi-node broker); excluded from run-all
 };
 
 var name = args.FirstOrDefault(a => !a.StartsWith("--", StringComparison.Ordinal));

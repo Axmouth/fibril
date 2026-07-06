@@ -78,4 +78,24 @@ internal static class Examples
         var record = await Harness.RecvAsync(fan.Deliveries(), TimeSpan.FromSeconds(5), "the stream record");
         Harness.AssertEq(record.Text(), "record", "stream record payload");
     }
+
+    // Demo (not self-validating): pattern (discovery) subscribe. Fan in across every
+    // work queue whose topic matches a glob, with new matching queues attaching
+    // automatically. Discovery is driven by cluster topology, so this needs a
+    // multi-node broker that advertises topology (a single-node broker advertises
+    // none). Runs until interrupted, so it is excluded from run-all; pattern subscribe
+    // is validated in CI by the fake-broker PatternTest instead.
+    public static async Task PatternAsync()
+    {
+        await using var client = await Harness.ConnectAsync("example-pattern");
+        await using var sub = await client.Routing.SubscribePatternAsync(
+            "events.*",
+            new PatternSubscribeOptions { Prefetch = 16, AutoAck = true });
+
+        Console.WriteLine("listening for events.* (new matching queues attach automatically; Ctrl-C to stop)");
+        await foreach (var d in sub.Deliveries())
+        {
+            Console.WriteLine($"{d.Topic}: {d.Text()}");
+        }
+    }
 }
