@@ -32,7 +32,7 @@ Superscript numbers refer to the Notes under the tables.
 | Username/password auth | done | done | done | done | done |
 | TLS connect (OS roots / CA file / fingerprint pin) | done | done | done <sup>12</sup> | done | done |
 | Typed TLS error taxonomy (426 mismatch / trust / config) | done | done | done | done | done |
-| Client certificate (mTLS) + typed required-cert error | done | done | done <sup>13</sup> | done <sup>13</sup> | done |
+| Client certificate (mTLS) + typed required-cert error | done | done | done <sup>13</sup> | done <sup>13</sup> | done <sup>13</sup> |
 | Heartbeat ping/pong + timeout | done | done | done | done | done |
 | Typed wire parse errors | done | done <sup>1</sup> | done <sup>1</sup> | done <sup>1</sup> | done <sup>1</sup> |
 

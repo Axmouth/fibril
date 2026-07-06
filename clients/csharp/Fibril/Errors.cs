@@ -114,6 +114,18 @@ public sealed class TlsHandshakeException : FibrilException
 }
 
 /// <summary>
+/// The broker requires a client certificate (mTLS) but this client presented none.
+/// Set ClientCertFile and ClientKeyFile in the TLS options to authenticate.
+/// </summary>
+public sealed class TlsClientCertificateRequiredException : FibrilException
+{
+    public TlsClientCertificateRequiredException()
+        : base("the broker requires a client certificate (mTLS) but none was configured. Set ClientCertFile and ClientKeyFile in the TLS options")
+    {
+    }
+}
+
+/// <summary>
 /// The broker told the client to retry this op against a different owner. Not a
 /// failure: the routing layer applies the target and retries, so the
 /// per-connection engine surfaces it as this typed error.

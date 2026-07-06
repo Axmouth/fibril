@@ -1,3 +1,4 @@
+using System.IO;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using Fibril;
@@ -93,5 +94,46 @@ public class TlsTest
         await using var broker = new FakeBroker();
         await Assert.ThrowsAsync<TlsConfigException>(
             () => Client.ConnectAsync(broker.Address, Opts(new TlsOptions { CaFingerprint = new string('a', 64), ClientCertFile = "cert.pem" }), Timeout()));
+    }
+
+    // Writes a fresh self-signed client certificate and its key to temp PEM files,
+    // whose paths the client feeds to ClientCertFile / ClientKeyFile.
+    private static (string CertPath, string KeyPath) ClientCertPem()
+    {
+        using var rsa = RSA.Create(2048);
+        var req = new CertificateRequest("CN=fibril-client", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        using var cert = req.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+        var dir = Directory.CreateTempSubdirectory().FullName;
+        var certPath = Path.Combine(dir, "client.crt");
+        var keyPath = Path.Combine(dir, "client.key");
+        File.WriteAllText(certPath, cert.ExportCertificatePem());
+        File.WriteAllText(keyPath, rsa.ExportPkcs8PrivateKeyPem());
+        return (certPath, keyPath);
+    }
+
+    [Fact]
+    public async Task ClientCertificatePassesRequiringBroker()
+    {
+        using var cert = SelfSigned();
+        var (certPath, keyPath) = ClientCertPem();
+        await using var broker = new FakeBroker { ServerCertificate = cert, RequireClientCertificate = true };
+        await using var client = await Client.ConnectAsync(broker.Address, Opts(new TlsOptions
+        {
+            CaFingerprint = Fingerprint(cert),
+            ClientCertFile = certPath,
+            ClientKeyFile = keyPath,
+        }), Timeout());
+
+        var offset = await client.Publisher("t").PublishConfirmedAsync(Message.Text("hello"), Timeout());
+        Assert.Equal(FakeBroker.FirstOffset, offset);
+    }
+
+    [Fact]
+    public async Task CertlessClientAgainstRequiringBrokerGetsTypedError()
+    {
+        using var cert = SelfSigned();
+        await using var broker = new FakeBroker { ServerCertificate = cert, RequireClientCertificate = true };
+        await Assert.ThrowsAsync<TlsClientCertificateRequiredException>(
+            () => Client.ConnectAsync(broker.Address, Opts(new TlsOptions { CaFingerprint = Fingerprint(cert) }), Timeout()));
     }
 }

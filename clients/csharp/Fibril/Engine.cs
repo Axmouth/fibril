@@ -214,7 +214,15 @@ internal sealed partial class Engine : IAsyncDisposable
         // HELLO.
         var hello = new Hello(opts.ClientName, opts.ClientVersion, Protocol.V1, opts.Resume);
         await WriteFrameAsync(stream, Frame.Build(Op.Hello, HandshakeId.Hello, WireOps.EncodeHello(hello)), ct).ConfigureAwait(false);
-        var hf = await ReadFrameAsync(stream, ct).ConfigureAwait(false);
+        Frame hf;
+        try
+        {
+            hf = await ReadFrameAsync(stream, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ClientCertRequired(opts.Tls, ex))
+        {
+            throw new TlsClientCertificateRequiredException();
+        }
         switch (hf.Opcode)
         {
             case Op.HelloOk:
@@ -698,6 +706,17 @@ internal sealed partial class Engine : IAsyncDisposable
             Payload = payload,
         };
     }
+
+    // A certless connection to a broker that requires a client certificate dies at
+    // the HELLO read: under TLS 1.3 the certificate-required alert arrives after the
+    // handshake completes and can flatten to a bare EOF. With TLS and no client cert
+    // configured, attribute such a death to the requirement.
+    private static bool ClientCertRequired(TlsOptions? tls, Exception ex)
+        => tls is not null
+           && tls.ClientCertFile is null
+           && (ex is EndOfStreamException
+               || ex is IOException
+               || ex.Message.Contains("certificate required", StringComparison.OrdinalIgnoreCase));
 
     private static ErrorMsg SafeDecodeError(byte[] payload)
     {

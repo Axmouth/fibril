@@ -118,6 +118,9 @@ internal sealed class FakeBroker : IAsyncDisposable
     /// <summary>When set, connections are wrapped in server-side TLS with this certificate.</summary>
     public X509Certificate2? ServerCertificate { get; init; }
 
+    /// <summary>When true, the TLS handshake requires the client to present a certificate (mTLS).</summary>
+    public bool RequireClientCertificate { get; init; }
+
     /// <summary>Topics an unfiltered TOPOLOGY advertises as single-partition queues, for discovery.</summary>
     public IReadOnlyList<string> CatalogueTopics { get; init; } = Array.Empty<string>();
 
@@ -181,7 +184,16 @@ internal sealed class FakeBroker : IAsyncDisposable
                 if (ServerCertificate is not null)
                 {
                     var ssl = new SslStream(stream, leaveInnerStreamOpen: false);
-                    await ssl.AuthenticateAsServerAsync(ServerCertificate, clientCertificateRequired: false, checkCertificateRevocation: false);
+                    await ssl.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
+                    {
+                        ServerCertificate = ServerCertificate,
+                        ClientCertificateRequired = RequireClientCertificate,
+                        // Accept any presented client cert (the mTLS tests only assert
+                        // presence). When a client cert is required, reject a missing one so a
+                        // certless client fails; otherwise accept the plain-TLS case.
+                        RemoteCertificateValidationCallback = (_, cert, _, _) => !RequireClientCertificate || cert is not null,
+                        CertificateRevocationCheckMode = X509RevocationMode.NoCheck,
+                    });
                     stream = ssl;
                 }
                 using (stream)
