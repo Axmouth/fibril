@@ -113,10 +113,7 @@ test("client connects, handshakes, publishes confirmed", async () => {
         const h = decodeFrameBody<Hello>(f);
         assert.equal(h.protocol_version, PROTOCOL_V1);
         assert.equal(h.resume, null);
-        broker.send(
-          s,
-          buildFrame(Op.HelloOk, f.requestId, helloOk()),
-        );
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
       } else if (f.opcode === Op.Publish) {
         const p = decodeFrameBody<PublishMsg>(f);
         assert.equal(p.group, null);
@@ -171,7 +168,9 @@ test("client reconnect offers previous resume identity", async () => {
 
     const client = await Client.connect(
       `127.0.0.1:${broker.port}`,
-      new ClientOptions({ superviseSubscriptions: false }).withReconnectReconcilePolicy("restore_client_subscriptions"),
+      new ClientOptions({ superviseSubscriptions: false }).withReconnectReconcilePolicy(
+        "restore_client_subscriptions",
+      ),
     );
     const outcome = await client.reconnect();
 
@@ -325,7 +324,9 @@ test("client sends active subscriptions during reconnect reconciliation", async 
 
     const client = await Client.connect(
       `127.0.0.1:${broker.port}`,
-      new ClientOptions({ superviseSubscriptions: false }).withReconnectReconcilePolicy("restore_client_subscriptions"),
+      new ClientOptions({ superviseSubscriptions: false }).withReconnectReconcilePolicy(
+        "restore_client_subscriptions",
+      ),
     );
     const sub = await client.subscribe("jobs").group("workers").sub();
     const outcome = await client.reconnect();
@@ -439,10 +440,7 @@ test("client applies a pushed topology update and acks it", async () => {
       }
     };
 
-    const client = await Client.connect(
-      `127.0.0.1:${broker.port}`,
-      new ClientOptions(),
-    );
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
 
     // The cache should reflect the pushed owner once the reader loop applies it.
     let owner = client._topology().lookup("jobs", 0, null);
@@ -468,6 +466,76 @@ test("client applies a pushed topology update and acks it", async () => {
     assert.equal(catalogue.queues.length, 1);
     assert.equal(catalogue.queues[0]?.topic, "jobs");
     assert.equal(catalogue.streams.length, 0);
+
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
+test("client ignores a stale topology push but acks the current generation", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    const freshOwner = "127.0.0.1:7123";
+    const staleOwner = "127.0.0.1:7999";
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+        // A newer generation the client adopts.
+        const fresh: TopologyOkMsg = {
+          generation: 7n,
+          queues: [
+            {
+              topic: "jobs",
+              partition: 0,
+              group: null,
+              owner_endpoints: [adv(freshOwner)],
+              partitioning_version: 1n,
+              partition_count: 3,
+            },
+          ],
+          streams: [],
+        };
+        broker.send(s, buildFrame(Op.TopologyUpdate, 0n, fresh));
+        // A stale (older-generation) push naming a different owner. The reader loop
+        // processes it after the fresh one and must ignore it, so an out-of-order
+        // push cannot regress routing.
+        const stale: TopologyOkMsg = {
+          generation: 5n,
+          queues: [
+            {
+              topic: "jobs",
+              partition: 0,
+              group: null,
+              owner_endpoints: [adv(staleOwner)],
+              partitioning_version: 1n,
+              partition_count: 9,
+            },
+          ],
+          streams: [],
+        };
+        broker.send(s, buildFrame(Op.TopologyUpdate, 0n, stale));
+      }
+    };
+
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+
+    // Both pushes are acked; the second ack implies the stale push was processed.
+    let acks: Frame[] = [];
+    for (let i = 0; i < 100 && acks.length < 2; i += 1) {
+      acks = broker.received.filter((r) => r.opcode === Op.TopologyUpdateAck);
+      if (acks.length < 2) await new Promise((r) => setTimeout(r, 10));
+    }
+    assert.equal(acks.length, 2, "client acks both pushes");
+
+    // Routing still reflects the fresh generation and owner; the stale push was ignored.
+    assert.equal(client._topology().generation, 7n);
+    assert.equal(client._topology().lookup("jobs", 0, null)?.endpoint, freshOwner);
+    // Every ack carries the current generation (7), never the stale 5.
+    for (const ack of acks) {
+      assert.equal(decodeFrameBody<{ generation: bigint }>(ack).generation, 7n);
+    }
 
     await client.shutdown();
   } finally {
@@ -509,10 +577,7 @@ test("catalogue change feed reports declared queues and streams", async () => {
       }
     };
 
-    const client = await Client.connect(
-      `127.0.0.1:${broker.port}`,
-      new ClientOptions(),
-    );
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
 
     const changed = new Promise<Catalogue>((resolve) => {
       client.onCatalogueChange(resolve);
@@ -676,10 +741,7 @@ test("publish confirmation handle can be awaited later", async () => {
   try {
     broker.onFrame = (f, s) => {
       if (f.opcode === Op.Hello) {
-        broker.send(
-          s,
-          buildFrame(Op.HelloOk, f.requestId, helloOk()),
-        );
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
       } else if (f.opcode === Op.Publish) {
         const p = decodeFrameBody<PublishMsg>(f);
         assert.equal(p.require_confirm, true);
@@ -714,25 +776,16 @@ test("client declares queue policy", async () => {
     let declare: DeclareQueueMsg | null = null;
     broker.onFrame = (f, s) => {
       if (f.opcode === Op.Hello) {
-        broker.send(
-          s,
-          buildFrame(Op.HelloOk, f.requestId, helloOk()),
-        );
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
       } else if (f.opcode === Op.DeclareQueue) {
         declare = decodeFrameBody<DeclareQueueMsg>(f);
-        broker.send(
-          s,
-          buildFrame(Op.DeclareQueueOk, f.requestId, { status: "stored" }),
-        );
+        broker.send(s, buildFrame(Op.DeclareQueueOk, f.requestId, { status: "stored" }));
       }
     };
 
     const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
     await client.declareQueue(
-      new QueueConfig("jobs")
-        .group("workers")
-        .customDeadLetterQueue("_dlq.jobs")
-        .maxRetries(3),
+      new QueueConfig("jobs").group("workers").customDeadLetterQueue("_dlq.jobs").maxRetries(3),
     );
 
     assert.deepEqual(declare, {
@@ -781,10 +834,7 @@ test("default and blank groups normalize to ungrouped declarations and subscript
     let subscribe: SubscribeMsg | null = null;
     broker.onFrame = (f, s) => {
       if (f.opcode === Op.Hello) {
-        broker.send(
-          s,
-          buildFrame(Op.HelloOk, f.requestId, helloOk()),
-        );
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
       } else if (f.opcode === Op.Subscribe) {
         subscribe = decodeFrameBody<SubscribeMsg>(f);
         broker.send(
@@ -827,10 +877,7 @@ test("client subscribes and receives a delivery", async () => {
     let subId = 0n;
     broker.onFrame = (f, s) => {
       if (f.opcode === Op.Hello) {
-        broker.send(
-          s,
-          buildFrame(Op.HelloOk, f.requestId, helloOk()),
-        );
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
       } else if (f.opcode === Op.Subscribe) {
         const sub = decodeFrameBody<SubscribeMsg>(f);
         subId = 100n;
@@ -897,10 +944,7 @@ test("delivery accepts array-encoded byte payloads from Rust", async () => {
   try {
     broker.onFrame = (f, s) => {
       if (f.opcode === Op.Hello) {
-        broker.send(
-          s,
-          buildFrame(Op.HelloOk, f.requestId, helloOk()),
-        );
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
       } else if (f.opcode === Op.Subscribe) {
         const sub = decodeFrameBody<SubscribeMsg>(f);
         broker.send(
@@ -1227,10 +1271,7 @@ test("publish without confirm does not block on reply", async () => {
   try {
     broker.onFrame = (f, s) => {
       if (f.opcode === Op.Hello) {
-        broker.send(
-          s,
-          buildFrame(Op.HelloOk, f.requestId, helloOk()),
-        );
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
       }
       // Note: no PublishOk reply.
     };
@@ -1254,10 +1295,7 @@ test("client publishes delayed frame with headers and deadline", async () => {
     let delayed: PublishDelayedMsg | null = null;
     broker.onFrame = (f, s) => {
       if (f.opcode === Op.Hello) {
-        broker.send(
-          s,
-          buildFrame(Op.HelloOk, f.requestId, helloOk()),
-        );
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
       } else if (f.opcode === Op.PublishDelayed) {
         delayed = decodeFrameBody<PublishDelayedMsg>(f);
         broker.send(s, buildFrame(Op.PublishOk, f.requestId, { offset: 11n }));
@@ -1362,10 +1400,7 @@ test("delivery deserializes json by content-type", async () => {
   try {
     broker.onFrame = (f, s) => {
       if (f.opcode === Op.Hello) {
-        broker.send(
-          s,
-          buildFrame(Op.HelloOk, f.requestId, helloOk()),
-        );
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
       } else if (f.opcode === Op.Subscribe) {
         const sub = decodeFrameBody<SubscribeMsg>(f);
         broker.send(
@@ -1417,10 +1452,7 @@ test("manual message retryAfter sends delayed nack", async () => {
     let nack: NackMsg | null = null;
     broker.onFrame = (f, s) => {
       if (f.opcode === Op.Hello) {
-        broker.send(
-          s,
-          buildFrame(Op.HelloOk, f.requestId, helloOk()),
-        );
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
       } else if (f.opcode === Op.Subscribe) {
         const sub = decodeFrameBody<SubscribeMsg>(f);
         broker.send(
@@ -1557,10 +1589,7 @@ test("a confirmed publish follows an owner redirect to the new broker", async ()
     const offset = await client.publisher("orders").publishConfirmed({ hello: "world" });
     assert.equal(offset, 42n);
     // The redirect point-updated routing to the owner connection.
-    assert.equal(
-      client._topology().lookup("orders", 0, null)?.endpoint,
-      `127.0.0.1:${owner.port}`,
-    );
+    assert.equal(client._topology().lookup("orders", 0, null)?.endpoint, `127.0.0.1:${owner.port}`);
     assert.ok(owner.received.some((f) => f.opcode === Op.Publish));
     await client.shutdown();
   } finally {
@@ -1637,9 +1666,9 @@ test("partition key routes the publish to the hashed partition on the wire", asy
 
     const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
     await client.fetchTopology();
-    await client.publisher("orders").publishConfirmed(
-      NewMessage.json({ id: 1 }).partitionKey("entity-1"),
-    );
+    await client
+      .publisher("orders")
+      .publishConfirmed(NewMessage.json({ id: 1 }).partitionKey("entity-1"));
 
     assert.ok(published);
     const expected = Number(fnv1a(new TextEncoder().encode("entity-1")) % 4n);
@@ -1688,7 +1717,12 @@ test("owner restart: reconnect into a fresh session still reconciles subscriptio
           s,
           buildFrame(Op.ReconcileResult, f.requestId, {
             subscriptions: [
-              { client: clientSub, server: { ...clientSub, sub_id: 66n }, action: "keep", reason: "restored" },
+              {
+                client: clientSub,
+                server: { ...clientSub, sub_id: 66n },
+                action: "keep",
+                reason: "restored",
+              },
             ],
           }),
         );
@@ -1713,7 +1747,9 @@ test("owner restart: reconnect into a fresh session still reconciles subscriptio
 
     const client = await Client.connect(
       `127.0.0.1:${broker.port}`,
-      new ClientOptions({ superviseSubscriptions: false }).withReconnectReconcilePolicy("restore_client_subscriptions"),
+      new ClientOptions({ superviseSubscriptions: false }).withReconnectReconcilePolicy(
+        "restore_client_subscriptions",
+      ),
     );
     const sub = await client.subscribe("jobs").sub();
     const outcome = await client.reconnect();
@@ -2120,9 +2156,7 @@ test("buffered unconfirmed publishes all deliver in order", async () => {
     for (let i = 0; i < n; i++) {
       await pub.publish(NewMessage.raw(new Uint8Array([i & 0xff])));
     }
-    await waitUntil(
-      () => broker.received.filter((f) => f.opcode === Op.Publish).length >= n,
-    );
+    await waitUntil(() => broker.received.filter((f) => f.opcode === Op.Publish).length >= n);
     const payloads = broker.received
       .filter((f) => f.opcode === Op.Publish)
       .map((f) => Uint8Array.from(decodeFrameBody<PublishMsg>(f).payload));
