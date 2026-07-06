@@ -14,7 +14,7 @@ dashmap = "6.1"
 fastrand = "2"
 futures = "0.3"
 parking_lot = "0.12"
-rmp-serde = "1.3"
+rmp-serde = { version = "1.3", optional = true }
 rustls-native-certs = "0.8"
 rustls-pemfile = "2"
 serde = { version = "1.0", features = ["derive"] }
@@ -33,6 +33,11 @@ fibril-config = { path = "../config" }
 serde_json = "1.0"
 
 [features]
+default = ["msgpack"]
+# msgpack payload encode/decode via rmp-serde. On by default and the implicit
+# content type for plain published values. Turn it off (default-features = false)
+# to drop the rmp-serde dependency and encode payloads as JSON, raw bytes, or text.
+msgpack = ["dep:rmp-serde"]
 # Build the client net path against turmoil's simulated TCP via the fibril-util
 # net seam, so a client can run inside a turmoil Sim. Note: the high-level
 # connect() still resolves addresses via std DNS, which a sim's logical

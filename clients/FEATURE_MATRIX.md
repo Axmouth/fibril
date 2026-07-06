@@ -211,9 +211,14 @@ fans in across channels by a topic glob, driven by the cluster topology.
 14. Go has no async/await split: the client API is a set of ordinary blocking,
     goroutine-safe calls, and deliveries arrive on channels. So the "blocking"
     row is the native model and the "async" row is n/a rather than a gap.
-15. Text, JSON, and raw have builders (`Text`/`JSON`/`Raw`); `Msgpack` and
-    `Custom` tag already-encoded bytes with the content type, so the Go and C#
-    clients need no MessagePack serialization dependency.
+15. Text, JSON, and raw have builders (`Text`/`JSON`/`Raw`). Rust, TypeScript, and
+    Python also serialize a value straight to msgpack for you, and keep that encoder
+    optional so a build that only publishes JSON, text, or raw needs no msgpack
+    library: Rust behind the default-on `msgpack` Cargo feature, TypeScript as an
+    optional `@msgpack/msgpack` peer dependency, Python as the `msgpack` extra. Go
+    and C# never serialize msgpack for you. Their `Msgpack` and `Custom` builders
+    tag already-encoded bytes with the content type, so they need no MessagePack
+    dependency at all.
 16. Discovery is reached via a routing view (`Client.Routing()` in Go and
     `Client.Routing` in C#). `SubscribePattern` and `SubscribeStreamPattern` take
     an options struct/record rather than the fluent builder the other clients use,

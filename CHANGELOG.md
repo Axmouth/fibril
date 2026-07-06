@@ -42,6 +42,10 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 - Leaner Rust client dependencies. The wire codec moved into a standalone
   `fibril-wire` crate that `fibril-client` depends on directly, so depending on the
   client no longer pulls in the broker, storage, and coordination crates.
+- Optional msgpack in the Rust client. msgpack encode and decode now sit behind a
+  default-on `msgpack` Cargo feature, so `default-features = false` drops the
+  rmp-serde dependency for users who publish JSON, text, or raw bytes. This matches
+  the optional-msgpack the TypeScript and Python clients already offer.
 
 ### Fixed
 

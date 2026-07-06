@@ -540,6 +540,9 @@ impl Message {
     }
 
     /// Deserialize the payload as msgpack, ignoring content type metadata.
+    ///
+    /// Requires the `msgpack` feature (enabled by default).
+    #[cfg(feature = "msgpack")]
     pub fn msg_pack<T: DeserializeOwned>(&self) -> FibrilResult<T> {
         rmp_serde::from_slice(&self.payload)
             .map_err(|e| FibrilError::DeserializationFailure { msg: e.to_string() })
@@ -593,6 +596,9 @@ pub struct NewMessage {
 
 impl NewMessage {
     /// Encode a serializable value as msgpack and set `application/msgpack`.
+    ///
+    /// Requires the `msgpack` feature (enabled by default).
+    #[cfg(feature = "msgpack")]
     pub fn msg_pack<T: serde::Serialize>(payload: &T) -> FibrilResult<Self> {
         rmp_serde::to_vec(payload)
             .map(|payload| NewMessage::with_content_type(payload, "application/msgpack"))
@@ -689,8 +695,10 @@ impl NewMessage {
 
 /// Value that can be published by a [`Publisher`].
 ///
-/// [`NewMessage`] preserves its explicit payload and headers. Other
-/// serializable values are encoded with [`NewMessage::msg_pack`].
+/// [`NewMessage`] preserves its explicit payload and headers. With the `msgpack`
+/// feature (enabled by default) other serializable values are encoded with
+/// [`NewMessage::msg_pack`]. Without it, encode explicitly via
+/// [`NewMessage::json`], [`NewMessage::content`], or [`NewMessage::raw`].
 pub trait Publishable {
     /// Convert into a publishable message.
     fn into_message(self) -> FibrilResult<NewMessage>;
@@ -702,6 +710,7 @@ impl Publishable for NewMessage {
     }
 }
 
+#[cfg(feature = "msgpack")]
 impl<T: Serialize> Publishable for T {
     fn into_message(self) -> FibrilResult<NewMessage> {
         NewMessage::msg_pack(&self)
@@ -1088,8 +1097,13 @@ fn deserialize_by_content_type<T: DeserializeOwned>(
     {
         Some("application/json") => serde_json::from_slice(payload)
             .map_err(|e| FibrilError::DeserializationFailure { msg: e.to_string() }),
+        #[cfg(feature = "msgpack")]
         Some("application/msgpack") | None | Some("") => rmp_serde::from_slice(payload)
             .map_err(|e| FibrilError::DeserializationFailure { msg: e.to_string() }),
+        #[cfg(not(feature = "msgpack"))]
+        Some("application/msgpack") | None | Some("") => Err(FibrilError::DeserializationFailure {
+            msg: "msgpack payloads need the `msgpack` feature, which is not enabled".to_string(),
+        }),
         Some(other) => Err(FibrilError::DeserializationFailure {
             msg: format!("unsupported content-type `{other}`"),
         }),
