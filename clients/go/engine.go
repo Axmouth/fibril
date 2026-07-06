@@ -189,6 +189,9 @@ func startEngine(ctx context.Context, conn net.Conn, opts EngineOptions) (*Engin
 	}
 	hf, err := readFrame(br)
 	if err != nil {
+		if certErr := clientCertRequiredError(opts.TLS, err); certErr != nil {
+			return nil, certErr
+		}
 		return nil, &DisconnectionError{Message: "read HELLO reply: " + err.Error()}
 	}
 	switch hf.Opcode {

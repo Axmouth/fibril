@@ -32,7 +32,7 @@ Superscript numbers refer to the Notes under the tables.
 | Username/password auth | done | done | done | done | done |
 | TLS connect (OS roots / CA file / fingerprint pin) | done | done | done <sup>12</sup> | done | done |
 | Typed TLS error taxonomy (426 mismatch / trust / config) | done | done | done | done | done |
-| Client certificate (mTLS) + typed required-cert error | done | done | done <sup>13</sup> | done | done |
+| Client certificate (mTLS) + typed required-cert error | done | done | done <sup>13</sup> | done <sup>13</sup> | done |
 | Heartbeat ping/pong + timeout | done | done | done | done | done |
 | Typed wire parse errors | done | done <sup>1</sup> | done <sup>1</sup> | done <sup>1</sup> | done <sup>1</sup> |
 
@@ -201,9 +201,10 @@ fans in across channels by a topic glob, driven by the cluster topology.
 12. The Python fingerprint pin checks the whole presented chain on Python 3.13
     and later. Older Pythons only expose the leaf certificate to the check, so
     pin the server certificate there or trust the CA via ``ca_path``.
-13. asyncio flattens the broker's certificate-required TLS alert into a clean
-    EOF, so the Python client attributes a certless TLS connect that ends with
-    no HELLO reply to the certificate requirement.
+13. Under TLS 1.3 the broker's certificate-required alert arrives after the
+    handshake completes, and the runtime can flatten it to a clean EOF (asyncio in
+    Python, the TLS stack in Go), so the client attributes a certless TLS connect
+    that ends with no HELLO reply to the certificate requirement.
 14. Go has no async/await split: the client API is a set of ordinary blocking,
     goroutine-safe calls, and deliveries arrive on channels. So the "blocking"
     row is the native model and the "async" row is n/a rather than a gap.

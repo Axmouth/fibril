@@ -105,6 +105,15 @@ type TlsHandshakeError struct {
 
 func (e *TlsHandshakeError) Error() string { return e.Message }
 
+// TlsClientCertificateRequiredError means the broker requires a client
+// certificate (mTLS) but this client presented none. Set ClientCertFile and
+// ClientKeyFile in the TLS options to authenticate.
+type TlsClientCertificateRequiredError struct{}
+
+func (e *TlsClientCertificateRequiredError) Error() string {
+	return "the broker requires a client certificate (mTLS) but none was configured. Set ClientCertFile and ClientKeyFile in the TLS options"
+}
+
 // RedirectError means the broker told the client to retry this op against a
 // different owner. It is not a failure: the routing layer applies the target and
 // retries, so the per-connection engine surfaces it as this typed error.

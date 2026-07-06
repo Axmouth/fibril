@@ -142,3 +142,20 @@ func classifyTLSDialError(err error, addr string) error {
 	}
 	return &TlsHandshakeError{Message: "TLS handshake with " + addr + " failed: " + err.Error()}
 }
+
+// clientCertRequiredError attributes a HELLO-time TLS death to a missing client
+// certificate. Over TLS with no client cert configured, a broker that requires
+// one closes the connection with a certificate-required alert, which under TLS
+// 1.3 arrives after the handshake completes and can flatten to a bare EOF as the
+// client reads the HELLO reply. Returns nil when this does not apply, so the
+// caller keeps its original error.
+func clientCertRequiredError(tlsOpts *TLSOptions, err error) *TlsClientCertificateRequiredError {
+	if tlsOpts == nil || tlsOpts.ClientCertFile != "" || err == nil {
+		return nil
+	}
+	if strings.Contains(err.Error(), "certificate required") ||
+		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return &TlsClientCertificateRequiredError{}
+	}
+	return nil
+}
