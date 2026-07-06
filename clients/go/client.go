@@ -190,9 +190,32 @@ func Dial(ctx context.Context, addr string, opts ClientOptions) (*Client, error)
 // endpoint's reconcile registry so a reconnect restores its subscriptions.
 func (c *Client) engineOpts(endpoint string) EngineOptions {
 	o := c.opts.engineOptions()
-	o.OnTopologyUpdate = c.topo.applyPush
+	o.OnTopologyUpdate = c.applyTopologyPush
 	o.ReconcileRegistry = c.reconcileFor(endpoint)
 	return o
+}
+
+// applyTopologyPush applies a broker-pushed snapshot and prunes the pool to the
+// new owner set, returning the generation the client now reflects (for the ack).
+func (c *Client) applyTopologyPush(topo TopologyOk) uint64 {
+	gen := c.topo.applyPush(topo)
+	c.prunePool()
+	return gen
+}
+
+// prunePool drops and shuts down pooled connections to endpoints that no longer
+// own any partition, so a failed-over owner's stale connection does not linger.
+// A full topology view (fetch or push) is authoritative about the live owner set.
+func (c *Client) prunePool() {
+	live := c.topo.endpoints()
+	c.poolMu.Lock()
+	for endpoint, e := range c.pool {
+		if !live[endpoint] {
+			e.Shutdown()
+			delete(c.pool, endpoint)
+		}
+	}
+	c.poolMu.Unlock()
 }
 
 // newClientWith builds a client around an already-connected bootstrap engine,
@@ -317,6 +340,18 @@ func (t *topologyCache) applyPush(topo TopologyOk) uint64 {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return t.generation
+}
+
+// endpoints returns the set of endpoints that currently own at least one
+// partition. The pool uses it to drop connections to owners that have gone away.
+func (t *topologyCache) endpoints() map[string]bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	live := make(map[string]bool, len(t.owners))
+	for _, ep := range t.owners {
+		live[ep] = true
+	}
+	return live
 }
 
 func (t *topologyCache) applyRedirect(rd Redirect) {
@@ -649,6 +684,7 @@ func (c *Client) FetchTopology(ctx context.Context, req TopologyRequest) (Topolo
 		topo, err := eng.FetchTopology(ctx, req)
 		if err == nil {
 			c.topo.replace(topo)
+			c.prunePool()
 			return topo, nil
 		}
 		if !isTransient(err) {
