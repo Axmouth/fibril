@@ -8,12 +8,15 @@ Run a broker on 127.0.0.1:9876, then:
 from __future__ import annotations
 
 import asyncio
+import os
 
-from fibril import Client, NewMessage
+from fibril import ClientOptions, NewMessage
 
 
 async def main() -> None:
-    async with await Client.connect("127.0.0.1:9876") as client:
+    addr = os.environ.get("FIBRIL_ADDR", "127.0.0.1:9876")
+    opts = ClientOptions().with_auth("fibril", "fibril")
+    async with await opts.connect(addr) as client:
         publisher = client.publisher("jobs")
 
         # Fire-and-forget (msgpack-encoded by default).
