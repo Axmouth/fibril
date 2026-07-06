@@ -300,6 +300,56 @@ async def test_applies_pushed_topology_update_and_acks(broker: FakeBroker) -> No
         await client.shutdown()
 
 
+async def test_ignores_stale_topology_push_but_acks_current(broker: FakeBroker) -> None:
+    from fibril.codec import build_frame
+    from fibril.frames import encode_body
+    from fibril.protocol import Op
+
+    # A newer generation the client adopts.
+    broker.push_topology_on_hello = wire.TopologyOk(
+        generation=7,
+        queues=[
+            wire.QueueTopologyEntry(
+                "jobs", 0, None, [wire.AdvertisedAddress("127.0.0.1", 7123)], 1, 1
+            )
+        ],
+    )
+    client = await _connect(broker)
+    try:
+        for _ in range(100):
+            if client._topology.generation == 7:
+                break
+            await asyncio.sleep(0.01)
+        assert client._topology.generation == 7
+
+        # A stale push (older generation) naming a different owner must be ignored, so
+        # a late duplicate from a bounced broker cannot rewind routing. The client
+        # still acks the generation it currently reflects so the broker can fence.
+        stale = wire.TopologyOk(
+            generation=5,
+            queues=[
+                wire.QueueTopologyEntry(
+                    "jobs", 0, None, [wire.AdvertisedAddress("127.0.0.1", 7999)], 1, 1
+                )
+            ],
+        )
+        await broker.push(build_frame(Op.TOPOLOGY_UPDATE, 0, encode_body(Op.TOPOLOGY_UPDATE, stale)))
+
+        for _ in range(100):
+            if len(broker.topology_acks) >= 2:
+                break
+            await asyncio.sleep(0.01)
+        # Routing still reflects generation 7 and its owner (the stale push was ignored).
+        assert client._topology.generation == 7
+        owner = client._topology.lookup("jobs", 0, None)
+        assert owner is not None
+        assert owner.endpoint == "127.0.0.1:7123"
+        # The ack carried the current generation (7), not the stale 5.
+        assert broker.topology_acks[-1].generation == 7
+    finally:
+        await client.shutdown()
+
+
 async def test_catalogue_reflects_pushed_topology(broker: FakeBroker) -> None:
     broker.push_topology_on_hello = wire.TopologyOk(
         generation=7,
@@ -380,6 +430,26 @@ def test_write_coalescing_knobs_thread_to_engine() -> None:
     for bad in (dict(max_bytes=0), dict(max_frames=0), dict(window_ms=-1)):
         with pytest.raises(ValueError):
             ClientOptions().with_write_coalescing(**bad)  # type: ignore[arg-type]
+
+
+def test_publish_timeout_defaults_on_and_is_configurable() -> None:
+    assert ClientOptions().publish_timeout_ms == 30_000
+    # Zero disables the bound; any positive value overrides the default.
+    assert ClientOptions(publish_timeout_ms=0).publish_timeout_ms == 0
+    assert ClientOptions(publish_timeout_ms=5_000).publish_timeout_ms == 5_000
+
+
+def test_user_headers_cannot_set_reserved_namespaces() -> None:
+    from fibril.errors import FibrilError
+
+    # A normal user header is kept.
+    assert NewMessage.raw(b"x").header("trace-id", "abc").headers["trace-id"] == "abc"
+
+    # The fibril.* and stroma.* namespaces are reserved for broker-stamped headers,
+    # so a user header in them is rejected rather than allowed to spoof one.
+    for reserved in ("fibril.client.producer_id", "fibril.retries", "stroma.dlq.source_topic"):
+        with pytest.raises(FibrilError):
+            NewMessage.raw(b"x").header(reserved, "evil")
 
 
 async def test_nonretryable_close_surfaces_without_reconnect(broker: FakeBroker) -> None:
