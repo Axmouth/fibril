@@ -167,6 +167,52 @@ async def test_fan_in_over_two_partitions(broker: FakeBroker) -> None:
         await client.shutdown()
 
 
+def test_prune_pool_drops_failed_over_owner() -> None:
+    from fibril.client import _prune_pool_to_topology
+    from fibril.internal.topology import TopologyCache
+
+    class _StubConn:
+        def __init__(self) -> None:
+            self.shutdown_called = False
+
+        def shutdown(self) -> None:
+            self.shutdown_called = True
+
+    cache = TopologyCache()
+    cache.replace(
+        wire.TopologyOk(
+            generation=1,
+            queues=[
+                wire.QueueTopologyEntry(
+                    "jobs", 0, None, [wire.AdvertisedAddress("127.0.0.1", 7001)], 1, 1
+                )
+            ],
+        )
+    )
+    conn = _StubConn()
+    pool = {"127.0.0.1:7001": conn}
+    # 7001 still owns partition 0, so its pooled connection is kept.
+    _prune_pool_to_topology(cache, pool)  # type: ignore[arg-type]
+    assert "127.0.0.1:7001" in pool
+    assert not conn.shutdown_called
+
+    # Failover: a refresh shows partition 0 now owned by a different broker. 7001
+    # owns nothing, so its pooled connection is pruned and shut down.
+    cache.replace(
+        wire.TopologyOk(
+            generation=2,
+            queues=[
+                wire.QueueTopologyEntry(
+                    "jobs", 0, None, [wire.AdvertisedAddress("127.0.0.1", 7002)], 1, 1
+                )
+            ],
+        )
+    )
+    _prune_pool_to_topology(cache, pool)  # type: ignore[arg-type]
+    assert "127.0.0.1:7001" not in pool
+    assert conn.shutdown_called
+
+
 async def test_fan_in_picks_up_grown_partition(broker: FakeBroker) -> None:
     owners = [wire.AdvertisedAddress(broker.host, broker.port)]
     # Start with a single partition; the fan-in subscribes it.
