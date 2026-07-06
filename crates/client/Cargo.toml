@@ -2,6 +2,9 @@
 name = "fibril-client"
 version.workspace = true
 edition = "2024"
+description = "Async Rust client for the Fibril message broker, with cluster routing, reconnect, and reliable publish"
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 fibril-wire = { path = "../wire" }

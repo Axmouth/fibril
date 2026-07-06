@@ -2,6 +2,9 @@
 name = "fibril-protocol"
 version.workspace = true
 edition = "2024"
+description = "Fibril broker-side protocol: connection handling and replication over the fibril-wire vocabulary"
+license.workspace = true
+repository.workspace = true
 autobenches = false
 
 [[bin]]

@@ -21,10 +21,12 @@ members = [
 resolver = "3"
 
 # All crates in this repo share one version and move in lockstep, inheriting it
-# via `version.workspace = true`. Ganglion and Keratin are separate repos that
-# carry their own version lines.
+# via `version.workspace = true`, and share one license and repository the same
+# way. Ganglion and Keratin are separate repos that carry their own version lines.
 [workspace.package]
 version = "0.4.0"
+license = "MIT"
+repository = "https://github.com/Axmouth/fibril"
 
 [workspace.metadata.sovereignty]
 ai-training = "prohibited"

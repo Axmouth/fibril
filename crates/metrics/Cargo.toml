@@ -2,6 +2,9 @@
 name = "fibril-metrics"
 version.workspace = true
 edition = "2024"
+description = "Fibril metrics and Prometheus exporter"
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 fibril-util = { path = "../util" }

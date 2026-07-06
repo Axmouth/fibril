@@ -2,6 +2,9 @@
 name = "fibril-broker"
 version.workspace = true
 edition = "2024"
+description = "Fibril broker core runtime: queue state, partitioning, cohorts, and replication"
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 fibril-metrics = { path = "../metrics" }

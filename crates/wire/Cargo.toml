@@ -2,9 +2,9 @@
 name = "fibril-wire"
 version.workspace = true
 edition = "2024"
-description = "Fibril v1 wire protocol: message types and the byte-exact frame/body codec."
-license = "MIT"
-repository = "https://github.com/Axmouth/fibril"
+description = "Fibril v1 wire protocol: message types and the byte-exact frame and body codec"
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 fibril-common = { path = "../common" }

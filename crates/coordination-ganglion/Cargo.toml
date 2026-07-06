@@ -2,7 +2,9 @@
 name = "fibril-coordination-ganglion"
 version.workspace = true
 edition = "2021"
-description = "Spike: ganglion raft-backed implementation of fibril's Coordination trait"
+description = "Ganglion raft-backed implementation of Fibril's Coordination trait"
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 fibril-broker = { path = "../broker" }

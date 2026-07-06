@@ -2,6 +2,9 @@
 name = "fibril-tls"
 version.workspace = true
 edition = "2024"
+description = "TLS configuration and certificate handling for Fibril, covering server, inter-broker, and mutual TLS"
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 fibril-config = { path = "../config" }

@@ -2,6 +2,9 @@
 name = "fibril-util"
 version.workspace = true
 edition = "2024"
+description = "Shared utilities for Fibril, including the pluggable network seam for deterministic simulation"
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 async-trait = "0.1"

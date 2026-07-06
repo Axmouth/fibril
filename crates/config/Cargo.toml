@@ -2,6 +2,9 @@
 name = "fibril-config"
 version.workspace = true
 edition = "2024"
+description = "Startup configuration for the Fibril broker"
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }

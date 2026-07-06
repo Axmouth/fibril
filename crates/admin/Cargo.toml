@@ -2,6 +2,9 @@
 name = "fibril-admin"
 version.workspace = true
 edition = "2024"
+description = "Fibril admin board: HTTP API and web UI for cluster operations"
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 fibril-broker = { path = "../broker" }

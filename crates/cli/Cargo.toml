@@ -2,6 +2,9 @@
 name = "fibril-cli"
 version.workspace = true
 edition = "2024"
+description = "Command-line tools for Fibril, including fibrilctl"
+license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "fibrilctl"

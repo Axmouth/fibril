@@ -2,6 +2,9 @@
 name = "fibril-common"
 version.workspace = true
 edition = "2024"
+description = "Core shared types for Fibril, such as the delivery-tag newtype"
+license.workspace = true
+repository.workspace = true
 
 # Dependency-light home for value types that originate at the fibril (broker)
 # layer and above — e.g. DeliveryTag. Engine-layer types (Partition, Offset,

@@ -2,6 +2,10 @@
 name = "fibril-compat-fixture-gen"
 version.workspace = true
 edition = "2024"
+description = "Generator for Fibril's shared cross-client conformance fixtures"
+license.workspace = true
+repository.workspace = true
+publish = false
 
 # Drives a running broker through a fixed sequence of durable operations so a
 # released version's on-disk data dir can be captured as a storage back-compat

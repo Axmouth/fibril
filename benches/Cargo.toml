@@ -2,6 +2,10 @@
 name = "fibril-benches"
 version.workspace = true
 edition = "2024"
+description = "Benchmarks for Fibril"
+license.workspace = true
+repository.workspace = true
+publish = false
 
 [[bin]]
 name = "bench-e2e"

@@ -2,6 +2,9 @@
 name = "fibril"
 version.workspace = true
 edition = "2024"
+description = "The Fibril message broker server binary and embedding library"
+license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "fibril-server"

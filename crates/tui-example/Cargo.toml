@@ -2,6 +2,10 @@
 name = "fibril-tui-example"
 version.workspace = true
 edition = "2024"
+description = "Terminal UI demo for Fibril"
+license.workspace = true
+repository.workspace = true
+publish = false
 
 [dependencies]
 fibril-broker = { path = "../broker" }
