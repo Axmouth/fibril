@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 fibril-broker = { path = "../broker" }
 fibril-protocol = { path = "../protocol" }
-fibril-storage = { path = "../storage" }
 fibril-metrics = { path = "../metrics" }
 fibril-util = { path = "../util" }
 askama = { version = "0.15" }

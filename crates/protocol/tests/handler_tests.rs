@@ -7,6 +7,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use fibril_broker::storage::Partition;
 use fibril_broker::{
     broker::{
         Broker, BrokerConfig, BrokerOwnerReplicationPeer, BrokerOwnerReplicationPeerResolver,
@@ -51,7 +52,6 @@ use fibril_protocol::v1::{
     },
     wire,
 };
-use fibril_storage::Partition;
 use fibril_util::{StaticAuthHandler, unix_millis};
 use futures::{SinkExt, StreamExt};
 use stroma_core::{KeratinConfig, SnapshotConfig, StromaEvent, StromaKeratinConfig, TempDir};

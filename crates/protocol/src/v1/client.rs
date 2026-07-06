@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fibril_storage::Partition;
+use fibril_broker::Partition;
 use fibril_util::unix_millis;
 use futures::{SinkExt, StreamExt};
 

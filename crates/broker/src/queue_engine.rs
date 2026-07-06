@@ -1,8 +1,8 @@
 use std::{collections::HashMap, path::Path, sync::Arc};
 
+use crate::storage::Offset;
 use async_trait::async_trait;
 use fibril_metrics::QueuesStateSnapshot;
-use fibril_storage::Offset;
 use fibril_util::{UnixMillis, unix_millis};
 use std::collections::HashSet;
 use stroma_core::{

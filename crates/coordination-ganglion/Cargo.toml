@@ -6,7 +6,6 @@ description = "Spike: ganglion raft-backed implementation of fibril's Coordinati
 
 [dependencies]
 fibril-broker = { path = "../broker" }
-fibril-storage = { path = "../storage" }
 ganglion-core = { git = "https://github.com/Axmouth/ganglion.git", branch = "main" }
 ganglion-openraft = { git = "https://github.com/Axmouth/ganglion.git", branch = "main", features = ["openraft"] }
 tokio = { version = "1", default-features = false, features = ["rt", "sync", "macros", "time"] }

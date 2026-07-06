@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use fibril_storage::{DeliveryTag, Offset, Partition};
+use crate::storage::{DeliveryTag, Offset, Partition};
 use hashbrown::HashMap;
 use stroma_core::{KeratinConfig, SnapshotConfig, StromaKeratinConfig, TempDir};
 use uuid::Uuid;

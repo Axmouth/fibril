@@ -26,7 +26,6 @@ path = "bin/bench_stream.rs"
 [dependencies]
 fibril-broker = { path = "../crates/broker" }
 fibril-client = { path = "../crates/client" }
-fibril-storage = { path = "../crates/storage" }
 fibril-metrics = { path = "../crates/metrics" }
 fibril-util = { path = "../crates/util" }
 anyhow = "1.0"

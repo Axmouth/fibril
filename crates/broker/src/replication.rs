@@ -15,7 +15,7 @@ use futures::future::BoxFuture;
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 use tokio_util::sync::CancellationToken;
 
-use fibril_storage::{Offset, Partition};
+use crate::storage::{Offset, Partition};
 use stroma_core::{Message, OwnerReplicationRead, StromaEvent};
 
 use crate::broker::{Broker, BrokerConfig, BrokerError, FOLLOWER_STREAM_BUFFER_BATCHES, QueueKey};

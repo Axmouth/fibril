@@ -34,6 +34,7 @@ use fibril_broker::coordination::{
     ReplicationDurabilityPolicy, StaticCoordination, StreamIdentity,
 };
 use fibril_broker::queue_engine::StromaEngine;
+use fibril_broker::storage::Partition;
 use fibril_coordination_ganglion::GanglionCoordination;
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_protocol::v1::frame::ProtoCodec;
@@ -47,7 +48,6 @@ use fibril_protocol::v1::{
     AdvertisedAddress, Hello, HelloOk, Op, PROTOCOL_V1, QueueTopologyEntry, TopologyOk,
     TopologyUpdateAck,
 };
-use fibril_storage::Partition;
 use fibril_util::{StaticAuthHandler, unix_millis};
 use futures::{SinkExt, StreamExt};
 use std::time::Instant;

@@ -18,7 +18,7 @@ use fibril_broker::coordination::{
     ReplicationDurabilityPolicy, StreamAssignment, StreamIdentity, StreamPlacementInput,
     StreamPlacementPolicy,
 };
-use fibril_storage::Partition;
+use fibril_broker::Partition;
 use ganglion_openraft::{
     client_write_remote_with_hint, MetadataRaftCommand, MetadataRaftResponse, MetadataRejection,
     OpenraftAdapterError, RaftMetadataNode, RemoteWriteError, WireFormat,
@@ -564,7 +564,7 @@ impl std::error::Error for RepartitionQueueError {}
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ClientQueueTopology {
     pub topic: String,
-    pub partition: fibril_storage::Partition,
+    pub partition: fibril_broker::Partition,
     pub group: Option<String>,
     pub owner_node_id: String,
     /// Broker endpoints of the owner in priority order, empty when the node is
@@ -582,7 +582,7 @@ pub struct ClientQueueTopology {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ClientStreamTopology {
     pub topic: String,
-    pub partition: fibril_storage::Partition,
+    pub partition: fibril_broker::Partition,
     pub owner_node_id: String,
     /// Broker endpoints of the owner in priority order, empty when the node is
     /// not in the registry. Clients try them in order.
@@ -1684,7 +1684,7 @@ impl GanglionCoordination {
         .map_err(RepartitionQueueError::Coordination)?;
         // 2. Register the new partitions so the controller places owners.
         for partition in n_old..new_count {
-            let queue = QueueIdentity::new(topic, fibril_storage::Partition::new(partition), group);
+            let queue = QueueIdentity::new(topic, fibril_broker::Partition::new(partition), group);
             self.register_queue(&queue)
                 .await
                 .map_err(RepartitionQueueError::Coordination)?;
@@ -2708,7 +2708,7 @@ impl fibril_broker::broker::QueueOwnership for GanglionCoordination {
     fn owns_queue(
         &self,
         topic: &str,
-        partition: fibril_storage::Partition,
+        partition: fibril_broker::Partition,
         group: Option<&str>,
     ) -> bool {
         Coordination::owns_queue(self, topic, partition, group)
@@ -2719,7 +2719,7 @@ impl fibril_broker::broker::QueueOwnership for GanglionCoordination {
 /// partitions the committed snapshot assigns to it, and reads declared config
 /// from coordination so it can open a partition it did not declare.
 impl fibril_broker::broker::StreamOwnership for GanglionCoordination {
-    fn owns_stream(&self, topic: &str, partition: fibril_storage::Partition) -> bool {
+    fn owns_stream(&self, topic: &str, partition: fibril_broker::Partition) -> bool {
         self.tx
             .borrow()
             .stream_assignment_for(topic, partition)

@@ -1,13 +1,13 @@
 use std::{collections::HashMap, hint::black_box};
 
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
+use fibril_broker::storage::Partition;
 use fibril_protocol::v1::{
     ContentType, Op, Publish, ReplicationEventRead, ReplicationEventRecord, ReplicationMessageRead,
     ReplicationMessageRecord, ReplicationReadOk,
     helper::{try_decode, try_encode},
     wire,
 };
-use fibril_storage::Partition;
 
 fn publish_frame(
     payload_size: usize,

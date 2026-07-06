@@ -16,6 +16,7 @@ use crate::v1::{
     *,
 };
 use arc_swap::ArcSwap;
+use fibril_broker::{Group, Partition, Topic};
 use fibril_broker::{
     broker::{
         Broker, BrokerError, BrokerFollowerReplicationApply, BrokerOwnerReplicationRecords,
@@ -34,7 +35,6 @@ use fibril_broker::{
     },
 };
 use fibril_metrics::{ConnectionStats, TcpStats};
-use fibril_storage::{Group, Partition, Topic};
 use fibril_util::net::{TcpListener, TcpStream};
 use fibril_util::sniff::{
     PrefixedStream, looks_like_plaintext_frame, looks_like_tls_client_hello, sniff_first_bytes,

@@ -12,7 +12,6 @@ fibril-admin = { path = "../admin" }
 fibril-broker = { path = "../broker" }
 fibril-config = { path = "../config" }
 fibril-protocol = { path = "../protocol" }
-fibril-storage = { path = "../storage" }
 fibril-metrics = { path = "../metrics" }
 fibril-tls = { path = "../tls" }
 fibril-util = { path = "../util" }

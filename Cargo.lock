@@ -1211,7 +1211,6 @@ dependencies = [
  "fibril-coordination-ganglion",
  "fibril-metrics",
  "fibril-protocol",
- "fibril-storage",
  "fibril-tls",
  "fibril-util",
  "futures",
@@ -1245,7 +1244,6 @@ dependencies = [
  "fibril-broker",
  "fibril-metrics",
  "fibril-protocol",
- "fibril-storage",
  "fibril-util",
  "futures",
  "http",
@@ -1280,7 +1278,6 @@ dependencies = [
  "fibril-broker",
  "fibril-client",
  "fibril-metrics",
- "fibril-storage",
  "fibril-util",
  "futures",
  "mimalloc",
@@ -1306,14 +1303,15 @@ dependencies = [
  "crossbeam",
  "dashmap",
  "fastrand",
+ "fibril-common",
  "fibril-metrics",
- "fibril-storage",
  "fibril-util",
  "futures",
  "hashbrown 0.17.1",
  "rmp-serde",
  "serde",
  "serde_json",
+ "stroma-common",
  "stroma-core",
  "thiserror 2.0.18",
  "tokio",
@@ -1397,7 +1395,6 @@ name = "fibril-coordination-ganglion"
 version = "0.4.0"
 dependencies = [
  "fibril-broker",
- "fibril-storage",
  "ganglion-core",
  "ganglion-openraft",
  "serde",
@@ -1440,7 +1437,6 @@ dependencies = [
  "fibril-broker",
  "fibril-coordination-ganglion",
  "fibril-metrics",
- "fibril-storage",
  "fibril-tls",
  "fibril-util",
  "fibril-wire",
@@ -1458,25 +1454,6 @@ dependencies = [
  "tracing",
  "turmoil",
  "uuid",
-]
-
-[[package]]
-name = "fibril-storage"
-version = "0.4.0"
-dependencies = [
- "async-trait",
- "bytes",
- "dashmap",
- "fibril-common",
- "fibril-metrics",
- "fibril-util",
- "serde",
- "stroma-common",
- "stroma-core",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "walkdir",
 ]
 
 [[package]]
@@ -1506,7 +1483,6 @@ dependencies = [
  "fastrand",
  "fibril-broker",
  "fibril-protocol",
- "fibril-storage",
  "fibril-util",
  "futures",
  "ratatui",

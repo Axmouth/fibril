@@ -7,9 +7,9 @@ pub use stroma_core::{
 
 // Shared value types live in dependency-light crates: engine-layer concepts
 // (Partition, Topic, Group) in `stroma-common`, fibril-layer concepts
-// (DeliveryTag) in `fibril-common`. Re-exported here so existing
-// `fibril_storage::{Partition, ...}` paths keep working. `Offset` stays a `u64`
-// alias for now (its newtype adoption is the phase after Partition).
+// (DeliveryTag) in `fibril-common`. Re-exported here so the broker names them off
+// a single storage module. `Offset` stays a `u64` alias for now (its newtype
+// adoption is the phase after Partition).
 pub use fibril_common::DeliveryTag;
 pub use stroma_common::{Group, Partition, Topic};
 

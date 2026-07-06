@@ -8,6 +8,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use fibril_broker::storage::{DeliverableMessage, Offset, Partition};
 use fibril_broker::{
     CompletionPair,
     broker::{
@@ -36,7 +37,6 @@ use fibril_broker::{
     test_util::TestState,
 };
 use fibril_metrics::{Metrics, QueuesStateSnapshot};
-use fibril_storage::{DeliverableMessage, Offset, Partition};
 use fibril_util::unix_millis;
 use futures::future::BoxFuture;
 use hashbrown::HashSet;
@@ -4427,7 +4427,7 @@ impl BrokerOwnerReplicationPeer for EmptyOwnerPeer {
     fn read_owner_replication_records<'a>(
         &'a self,
         _topic: &'a str,
-        _partition: fibril_storage::Partition,
+        _partition: fibril_broker::storage::Partition,
         _group: Option<&'a str>,
         message_from: Offset,
         event_from: Offset,
@@ -4457,7 +4457,7 @@ impl BrokerOwnerReplicationPeer for EmptyOwnerPeer {
     fn export_owner_state_checkpoint<'a>(
         &'a self,
         _topic: &'a str,
-        _partition: fibril_storage::Partition,
+        _partition: fibril_broker::storage::Partition,
         _group: Option<&'a str>,
     ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
         Box::pin(async {
@@ -4495,7 +4495,7 @@ impl BrokerOwnerReplicationPeer for NotOwnerPeer {
     fn read_owner_replication_records<'a>(
         &'a self,
         topic: &'a str,
-        partition: fibril_storage::Partition,
+        partition: fibril_broker::storage::Partition,
         group: Option<&'a str>,
         _message_from: Offset,
         _event_from: Offset,
@@ -4516,7 +4516,7 @@ impl BrokerOwnerReplicationPeer for NotOwnerPeer {
     fn export_owner_state_checkpoint<'a>(
         &'a self,
         _topic: &'a str,
-        _partition: fibril_storage::Partition,
+        _partition: fibril_broker::storage::Partition,
         _group: Option<&'a str>,
     ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
         Box::pin(async {
@@ -4566,7 +4566,7 @@ impl BrokerOwnerReplicationPeer for CountingEmptyOwnerPeer {
     fn read_owner_replication_records<'a>(
         &'a self,
         _topic: &'a str,
-        _partition: fibril_storage::Partition,
+        _partition: fibril_broker::storage::Partition,
         _group: Option<&'a str>,
         message_from: Offset,
         event_from: Offset,
@@ -4602,7 +4602,7 @@ impl BrokerOwnerReplicationPeer for CountingEmptyOwnerPeer {
     fn export_owner_state_checkpoint<'a>(
         &'a self,
         _topic: &'a str,
-        _partition: fibril_storage::Partition,
+        _partition: fibril_broker::storage::Partition,
         _group: Option<&'a str>,
     ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
         Box::pin(async {
@@ -4638,7 +4638,7 @@ impl BrokerOwnerReplicationPeer for BlockingOwnerPeer {
     fn read_owner_replication_records<'a>(
         &'a self,
         _topic: &'a str,
-        _partition: fibril_storage::Partition,
+        _partition: fibril_broker::storage::Partition,
         _group: Option<&'a str>,
         _message_from: Offset,
         _event_from: Offset,
@@ -4655,7 +4655,7 @@ impl BrokerOwnerReplicationPeer for BlockingOwnerPeer {
     fn export_owner_state_checkpoint<'a>(
         &'a self,
         _topic: &'a str,
-        _partition: fibril_storage::Partition,
+        _partition: fibril_broker::storage::Partition,
         _group: Option<&'a str>,
     ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
         Box::pin(std::future::pending())

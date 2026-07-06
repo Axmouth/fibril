@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use fibril_broker::broker::{Broker, BrokerConfig, ConsumerConfig, SettleRequest, SettleType};
 use fibril_broker::queue_engine::StromaEngine;
-use fibril_storage::Partition;
+use fibril_broker::storage::Partition;
 use fibril_util::unix_millis;
 use stroma_core::{KeratinConfig, SnapshotConfig, StromaKeratinConfig, TempDir, test_dir};
 use uuid::Uuid;

@@ -4,10 +4,11 @@ version.workspace = true
 edition = "2024"
 
 [dependencies]
-fibril-storage = { path = "../storage" }
 fibril-metrics = { path = "../metrics" }
+fibril-common = { path = "../common" }
 fibril-util = { path = "../util" }
 stroma-core = { git = "https://github.com/Axmouth/keratin.git", branch = "main" }
+stroma-common = { git = "https://github.com/Axmouth/keratin.git", branch = "main" }
 anyhow = "1.0"
 arc-swap = "1.9"
 async-trait = "0.1"

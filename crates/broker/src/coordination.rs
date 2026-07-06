@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use fibril_storage::{Group, Partition, Topic};
+use crate::storage::{Group, Partition, Topic};
 use tokio::sync::watch;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

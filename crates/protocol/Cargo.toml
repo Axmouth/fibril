@@ -15,7 +15,6 @@ harness = false
 [dependencies]
 fibril-wire = { path = "../wire" }
 fibril-broker = { path = "../broker" }
-fibril-storage = { path = "../storage" }
 fibril-metrics = { path = "../metrics" }
 fibril-util = { path = "../util" }
 anyhow = "1.0"

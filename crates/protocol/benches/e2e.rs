@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
+use fibril_broker::storage::{DeliveryTag, Partition};
 use fibril_protocol::v1::{
     Ack, Auth, Deliver, Hello, Op, PROTOCOL_V1, Publish, Subscribe,
     frame::ProtoCodec,
     helper::{try_decode, try_encode},
 };
-use fibril_storage::{DeliveryTag, Partition};
 use fibril_util::unix_millis;
 use futures::{SinkExt, StreamExt};
 use tokio::{net::TcpStream, sync::oneshot, time::Instant};

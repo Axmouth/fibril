@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 fibril-broker = { path = "../broker" }
 fibril-protocol = { path = "../protocol" }
-fibril-storage = { path = "../storage" }
 fibril-util = { path = "../util" }
 ratatui = "0.30"
 crossterm = "0.29"

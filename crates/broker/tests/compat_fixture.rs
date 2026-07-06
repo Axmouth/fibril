@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use fibril_broker::broker::{Broker, BrokerConfig, ConsumerConfig};
 use fibril_broker::queue_engine::{QueueEngine, StreamStore, StromaEngine};
-use fibril_storage::Partition;
+use fibril_broker::storage::Partition;
 use stroma_core::{KeratinConfig, SnapshotConfig, StromaKeratinConfig, TempDir, test_dir};
 use uuid::Uuid;
 

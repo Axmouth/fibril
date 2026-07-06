@@ -20,8 +20,8 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 
+use crate::storage::Offset;
 use arc_swap::ArcSwap;
-use fibril_storage::Offset;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::broker::BrokerConfig;

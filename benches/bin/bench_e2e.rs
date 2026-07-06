@@ -7,6 +7,7 @@ use std::{
     time::Instant,
 };
 
+use fibril_broker::DeliveryTag;
 use fibril_broker::broker::{ConsumerConfig, SettleRequest};
 use fibril_broker::{
     Partition,
@@ -18,7 +19,6 @@ use fibril_broker::{
     queue_engine::StromaEngine,
 };
 use fibril_metrics::{Metrics, MetricsConfig};
-use fibril_storage::DeliveryTag;
 
 use clap::{Parser, ValueEnum};
 use fibril_util::{init_tracing, unix_millis};

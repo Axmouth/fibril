@@ -14,7 +14,7 @@ use futures::FutureExt;
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, Notify, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use fibril_storage::{
+use crate::storage::{
     DeliverableMessage, DeliveryTag, Group, Offset, Partition, StorageError, StoredMessage, Topic,
 };
 use fibril_util::unix_millis;
