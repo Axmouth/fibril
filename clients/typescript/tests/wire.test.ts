@@ -217,7 +217,14 @@ test("ack and nack bodies round-trip", () => {
   };
   assert.deepEqual(decodeNackBody(encodeNackBody(nackRequeue)), nackRequeue);
 
-  const nackPlain = { topic: "t", group: null, partition: 0, tags: [], requeue: false, notBefore: null };
+  const nackPlain = {
+    topic: "t",
+    group: null,
+    partition: 0,
+    tags: [],
+    requeue: false,
+    notBefore: null,
+  };
   assert.deepEqual(decodeNackBody(encodeNackBody(nackPlain)), nackPlain);
 });
 
@@ -321,8 +328,18 @@ test("reconcile client/server bodies round-trip", () => {
 test("reconcile result body round-trips across actions", () => {
   const rr = {
     subscriptions: [
-      { client: reconcileSub(1n), server: reconcileSub(2n), action: "keep" as const, reason: "matched" },
-      { client: reconcileSub(3n), server: null, action: "close_client_side" as const, reason: "server_missing" },
+      {
+        client: reconcileSub(1n),
+        server: reconcileSub(2n),
+        action: "keep" as const,
+        reason: "matched",
+      },
+      {
+        client: reconcileSub(3n),
+        server: null,
+        action: "close_client_side" as const,
+        reason: "server_missing",
+      },
     ],
   };
   assert.deepEqual(decodeReconcileResultBody(encodeReconcileResultBody(rr)), rr);
@@ -452,6 +469,8 @@ import {
   type TopologyOk,
 } from "../src/wire.js";
 
+import * as wireModule from "../src/wire.js";
+
 const toHex = (b: Uint8Array): string =>
   Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
 
@@ -463,6 +482,68 @@ const VECTORS: Record<string, string> = JSON.parse(
     "utf-8",
   ),
 );
+
+const fromHex = (hex: string): Uint8Array =>
+  new Uint8Array((hex.match(/../g) ?? []).map((b) => parseInt(b, 16)));
+
+// Maps every shared vector name to the body op whose codec produces it, so the
+// conformance test below is data-driven over the whole fixture. A new vector with
+// no entry here fails the guard, forcing a matching TS codec case.
+const CODEC_OP: Record<string, string> = {
+  ack: "Ack",
+  assignment: "AssignmentChanged",
+  auth: "Auth",
+  declare: "DeclareQueue",
+  declare_min: "DeclareQueue",
+  declare_ok: "DeclareQueueOk",
+  declare_plexus: "DeclarePlexus",
+  declare_plexus_min: "DeclarePlexus",
+  declare_plexus_ok: "DeclarePlexusOk",
+  deliver: "Deliver",
+  error: "Error",
+  going_away: "GoingAway",
+  hello: "Hello",
+  hello_no_resume: "Hello",
+  hello_ok: "HelloOk",
+  nack: "Nack",
+  nack_no_nb: "Nack",
+  publish: "Publish",
+  publish_custom_ct: "Publish",
+  publish_delayed: "PublishDelayed",
+  publish_no_ttl: "Publish",
+  publish_ok: "PublishOk",
+  reconcile_client: "ReconcileClient",
+  redirect: "Redirect",
+  subscribe: "Subscribe",
+  subscribe_min: "Subscribe",
+  subscribe_ok: "SubscribeOk",
+  subscribe_stream: "SubscribeStream",
+  subscribe_stream_min: "SubscribeStream",
+  topology_ok: "TopologyOk",
+  topology_req: "TopologyRequest",
+  topology_update: "TopologyUpdate",
+  topology_update_ack: "TopologyUpdateAck",
+};
+
+const decoders = wireModule as unknown as Record<string, (b: Uint8Array) => unknown>;
+const encoders = wireModule as unknown as Record<string, (v: unknown) => Uint8Array>;
+
+// Byte-exact conformance for the WHOLE fixture: decoding each shared vector and
+// re-encoding it must reproduce the exact bytes, so a TS codec that diverges from
+// the cross-client spec on any op is caught (not just the handful checked with a
+// hand-built value above).
+test("every shared vector decodes and re-encodes to identical bytes", () => {
+  for (const [name, hex] of Object.entries(VECTORS)) {
+    const op = CODEC_OP[name];
+    assert.ok(op, `shared vector "${name}" has no TS codec mapped in CODEC_OP`);
+    const decoded = decoders[`decode${op}Body`](fromHex(hex));
+    assert.equal(
+      toHex(encoders[`encode${op}Body`](decoded)),
+      hex,
+      `${name} does not re-encode to the shared vector bytes`,
+    );
+  }
+});
 
 test("plexus stream bodies match shared vectors and round-trip", () => {
   const declare: DeclarePlexus = {
@@ -544,10 +625,7 @@ test("topology update push + ack bodies match shared vectors and round-trip", ()
   assert.deepEqual(decodeTopologyUpdateBody(encodeTopologyUpdateBody(topology)), topology);
 
   const ack = { generation: 12n };
-  assert.equal(
-    toHex(encodeTopologyUpdateAckBody(ack)),
-    VECTORS.topology_update_ack,
-  );
+  assert.equal(toHex(encodeTopologyUpdateAckBody(ack)), VECTORS.topology_update_ack);
   assert.deepEqual(decodeTopologyUpdateAckBody(encodeTopologyUpdateAckBody(ack)), ack);
 });
 
