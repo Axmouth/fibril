@@ -125,8 +125,8 @@ internal sealed partial class Engine
 {
     // ---- publish ----
 
-    internal void PublishUnconfirmed(PublishFrame p, CancellationToken ct)
-        => Send(Op.Publish, WireOps.EncodePublish(p with { RequireConfirm = false }), ct);
+    internal Task PublishUnconfirmedAsync(PublishFrame p, CancellationToken ct)
+        => SendAsync(Op.Publish, WireOps.EncodePublish(p with { RequireConfirm = false }), ct);
 
     internal async Task<ulong> PublishConfirmedAsync(PublishFrame p, CancellationToken ct)
     {
@@ -134,8 +134,8 @@ internal sealed partial class Engine
         return WireOps.DecodePublishOk(f.Payload).Offset;
     }
 
-    internal void PublishDelayedUnconfirmed(PublishDelayedFrame p, CancellationToken ct)
-        => Send(Op.PublishDelayed, WireOps.EncodePublishDelayed(p with { RequireConfirm = false }), ct);
+    internal Task PublishDelayedUnconfirmedAsync(PublishDelayedFrame p, CancellationToken ct)
+        => SendAsync(Op.PublishDelayed, WireOps.EncodePublishDelayed(p with { RequireConfirm = false }), ct);
 
     internal async Task<ulong> PublishDelayedConfirmedAsync(PublishDelayedFrame p, CancellationToken ct)
     {

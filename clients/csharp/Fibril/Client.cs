@@ -454,7 +454,7 @@ public sealed partial class Client : IAsyncDisposable
             try
             {
                 var eng = await EngineForAsync(_topo.OwnerOf(p.Topic, partition, p.Group), ct).ConfigureAwait(false);
-                eng.PublishUnconfirmed(p, ct);
+                await eng.PublishUnconfirmedAsync(p, ct).ConfigureAwait(false);
                 return;
             }
             catch (Exception ex) when (IsTransient(ex))
@@ -480,7 +480,7 @@ public sealed partial class Client : IAsyncDisposable
             try
             {
                 var eng = await EngineForAsync(_topo.OwnerOf(p.Topic, partition, p.Group), ct).ConfigureAwait(false);
-                eng.PublishDelayedUnconfirmed(p, ct);
+                await eng.PublishDelayedUnconfirmedAsync(p, ct).ConfigureAwait(false);
                 return;
             }
             catch (Exception ex) when (IsTransient(ex))

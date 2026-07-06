@@ -71,7 +71,8 @@ internal sealed record OutgoingCommand(
     TaskCompletionSource<Frame>? Reply,
     TaskCompletionSource<Subscription>? SubReply,
     bool AutoAck,
-    SubscribeMeta? Sub = null) : EngineMessage;
+    SubscribeMeta? Sub = null,
+    bool Gated = false) : EngineMessage;
 
 // Carries a queue subscribe's original request and reconcile intent, so a
 // SUBSCRIBE_OK can register it for reconnect restore without re-decoding.
@@ -109,6 +110,7 @@ internal sealed class SubState
 internal sealed partial class Engine : IAsyncDisposable
 {
     private const int WriteBatchBytes = 128 * 1024;
+    private const int SendGateCapacity = 1024;
 
     private readonly Stream _stream;
     private readonly TcpClient? _tcp;
@@ -118,6 +120,14 @@ internal sealed partial class Engine : IAsyncDisposable
     // Real backpressure lives at the broker (prefetch/confirm windows), not here.
     private readonly Channel<EngineMessage> _inbox =
         Channel.CreateUnbounded<EngineMessage>(new UnboundedChannelOptions { SingleReader = true });
+
+    // Bounds un-flushed fire-and-forget commands (unconfirmed publishes) so a
+    // saturating producer backpressures on the socket instead of ballooning the
+    // unbounded inbox. A permit is taken before the command is queued and released
+    // once its batch has flushed to the socket. Confirmed ops backpressure by
+    // awaiting their reply, and settle is bounded by the delivery rate, so only the
+    // fire-and-forget path is gated.
+    private readonly SemaphoreSlim _sendGate = new(SendGateCapacity);
 
     private readonly CancellationTokenSource _lifetime = new();
     private Task _runTask = Task.CompletedTask;
@@ -294,11 +304,15 @@ internal sealed partial class Engine : IAsyncDisposable
 
     // ---- request submission ----
 
-    internal void Send(Op op, byte[] body, CancellationToken ct)
+    // Fire-and-forget, gated: a saturating producer blocks here on the send gate
+    // rather than piling unbounded work onto the actor. The actor releases the permit
+    // once this command's batch has flushed to the socket.
+    internal async Task SendAsync(Op op, byte[] body, CancellationToken ct)
     {
-        ct.ThrowIfCancellationRequested();
-        if (!_inbox.Writer.TryWrite(new OutgoingCommand(op, body, 0, null, null, false)))
+        await _sendGate.WaitAsync(ct).ConfigureAwait(false);
+        if (!_inbox.Writer.TryWrite(new OutgoingCommand(op, body, 0, null, null, false, Gated: true)))
         {
+            _sendGate.Release();
             throw Error();
         }
     }
@@ -347,11 +361,16 @@ internal sealed partial class Engine : IAsyncDisposable
         {
             while (await _inbox.Reader.WaitToReadAsync().ConfigureAwait(false))
             {
+                var gatedInBatch = 0;
                 while (_inbox.Reader.TryRead(out var msg))
                 {
                     switch (msg)
                     {
                         case OutgoingCommand cmd:
+                            if (cmd.Gated)
+                            {
+                                gatedInBatch++;
+                            }
                             HandleCommand(cmd, writeBuf);
                             break;
                         case IncomingFrame inc:
@@ -390,6 +409,13 @@ internal sealed partial class Engine : IAsyncDisposable
                         death ??= new DisconnectionException("socket write failed: " + ex.Message);
                     }
                     writeBuf.Clear();
+                }
+
+                // Release the send-gate permits for the fire-and-forget commands whose
+                // frames have now left for the socket, letting blocked producers refill.
+                if (gatedInBatch > 0)
+                {
+                    _sendGate.Release(gatedInBatch);
                 }
 
                 if (death is not null)
@@ -562,6 +588,9 @@ internal sealed partial class Engine : IAsyncDisposable
         }
         _subs.Clear();
         _inbox.Writer.TryComplete();
+        // Wake any producers blocked on the send gate. Their queued write now fails
+        // with the close error instead of hanging.
+        _sendGate.Release(1 << 24);
         _lifetime.Cancel();
         try
         {

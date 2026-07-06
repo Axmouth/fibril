@@ -35,7 +35,11 @@ case "$CLIENT" in
   go)     DIR="$REPO_ROOT/clients/go";         RUN=(go run ./examples/bench-plexus);        DUR_ENV="DURATION_S=$DURATION WARMUP_S=$WARMUP" ;;
   python) DIR="$REPO_ROOT/clients/python";     RUN=(uv run --quiet python examples/bench_plexus.py); DUR_ENV="DURATION_S=$DURATION WARMUP_S=$WARMUP" ;;
   ts)     DIR="$REPO_ROOT/clients/typescript"; RUN=(npx --yes tsx examples/bench-plexus.ts); DUR_ENV="DURATION_MS=$((DURATION * 1000)) WARMUP_MS=$((WARMUP * 1000))" ;;
-  *) echo "unknown CLIENT=$CLIENT (want go|python|ts)" >&2; exit 2 ;;
+  csharp) DIR="$REPO_ROOT/clients/csharp";
+          # Build once so each per-role process launches the compiled binary rather than rebuilding.
+          (cd "$DIR" && dotnet build -c Release Fibril.Bench/Fibril.Bench.csproj >/dev/null)
+          RUN=("$DIR/Fibril.Bench/bin/Release/net10.0/fibril-bench"); DUR_ENV="DURATION_S=$DURATION WARMUP_S=$WARMUP" ;;
+  *) echo "unknown CLIENT=$CLIENT (want go|python|ts|csharp)" >&2; exit 2 ;;
 esac
 
 if [[ "${FIBRIL_EXTERNAL_BROKER:-0}" != "1" ]]; then
@@ -50,7 +54,7 @@ if [[ "${FIBRIL_EXTERNAL_BROKER:-0}" != "1" ]]; then
 fi
 
 OUT="$(mktemp -d)"; trap 'rm -rf "$OUT"' RETURN 2>/dev/null || true
-common="FIBRIL_ADDR=$ADDR $DUR_ENV SIZE=$SIZE TOPIC=$TOPIC PARTITIONS=$PARTITIONS PREFETCH=$PREFETCH DURABILITY=$DURABILITY"
+common="FIBRIL_ADDR=$ADDR $DUR_ENV SIZE=$SIZE TOPIC=$TOPIC PARTITIONS=$PARTITIONS PREFETCH=$PREFETCH DURABILITY=$DURABILITY KIND=${KIND:-stream}"
 pids=()
 
 echo "client=$CLIENT readers=$READERS writers=$WRITERS topic=$TOPIC durability=$DURABILITY size=$SIZE duration=${DURATION}s"

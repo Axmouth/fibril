@@ -1,4 +1,5 @@
 <Solution>
+  <Project Path="Fibril.Bench/Fibril.Bench.csproj" />
   <Project Path="Fibril.Examples/Fibril.Examples.csproj" />
   <Project Path="Fibril.Tests/Fibril.Tests.csproj" />
   <Project Path="Fibril/Fibril.csproj" />
