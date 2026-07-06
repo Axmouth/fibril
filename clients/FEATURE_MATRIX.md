@@ -96,7 +96,9 @@ the same durable name tracks an independent cursor per partition.
 | Feature | Rust | TypeScript | Python | Go | C# |
 | --- | --- | --- | --- | --- | --- |
 | Topology fetch + cache | done | done | done | done | done |
+| Ignore stale (older-generation) topology pushes <sup>19</sup> | done | done | done | done | done |
 | Per-endpoint connection pool | done | done | done | done | done |
+| Prune pooled connections on topology apply <sup>20</sup> | done | done | done | done | done |
 | Owner routing per (topic, partition) | done | done | done | done | done |
 | Partition-key routing (FNV-1a, broker-exact) | done | done | done | done | done |
 | Keyless round-robin spread | done | done | done | done | done |
@@ -122,6 +124,7 @@ fans in across channels by a topic glob, driven by the cluster topology.
 | Feature | Rust | TypeScript | Python | Go | C# |
 | --- | --- | --- | --- | --- | --- |
 | Retry classification (is_retryable / retry_advice) | done | done | done | done | done |
+| Bounded confirmed publish (timeout / deadline) <sup>21</sup> | done | done | done | done | done |
 | Reserved-namespace header validation | done | done | done | done | done |
 | ReliablePublisher helper | done | done | done | done | done |
 | Producer-id dedup headers | done | done <sup>3</sup> | done <sup>3</sup> | done <sup>3</sup> | done <sup>3</sup> |
@@ -223,6 +226,17 @@ fans in across channels by a topic glob, driven by the cluster topology.
 18. The C# client is async-native (Task-based), like the TS client, so it exposes
     no separate blocking facade. `CancellationToken` provides cancellation on every
     network call.
+19. Topology apply is generation-gated: a pushed or fetched snapshot older than the
+    cache already holds is ignored, so an out-of-order or duplicate push from a
+    bounced broker cannot regress routing. The client still acks the current
+    generation so the broker can fence a repartition cutover.
+20. On every topology apply (fetch or push), pooled connections to endpoints that no
+    longer own any partition are dropped and closed, so a failed-over owner's
+    connection does not linger until shutdown.
+21. A confirmed publish to an owner that never answers must terminate rather than
+    hang. Rust and Python bound it with a client-level `publish_timeout_ms` option;
+    Go and C# with the per-call `context`/`CancellationToken`; TypeScript with a
+    retry-state deadline.
 
 See the repo-root `FOLLOWUPS.md` "Clients" section for the brick-by-brick plan
 behind these rows.
