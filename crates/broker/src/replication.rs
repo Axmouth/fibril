@@ -821,6 +821,16 @@ fn cap_owner_event_read_to_message_frontier(
             message_frontier,
             message_tail_fully_returned,
         ) {
+            // Head-of-line stop, not a skip: an event referencing a non-durable
+            // offset (e.g. a dangling EnqueueMany whose payload never fsynced) halts
+            // the stream here. This is safe and self-healing. Durability is a
+            // contiguous prefix, so nothing DURABLE can sit behind a non-durable
+            // offset, and no confirmed data is ever blocked. A CancelEnqueue that
+            // follows a dangling enqueue is not reached, but it is a no-op on a
+            // follower that never received the enqueue. If the offset later becomes
+            // durable (a transient fsync failure healed by a later flush), the
+            // frontier advances and the next read resumes from this cursor. Skipping
+            // instead would permanently drop an enqueue that could become durable.
             break;
         }
         kept.push((offset, event));
