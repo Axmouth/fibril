@@ -613,6 +613,14 @@ impl ServerConfig {
             self.storage.keratin.segment_preallocate_bytes =
                 parse_env("FIBRIL_KERATIN_SEGMENT_PREALLOCATE_BYTES", &value)?;
         }
+        if let Some(value) = env_value(&mut get, "FIBRIL_KERATIN_MAX_INFLIGHT_FSYNCS")? {
+            self.storage.keratin.max_inflight_fsyncs =
+                parse_env("FIBRIL_KERATIN_MAX_INFLIGHT_FSYNCS", &value)?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_KERATIN_PIPELINE_COMMIT_RECORDS")? {
+            self.storage.keratin.pipeline_commit_records =
+                parse_env("FIBRIL_KERATIN_PIPELINE_COMMIT_RECORDS", &value)?;
+        }
         if let Some(value) = env_value(&mut get, "FIBRIL_REPLICATION_STREAM_ENABLED")? {
             self.runtime_seed.replication.stream_enabled =
                 parse_env("FIBRIL_REPLICATION_STREAM_ENABLED", &value)?;
@@ -1400,6 +1408,23 @@ pub struct KeratinStorageSection {
     /// write pays. Disk use tracks written data plus at most one chunk per log.
     #[serde(default)]
     pub segment_preallocate_bytes: usize,
+    /// Commits allowed in flight to the fsync worker at once. Above 1 the worker
+    /// coalesces the queued commits into one fdatasync, so small batches reach
+    /// fat-batch throughput.
+    #[serde(default = "default_max_inflight_fsyncs")]
+    pub max_inflight_fsyncs: usize,
+    /// Records-per-commit below which the writer pipelines fsyncs (fsync-count-bound).
+    /// At or above it a single fsync stays in flight (bandwidth-bound).
+    #[serde(default = "default_pipeline_commit_records")]
+    pub pipeline_commit_records: u64,
+}
+
+fn default_max_inflight_fsyncs() -> usize {
+    8
+}
+
+fn default_pipeline_commit_records() -> u64 {
+    2048
 }
 fn default_tail_cache_bytes() -> usize {
     64 * 1024 * 1024
@@ -1431,6 +1456,8 @@ impl Default for KeratinStorageSection {
             event_log: default_event_log_section(),
             tail_cache_bytes: default_tail_cache_bytes(),
             segment_preallocate_bytes: 0,
+            max_inflight_fsyncs: default_max_inflight_fsyncs(),
+            pipeline_commit_records: default_pipeline_commit_records(),
         }
     }
 }

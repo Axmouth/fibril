@@ -32,7 +32,9 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   (`storage.keratin.segment_preallocate_bytes`, off by default, also settable via
   the `FIBRIL_KERATIN_SEGMENT_PREALLOCATE_BYTES` env override), so operators can
   preallocate segment space ahead of the write cursor and cut durable-publish
-  latency on consumer NVMe at low load.
+  latency on consumer NVMe at low load. The fsync-fusion tunables are exposed too
+  (`storage.keratin.max_inflight_fsyncs`, `storage.keratin.pipeline_commit_records`,
+  and the matching `FIBRIL_KERATIN_*` env overrides).
 
 ### Changed
 
