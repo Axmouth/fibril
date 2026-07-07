@@ -1398,6 +1398,18 @@ pub struct Broker<
     settings_changed: Arc<Notify>,
     settings_epoch: AtomicU64,
 
+    /// Node-local cap on the payload bytes fetched per delivery `poll_ready`
+    /// call. The per-poll deliverable buffers go memory-bandwidth-bound past a
+    /// (hardware-dependent) working-set size, so a large single poll is far
+    /// slower than several smaller ones. This is a byte budget rather than a
+    /// message count so it adapts across payload sizes. Not cluster-replicated:
+    /// the optimum tracks CPU cache/bandwidth, which varies per node.
+    delivery_poll_batch_bytes: AtomicUsize,
+    /// EWMA of delivered payload size, used to turn the byte budget above into a
+    /// message count for `poll_ready` (which leases by count before it knows
+    /// sizes). Seeded at 1 KiB and updated from each delivered batch.
+    avg_payload_bytes: AtomicUsize,
+
     pub(crate) task_group: Arc<TaskGroup>,
 
     metrics: Option<Arc<BrokerStats>>,
@@ -1544,6 +1556,14 @@ impl<
         Self::new_with_ownership(engine, cfg, metrics, Arc::new(OwnAllQueues))
     }
 
+    /// Set the node-local per-poll delivery byte budget (from startup config).
+    /// Node-local rather than a runtime/cluster setting because the optimum
+    /// tracks CPU cache and memory bandwidth, which differ per node.
+    pub fn set_delivery_poll_batch_bytes(&self, bytes: usize) {
+        self.delivery_poll_batch_bytes
+            .store(bytes.max(1), Ordering::Relaxed);
+    }
+
     pub fn new_with_ownership(
         engine: E,
         cfg: BrokerConfig,
@@ -1589,6 +1609,13 @@ impl<
         let this = Arc::new(Self {
             cfg: Arc::new(ArcSwap::from_pointee(cfg)),
             engine: Arc::new(engine),
+            delivery_poll_batch_bytes: AtomicUsize::new(
+                std::env::var("FIBRIL_DELIVERY_POLL_BATCH_BYTES")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1024 * 1024),
+            ),
+            avg_payload_bytes: AtomicUsize::new(1024),
             shutdown_publishers: CancellationToken::new(),
             shutdown_consumers: CancellationToken::new(),
             shutdown_settle: CancellationToken::new(),
@@ -3617,14 +3644,25 @@ impl<
                         .visibility_ceiling()
                         .min(hold_above.unwrap_or(u64::MAX));
 
-                    // TODO: Also limit each poll batch based on size of aggreated messages
+                    // Cap each poll by a node-local byte budget. The per-poll
+                    // deliverable buffers go memory-bandwidth-bound past a
+                    // hardware-dependent working set, so several ~budget-sized
+                    // polls beat one huge one (the inner loop re-polls until the
+                    // consumers' capacity is full). Convert the byte budget to a
+                    // message count via the running average payload size, since
+                    // poll_ready leases by count before it knows sizes.
+                    let poll_cap = {
+                        let budget = broker.delivery_poll_batch_bytes.load(Ordering::Relaxed);
+                        let avg = broker.avg_payload_bytes.load(Ordering::Relaxed).max(1);
+                        (budget / avg).clamp(1, total_cap)
+                    };
                     let deliverables = match broker
                         .engine
                         .poll_ready(
                             &key.tp,
                             key.part.id(),
                             key.group.as_deref(),
-                            total_cap,
+                            poll_cap,
                             lease_deadline,
                             poll_upper,
                         )
@@ -3633,6 +3671,18 @@ impl<
                         Ok(v) if !v.is_empty() => v,
                         _ => break,
                     };
+
+                    // Track the payload-size EWMA (weight 1/8 to the new batch)
+                    // so the byte budget keeps mapping to a sensible count as
+                    // payload sizes drift. `deliverables` is non-empty here.
+                    {
+                        let total: usize = deliverables.iter().map(|d| d.payload.len()).sum();
+                        let batch_avg = (total / deliverables.len()).max(1);
+                        let prev = broker.avg_payload_bytes.load(Ordering::Relaxed);
+                        broker
+                            .avg_payload_bytes
+                            .store((prev * 7 + batch_avg) / 8, Ordering::Relaxed);
+                    }
 
                     tracing::debug!("Polled {} deliverables for tp={} part={} group={:?}", deliverables.len(), key.tp, key.part, key.group);
                     // `poll_ready` records the in-flight lease before returning,
