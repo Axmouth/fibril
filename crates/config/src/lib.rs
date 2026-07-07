@@ -609,6 +609,10 @@ impl ServerConfig {
             self.storage.keratin.batch_linger_ms =
                 parse_env("FIBRIL_KERATIN_BATCH_LINGER_MS", &value)?;
         }
+        if let Some(value) = env_value(&mut get, "FIBRIL_KERATIN_SEGMENT_PREALLOCATE_BYTES")? {
+            self.storage.keratin.segment_preallocate_bytes =
+                parse_env("FIBRIL_KERATIN_SEGMENT_PREALLOCATE_BYTES", &value)?;
+        }
         if let Some(value) = env_value(&mut get, "FIBRIL_REPLICATION_STREAM_ENABLED")? {
             self.runtime_seed.replication.stream_enabled =
                 parse_env("FIBRIL_REPLICATION_STREAM_ENABLED", &value)?;

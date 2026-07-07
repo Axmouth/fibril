@@ -14,6 +14,7 @@
 #   scripts/cluster-tryout.sh --nodes 3 --ganglion --replica-durable
 #   scripts/cluster-tryout.sh --nodes 3 --ganglion --replica-durable --failover-smoke
 #   scripts/cluster-tryout.sh --nodes 3 --failover-verify   # identity zero-loss check under owner kill
+#   scripts/cluster-tryout.sh --nodes 3 --failover-verify --hard-kill --prealloc   # crash recovery: SIGKILL the owner over preallocated segments, still zero-loss
 #   scripts/cluster-tryout.sh --nodes 3 --chaos             # chaos soak: repeated mixed faults (kill+rejoin, pause) under load, zero-loss + reconverge
 #   scripts/cluster-tryout.sh --nodes 5 --chaos --chaos-rounds 12   # longer, wider chaos soak
 #   scripts/cluster-tryout.sh --nodes 3 --ganglion --steady-bench
@@ -50,6 +51,13 @@ FAILOVER_VERIFY=false
 FAILOVER_VERIFY_COUNT="${FAILOVER_VERIFY_COUNT:-30000}"
 FAILOVER_VERIFY_RATE="${FAILOVER_VERIFY_RATE:-5000}"
 REPARTITION_SMOKE=false
+# Segment preallocation for every node (0 = off). Exercises crash recovery over
+# preallocated, zero-padded segments end to end. `--prealloc` with no value uses 64 MiB.
+PREALLOC_BYTES="${PREALLOC_BYTES:-0}"
+# Kill the owner with SIGKILL instead of SIGTERM, so it crashes without a graceful
+# drain (dirty manifest + preallocated padding + a possible two-fsync-seam interrupt),
+# exercising crash recovery rather than clean handoff.
+HARD_KILL=false
 CHAOS=false
 CHAOS_ROUNDS="${CHAOS_ROUNDS:-6}"
 CHAOS_LOAD_SECS="${CHAOS_LOAD_SECS:-70}"
@@ -100,6 +108,11 @@ while [[ $# -gt 0 ]]; do
       [[ -z "$ASSIGNMENT_DURABILITY" ]] && ASSIGNMENT_DURABILITY="replica_durable:2"
       shift ;;
     --chaos-rounds) CHAOS_ROUNDS="$2"; shift 2 ;;
+    --prealloc)
+      # Optional byte value; bare flag defaults to 64 MiB.
+      if [[ -n "${2:-}" && "$2" =~ ^[0-9]+$ ]]; then PREALLOC_BYTES="$2"; shift 2
+      else PREALLOC_BYTES=67108864; shift; fi ;;
+    --hard-kill) HARD_KILL=true; shift ;;
     --admin-wait-secs) ADMIN_WAIT_SECS="$2"; shift 2 ;;
     --cluster-wait-secs) CLUSTER_WAIT_SECS="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -459,10 +472,15 @@ if [[ "$VIZ" == true ]]; then
 fi
 
 PEERS=""
+# Ganglion node-to-node auth needs one shared secret across the cluster. Generate
+# it once here (honoring an externally provided FIBRIL_CLUSTER_SECRET) and give
+# every node the same value.
+CLUSTER_SECRET=""
 if [[ "$GANGLION" == true ]]; then
   for i in $(seq 1 "$NODES"); do
     PEERS+="${PEERS:+,}$i=127.0.0.1:$((BASE_RAFT_PORT + i))"
   done
+  CLUSTER_SECRET="${FIBRIL_CLUSTER_SECRET:-$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | base64 | tr -d '\n')}"
 fi
 
 start_node() {
@@ -486,8 +504,12 @@ start_node() {
     "FIBRIL_BROKER_BIND=127.0.0.1:$broker_port"
     "FIBRIL_ADMIN_BIND=127.0.0.1:$admin_port"
   )
+  if [[ "$PREALLOC_BYTES" != "0" ]]; then
+    env_vars+=("FIBRIL_KERATIN_SEGMENT_PREALLOCATE_BYTES=$PREALLOC_BYTES")
+  fi
   if [[ "$GANGLION" == true ]]; then
     env_vars+=(
+      "FIBRIL_CLUSTER_SECRET=$CLUSTER_SECRET"
       "FIBRIL_COORDINATION_MODE=ganglion"
       "FIBRIL_COORDINATION_NODE_ID=broker-$i"
       "FIBRIL_COORDINATION_RAFT_ID=$i"
@@ -954,8 +976,13 @@ run_failover_smoke() {
   sleep 4
 
   owner_pid="${PIDS[$((owner_node - 1))]}"
-  echo "  killing owner $owner pid=$owner_pid"
-  kill "$owner_pid" 2>/dev/null || true
+  if [[ "$HARD_KILL" == true ]]; then
+    echo "  hard-killing owner $owner pid=$owner_pid (SIGKILL)"
+    kill -9 "$owner_pid" 2>/dev/null || true
+  else
+    echo "  killing owner $owner pid=$owner_pid (SIGTERM)"
+    kill "$owner_pid" 2>/dev/null || true
+  fi
   wait "$owner_pid" 2>/dev/null || true
 
   echo "  waiting for assignment to move away from $owner..."
@@ -1043,8 +1070,13 @@ run_failover_verify() {
   # Let load ramp and replicate so there are confirmed+replicated ids to lose.
   sleep 3
   owner_pid="${PIDS[$((owner_node - 1))]}"
-  echo "  killing owner $owner pid=$owner_pid mid-run"
-  kill "$owner_pid" 2>/dev/null || true
+  if [[ "$HARD_KILL" == true ]]; then
+    echo "  hard-killing owner $owner pid=$owner_pid mid-run (SIGKILL, no graceful drain)"
+    kill -9 "$owner_pid" 2>/dev/null || true
+  else
+    echo "  killing owner $owner pid=$owner_pid mid-run (SIGTERM, graceful)"
+    kill "$owner_pid" 2>/dev/null || true
+  fi
   wait "$owner_pid" 2>/dev/null || true
 
   echo "  waiting for the verifier to finish (producer + consumer ride-through)..."
