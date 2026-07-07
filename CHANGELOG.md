@@ -31,6 +31,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Changed
 
+- Durable publish latency. Publishing overlaps the message-log and event-log
+  fsyncs instead of serializing them, roughly halving single-node durable
+  publish-to-confirm latency, and the storage layer coalesces small commits so
+  low-latency workloads no longer trade away throughput. Delivery waits for the
+  payload to be durable, so nothing is delivered or confirmed before it is safe.
 - Client publish throughput. The Rust, TypeScript, and Python clients now coalesce
   fire-and-forget writes into batched socket writes (exposed as a public client
   option), coalesce consumer acks, and flush buffered frames on graceful shutdown,
