@@ -48,6 +48,7 @@ async fn run_load_test(
     idle_timeout_ms: u64,
     confirmed: bool,
     firehose: bool,
+    topic: std::sync::Arc<str>,
 ) {
     let start = Instant::now();
     let expected_total = num_clients * msgs_per_client;
@@ -62,6 +63,7 @@ async fn run_load_test(
         let shared_received = shared_received.clone();
         let readers_done = readers_done.clone();
         let readers_done_notify = readers_done_notify.clone();
+        let topic = topic.clone();
         handles.push(tokio::spawn(async move {
             let payload = vec![8u8; payload_size];
             let address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from([127, 0, 0, 1]), 9876));
@@ -74,13 +76,14 @@ async fn run_load_test(
             let (tx_acker, mut rx_acker) =
                 tokio::sync::mpsc::unbounded_channel::<InflightMessage>();
             let client_reader = client.clone();
+            let topic_reader = topic.clone();
             let reader = tokio::spawn(async move {
                 let mut stats = ClientStats::default();
                 if !start_reader {
                     return stats;
                 }
                 let mut sub = client_reader
-                    .subscribe("topic1")
+                    .subscribe(topic_reader.as_ref())
                     .unwrap()
                     .prefetch(prefetch)
                     .sub()
@@ -161,12 +164,13 @@ async fn run_load_test(
                 .await
                 .unwrap();
 
+            let topic_pub = topic.clone();
             let pubber = tokio::spawn(async move {
                 if !start_writer {
                     return;
                 }
                 let start_inner = Instant::now();
-                let publisher = client_pub.publisher("topic1").unwrap();
+                let publisher = client_pub.publisher(topic_pub.as_ref()).unwrap();
 
                 for i in 1..=msgs_per_client {
                     if confirmed {
@@ -345,6 +349,11 @@ struct Args {
     /// the client stops being the bottleneck when isolating broker delivery.
     #[arg(long, default_value_t = false)]
     firehose: bool,
+
+    /// Topic to publish to / subscribe from. Lets publish and delivery run on
+    /// different topics against one broker to separate per-topic contention.
+    #[arg(long, default_value = "topic1")]
+    topic: String,
 }
 
 #[tokio::main]
@@ -370,6 +379,7 @@ async fn main() {
             args.idle_timeout_ms,
             args.confirmed,
             args.firehose,
+            args.topic.into(),
         )
         .await;
     });
