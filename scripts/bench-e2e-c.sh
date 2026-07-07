@@ -19,6 +19,12 @@ writer_args=()
 if [ "$confirmed" != "0" ]; then
   writer_args+=(--confirmed)
 fi
+# FIREHOSE=1 strips the reader's per-message latency tracking so the bench client
+# stops being the bottleneck when isolating broker delivery throughput.
+reader_args=()
+if [ "${FIREHOSE:-0}" != "0" ]; then
+  reader_args+=(--firehose)
+fi
 
 mkdir -p "$(dirname "$log_file")" "$(dirname "$results_file")"
 : >"$log_file"
@@ -99,7 +105,7 @@ curl --silent --show-error --fail http://127.0.0.1:8081/healthz >>"$log_file" 2>
 echo "Warmup: ${warmup_messages} messages, 1 client" >>"$results_file"
 warmup_ready_dir="$data_dir/warmup-ready"
 mkdir -p "$warmup_ready_dir"
-"$repo_root/target/release/e2e_c" -m "$warmup_messages" -c 1 --reader --prefetch "$prefetch" --ready-dir "$warmup_ready_dir" --idle-timeout-ms "$idle_timeout_ms" >>"$results_file" 2>>"$log_file" &
+"$repo_root/target/release/e2e_c" -m "$warmup_messages" -c 1 --reader --prefetch "$prefetch" --ready-dir "$warmup_ready_dir" --idle-timeout-ms "$idle_timeout_ms" "${reader_args[@]}" >>"$results_file" 2>>"$log_file" &
 warmup_reader_pid="$!"
 wait_for_ready 1 "$warmup_ready_dir"
 sleep "$ready_settle_seconds"
@@ -113,7 +119,7 @@ fi
 echo "Benchmark: ${messages} messages/client, ${clients} clients, ${size} byte payload, prefetch ${prefetch}" >>"$results_file"
 benchmark_ready_dir="$data_dir/benchmark-ready"
 mkdir -p "$benchmark_ready_dir"
-"$repo_root/target/release/e2e_c" -m "$messages" -c "$clients" --reader --prefetch "$prefetch" --ready-dir "$benchmark_ready_dir" --idle-timeout-ms "$idle_timeout_ms" >>"$results_file" 2>>"$log_file" &
+"$repo_root/target/release/e2e_c" -m "$messages" -c "$clients" --reader --prefetch "$prefetch" --ready-dir "$benchmark_ready_dir" --idle-timeout-ms "$idle_timeout_ms" "${reader_args[@]}" >>"$results_file" 2>>"$log_file" &
 reader_pid="$!"
 wait_for_ready "$clients" "$benchmark_ready_dir"
 sleep "$ready_settle_seconds"

@@ -27,8 +27,13 @@ path = "bin/failover_verify.rs"
 name = "bench-stream"
 path = "bin/bench_stream.rs"
 
+[[bin]]
+name = "stroma-poll"
+path = "bin/stroma_poll.rs"
+
 [dependencies]
 fibril-broker = { path = "../crates/broker" }
+stroma-core = { git = "https://github.com/Axmouth/keratin.git", branch = "main" }
 fibril-client = { path = "../crates/client" }
 fibril-metrics = { path = "../crates/metrics" }
 fibril-util = { path = "../crates/util" }

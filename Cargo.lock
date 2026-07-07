@@ -1281,6 +1281,7 @@ dependencies = [
  "fibril-util",
  "futures",
  "mimalloc",
+ "stroma-core",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",

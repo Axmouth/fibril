@@ -318,7 +318,9 @@ async fn make_broker_with_cfg(_cmd: E2EBench) -> Arc<Broker<StromaEngine>> {
     // let coord = NoopCoordination {};
 
     let keratin_cfg = KeratinConfig {
-        batch_linger_ms: 0,
+        // Match the server default (config rejects < 1). 0 disables coalescing and
+        // makes this bench fsync-bound, which is not how the broker actually runs.
+        batch_linger_ms: 5,
         ..Default::default()
     };
 

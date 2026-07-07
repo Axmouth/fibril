@@ -47,6 +47,7 @@ async fn run_load_test(
     ready_dir: Option<PathBuf>,
     idle_timeout_ms: u64,
     confirmed: bool,
+    firehose: bool,
 ) {
     let start = Instant::now();
     let expected_total = num_clients * msgs_per_client;
@@ -123,15 +124,17 @@ async fn run_load_test(
                     let receive_elapsed = start_inner.elapsed().as_millis();
                     stats.first_receive_ms.get_or_insert(receive_elapsed);
                     stats.last_receive_ms = Some(receive_elapsed);
-                    let now = unix_millis();
-                    stats
-                        .publish_to_delivery_ms
-                        .push(now.saturating_sub(msg.published));
-                    stats
-                        .server_receive_to_delivery_ms
-                        .push(now.saturating_sub(msg.publish_received));
-                    if let Some(retries) = msg.headers.get("fibril.retries") {
-                        stats.retries_seen += retries.parse::<u64>().unwrap_or(1);
+                    if !firehose {
+                        let now = unix_millis();
+                        stats
+                            .publish_to_delivery_ms
+                            .push(now.saturating_sub(msg.published));
+                        stats
+                            .server_receive_to_delivery_ms
+                            .push(now.saturating_sub(msg.publish_received));
+                        if let Some(retries) = msg.headers.get("fibril.retries") {
+                            stats.retries_seen += retries.parse::<u64>().unwrap_or(1);
+                        }
                     }
                     if i.is_multiple_of(5000) {
                         let elapsed = start_inner.elapsed();
@@ -336,6 +339,12 @@ struct Args {
     /// Wait for server publish confirmations before counting writes complete
     #[arg(long, default_value_t = false)]
     confirmed: bool,
+
+    /// Reader firehose mode: drain and ack only, skipping per-message latency
+    /// tracking (the unbounded latency Vecs, clock reads, and header lookup) so
+    /// the client stops being the bottleneck when isolating broker delivery.
+    #[arg(long, default_value_t = false)]
+    firehose: bool,
 }
 
 #[tokio::main]
@@ -360,6 +369,7 @@ async fn main() {
             args.ready_dir,
             args.idle_timeout_ms,
             args.confirmed,
+            args.firehose,
         )
         .await;
     });
