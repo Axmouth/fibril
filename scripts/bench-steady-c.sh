@@ -25,6 +25,11 @@ data_dir="$(mktemp -d)"
 log_file="${LOG_FILE:-$data_dir/steady.log}"
 results_file="${RESULTS_FILE:-$data_dir/steady-results.txt}"
 memory_file="$data_dir/server-rss-kib.txt"
+# Where the started server keeps its segments (defaults to the work dir). Point it
+# at a specific device (e.g. an nvme scratch mount) to benchmark that storage.
+server_data_dir="${SERVER_DATA_DIR:-$data_dir}"
+# Optional server config file (e.g. to set storage.keratin.segment_preallocate_bytes).
+server_config="${SERVER_CONFIG:-}"
 bench_args=()
 memory_sampler_pid=""
 server_pid=""
@@ -53,9 +58,14 @@ if [ "$build" != "0" ]; then
 fi
 
 if [ "$start_server" != "0" ]; then
+  mkdir -p "$server_data_dir"
+  server_cmd=("$repo_root/target/release/fibril-server" --data-dir "$server_data_dir")
+  if [ -n "$server_config" ]; then
+    server_cmd+=(--config "$server_config")
+  fi
   (
     cd "$data_dir"
-    "$repo_root/target/release/fibril-server"
+    "${server_cmd[@]}"
   ) >>"$log_file" 2>&1 &
   server_pid="$!"
 fi
