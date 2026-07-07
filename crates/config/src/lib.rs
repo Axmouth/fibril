@@ -1391,6 +1391,11 @@ pub struct KeratinStorageSection {
     /// file under fsync/writeback.
     #[serde(default = "default_tail_cache_bytes")]
     pub tail_cache_bytes: usize,
+    /// Bytes preallocated ahead of each active segment write cursor (`0` = off).
+    /// In-place writes let fdatasync skip the block-allocation flush an extending
+    /// write pays. Disk use tracks written data plus at most one chunk per log.
+    #[serde(default)]
+    pub segment_preallocate_bytes: usize,
 }
 fn default_tail_cache_bytes() -> usize {
     64 * 1024 * 1024
@@ -1421,6 +1426,7 @@ impl Default for KeratinStorageSection {
             message_log: default_message_log_section(),
             event_log: default_event_log_section(),
             tail_cache_bytes: default_tail_cache_bytes(),
+            segment_preallocate_bytes: 0,
         }
     }
 }

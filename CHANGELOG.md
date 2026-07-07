@@ -28,6 +28,10 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   confirmation handle, so all clients cover the same surface. A shared feature
   matrix and shared conformance fixtures (wire vectors and error-message guides)
   keep the clients byte- and word-identical.
+- Storage config passthrough for Keratin segment preallocation
+  (`storage.keratin.segment_preallocate_bytes`, off by default), so operators can
+  preallocate segment space ahead of the write cursor and cut durable-publish
+  latency on consumer NVMe at low load.
 
 ### Changed
 
