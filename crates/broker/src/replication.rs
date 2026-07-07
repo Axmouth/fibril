@@ -857,11 +857,15 @@ fn stroma_event_available_for_replicated_messages(
         StromaEvent::DeadLetterCommit { offs } => offs.iter().all(|off| *off < message_frontier),
         // A cursor commit carries no message reference (it is a soft consumer
         // bookmark), and a stream truncation is a delete directive, so neither has
-        // to wait on the message frontier.
+        // to wait on the message frontier. A CancelEnqueue is likewise an
+        // annihilation directive: it must not be frontier-gated (its offset may
+        // never become durable) and is a harmless no-op on a follower that never
+        // received the enqueue it cancels.
         StromaEvent::Declare(_)
         | StromaEvent::ResetQueue { .. }
         | StromaEvent::CursorCommit { .. }
         | StromaEvent::CursorCommitBatch { .. }
+        | StromaEvent::CancelEnqueueMany { .. }
         | StromaEvent::StreamTruncate { .. } => true,
         StromaEvent::Snapshot { .. } => message_tail_fully_returned,
     }
