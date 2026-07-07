@@ -1385,6 +1385,15 @@ pub struct KeratinStorageSection {
     pub message_log: KeratinLogSection,
     #[serde(default = "default_event_log_section")]
     pub event_log: KeratinLogSection,
+    /// In-memory tail-read cache budget in bytes for the message log (`0`
+    /// disables, e.g. to keep RAM free). Recent records are served to
+    /// tail-following consumers from memory instead of scanning the segment
+    /// file under fsync/writeback.
+    #[serde(default = "default_tail_cache_bytes")]
+    pub tail_cache_bytes: usize,
+}
+fn default_tail_cache_bytes() -> usize {
+    64 * 1024 * 1024
 }
 
 fn default_batch_linger_ms() -> u64 {
@@ -1411,6 +1420,7 @@ impl Default for KeratinStorageSection {
             batch_linger_ms: default_batch_linger_ms(),
             message_log: default_message_log_section(),
             event_log: default_event_log_section(),
+            tail_cache_bytes: default_tail_cache_bytes(),
         }
     }
 }

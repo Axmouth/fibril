@@ -1345,6 +1345,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         min_fsync_interval_ms: config.storage.keratin.min_fsync_interval_ms,
         batch_linger_ms: config.storage.keratin.batch_linger_ms,
         segment_max_bytes: config.storage.keratin.message_log.segment_max_bytes,
+        tail_cache_bytes: config.storage.keratin.tail_cache_bytes,
         ..keratin_default
     };
     let keratin_event_cfg = KeratinConfig {
@@ -1355,6 +1356,8 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         flush_target_bytes: keratin_default.flush_target_bytes / 8,
         max_batch_bytes: keratin_default.max_batch_bytes / 8,
         index_stride_bytes: keratin_default.index_stride_bytes / 8,
+        // The event log is not tail-followed by consumers; no read cache.
+        tail_cache_bytes: 0,
         ..keratin_default
     };
     let engine = StromaEngine::open(
