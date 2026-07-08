@@ -110,7 +110,7 @@ await publisher.PublishDelayedConfirmedAsync(payload, TimeSpan.FromSeconds(30));
   </TabItem>
 </Tabs>
 
-Delay units differ by client: Rust a `Duration`, TypeScript milliseconds (or a `Date` deadline), Python seconds (or a `timedelta`), Go a `time.Duration`, C# a `TimeSpan`.
+Delay units differ by client: Rust a `Duration`, TypeScript milliseconds by default (or an explicit `{ seconds }` / `{ ms }` / `{ minutes }`, or a `Date` deadline), Python seconds (or a `timedelta`), Go a `time.Duration`, C# a `TimeSpan`.
 
 The delayed publish path uses a distinct protocol frame instead of adding an optional delay field to the common publish frame.
 

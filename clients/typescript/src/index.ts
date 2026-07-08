@@ -29,6 +29,7 @@ export {
   ReliablePublisher,
   PublishConfirmation,
   type DelayInput,
+  type DurationInput,
 } from "./publisher.js";
 export {
   Subscription,

@@ -472,7 +472,7 @@ const offset = await publisher.publishDelayedConfirmed(
 );
 ```
 
-TypeScript numeric delays are milliseconds. Passing a `Date` uses that absolute deadline.
+TypeScript numeric delays are milliseconds; pass `{ seconds: 30 }`, `{ ms: 250 }`, or `{ minutes: 5 }` to make the unit explicit, or a `Date` for an absolute deadline.
 
   </TabItem>
   <TabItem label="Python">
@@ -553,7 +553,7 @@ const msg = await sub.recv();
 await msg.retryAfter(30_000);
 ```
 
-TypeScript numeric delays are milliseconds. Passing a `Date` uses that absolute retry deadline.
+TypeScript numeric delays are milliseconds; pass `{ seconds: 30 }`, `{ ms: 250 }`, or `{ minutes: 5 }` to make the unit explicit, or a `Date` for an absolute retry deadline.
 
   </TabItem>
   <TabItem label="Python">

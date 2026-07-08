@@ -28,6 +28,10 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   confirmation handle, so all clients cover the same surface. A shared feature
   matrix and shared conformance fixtures (wire vectors and error-message guides)
   keep the clients byte- and word-identical.
+- Explicit-unit durations in the TypeScript client. `publishDelayed`, `retryAfter`,
+  and `expiring` now accept `{ seconds }`, `{ ms }`, or `{ minutes }` in addition to
+  the millisecond number and a `Date` deadline, so the unit can be explicit at the
+  call site. Non-breaking - a bare number is still milliseconds.
 - Storage config passthrough for Keratin segment preallocation
   (`storage.keratin.segment_preallocate_bytes`, off by default, also settable via
   the `FIBRIL_KERATIN_SEGMENT_PREALLOCATE_BYTES` env override), so operators can
@@ -58,27 +62,15 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   default-on `msgpack` Cargo feature, so `default-features = false` drops the
   rmp-serde dependency for users who publish JSON, text, or raw bytes. This matches
   the optional-msgpack the TypeScript and Python clients already offer.
-- Client API vocabulary consistency. The Go client's `SubscribeTopic` takes a
-  `TopicSubscribeOptions` struct instead of positional group, prefetch, and
-  auto-ack arguments, matching its own `SubscribeStreamTopic`, and the Python
-  client's text-message constructor is `NewMessage.text()` (was `.content()`) so
-  the write name matches the `text()` read accessor.
-- Client API vocabulary, unified across all five clients (glossary pass). The
-  positive settle verb is `complete` everywhere: Go and C# rename `Ack()` to
-  `Complete()` and drop the redundant raw public `Nack()` (`Fail`/`Retry`/
-  `RetryAfter` cover it). The text-body accessor is `text` everywhere: the Rust and
-  TypeScript read accessor and write constructor rename from `content` to `text`,
-  matching the `raw`/`json`/`msgpack` set (content-type accessors are unchanged).
-  The declare config type is `QueueConfig`/`StreamConfig` everywhere: Go
-  (`DeclareQueue`/`DeclarePlexus`) and C# (`QueueDeclareOptions`/
-  `PlexusDeclareOptions`) rename to it while the declare methods keep their verb
-  names. The stream retention record count is `retain_records` (Go/C# fields and
-  the TypeScript retention field align with the existing builder). The Go auth
-  struct and options field become `Credentials`. The reconnect reconcile policy
-  value is `restore` (Rust `ReconcilePolicy::Restore`, and the `"restore"` string in
-  the TypeScript, Python, and Go clients) instead of `restore_client_subscriptions`
-  / `RestoreClientSubscriptions`; the wire encoding is an unchanged numeric byte. A
-  `clients/vocab-lint.sh` CI check guards these against drifting back.
+- Client text-body accessor renamed to `text`. The Rust and TypeScript clients'
+  read accessor and write constructor move from `content()` to `text()` (matching
+  the `raw`/`json`/`msgpack` set), and the Python write constructor moves from
+  `content()` to `text()` to match its `text()` reader. Content-type accessors are
+  unchanged.
+- Reconnect reconcile policy value renamed to `restore`. The Rust
+  (`ReconcilePolicy::Restore`), TypeScript, and Python (`"restore"`) clients replace
+  `RestoreClientSubscriptions` / `"restore_client_subscriptions"`. The wire encoding
+  is an unchanged numeric byte.
 - Admin HTTP API topic field. The admin API and `fibrilctl` now spell the topic
   `topic` (matching every client and the rest of the API) instead of the
   abbreviated `tp` in the create-queue, delete-queue, create-stream, per-queue
@@ -92,13 +84,6 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   milliseconds; pass `Duration::from_secs(30)` or `Duration::from_millis(250)`. The
   Python (seconds) and TypeScript (milliseconds) bare-number conventions are
   unchanged, matching their own language norms.
-- Go client queue and stream declarations are fluent builders. `QueueConfig` and
-  `StreamConfig` are built with `fibril.NewQueueConfig(topic).PartitionCount(4).
-  DlqMaxRetries(3)` and `fibril.NewStreamConfig(topic).Retention(...)` instead of
-  struct literals whose optional fields were pointers to locals (`&group`, a
-  `u32p(3)` helper). This matches the builder shape the Rust, TypeScript, and Python
-  clients already use for their queue and stream config. The wire encoding is
-  unchanged.
 
 ### Fixed
 

@@ -45,19 +45,44 @@ interface RoutingClient {
 }
 
 /**
- * Delay accepted by delayed publish methods.
+ * A relative duration. A bare `number` is milliseconds (JS-native, matching
+ * `setTimeout`); the object forms make the unit explicit at the call site so a
+ * value is never mistaken for the wrong unit:
  *
- * A number is a relative delay in milliseconds. A `Date` is treated as an
- * absolute Unix-millisecond deadline.
+ * ```ts
+ * publisher.publishDelayed(msg, 30_000);        // 30s, milliseconds
+ * publisher.publishDelayed(msg, { seconds: 30 }); // 30s, explicit
+ * ```
  */
-export type DelayInput = number | Date;
+export type DurationInput =
+  | number
+  | { ms: number }
+  | { seconds: number }
+  | { minutes: number };
+
+/** Resolve a {@link DurationInput} to whole milliseconds. */
+export function durationToMs(duration: DurationInput): number {
+  let ms: number;
+  if (typeof duration === "number") ms = duration;
+  else if ("ms" in duration) ms = duration.ms;
+  else if ("seconds" in duration) ms = duration.seconds * 1000;
+  else ms = duration.minutes * 60_000;
+  if (!Number.isFinite(ms) || ms < 0) {
+    throw new Error("duration must be a non-negative amount of time");
+  }
+  return Math.trunc(ms);
+}
+
+/**
+ * Delay accepted by delayed publish and retry methods. A relative
+ * {@link DurationInput}, or a `Date` treated as an absolute Unix-millisecond
+ * deadline.
+ */
+export type DelayInput = DurationInput | Date;
 
 export function deadlineFromDelay(delay: DelayInput): bigint {
   if (delay instanceof Date) return BigInt(delay.getTime());
-  if (!Number.isFinite(delay) || delay < 0) {
-    throw new Error("delay must be a non-negative millisecond value");
-  }
-  return BigInt(Date.now() + Math.trunc(delay));
+  return BigInt(Date.now() + durationToMs(delay));
 }
 
 // The content and routing inputs shared by every publish variant.
@@ -340,23 +365,20 @@ export class Publisher {
   }
 
   /**
-   * Return a publisher that stamps a default message TTL (in milliseconds) on
-   * every immediate publish: the broker drops the message if it is not consumed
-   * within the interval. Milliseconds, matching this client's delayed-publish
-   * convention. Applies to the immediate publish paths (delayed publishes do not
-   * carry a TTL yet).
+   * Return a publisher that stamps a default message TTL on every immediate
+   * publish: the broker drops the message if it is not consumed within the
+   * interval. Takes a {@link DurationInput} (a bare number is milliseconds).
+   * Applies to the immediate publish paths (delayed publishes do not carry a TTL
+   * yet).
    *
    * @example
    * ```ts
-   * const ephemeral = client.publisher("rpc.reply").expiring(30_000);
+   * const ephemeral = client.publisher("rpc.reply").expiring({ seconds: 30 });
    * await ephemeral.publish(result);
    * ```
    */
-  expiring(ttlMs: number): Publisher {
-    if (!Number.isFinite(ttlMs) || ttlMs < 0) {
-      throw new Error("ttl must be a non-negative millisecond value");
-    }
-    return new Publisher(this.#client, this.#topic, this.#group, BigInt(Math.trunc(ttlMs)));
+  expiring(ttl: DurationInput): Publisher {
+    return new Publisher(this.#client, this.#topic, this.#group, BigInt(durationToMs(ttl)));
   }
 
   /**
