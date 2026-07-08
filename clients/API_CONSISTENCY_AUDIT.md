@@ -195,10 +195,25 @@ Tier 4 is now fully cleared.
 - Footgun-resistance: make an unsafe-resume return a distinctly-typed value you
   cannot accidentally treat as live.
 - Check the error guide keys on stable *identifiers* (shared identity, only the
-  language binding differs) — not per-language identifiers.
-- Ensure message-shaped decode errors (content-type present but body undecodable;
-  type mismatch) are in the golden set, since Go/C# explicit decode entry points
-  differ from the `deserialize()` dispatch in the other three.
+  language binding differs) — not per-language identifiers. DONE (Group B): the
+  keys in `error_guides.json` were already stable, language-agnostic strings; the
+  only fix was the stale `_note` (it named three clients, now all five, all of which
+  assert against the guide).
+- Ensure message-shaped decode errors (content-type present but body undecodable)
+  are in the golden set, since Go/C# explicit decode entry points differ from the
+  `deserialize()` dispatch in the other three. DONE (Group B): added a
+  `decode_malformed_body` guide case pinned on the shared wording "failed to
+  deserialize", aligned the Go and C# decode messages to it (they said "json
+  decode"), and added a provocation test in all five suites. (The "type mismatch"
+  variant is not uniform - Python/TS `deserialize()` return dynamic values with no
+  target type - so it was left out.)
+
+**Group A (freeze-gated, NOT done here):** the typed stream-close reason, the typed
+reconnect state machine, the whole-surface TLS-grade error taxonomy, and the
+distinctly-typed unsafe-resume value all reshape the client receive/error surface,
+so they are the client API freeze (#111) design bundle - one typed lifecycle
+designed once, not bolted on. Also parked there: the deeper TLS soundness question
+noted in Tier 3 (CA-fingerprint pinning under `verify_mode=CERT_NONE`).
 
 **Tier 6 — nits.** `subscribe`/`.sub()` terminal; `publish_confirmed` vs
 `publish_with_confirmation` legibility; long enum names; C# `ShutdownAsync()` alias.

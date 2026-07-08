@@ -62,7 +62,7 @@ public readonly struct Delivery
         }
         catch (System.Text.Json.JsonException ex)
         {
-            throw new DeserializationException("json decode: " + ex.Message);
+            throw new DeserializationException("failed to deserialize json payload: " + ex.Message);
         }
     }
 

@@ -72,4 +72,15 @@ public class ErrorsTest
     {
         AssertContainsAll(Guides.HeartbeatTimeout, MustContain("heartbeat_timeout"));
     }
+
+    [Fact]
+    public void DecodeMalformedBodyCarriesGuide()
+    {
+        var delivery = new Delivery(
+            new Deliver { Payload = System.Text.Encoding.UTF8.GetBytes("not json") },
+            0UL, false, null!);
+        var ex = Assert.Throws<DeserializationException>(
+            () => delivery.Json<Dictionary<string, object>>());
+        AssertContainsAll(ex.Message, MustContain("decode_malformed_body"));
+    }
 }

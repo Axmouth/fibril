@@ -116,7 +116,7 @@ func (d Delivery) Text() string { return string(d.Payload) }
 // JSON decodes the delivery payload into v.
 func (d Delivery) JSON(v any) error {
 	if err := json.Unmarshal(d.Payload, v); err != nil {
-		return &DeserializationError{Message: "json decode: " + err.Error()}
+		return &DeserializationError{Message: "failed to deserialize json payload: " + err.Error()}
 	}
 	return nil
 }

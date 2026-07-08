@@ -64,3 +64,13 @@ func TestConnectionRefusedCarriesGuide(t *testing.T) {
 func TestHeartbeatTimeoutCarriesGuide(t *testing.T) {
 	assertContainsAll(t, "heartbeat_timeout", heartbeatTimeoutMessage, mustContain(t, "heartbeat_timeout"))
 }
+
+func TestDecodeMalformedBodyCarriesGuide(t *testing.T) {
+	d := Delivery{Payload: []byte("not json")}
+	var v map[string]any
+	err := d.JSON(&v)
+	if err == nil {
+		t.Fatal("expected a decode error for a malformed json body")
+	}
+	assertContainsAll(t, "decode_malformed_body", err.Error(), mustContain(t, "decode_malformed_body"))
+}

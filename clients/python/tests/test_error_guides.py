@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from fibril import message
 from fibril.client import ClientOptions
 
 GUIDES = json.loads(
@@ -36,3 +37,11 @@ async def test_connection_refused_carries_the_shared_guide() -> None:
     message = str(excinfo.value).lower()
     for keyword in GUIDES["connection_refused"]["must_contain"]:
         assert keyword.lower() in message, f"missing {keyword}: {message}"
+
+
+def test_decode_malformed_body_carries_the_shared_guide() -> None:
+    with pytest.raises(Exception) as excinfo:
+        message.deserialize_by_content_type("application/json", b"not json")
+    text = str(excinfo.value).lower()
+    for keyword in GUIDES["decode_malformed_body"]["must_contain"]:
+        assert keyword.lower() in text, f"missing {keyword}: {text}"

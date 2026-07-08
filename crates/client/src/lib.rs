@@ -5218,6 +5218,28 @@ mod tests {
     }
 
     #[test]
+    fn decode_malformed_body_carries_the_shared_guide() {
+        // A json content type with a non-json body must fail to decode with the
+        // wording pinned in clients/error_guides.json (matched by every client).
+        let guides: serde_json::Value =
+            serde_json::from_str(include_str!("../../../clients/error_guides.json"))
+                .expect("error_guides.json parses");
+        let error = deserialize_by_content_type::<serde_json::Value>(
+            Some("application/json"),
+            b"not json",
+        )
+        .expect_err("a malformed json body must fail to decode");
+        let message = error.to_string().to_lowercase();
+        for keyword in guides["decode_malformed_body"]["must_contain"]
+            .as_array()
+            .expect("must_contain is an array")
+        {
+            let keyword = keyword.as_str().expect("keyword is a string").to_lowercase();
+            assert!(message.contains(&keyword), "missing {keyword:?}: {message}");
+        }
+    }
+
+    #[test]
     fn topology_cache_distinguishes_declared_from_gone() {
         // A declared topic with no resolved owner (mid-failover) stays "known"
         // (counts present, by_queue absent) -> caller keeps retrying. An absent

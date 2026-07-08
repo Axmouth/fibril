@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:net";
 import { readFileSync } from "node:fs";
 import { ClientOptions } from "../src/index.js";
+import { deserializeByContentType } from "../src/message.js";
 
 // Shared source of truth for client-local guide wording (see
 // clients/error_guides.json), the error-message analogue of wire_vectors.json.
@@ -33,6 +34,22 @@ test("connection_refused carries the shared guide", async () => {
     assert.ok(
       message.includes(keyword.toLowerCase()),
       `connection_refused guide is missing ${keyword}: ${message}`,
+    );
+  }
+});
+
+test("decode_malformed_body carries the shared guide", () => {
+  let message = "";
+  try {
+    deserializeByContentType("application/json", new TextEncoder().encode("not json"));
+    assert.fail("decoding a malformed json body must throw");
+  } catch (err) {
+    message = String((err as Error).message).toLowerCase();
+  }
+  for (const keyword of guides.decode_malformed_body.must_contain) {
+    assert.ok(
+      message.includes(keyword.toLowerCase()),
+      `decode_malformed_body guide is missing ${keyword}: ${message}`,
     );
   }
 });
