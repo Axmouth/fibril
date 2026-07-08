@@ -47,7 +47,7 @@ public class PatternTest
         await foreach (var msg in sub.Deliveries(Timeout()))
         {
             topics.Add(msg.Topic);
-            msg.Ack();
+            msg.Complete();
             if (topics.Count == 2)
             {
                 break;

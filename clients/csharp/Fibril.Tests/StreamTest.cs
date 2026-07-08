@@ -30,7 +30,7 @@ public class StreamTest
         await foreach (var record in fan.Deliveries(Timeout()))
         {
             Assert.Equal("record", record.Text());
-            record.Ack();
+            record.Complete();
             if (++received == 3)
             {
                 break;

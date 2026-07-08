@@ -90,7 +90,7 @@ client.DeclareQueue(ctx, fibril.QueueConfig{
   <TabItem label="C#">
 
 ```csharp
-await client.DeclareQueueAsync("orders.created", new QueueDeclareOptions
+await client.DeclareQueueAsync("orders.created", new QueueConfig
 {
     Group = "workers",
     DeadLetter = DeadLetterPolicy.Global,

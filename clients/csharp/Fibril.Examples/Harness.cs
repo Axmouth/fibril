@@ -16,7 +16,7 @@ internal static class Harness
     public static Task<Client> ConnectAsync(string name) => Client.ConnectAsync(Address, new ClientOptions
     {
         ClientName = name,
-        Auth = new Credentials("fibril", "fibril"),
+        Credentials = new Credentials("fibril", "fibril"),
     }, Timeout(10));
 
     public static string UniqueTopic(string prefix) => $"{prefix}.{Guid.NewGuid():N}";

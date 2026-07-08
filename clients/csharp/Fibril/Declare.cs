@@ -23,8 +23,8 @@ public sealed record DeadLetterPolicy
     internal DlqPolicy ToWire() => new() { Kind = Kind, Topic = DlqTopic, Group = DlqGroup };
 }
 
-/// <summary>Options for declaring a queue.</summary>
-public sealed record QueueDeclareOptions
+/// <summary>Queue declaration config.</summary>
+public sealed record QueueConfig
 {
     public int? PartitionCount { get; init; }
 
@@ -51,11 +51,11 @@ public sealed record StreamRetentionPolicy
 {
     public TimeSpan? MaxAge { get; init; }
     public long? MaxBytes { get; init; }
-    public long? MaxRecords { get; init; }
+    public long? RetainRecords { get; init; }
 }
 
-/// <summary>Options for declaring a Plexus (fan-out stream) channel.</summary>
-public sealed record PlexusDeclareOptions
+/// <summary>Plexus (fan-out stream) declaration config.</summary>
+public sealed record StreamConfig
 {
     public int? PartitionCount { get; init; }
     public StreamDurabilityTier Durability { get; init; } = StreamDurabilityTier.Durable;
@@ -66,7 +66,7 @@ public sealed record PlexusDeclareOptions
 public sealed partial class Client
 {
     /// <summary>Declares a queue with dead-letter, retry, partition, and TTL options.</summary>
-    public async Task<DeclareOutcome> DeclareQueueAsync(string topic, QueueDeclareOptions options, CancellationToken ct = default)
+    public async Task<DeclareOutcome> DeclareQueueAsync(string topic, QueueConfig options, CancellationToken ct = default)
     {
         var ok = await BootstrapOpAsync(eng => eng.DeclareQueueAsync(new DeclareQueueFrame
         {
@@ -81,14 +81,14 @@ public sealed partial class Client
     }
 
     /// <summary>Declares a Plexus stream with partition, durability, retention, and replication options.</summary>
-    public async Task<DeclareOutcome> DeclarePlexusAsync(string topic, PlexusDeclareOptions options, CancellationToken ct = default)
+    public async Task<DeclareOutcome> DeclarePlexusAsync(string topic, StreamConfig options, CancellationToken ct = default)
     {
         var retention = options.Retention is { } r
             ? new StreamRetention
             {
                 MaxAgeMs = r.MaxAge is { } age ? (ulong)age.TotalMilliseconds : null,
                 MaxBytes = r.MaxBytes is null ? null : (ulong)r.MaxBytes.Value,
-                MaxRecords = r.MaxRecords is null ? null : (ulong)r.MaxRecords.Value,
+                MaxRecords = r.RetainRecords is null ? null : (ulong)r.RetainRecords.Value,
             }
             : new StreamRetention();
 

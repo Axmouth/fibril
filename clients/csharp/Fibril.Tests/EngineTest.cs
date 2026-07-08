@@ -51,7 +51,7 @@ public class EngineTest
         await foreach (var d in sub.Deliveries(Timeout()))
         {
             got = d;
-            d.Ack();
+            d.Complete();
             break;
         }
 

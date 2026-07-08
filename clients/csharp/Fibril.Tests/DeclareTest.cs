@@ -14,7 +14,7 @@ public class DeclareTest
         await using var broker = new FakeBroker();
         await using var client = await Client.ConnectAsync(broker.Address, Opts(), Timeout());
 
-        var outcome = await client.DeclareQueueAsync("orders", new QueueDeclareOptions
+        var outcome = await client.DeclareQueueAsync("orders", new QueueConfig
         {
             PartitionCount = 4,
             DeadLetter = DeadLetterPolicy.ToTopic("orders.dlq"),
@@ -38,11 +38,11 @@ public class DeclareTest
         await using var broker = new FakeBroker();
         await using var client = await Client.ConnectAsync(broker.Address, Opts(), Timeout());
 
-        await client.DeclarePlexusAsync("events", new PlexusDeclareOptions
+        await client.DeclarePlexusAsync("events", new StreamConfig
         {
             PartitionCount = 3,
             Durability = StreamDurabilityTier.Speculative,
-            Retention = new StreamRetentionPolicy { MaxAge = TimeSpan.FromMinutes(1), MaxRecords = 1_000_000 },
+            Retention = new StreamRetentionPolicy { MaxAge = TimeSpan.FromMinutes(1), RetainRecords = 1_000_000 },
             ReplicationFactor = 2,
         }, Timeout());
 

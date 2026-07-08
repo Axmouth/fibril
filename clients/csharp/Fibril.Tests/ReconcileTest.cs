@@ -33,7 +33,7 @@ public class ReconcileTest
         // First delivery, then the broker drops the connection.
         Assert.True(await deliveries.MoveNextAsync());
         var first = deliveries.Current.Text();
-        deliveries.Current.Ack();
+        deliveries.Current.Complete();
 
         // A routed op forces the reconnect that carries RECONCILE_CLIENT.
         await client.Publisher("t").PublishConfirmedAsync(Message.Text("trigger"), Timeout());
@@ -41,7 +41,7 @@ public class ReconcileTest
         // The restored subscription yields the post-reconnect delivery on the same channel.
         Assert.True(await deliveries.MoveNextAsync());
         var second = deliveries.Current.Text();
-        deliveries.Current.Ack();
+        deliveries.Current.Complete();
 
         Assert.Equal("hello", first);
         Assert.Equal("restored", second);

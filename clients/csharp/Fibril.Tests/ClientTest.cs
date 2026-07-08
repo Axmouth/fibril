@@ -27,7 +27,7 @@ public class ClientTest
         await foreach (var msg in sub.Deliveries(Timeout()))
         {
             Assert.Equal("hello", msg.Text());
-            msg.Ack();
+            msg.Complete();
             break;
         }
     }

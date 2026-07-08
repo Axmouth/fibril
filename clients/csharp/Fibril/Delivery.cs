@@ -4,7 +4,7 @@ using System.Threading.Channels;
 namespace Fibril;
 
 // The delivery path: subscribe, receive pushed messages as an IAsyncEnumerable
-// per subscription, and settle them with ack/nack. The actor owns the sub-id ->
+// per subscription, and settle them with complete/fail/retry. The actor owns the sub-id ->
 // channel map and pushes deliveries. Settle is fire-and-forget and stays
 // cancellation-token-free, matching the reference client's complete/retry.
 
@@ -23,7 +23,7 @@ public readonly struct Delivery
 
     /// <summary>
     /// True when the broker already settled this delivery server-side (an auto-ack
-    /// subscription). Ack/Nack are then unnecessary.
+    /// subscription). Settling is then unnecessary.
     /// </summary>
     public bool AutoAck { get; }
 
@@ -67,10 +67,7 @@ public readonly struct Delivery
     }
 
     /// <summary>Settles this delivery as processed, on the connection it arrived on.</summary>
-    public void Ack() => _engine.Ack(this);
-
-    /// <summary>Returns this delivery unprocessed, optionally requeuing it.</summary>
-    public void Nack(bool requeue, ulong? notBefore = null) => _engine.Nack(this, requeue, notBefore);
+    public void Complete() => _engine.Complete(this);
 
     /// <summary>Requeues this delivery immediately for redelivery.</summary>
     public void Retry() => _engine.Nack(this, true, null);
@@ -95,7 +92,7 @@ public readonly struct Delivery
 
 /// <summary>
 /// A live single-partition subscription. <see cref="Deliveries"/> yields messages
-/// until the connection closes. Settle each with its Ack/Nack.
+/// until the connection closes. Settle each with its Complete/Fail/Retry.
 /// </summary>
 public sealed class Subscription
 {
@@ -214,7 +211,7 @@ internal sealed partial class Engine
 
     // ---- settle ----
 
-    internal void Ack(Delivery d)
+    internal void Complete(Delivery d)
     {
         var body = WireOps.EncodeAck(new AckFrame { Topic = d.Topic, Group = d.Group, Partition = d.Partition, Tags = new[] { d.Tag } });
         SendWithId(Op.Ack, d.ReqId, body);

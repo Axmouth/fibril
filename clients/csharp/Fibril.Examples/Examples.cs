@@ -57,7 +57,7 @@ internal static class Examples
 
         Harness.Check(await deliveries.MoveNextAsync(), "redelivery after retry");
         Harness.AssertEq(deliveries.Current.Text(), "task", "redelivered task payload");
-        deliveries.Current.Ack();
+        deliveries.Current.Complete();
     }
 
     // Declare a Plexus stream, subscribe, publish a record, and read it back.

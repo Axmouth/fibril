@@ -18,7 +18,7 @@ public sealed record Credentials(string Username, string Password);
 /// <summary>Connection-level options for a <see cref="Client"/>.</summary>
 public sealed record ClientOptions
 {
-    public Credentials? Auth { get; init; }
+    public Credentials? Credentials { get; init; }
     public string ClientName { get; init; } = "fibril-csharp";
     public string ClientVersion { get; init; } = "";
     public TimeSpan HeartbeatInterval { get; init; } = TimeSpan.FromSeconds(5);
@@ -106,7 +106,7 @@ public sealed partial class Client : IAsyncDisposable
     {
         _opts = opts;
         _bootstrapEndpoint = bootstrapEndpoint;
-        _auth = opts.Auth is null ? null : new AuthFrame(opts.Auth.Username, opts.Auth.Password);
+        _auth = opts.Credentials is null ? null : new AuthFrame(opts.Credentials.Username, opts.Credentials.Password);
         _maxRedirects = opts.MaxRedirects > 0 ? opts.MaxRedirects : DefaultMaxRedirects;
     }
 
@@ -404,11 +404,11 @@ public sealed partial class Client : IAsyncDisposable
 
     /// <summary>Declares a queue with a partition count and waits for the broker's confirmation.</summary>
     public Task<DeclareOutcome> DeclareQueueAsync(string topic, int? partitionCount = null, CancellationToken ct = default)
-        => DeclareQueueAsync(topic, new QueueDeclareOptions { PartitionCount = partitionCount }, ct);
+        => DeclareQueueAsync(topic, new QueueConfig { PartitionCount = partitionCount }, ct);
 
     /// <summary>Declares a Plexus (fan-out stream) channel with a partition count and waits for confirmation.</summary>
     public Task<DeclareOutcome> DeclarePlexusAsync(string topic, int? partitionCount = null, CancellationToken ct = default)
-        => DeclarePlexusAsync(topic, new PlexusDeclareOptions { PartitionCount = partitionCount }, ct);
+        => DeclarePlexusAsync(topic, new StreamConfig { PartitionCount = partitionCount }, ct);
 
     /// <summary>Fetches the topology and warms the routing cache.</summary>
     public async Task<TopologyView> FetchTopologyAsync(string? topic = null, CancellationToken ct = default)

@@ -263,7 +263,7 @@ client.DeclareQueue(ctx, fibril.QueueConfig{
   <TabItem label="C#">
 
 ```csharp
-await client.DeclareQueueAsync("rpc.reply", new QueueDeclareOptions
+await client.DeclareQueueAsync("rpc.reply", new QueueConfig
 {
     DefaultMessageTtl = TimeSpan.FromSeconds(30),
 });

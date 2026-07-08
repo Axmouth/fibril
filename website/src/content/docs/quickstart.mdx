@@ -194,14 +194,14 @@ for msg := range sub.Deliveries {
 
 The C# client lives in `clients/csharp`. Every network method takes an optional
 `CancellationToken`. Delays are a `TimeSpan`. Deliveries arrive as an
-`IAsyncEnumerable` and settle with `Ack`/`Nack`.
+`IAsyncEnumerable` and settle with `Complete`/`Fail`/`Retry`.
 
 ```csharp
 using Fibril;
 
 await using var client = await Client.ConnectAsync("127.0.0.1:9876", new ClientOptions
 {
-    Auth = new Credentials("fibril", "fibril"),
+    Credentials = new Credentials("fibril", "fibril"),
 });
 
 var publisher = client.Publisher("email.send");
@@ -213,7 +213,7 @@ await using var sub = await client.SubscribeTopicAsync("email.send", prefetch: 3
 await foreach (var msg in sub.Deliveries())
 {
     Process(msg.Text());
-    msg.Ack();
+    msg.Complete();
 }
 ```
 

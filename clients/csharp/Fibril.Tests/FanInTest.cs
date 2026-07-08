@@ -29,7 +29,7 @@ public class FanInTest
         await foreach (var msg in fan.Deliveries(ct))
         {
             Assert.Equal("hello", msg.Text());
-            msg.Ack();
+            msg.Complete();
             if (++received == 3)
             {
                 break;
@@ -53,7 +53,7 @@ public class FanInTest
         var received = 0;
         await foreach (var msg in fan.Deliveries(Timeout()))
         {
-            msg.Ack();
+            msg.Complete();
             if (++received == 2)
             {
                 break;

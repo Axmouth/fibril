@@ -117,7 +117,7 @@ using Fibril;
 
 var client = await Client.ConnectAsync("127.0.0.1:9876", new ClientOptions
 {
-    Auth = new Credentials("fibril", "fibril"),
+    Credentials = new Credentials("fibril", "fibril"),
 });
 ```
 
@@ -213,7 +213,7 @@ roots. A client certificate is `ClientCertFile` with `ClientKeyFile`.
 ```csharp
 var client = await Client.ConnectAsync("broker.internal:9876", new ClientOptions
 {
-    Auth = new Credentials("fibril", "fibril"),
+    Credentials = new Credentials("fibril", "fibril"),
     Tls = new TlsOptions { CaFile = "/var/lib/fibril/tls/ca.pem" },
 });
 ```
@@ -840,7 +840,7 @@ await foreach (var msg in sub.Deliveries())
     var body = msg.Text();
     if (await SendEmail(body))
     {
-        msg.Ack();
+        msg.Complete();
     }
     else
     {
@@ -961,7 +961,7 @@ client.DeclareQueue(ctx, fibril.QueueConfig{
   <TabItem label="C#">
 
 ```csharp
-await client.DeclareQueueAsync("email.send", new QueueDeclareOptions
+await client.DeclareQueueAsync("email.send", new QueueConfig
 {
     Group = "workers",
     DeadLetter = DeadLetterPolicy.Global,
@@ -1092,7 +1092,7 @@ await foreach (var msg in sub.Deliveries())
     var job = msg.Json<Job>();
     if (job is not null && Process(job))
     {
-        msg.Ack();
+        msg.Complete();
     }
     else
     {
@@ -1397,10 +1397,10 @@ for msg := range sub.Deliveries {
   <TabItem label="C#">
 
 ```csharp
-await client.DeclarePlexusAsync("events", new PlexusDeclareOptions
+await client.DeclarePlexusAsync("events", new StreamConfig
 {
     PartitionCount = 4,
-    Retention = new StreamRetentionPolicy { MaxRecords = 1_000_000 },
+    Retention = new StreamRetentionPolicy { RetainRecords = 1_000_000 },
 });
 
 // Publish uses the normal publisher.
@@ -1416,7 +1416,7 @@ var sub = await client.SubscribeStreamTopicAsync("events", new StreamSubscribeOp
 await foreach (var msg in sub.Deliveries())
 {
     handle(msg.Text());
-    msg.Ack(); // advances the durable cursor
+    msg.Complete(); // advances the durable cursor
 }
 ```
 
@@ -1521,7 +1521,7 @@ var sub = await client.Routing.SubscribePatternAsync("events.*");
 await foreach (var msg in sub.Deliveries())
 {
     handle(msg.Topic, msg.Text());
-    msg.Ack();
+    msg.Complete();
 }
 ```
 

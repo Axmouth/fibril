@@ -74,7 +74,7 @@ msg.Fail()                       // terminal failure
   <TabItem label="C#">
 
 ```csharp
-msg.Ack();                                // terminal success
+msg.Complete();                                // terminal success
 msg.Retry();                              // requeue immediately
 msg.RetryAfter(TimeSpan.FromSeconds(30)); // requeue after a delay
 msg.Fail();                               // terminal failure
