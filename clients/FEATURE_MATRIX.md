@@ -90,6 +90,9 @@ the same durable name tracks an independent cursor per partition.
 | Auto-reconnect before an operation | done | done | done | done | done |
 | Reconcile subscriptions on reconnect | done | done | done | done | done |
 | Owner-restart (reconcile on any reconnect, not just resumed) | done | done | done | done | done |
+| Opt-in restore reconcile policy | done | done | done | done | done |
+| Explicit `reconnect()` returning the handshake outcome | done | done | done | no | no |
+| Disable automatic reconnect | done | done | done | no | no |
 
 ## Cluster routing
 

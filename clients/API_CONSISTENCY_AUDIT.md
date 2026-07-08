@@ -137,21 +137,24 @@ drift again"). Touches all five clients — do as one coordinated pass. Highest 
   fail loud on older Pythons rather than checking less (it is a security control).
 
 **Tier 4 — docs.**
-- **`website/src/content/docs/reliability/reconnects.md` says "Rust and TypeScript"
-  in 4 places** (lines 31, 40, 71, 103 — incl. the handshake-outcome line), while
-  `development/reconnection-grace.md` was already updated to all five. This
-  *under-claims a safety surface* → correct each line to the true support set (keep
-  genuine per-client gaps explicit). HIGHEST-STAKES single item.
-- Structural: assert parity once + a per-client support matrix for the uneven bits
-  (handshake-outcome accessor, reconcile-close reason, closed-stream signal shape).
-  Stop inline-enumerating client names (an allowlist silently becomes a denylist).
-- Central reconnect entry point (there are TWO pages: `reconnection-grace` +
-  `reconnects`) — one canonical entry + cross-link.
-- Mental-model diagram (TCP → logical connection → subscriptions → settlement).
-- Explain the reserved `stroma.*` namespace on the clients page.
-- Admin DLQ `"tp"` field → `"topic"` (keep `expected_version`, it is a nice touch).
-- Define what "known to be closed" triggers reconnect (read/write fail, heartbeat,
-  EOF, TLS alert).
+- DONE - `reliability/reconnects.md` under-claim fixed. Verified the true support
+  set in-repo first: resume identity + one-attempt auto-reconnect + reconcile +
+  opt-in restore + no-replay + closed-stream-as-end-of-stream are ALL FIVE; the only
+  uneven bits are explicit user `reconnect()` returning the handshake outcome and
+  disabling auto-reconnect (Rust/TS/Python only - Go/C# reconnect automatically with
+  no explicit call or disable knob). Replaced the "Rust and TypeScript" lines with
+  the accurate set + per-language closed-stream shapes.
+- DONE - support matrix. Added a per-client matrix in `reconnects.md` for the uneven
+  bits and two matching rows in `clients/FEATURE_MATRIX.md`, and stopped inline
+  client enumeration for the uniform features ("the clients").
+- DONE - central entry + cross-link. `reconnects.md` (user-facing) links to the
+  `reconnection-grace` dev note and vice-versa.
+- DONE - defined what "known to be closed" means (socket read/write fail, EOF, missed
+  heartbeat, fatal TLS alert).
+- Still pending (not reconnect-specific): mental-model diagram (TCP -> logical
+  connection -> subscriptions -> settlement); explain the reserved `stroma.*`
+  namespace on the clients page; admin DLQ `"tp"` field -> `"topic"` (keep
+  `expected_version`).
 
 **Tier 5 — design deepening (differentiators, bigger, mature over time; 9→10).**
 - Typed stream-close reason (`End`/`ReconciliationFailed`/`ConnectionLost`/

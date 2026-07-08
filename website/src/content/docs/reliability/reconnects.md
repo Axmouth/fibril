@@ -6,6 +6,10 @@ description: What reconnect grace does and what clients can rely on today.
 Reconnect grace is for short network breaks where the broker process is still
 running and the client can reconnect with the same resume identity.
 
+This page documents current user-facing behavior. For the protocol design and
+broker internals behind it, see the [reconnection grace development
+note](/development/reconnection-grace/).
+
 When grace is enabled, a disconnected client is not cleaned up immediately. The
 broker keeps the logical connection dormant for the configured window. If the
 client reconnects with the resume identity before the window expires, the broker
@@ -28,16 +32,20 @@ returning the message for redelivery.
 
 ## What It Does Not Do Yet
 
-Current Rust and TypeScript clients store resume identity and use it for
-explicit `reconnect()`. They also make one conservative automatic reconnect
-attempt before a new publish, subscribe, or declare operation when the previous
-engine is already known to be closed.
+All five clients (Rust, TypeScript, Python, Go, and C#) store the resume identity
+and make one conservative automatic reconnect attempt before a new publish,
+subscribe, or declare operation when the previous engine is already known to be
+closed. A connection is *known to be closed* when a socket read or write fails,
+the peer sends EOF, an expected heartbeat is missed, or the TLS layer reports a
+fatal alert. Rust, TypeScript, and Python additionally expose an explicit
+`reconnect()` you can call yourself (see the support matrix below); Go and C#
+reconnect only automatically.
 
 Publisher handles created from a client use the latest connection engine after
 explicit or automatic reconnect. New subscriptions created after reconnect also
 use the latest engine.
 
-After a successful resume, Rust and TypeScript clients send the broker the
+After a successful resume, the clients send the broker the
 subscription metadata they still believe is active. The broker compares it with
 the server-side logical connection and replies with a reconciliation result.
 When the broker reports that a subscription should be kept, the client routes
@@ -55,7 +63,7 @@ The default reconciliation policy is conservative:
 - Subscriptions present on the server but missing from the client are dropped by
   the broker, because no client stream is listening for them.
 
-Both clients also expose an opt-in restore policy. With that policy, a
+The clients also expose an opt-in restore policy. With that policy, a
 client-owned subscription that is missing server-side is recreated by the
 broker, and the existing client stream continues with the broker's new
 subscription id. Metadata mismatches are still treated as unsafe.
@@ -68,10 +76,14 @@ If resume is not accepted, or the broker reports that the client and server
 disagree about a subscription, treat that stream as unsafe and recreate the
 subscription at the application level.
 
-Today, Rust and TypeScript subscription receive APIs report a closed
-subscription as end-of-stream: Rust returns `None`, and TypeScript returns
-`null` or ends async iteration. They do not yet attach a specific
-reconciliation-close reason to that stream.
+Today the clients report a closed subscription as end-of-stream on their normal
+receive API, each in its idiomatic shape: Rust `recv()` returns `None`,
+TypeScript returns `null` or ends async iteration, Python returns `None` (or
+raises `StopAsyncIteration`), Go closes the delivery channel, and C# ends the
+`IAsyncEnumerable`. None of them yet attach a specific reconciliation-close reason
+to that stream. A typed subscription lifecycle that carries the termination reason
+is planned as part of the client API freeze (see the [reconnection grace
+note](/development/reconnection-grace/#remaining-reconciliation-work)).
 
 Reconnect grace is also not durable restart recovery. If the broker process
 restarts, the in-memory dormant connection state is gone.
@@ -100,15 +112,28 @@ the runtime settings API.
 
 ## Current Client Signal
 
-Rust and TypeScript explicit reconnect calls return the broker handshake
-outcome. Use it to tell whether the broker actually resumed the previous
-logical connection or started a fresh one.
+Most reconnect behavior is uniform across the clients; two capabilities are not
+yet, so rather than name clients inline this is the support matrix:
 
-If the outcome is not `resumed`, treat old subscriptions and unsettled local
-work as unsafe to continue without a fresh application-level decision.
+| Capability | Rust | TypeScript | Python | Go | C# |
+|---|---|---|---|---|---|
+| Resume identity + one automatic reconnect attempt before an op | yes | yes | yes | yes | yes |
+| Subscription reconciliation on reconnect (conservative default) | yes | yes | yes | yes | yes |
+| Opt-in restore policy | yes | yes | yes | yes | yes |
+| Closed subscription surfaces as end-of-stream (no typed reason yet) | yes | yes | yes | yes | yes |
+| No replay of in-flight operations | yes | yes | yes | yes | yes |
+| Explicit `reconnect()` returning the handshake outcome | yes | yes | yes | no | no |
+| Disable automatic reconnect | yes | yes | yes | no | no |
 
-Automatic reconnect can be disabled in both clients. The default is intentionally
-small: one attempt before a new operation, not an unbounded background loop.
+Where an explicit `reconnect()` is available it returns the broker handshake
+outcome. Use it to tell whether the broker actually resumed the previous logical
+connection or started a fresh one. If the outcome is not `resumed`, treat old
+subscriptions and unsettled local work as unsafe to continue without a fresh
+application-level decision. Go and C# perform the same one-attempt automatic
+reconnect but do not surface an explicit call or a disable knob today.
+
+Automatic reconnect is intentionally small everywhere: one attempt before a new
+operation, not an unbounded background loop.
 
 ## Operator Visibility
 

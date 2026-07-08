@@ -3,8 +3,9 @@ title: Reconnection grace
 description: Development plan for client reconnection and inflight reconciliation.
 ---
 
-This is a development note. User-facing behavior should be documented separately
-once the feature exists.
+This is a development note covering the protocol design and broker internals. The
+current user-facing behavior and per-client support matrix live on the
+[Reconnects](/reliability/reconnects/) page.
 
 ## Problem
 
