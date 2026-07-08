@@ -151,10 +151,19 @@ drift again"). Touches all five clients — do as one coordinated pass. Highest 
   `reconnection-grace` dev note and vice-versa.
 - DONE - defined what "known to be closed" means (socket read/write fail, EOF, missed
   heartbeat, fatal TLS alert).
+- DONE - admin HTTP API topic field `tp` -> `topic`. Broader than just DLQ: the
+  admin request DTOs (create/delete queue, create stream, per-queue and global
+  dead-letter target) all spelled it `tp`, and the global-DLQ response leaked the
+  storage `GlobalDLQ.tp`. Renamed the admin request DTOs (admin-owned, not
+  persisted) and added a thin response view DTO, leaving the PERSISTED
+  `GlobalDLQ.tp` (msgpack `to_vec_named`) and the broker-wire `DLQDiscardPolicyWire`
+  field untouched - those are internal formats, same principle as the client wire
+  DTOs. fibrilctl updated in lockstep; the vocab-lint now guards `"tp"` / `pub tp:`
+  across the admin + cli surface. `expected_version` kept.
 - Still pending (not reconnect-specific): mental-model diagram (TCP -> logical
   connection -> subscriptions -> settlement); explain the reserved `stroma.*`
-  namespace on the clients page; admin DLQ `"tp"` field -> `"topic"` (keep
-  `expected_version`).
+  namespace on the clients page; the Go/C# decode-dispatch doc intro that
+  over-promises `deserialize()`.
 
 **Tier 5 — design deepening (differentiators, bigger, mature over time; 9→10).**
 - Typed stream-close reason (`End`/`ReconciliationFailed`/`ConnectionLost`/

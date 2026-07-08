@@ -591,7 +591,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                             .set_global_dlq(
                                 version,
                                 Some(GlobalDlqTarget {
-                                    tp: args.topic,
+                                    topic: args.topic,
                                     group: normalize_group_arg(args.group.as_deref())
                                         .map(str::to_string),
                                     part: None,
@@ -792,7 +792,7 @@ struct GlobalDlqSnapshot {
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 struct GlobalDlqTarget {
-    tp: String,
+    topic: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     part: Option<u32>,
     group: Option<String>,

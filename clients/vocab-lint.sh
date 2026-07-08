@@ -16,8 +16,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
 cd "$REPO_ROOT"
 
-# Source trees to scan (client public surfaces + the Rust reference client).
-SCAN=(clients/go clients/csharp/Fibril clients/python/src clients/typescript/src crates/client/src crates/cli/src)
+# Source trees to scan (client public surfaces + the Rust reference client + the
+# admin HTTP API and fibrilctl, which are also user-facing).
+SCAN=(clients/go clients/csharp/Fibril clients/python/src clients/typescript/src crates/client/src crates/cli/src crates/admin/src)
 
 fail=0
 
@@ -54,6 +55,12 @@ report "declare config type (Go)" 'type Declare(Queue|Plexus) struct' 'QueueConf
 # Reconcile policy value is `restore` (the wire stays a numeric byte; only the
 # client-facing spelling is checked here). The old string has no use left.
 report "reconcile policy value" 'restore_client_subscriptions' 'restore'
+
+# The admin HTTP API and fibrilctl spell the topic `topic`, never the abbreviated
+# `tp` (the storage and broker-wire layers keep `tp` internally; that is a struct
+# literal `tp:` / field access `.tp`, which these patterns do not match). Catch a
+# reintroduced `"tp"` JSON key or a `pub tp:` request field.
+report "admin topic field" '"tp"|pub tp:' 'topic'
 
 if [[ "$fail" -ne 0 ]]; then
   echo "Client vocabulary lint FAILED. See clients/API_CONSISTENCY_AUDIT.md for the canonical table."

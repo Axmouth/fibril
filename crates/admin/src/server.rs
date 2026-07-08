@@ -1395,7 +1395,7 @@ mod tests {
                     .method("POST")
                     .uri("/admin/api/queues")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(json!({ "tp": "  " }).to_string()))
+                    .body(Body::from(json!({ "topic": "  " }).to_string()))
                     .unwrap(),
             )
             .await
@@ -1417,7 +1417,7 @@ mod tests {
                     .method("POST")
                     .uri("/admin/api/queues/delete")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(json!({ "tp": "  " }).to_string()))
+                    .body(Body::from(json!({ "topic": "  " }).to_string()))
                     .unwrap(),
             )
             .await
@@ -1451,7 +1451,7 @@ mod tests {
                     .uri("/admin/api/queues/delete")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
-                        json!({ "tp": "orders", "partition_count": 2 }).to_string(),
+                        json!({ "topic": "orders", "partition_count": 2 }).to_string(),
                     ))
                     .unwrap(),
             )
@@ -2332,7 +2332,7 @@ mod tests {
                         json!({
                             "expected_version": 0,
                             "target": {
-                                "tp": "_dlq.orders",
+                                "topic": "_dlq.orders",
                                 "group": "failed"
                             }
                         })
@@ -2346,7 +2346,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["version"], 1);
-        assert_eq!(body["target"]["tp"], "_dlq.orders");
+        assert_eq!(body["target"]["topic"], "_dlq.orders");
         assert_eq!(body["target"]["group"], "failed");
 
         let response = app
@@ -2389,7 +2389,7 @@ mod tests {
                         json!({
                             "expected_version": 0,
                             "target": {
-                                "tp": "_dlq.orders",
+                                "topic": "_dlq.orders",
                                 "group": null
                             }
                         })
@@ -2411,7 +2411,7 @@ mod tests {
                         json!({
                             "expected_version": 0,
                             "target": {
-                                "tp": "_dlq.other",
+                                "topic": "_dlq.other",
                                 "group": null
                             }
                         })
@@ -2425,7 +2425,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CONFLICT);
         let body = response_json(response).await;
         assert_eq!(body["version"], 1);
-        assert_eq!(body["target"]["tp"], "_dlq.orders");
+        assert_eq!(body["target"]["topic"], "_dlq.orders");
     }
 
     #[tokio::test]
@@ -2443,7 +2443,7 @@ mod tests {
                         json!({
                             "expected_version": 0,
                             "target": {
-                                "tp": "BadTopic",
+                                "topic": "BadTopic",
                                 "group": null
                             }
                         })
@@ -2473,11 +2473,11 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
-                            "tp": "orders.created",
+                            "topic": "orders.created",
                             "group": null,
                             "policy": "custom",
                             "target": {
-                                "tp": "_dlq.orders",
+                                "topic": "_dlq.orders",
                                 "group": "failed"
                             },
                             "max_retries": 7
@@ -2629,7 +2629,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
-                            "tp": "orders.created",
+                            "topic": "orders.created",
                             "group": null,
                             "policy": "custom",
                             "target": null,
@@ -2685,7 +2685,7 @@ mod tests {
                         json!({
                             "expected_version": 0,
                             "target": {
-                                "tp": "_dlq.source",
+                                "topic": "_dlq.source",
                                 "group": null
                             }
                         })
@@ -2705,7 +2705,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
-                            "tp": "source",
+                            "topic": "source",
                             "group": null,
                             "policy": "global",
                             "target": null,

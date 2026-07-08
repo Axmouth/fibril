@@ -79,6 +79,13 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   the TypeScript, Python, and Go clients) instead of `restore_client_subscriptions`
   / `RestoreClientSubscriptions`; the wire encoding is an unchanged numeric byte. A
   `clients/vocab-lint.sh` CI check guards these against drifting back.
+- Admin HTTP API topic field. The admin API and `fibrilctl` now spell the topic
+  `topic` (matching every client and the rest of the API) instead of the
+  abbreviated `tp` in the create-queue, delete-queue, create-stream, per-queue
+  dead-letter, and global dead-letter request and response bodies. The persisted
+  storage field and the broker wire keep their internal `tp` name, so on-disk state
+  and the protocol are unchanged; only the HTTP surface is renamed. The vocab-lint
+  guards it.
 
 ### Fixed
 

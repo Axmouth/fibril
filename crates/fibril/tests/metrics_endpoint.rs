@@ -116,7 +116,7 @@ async fn metrics_scrape_reflects_broker_traffic_and_channels() {
     let http = reqwest::Client::new();
     let resp = http
         .post(format!("http://{}/admin/api/streams", server.admin_addr))
-        .json(&serde_json::json!({ "tp": "metrics.events" }))
+        .json(&serde_json::json!({ "topic": "metrics.events" }))
         .send()
         .await
         .expect("declare stream");

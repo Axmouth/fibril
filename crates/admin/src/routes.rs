@@ -65,13 +65,13 @@ pub enum QueueDlqPolicyRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct QueueDlqTargetRequest {
-    pub tp: String,
+    pub topic: String,
     pub group: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct UpdateQueueDlqRequest {
-    pub tp: String,
+    pub topic: String,
     pub group: Option<String>,
     pub policy: QueueDlqPolicyRequest,
     pub target: Option<QueueDlqTargetRequest>,
@@ -80,7 +80,7 @@ pub struct UpdateQueueDlqRequest {
 
 #[derive(Deserialize)]
 pub struct CreateQueueRequest {
-    pub tp: String,
+    pub topic: String,
     pub group: Option<String>,
     /// Partition count for the new queue (defaults to 1).
     pub partition_count: Option<u32>,
@@ -95,7 +95,7 @@ pub struct CreateQueueRequest {
 
 #[derive(Deserialize)]
 pub struct DeleteQueueRequest {
-    pub tp: String,
+    pub topic: String,
     pub group: Option<String>,
     /// Partition count to tear down (defaults to 1). Partitions 0..count are
     /// destroyed.
@@ -131,6 +131,36 @@ pub struct RepartitionQueueRequest {
 #[derive(Serialize)]
 pub struct QueueDlqResponse {
     pub status: &'static str,
+}
+
+/// Admin-API view of the global dead-letter snapshot. The storage layer spells
+/// the topic `tp` (a persisted field name); the HTTP API presents it as `topic`
+/// like every other admin surface, so this view translates rather than leaking
+/// the internal name.
+#[derive(Serialize)]
+pub struct GlobalDlqTargetView {
+    pub topic: String,
+    pub part: u32,
+    pub group: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct GlobalDlqView {
+    pub version: u64,
+    pub target: Option<GlobalDlqTargetView>,
+}
+
+impl From<GlobalDlqSnapshot> for GlobalDlqView {
+    fn from(snapshot: GlobalDlqSnapshot) -> Self {
+        GlobalDlqView {
+            version: snapshot.version,
+            target: snapshot.target.map(|t| GlobalDlqTargetView {
+                topic: t.tp,
+                part: t.part,
+                group: t.group,
+            }),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -232,7 +262,7 @@ impl RuntimeSettingsResponse {
 /// Request body for declaring a Plexus stream from the admin UI.
 #[derive(Deserialize)]
 pub struct CreateStreamRequest {
-    pub tp: String,
+    pub topic: String,
     pub partition_count: Option<u32>,
     /// "ephemeral" | "speculative" | "durable" (defaults to durable).
     pub durability: Option<String>,
@@ -265,7 +295,7 @@ pub async fn create_stream(
 ) -> Result<Response, StatusCode> {
     check_auth(&server, &headers).await?;
 
-    if request.tp.trim().is_empty() {
+    if request.topic.trim().is_empty() {
         return Ok(admin_error(
             StatusCode::BAD_REQUEST,
             "invalid_topic",
@@ -308,7 +338,7 @@ pub async fn create_stream(
 
     let partition_count = request.partition_count.unwrap_or(1).max(1);
     match streams
-        .declare_stream(&request.tp, partition_count, durability, retention)
+        .declare_stream(&request.topic, partition_count, durability, retention)
         .await
     {
         Ok(()) => Ok(Json(serde_json::json!({ "status": "created" })).into_response()),
@@ -1128,13 +1158,18 @@ pub async fn remove_user(
 pub async fn global_dlq(
     State(server): State<Arc<AdminServer>>,
     headers: axum::http::HeaderMap,
-) -> Result<Json<GlobalDlqSnapshot>, StatusCode> {
+) -> Result<Json<GlobalDlqView>, StatusCode> {
     check_auth(&server, &headers).await?;
 
-    server.storage.global_dlq().await.map(Json).map_err(|err| {
-        tracing::error!("global dlq fetch failed: {err}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })
+    server
+        .storage
+        .global_dlq()
+        .await
+        .map(|snapshot| Json(GlobalDlqView::from(snapshot)))
+        .map_err(|err| {
+            tracing::error!("global dlq fetch failed: {err}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
 }
 
 pub async fn update_global_dlq(
@@ -1147,7 +1182,7 @@ pub async fn update_global_dlq(
     let target = match request.target {
         Some(target) => {
             let group = normalize_group(target.group);
-            match GlobalDLQ::new(&target.tp, 0, group.as_deref()).await {
+            match GlobalDLQ::new(&target.topic, 0, group.as_deref()).await {
                 Ok(target) => Some(target),
                 Err(err) => {
                     return Ok(admin_error(
@@ -1167,10 +1202,10 @@ pub async fn update_global_dlq(
         .await
     {
         Ok(GlobalDlqUpdateOutcome::Stored(snapshot)) => {
-            Ok((StatusCode::OK, Json(snapshot)).into_response())
+            Ok((StatusCode::OK, Json(GlobalDlqView::from(snapshot))).into_response())
         }
         Ok(GlobalDlqUpdateOutcome::Conflict(snapshot)) => {
-            Ok((StatusCode::CONFLICT, Json(snapshot)).into_response())
+            Ok((StatusCode::CONFLICT, Json(GlobalDlqView::from(snapshot))).into_response())
         }
         Err(err @ StromaError::InvalidArgument(_)) => Ok(admin_error(
             StatusCode::BAD_REQUEST,
@@ -1207,7 +1242,7 @@ pub async fn update_queue_dlq(
                 ));
             };
             let target_group = normalize_group(target.group);
-            let target = match GlobalDLQ::new(&target.tp, 0, target_group.as_deref()).await {
+            let target = match GlobalDLQ::new(&target.topic, 0, target_group.as_deref()).await {
                 Ok(target) => target,
                 Err(err) => {
                     return Ok(admin_error(
@@ -1234,7 +1269,7 @@ pub async fn update_queue_dlq(
     let group = normalize_group(request.group);
     match server
         .storage
-        .declare_queue(&request.tp, 0, group.as_deref(), meta)
+        .declare_queue(&request.topic, 0, group.as_deref(), meta)
         .await
     {
         Ok(()) => Ok((StatusCode::OK, Json(QueueDlqResponse { status: "stored" })).into_response()),
@@ -1269,7 +1304,7 @@ pub async fn create_queue(
 ) -> Result<Response, StatusCode> {
     check_auth(&server, &headers).await?;
 
-    if request.tp.trim().is_empty() {
+    if request.topic.trim().is_empty() {
         return Ok(admin_error(
             StatusCode::BAD_REQUEST,
             "invalid_topic",
@@ -1292,7 +1327,7 @@ pub async fn create_queue(
                 ));
             };
             let target_group = normalize_group(target.group.clone());
-            let target = match GlobalDLQ::new(&target.tp, 0, target_group.as_deref()).await {
+            let target = match GlobalDLQ::new(&target.topic, 0, target_group.as_deref()).await {
                 Ok(target) => target,
                 Err(err) => {
                     return Ok(admin_error(
@@ -1320,7 +1355,7 @@ pub async fn create_queue(
     for partition in 0..partition_count {
         match server
             .storage
-            .declare_queue(&request.tp, partition, group.as_deref(), meta.clone())
+            .declare_queue(&request.topic, partition, group.as_deref(), meta.clone())
             .await
         {
             Ok(()) => {}
@@ -1370,7 +1405,7 @@ pub async fn delete_queue(
 ) -> Result<Response, StatusCode> {
     check_auth(&server, &headers).await?;
 
-    if request.tp.trim().is_empty() {
+    if request.topic.trim().is_empty() {
         return Ok(admin_error(
             StatusCode::BAD_REQUEST,
             "invalid_topic",
@@ -1392,7 +1427,7 @@ pub async fn delete_queue(
     for partition in 0..partition_count {
         match server
             .storage
-            .destroy_partition(&request.tp, partition, group.as_deref())
+            .destroy_partition(&request.topic, partition, group.as_deref())
             .await
         {
             Ok(DestroyOutcome::Destroyed) => {}

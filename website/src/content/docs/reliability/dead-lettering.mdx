@@ -156,7 +156,7 @@ PUT /admin/api/global-dlq
 {
   "version": 1,
   "target": {
-    "tp": "_dlq.orders",
+    "topic": "_dlq.orders",
     "part": 0,
     "group": null
   }
@@ -169,7 +169,7 @@ PUT /admin/api/global-dlq
 {
   "expected_version": 1,
   "target": {
-    "tp": "_dlq.orders",
+    "topic": "_dlq.orders",
     "group": null
   }
 }
@@ -188,7 +188,7 @@ Use the global DLQ target for a queue:
 
 ```json
 {
-  "tp": "orders.created",
+  "topic": "orders.created",
   "group": null,
   "policy": "global",
   "target": null,
@@ -251,11 +251,11 @@ Use a queue-specific DLQ target:
 
 ```json
 {
-  "tp": "orders.created",
+  "topic": "orders.created",
   "group": null,
   "policy": "custom",
   "target": {
-    "tp": "_dlq.orders",
+    "topic": "_dlq.orders",
     "group": null
   },
   "max_retries": 3
@@ -266,7 +266,7 @@ Discard after retries are exhausted:
 
 ```json
 {
-  "tp": "orders.created",
+  "topic": "orders.created",
   "group": null,
   "policy": "discard",
   "target": null,
