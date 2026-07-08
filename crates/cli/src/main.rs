@@ -694,7 +694,7 @@ async fn publish_message(
         Some(group) => client.publisher_grouped(&args.topic, group)?,
         None => client.publisher(&args.topic)?,
     };
-    let mut message = NewMessage::content(args.message);
+    let mut message = NewMessage::text(args.message);
     if let Some(partition_key) = args.partition_key {
         message = message.partition_key(partition_key.into_bytes());
     }

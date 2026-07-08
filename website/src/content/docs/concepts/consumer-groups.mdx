@@ -40,7 +40,7 @@ let mut sub = client
     .await?;
 
 while let Some(msg) = sub.recv().await? {
-    process(msg.content()?).await?; // per-key order preserved
+    process(msg.text()?).await?; // per-key order preserved
 }
 ```
 

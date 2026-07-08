@@ -17,12 +17,12 @@ async fn main() -> Result<(), FibrilError> {
 
     let offset = client
         .publisher(topic)?
-        .publish_confirmed(NewMessage::content("hello"))
+        .publish_confirmed(NewMessage::text("hello"))
         .await?;
     println!("confirmed publish at offset {offset}");
 
     let msg = sub.recv().await.expect("the round-trip message");
-    assert_eq!(msg.content()?, "hello", "payload round-trips");
-    println!("received {}", msg.content()?);
+    assert_eq!(msg.text()?, "hello", "payload round-trips");
+    println!("received {}", msg.text()?);
     Ok(())
 }

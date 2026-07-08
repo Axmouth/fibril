@@ -29,13 +29,13 @@ async fn main() -> Result<(), FibrilError> {
 
     for seq in 0..5 {
         publisher
-            .publish_confirmed(NewMessage::content(format!("record-{seq}")))
+            .publish_confirmed(NewMessage::text(format!("record-{seq}")))
             .await?;
     }
 
     for _ in 0..5 {
         let record = sub.recv().await.expect("a stream record");
-        println!("stream record {}", record.content()?);
+        println!("stream record {}", record.text()?);
     }
     Ok(())
 }

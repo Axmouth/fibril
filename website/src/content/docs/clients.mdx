@@ -622,7 +622,7 @@ publisher
 
 publisher
     .publish(
-        NewMessage::content("plain text")
+        NewMessage::text("plain text")
             .header("x-trace-id", "abc123"),
     )
     .await?;
@@ -739,7 +739,7 @@ let mut sub = client
     .await?;
 
 while let Some(msg) = sub.recv().await {
-    let body = msg.content()?;
+    let body = msg.text()?;
 
     match send_email(body).await {
         Ok(()) => {
@@ -1121,7 +1121,7 @@ struct Job {
 
 let job: Job = msg.deserialize()?;
 let raw: &[u8] = msg.raw();
-let text: &str = msg.content()?;
+let text: &str = msg.text()?;
 ```
 
   </TabItem>
@@ -1296,7 +1296,7 @@ let mut sub = client
     .await?;
 
 while let Some(msg) = sub.recv().await {
-    handle(msg.content()?);
+    handle(msg.text()?);
     msg.complete().await?; // advances the durable cursor
 }
 ```
@@ -1452,7 +1452,7 @@ let mut sub = client
     .await?;
 
 while let Some((source, msg)) = sub.recv().await {
-    handle(&source.topic, msg.content()?);
+    handle(&source.topic, msg.text()?);
     msg.complete().await?;
 }
 ```

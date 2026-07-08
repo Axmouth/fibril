@@ -560,7 +560,7 @@ impl Message {
     }
 
     /// Decode the payload as UTF-8 text.
-    pub fn content(&self) -> Result<&str, FibrilError> {
+    pub fn text(&self) -> Result<&str, FibrilError> {
         std::str::from_utf8(&self.payload)
             .map_err(|e| FibrilError::DeserializationFailure { msg: e.to_string() })
     }
@@ -578,7 +578,7 @@ impl Message {
 /// # async fn example(publisher: fibril_client::Publisher) -> fibril_client::FibrilResult<()> {
 /// publisher
 ///     .publish(
-///         NewMessage::content("hello")
+///         NewMessage::text("hello")
 ///             .header("x-trace-id", "abc123"),
 ///     )
 ///     .await?;
@@ -623,7 +623,7 @@ impl NewMessage {
     }
 
     /// Publish UTF-8 text and set `text/plain; charset=utf-8`.
-    pub fn content(payload: impl Into<Vec<u8>>) -> Self {
+    pub fn text(payload: impl Into<Vec<u8>>) -> Self {
         NewMessage::with_content_type(payload.into(), "text/plain; charset=utf-8")
     }
 
@@ -6755,7 +6755,7 @@ mod tests {
 
     #[test]
     fn new_message_exposes_headers_and_content_type() {
-        let message = NewMessage::content("hello")
+        let message = NewMessage::text("hello")
             .header("x-trace", "abc")
             .content_type("text/plain");
 
@@ -6812,8 +6812,8 @@ mod tests {
     }
 
     #[test]
-    fn content_message_sets_text_content_type() {
-        let message = NewMessage::content("hello");
+    fn text_message_sets_text_content_type() {
+        let message = NewMessage::text("hello");
         let message = Message {
             delivery_tag: DeliveryTag { epoch: 1 },
             published: 0,
@@ -6824,7 +6824,7 @@ mod tests {
         };
 
         assert_eq!(message.content_type(), Some("text/plain; charset=utf-8"));
-        assert_eq!(message.content().unwrap(), "hello");
+        assert_eq!(message.text().unwrap(), "hello");
     }
 
     #[test]

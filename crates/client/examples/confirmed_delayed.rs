@@ -19,10 +19,10 @@ async fn main() -> Result<(), FibrilError> {
     let publisher = client.publisher(topic)?;
 
     let first = publisher
-        .publish_confirmed(NewMessage::content("now"))
+        .publish_confirmed(NewMessage::text("now"))
         .await?;
     let second = publisher
-        .publish_confirmed(NewMessage::content("also now"))
+        .publish_confirmed(NewMessage::text("also now"))
         .await?;
     assert!(
         second > first,
@@ -32,13 +32,13 @@ async fn main() -> Result<(), FibrilError> {
 
     // Withheld until the delay elapses (1 second), then delivered normally.
     publisher
-        .publish_delayed_confirmed(NewMessage::content("later"), Duration::from_secs(1))
+        .publish_delayed_confirmed(NewMessage::text("later"), Duration::from_secs(1))
         .await?;
     println!("published one message delayed by 1s");
 
     for _ in 0..3 {
         let msg = sub.recv().await.expect("a delivery");
-        println!("received {}", msg.content()?);
+        println!("received {}", msg.text()?);
     }
     Ok(())
 }

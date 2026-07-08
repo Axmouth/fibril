@@ -21,7 +21,7 @@ async fn main() -> Result<(), FibrilError> {
         println!(
             "{}: {}",
             source.topic,
-            message.content().unwrap_or("<binary>")
+            message.text().unwrap_or("<binary>")
         );
     }
     Ok(())

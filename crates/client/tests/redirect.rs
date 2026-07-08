@@ -460,7 +460,7 @@ async fn keyless_publishes_spread_keyed_publishes_stick() {
     for _ in 0..keyless {
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            publisher.publish_confirmed(NewMessage::content("spread")),
+            publisher.publish_confirmed(NewMessage::text("spread")),
         )
         .await
         .expect("keyless publish must not hang")
@@ -480,7 +480,7 @@ async fn keyless_publishes_spread_keyed_publishes_stick() {
     for _ in 0..keyed {
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            publisher.publish_confirmed(NewMessage::content("sticky").partition_key("order-42")),
+            publisher.publish_confirmed(NewMessage::text("sticky").partition_key("order-42")),
         )
         .await
         .expect("keyed publish must not hang")
@@ -527,7 +527,7 @@ async fn publishes_carry_routed_partitioning_version() {
     for _ in 0..5 {
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            publisher.publish_confirmed(NewMessage::content("v")),
+            publisher.publish_confirmed(NewMessage::text("v")),
         )
         .await
         .expect("publish must not hang")

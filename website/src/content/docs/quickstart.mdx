@@ -76,7 +76,7 @@ let mut sub = client
     .await?;
 
 while let Some(msg) = sub.recv().await {
-    process(msg.content()?).await?;
+    process(msg.text()?).await?;
     msg.complete().await?;
 }
 ```

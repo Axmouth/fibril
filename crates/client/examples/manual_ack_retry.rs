@@ -17,7 +17,7 @@ async fn main() -> Result<(), FibrilError> {
     let mut sub = client.subscribe(topic)?.prefetch(4).sub().await?; // manual ack
     client
         .publisher(topic)?
-        .publish_confirmed(NewMessage::content("work"))
+        .publish_confirmed(NewMessage::text("work"))
         .await?;
 
     let first = sub.recv().await.expect("first delivery");
