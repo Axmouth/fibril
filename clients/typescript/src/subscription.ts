@@ -110,7 +110,7 @@ export class Message {
   /**
    * Decode the payload as UTF-8 text.
    */
-  content(): string {
+  text(): string {
     try {
       return new TextDecoder().decode(this.payload);
     } catch (err) {
@@ -205,7 +205,7 @@ export class InflightMessage {
   /**
    * Decode the payload as UTF-8 text.
    */
-  content(): string {
+  text(): string {
     try {
       return new TextDecoder().decode(this.payload);
     } catch (err) {

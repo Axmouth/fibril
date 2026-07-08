@@ -1065,7 +1065,7 @@ export interface StreamRetention {
   /** Keep at most this many bytes of retained records. */
   maxBytes: bigint | null;
   /** Keep at most this many records. */
-  maxRecords: bigint | null;
+  retainRecords: bigint | null;
 }
 
 /**
@@ -1128,7 +1128,7 @@ export function encodeDeclarePlexusBody(d: DeclarePlexus): Uint8Array {
   w.u8(DURABILITY_TO_U8[d.durability]);
   w.optionalU64(d.retention.maxAgeMs);
   w.optionalU64(d.retention.maxBytes);
-  w.optionalU64(d.retention.maxRecords);
+  w.optionalU64(d.retention.retainRecords);
   w.optionalU32(d.replicationFactor);
   return w.finish();
 }
@@ -1146,7 +1146,7 @@ export function decodeDeclarePlexusBody(body: Uint8Array): DeclarePlexus {
   const retention: StreamRetention = {
     maxAgeMs: r.optionalU64(),
     maxBytes: r.optionalU64(),
-    maxRecords: r.optionalU64(),
+    retainRecords: r.optionalU64(),
   };
   const replicationFactor = r.optionalU32();
   r.finish();

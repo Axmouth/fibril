@@ -52,7 +52,7 @@ while let Some(msg) = sub.recv().await? {
 const sub = await client.subscribe("orders").exclusive().subAutoAck();
 
 for await (const msg of sub) {
-  await process(msg.content()); // per-key order preserved
+  await process(msg.text()); // per-key order preserved
 }
 ```
 

@@ -21,5 +21,5 @@ const sub = await client.routing().subscribePattern("events.*").sub();
 console.log("listening for events.* (new matching queues attach automatically)");
 for await (const { source, message } of sub) {
   const settled = await message.complete();
-  console.log(`${source.topic}: ${settled.content()}`);
+  console.log(`${source.topic}: ${settled.text()}`);
 }

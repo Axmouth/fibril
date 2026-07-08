@@ -564,14 +564,14 @@ const CANONICAL: Record<string, unknown> = {
     topic: "t",
     partitionCount: 4,
     durability: "speculative",
-    retention: { maxAgeMs: 60000n, maxBytes: null, maxRecords: 1000000n },
+    retention: { maxAgeMs: 60000n, maxBytes: null, retainRecords: 1000000n },
     replicationFactor: 2,
   },
   declare_plexus_min: {
     topic: "t",
     partitionCount: null,
     durability: "durable",
-    retention: { maxAgeMs: null, maxBytes: null, maxRecords: null },
+    retention: { maxAgeMs: null, maxBytes: null, retainRecords: null },
     replicationFactor: null,
   },
   declare_plexus_ok: { status: "created", partitionCount: 4 },
@@ -831,7 +831,7 @@ test("plexus stream bodies match shared vectors and round-trip", () => {
     topic: "t",
     partitionCount: 4,
     durability: "speculative",
-    retention: { maxAgeMs: 60000n, maxBytes: null, maxRecords: 1000000n },
+    retention: { maxAgeMs: 60000n, maxBytes: null, retainRecords: 1000000n },
     replicationFactor: 2,
   };
   assert.equal(toHex(encodeDeclarePlexusBody(declare)), VECTORS.declare_plexus);
@@ -841,7 +841,7 @@ test("plexus stream bodies match shared vectors and round-trip", () => {
     topic: "t",
     partitionCount: null,
     durability: "durable",
-    retention: { maxAgeMs: null, maxBytes: null, maxRecords: null },
+    retention: { maxAgeMs: null, maxBytes: null, retainRecords: null },
     replicationFactor: null,
   };
   assert.equal(toHex(encodeDeclarePlexusBody(declareMin)), VECTORS.declare_plexus_min);

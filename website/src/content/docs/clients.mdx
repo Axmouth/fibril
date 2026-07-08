@@ -646,7 +646,7 @@ await publisher.publish(
 );
 
 await publisher.publish(
-  NewMessage.content("plain text")
+  NewMessage.text("plain text")
     .header("x-trace-id", "abc123"),
 );
 
@@ -763,7 +763,7 @@ const sub = await client
   .sub();
 
 for await (const msg of sub) {
-  const body = msg.content();
+  const body = msg.text();
 
   try {
     await sendEmail(body);
@@ -1134,7 +1134,7 @@ type Job = {
 
 const job = msg.deserialize<Job>();
 const raw = msg.raw();
-const text = msg.content();
+const text = msg.text();
 ```
 
   </TabItem>
@@ -1320,7 +1320,7 @@ const sub = await client
   .sub();
 
 for await (const msg of sub) {
-  handle(msg.content());
+  handle(msg.text());
   await msg.complete(); // advances the durable cursor
 }
 ```
@@ -1464,7 +1464,7 @@ while let Some((source, msg)) = sub.recv().await {
 const sub = await client.routing().subscribePattern("events.*").sub();
 
 for await (const { source, message } of sub) {
-  handle(source.topic, message.content());
+  handle(source.topic, message.text());
   await message.complete();
 }
 ```

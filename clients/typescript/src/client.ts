@@ -504,7 +504,7 @@ export class StreamConfig {
     topic: string,
     partitionCount: number | null = null,
     durability: StreamDurability = "durable",
-    retention: StreamRetention = { maxAgeMs: null, maxBytes: null, maxRecords: null },
+    retention: StreamRetention = { maxAgeMs: null, maxBytes: null, retainRecords: null },
     replicationFactor: number | null = null,
   ) {
     this.topic = topic;
@@ -559,7 +559,7 @@ export class StreamConfig {
 
   /** Keep at most this many records. */
   retainRecords(records: number | bigint): StreamConfig {
-    return this.#with({ retention: { ...this.retention, maxRecords: BigInt(records) } });
+    return this.#with({ retention: { ...this.retention, retainRecords: BigInt(records) } });
   }
 
   /**

@@ -13,13 +13,13 @@ await runExample("confirmed-delayed", async () => {
     const sub = await client.subscribe(topic).prefetch(8).subAutoAck();
     const publisher = client.publisher(topic);
 
-    const o1 = await publisher.publishConfirmed(NewMessage.content("now"));
-    const o2 = await publisher.publishConfirmed(NewMessage.content("also now"));
+    const o1 = await publisher.publishConfirmed(NewMessage.text("now"));
+    const o2 = await publisher.publishConfirmed(NewMessage.text("also now"));
     check(o2 > o1, "offsets increase across confirmed publishes");
 
     // Publish with a 1s delay, then assert nothing arrives early.
     const delayMs = 1_000;
-    await publisher.publishDelayedConfirmed(NewMessage.content("later"), delayMs);
+    await publisher.publishDelayedConfirmed(NewMessage.text("later"), delayMs);
 
     const first = await sub.recv();
     const second = await sub.recv();

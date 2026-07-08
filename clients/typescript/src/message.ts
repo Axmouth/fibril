@@ -145,7 +145,7 @@ export class NewMessage {
   /**
    * Publish UTF-8 text and set `text/plain; charset=utf-8`.
    */
-  static content(payload: string): NewMessage {
+  static text(payload: string): NewMessage {
     return NewMessage.withContentType(
       new TextEncoder().encode(payload),
       TEXT_CONTENT_TYPE,

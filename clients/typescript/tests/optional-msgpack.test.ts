@@ -15,6 +15,6 @@ test("msgpack codec lazily loads and round-trips (bigints included)", () => {
 
 test("raw and text messages need no msgpack", () => {
   assert.deepEqual(NewMessage.raw(new Uint8Array([1, 2, 3])).payload, new Uint8Array([1, 2, 3]));
-  const text = NewMessage.content("hi");
+  const text = NewMessage.text("hi");
   assert.equal(new TextDecoder().decode(text.payload), "hi");
 });
