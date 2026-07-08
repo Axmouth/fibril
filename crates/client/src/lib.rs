@@ -841,9 +841,8 @@ impl Publisher {
 
     /// Stamp a default message TTL on every immediate publish from this
     /// publisher: the broker drops the message if it is not consumed within the
-    /// interval. The interval follows the [`Delayable`] convention - a bare
-    /// number is seconds, or pass a [`std::time::Duration`]. Applies to the
-    /// immediate publish paths (delayed publishes do not carry a TTL yet).
+    /// interval, given as a [`std::time::Duration`] (see [`Delayable`]). Applies to
+    /// the immediate publish paths (delayed publishes do not carry a TTL yet).
     pub fn expiring(mut self, ttl: impl Delayable) -> Self {
         self.default_message_ttl_ms = Some(ttl.with_delay().as_millis() as u64);
         self
@@ -868,8 +867,11 @@ pub enum SettleRequest {
 
 /// Type accepted as a delayed publish interval.
 ///
-/// Numeric implementations are interpreted as seconds in the Rust client.
-/// Use [`std::time::Duration`] when the unit should be explicit.
+/// A relative delay. Implemented only for [`std::time::Duration`] so the unit is
+/// always explicit at the call site: the Rust client does not accept a bare number
+/// (which would hide whether it meant seconds or milliseconds, and would disagree
+/// with the millisecond convention the TypeScript client uses). Write
+/// `Duration::from_secs(30)` or `Duration::from_millis(250)`.
 pub trait Delayable {
     /// Convert the value into a relative delay.
     fn with_delay(&self) -> std::time::Duration;
@@ -877,30 +879,6 @@ pub trait Delayable {
     /// Convert the relative delay into a Unix-millisecond deadline.
     fn deadline(&self) -> UnixMillis {
         unix_millis() + self.with_delay().as_millis() as u64
-    }
-}
-
-impl Delayable for u64 {
-    fn with_delay(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(*self)
-    }
-}
-
-impl Delayable for u32 {
-    fn with_delay(&self) -> std::time::Duration {
-        std::time::Duration::from_secs((*self).into())
-    }
-}
-
-impl Delayable for u16 {
-    fn with_delay(&self) -> std::time::Duration {
-        std::time::Duration::from_secs((*self).into())
-    }
-}
-
-impl Delayable for u8 {
-    fn with_delay(&self) -> std::time::Duration {
-        std::time::Duration::from_secs((*self).into())
     }
 }
 
@@ -1208,9 +1186,9 @@ impl QueueConfig {
     }
 
     /// Set a default message TTL for this queue: messages published without their
-    /// own TTL drop after this interval. Follows the [`Delayable`] convention
-    /// (bare number = seconds, or a Duration). This is per-message expiry, not
-    /// queue expiration (auto-deleting an idle queue).
+    /// own TTL drop after this interval, given as a [`std::time::Duration`] (see
+    /// [`Delayable`]). This is per-message expiry, not queue expiration
+    /// (auto-deleting an idle queue).
     pub fn default_message_ttl(mut self, ttl: impl Delayable) -> Self {
         self.default_message_ttl_ms = Some(ttl.with_delay().as_millis() as u64);
         self
@@ -1340,8 +1318,8 @@ impl StreamConfig {
         self
     }
 
-    /// Drop records older than this age. Follows the [`Delayable`] convention
-    /// (bare number = seconds, or a Duration).
+    /// Drop records older than this age, given as a [`std::time::Duration`] (see
+    /// [`Delayable`]).
     pub fn retain_for(mut self, age: impl Delayable) -> Self {
         self.retention.max_age_ms = Some(age.with_delay().as_millis() as u64);
         self
@@ -5231,13 +5209,12 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn expiring_ttl_follows_delayable_convention() {
-        // expiring() stamps `ttl.with_delay().as_millis()`. A bare number is
-        // seconds; a Duration is taken as-is. This mirrors the delayed-publish API.
-        let from_secs = 60u64.with_delay().as_millis() as u64;
+    fn delay_is_taken_from_the_duration() {
+        // A delay is a Duration, taken as-is (no bare-number unit to guess).
+        let from_secs = Duration::from_secs(60).with_delay().as_millis() as u64;
         assert_eq!(from_secs, 60_000);
-        let from_duration = Duration::from_millis(1500).with_delay().as_millis() as u64;
-        assert_eq!(from_duration, 1500);
+        let from_millis = Duration::from_millis(1500).with_delay().as_millis() as u64;
+        assert_eq!(from_millis, 1500);
     }
 
     #[test]
@@ -6457,7 +6434,7 @@ mod tests {
                         .partitions(4)
                         .speculative()
                         .retain_records(1_000)
-                        .retain_for(60u64),
+                        .retain_for(Duration::from_secs(60)),
                 )
                 .await
         });
@@ -6609,14 +6586,14 @@ mod tests {
                 .declare_queue(
                     QueueConfig::new("ephemeral")
                         .unwrap()
-                        .default_message_ttl(30u64),
+                        .default_message_ttl(Duration::from_secs(30)),
                 )
                 .await
         });
 
         match rx.recv().await.unwrap() {
             Command::DeclareQueue { req, reply } => {
-                // 30 seconds via the Delayable convention -> 30_000 ms.
+                // 30 seconds -> 30_000 ms.
                 assert_eq!(req.default_message_ttl_ms, Some(30_000));
                 reply.send(Ok(())).unwrap();
             }

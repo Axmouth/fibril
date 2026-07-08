@@ -86,6 +86,12 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   storage field and the broker wire keep their internal `tp` name, so on-disk state
   and the protocol are unchanged; only the HTTP surface is renamed. The vocab-lint
   guards it.
+- Rust client delays require an explicit `std::time::Duration`. The delayed-publish,
+  message-TTL, retry-after, and retention-age APIs no longer accept a bare integer,
+  which silently meant seconds and disagreed with the TypeScript client's
+  milliseconds; pass `Duration::from_secs(30)` or `Duration::from_millis(250)`. The
+  Python (seconds) and TypeScript (milliseconds) bare-number conventions are
+  unchanged, matching their own language norms.
 
 ### Fixed
 
@@ -93,6 +99,10 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   clients.
 - A plaintext broker is named as such when a TLS client connects to it, rather
   than surfacing as a generic handshake failure.
+- Python TLS fingerprint pinning on Python older than 3.13 now fails with a clear,
+  actionable message. Those interpreters expose only the leaf certificate, so a
+  CA-fingerprint pin cannot match; the client now says so (pin the leaf fingerprint,
+  upgrade to 3.13+, or trust the CA with a path) instead of a generic no-match error.
 
 ## [0.4.0] - 2026-07-04
 

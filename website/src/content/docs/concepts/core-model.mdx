@@ -36,7 +36,7 @@ Manual-ack consumers decide what happens after processing:
 ```rust
 msg.complete().await?;      // terminal success
 msg.retry().await?;         // requeue immediately
-msg.retry_after(30).await?; // requeue after a delay
+msg.retry_after(std::time::Duration::from_secs(30)).await?; // requeue after a delay
 msg.fail().await?;          // terminal failure
 ```
 

@@ -130,11 +130,21 @@ ways, so drift cannot reintroduce (the real 8→9 move: not "renamed" but "can't
 drift again"). Touches all five clients — do as one coordinated pass. Highest lever
 (this is the axis separating Fibril from NATS).
 
-**Tier 3 — latent hazards.**
-- Bare-number durations, per-language units (Rust sec vs TS ms) → drop bare overload
-  or bake unit into name. A unit mismatch that still type-checks. Do it.
-- Python 3.13 `tls_ca_fingerprint` silently pins whole chain vs leaf on older →
-  fail loud on older Pythons rather than checking less (it is a security control).
+**Tier 3 — latent hazards. DONE.**
+- Bare-number durations: RESOLVED by scoping to the one client where a bare number
+  is un-idiomatic. Python bare-seconds matches `time.sleep`/asyncio and TS
+  `number`=ms matches `setTimeout` (both idiomatic + documented, left as-is). Only
+  Rust's bare-int-`Delayable` (seconds) was surprising and un-idiomatic to its own
+  ecosystem (std/tokio require `Duration`), so the bare-int impls were dropped -
+  `Delayable` now takes only `Duration`, unit always explicit. 2 call sites + Rust
+  doc tabs updated; examples already used `Duration`.
+- Python `tls_ca_fingerprint` version split: RESOLVED. On Python < 3.13 there is no
+  chain introspection, so only the leaf can be checked against a pin; a CA-fingerprint
+  pin now fails with a LOUD, actionable error naming the version limitation (pin the
+  leaf, upgrade to 3.13+, or use `ca_path`) instead of an opaque "no cert matches",
+  and the `with_tls_ca_fingerprint` docstring states the caveat. (A deeper question -
+  CA-pinning with `verify_mode=CERT_NONE` trusting any chain that merely CONTAINS the
+  public CA cert - is noted for the Tier-5 whole-surface TLS review, not fixed here.)
 
 **Tier 4 — docs.**
 - DONE - `reliability/reconnects.md` under-claim fixed. Verified the true support

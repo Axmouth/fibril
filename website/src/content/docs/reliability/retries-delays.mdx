@@ -71,8 +71,8 @@ The clients expose delayed publish methods:
   <TabItem label="Rust">
 
 ```rust
-publisher.publish_delayed(payload, delay).await?;
-publisher.publish_delayed_confirmed(payload, delay).await?;
+publisher.publish_delayed(payload, std::time::Duration::from_secs(30)).await?;
+publisher.publish_delayed_confirmed(payload, std::time::Duration::from_secs(30)).await?;
 ```
 
   </TabItem>
@@ -110,7 +110,7 @@ await publisher.PublishDelayedConfirmedAsync(payload, TimeSpan.FromSeconds(30));
   </TabItem>
 </Tabs>
 
-Delay units differ by client: Rust seconds (or a `Duration`), TypeScript milliseconds (or a `Date` deadline), Python seconds (or a `timedelta`), Go a `time.Duration`.
+Delay units differ by client: Rust a `Duration`, TypeScript milliseconds (or a `Date` deadline), Python seconds (or a `timedelta`), Go a `time.Duration`, C# a `TimeSpan`.
 
 The delayed publish path uses a distinct protocol frame instead of adding an optional delay field to the common publish frame.
 
@@ -122,7 +122,7 @@ Manual-ack consumers can ask the broker to retry a message after a delay. Fibril
   <TabItem label="Rust">
 
 ```rust
-msg.retry_after(30).await?;
+msg.retry_after(std::time::Duration::from_secs(30)).await?;
 msg.retry_after(std::time::Duration::from_millis(250)).await?;
 ```
 
@@ -182,7 +182,7 @@ still overrides the default):
   <TabItem label="Rust">
 
 ```rust
-let publisher = client.publisher("rpc.reply")?.expiring(30);
+let publisher = client.publisher("rpc.reply")?.expiring(std::time::Duration::from_secs(30));
 publisher.publish(reply).await?;
 ```
 
@@ -228,7 +228,7 @@ Per-queue default TTL at declare time:
 
 ```rust
 client
-    .declare_queue(QueueConfig::new("rpc.reply")?.default_message_ttl(30))
+    .declare_queue(QueueConfig::new("rpc.reply")?.default_message_ttl(std::time::Duration::from_secs(30)))
     .await?;
 ```
 

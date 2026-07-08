@@ -161,7 +161,13 @@ class ClientOptions:
 
     def with_tls_ca_fingerprint(self, ca_fingerprint: str) -> "ClientOptions":
         """TLS pinning the broker certificate by the SHA-256 fingerprint printed
-        in the broker startup log (colons optional)."""
+        in the broker startup log (colons optional).
+
+        On Python 3.13+ the pin can match any certificate in the presented chain, so
+        pinning the CA fingerprint survives leaf-certificate rotation. On older
+        Pythons only the leaf certificate is available, so a CA-fingerprint pin will
+        not match (the connection is rejected with a message that says so) - pin the
+        leaf fingerprint, upgrade Python, or use ``with_tls_ca_path`` instead."""
         return replace(
             self, tls=replace(self.tls or TlsOptions(), ca_fingerprint=ca_fingerprint)
         )
@@ -486,6 +492,21 @@ async def _open_connection(
             ssl_object = writer.get_extra_info("ssl_object")
             if ssl_object is None or not _chain_matches_pin(ssl_object, pin):
                 writer.close()
+                # On Python < 3.13 there is no chain introspection, so only the leaf
+                # certificate can be checked against the pin. Say so loudly instead of
+                # letting a CA-fingerprint pin fail with an opaque message: the pin is
+                # doing less than a 3.13+ interpreter would, and the fix differs.
+                if ssl_object is not None and not hasattr(
+                    ssl_object, "get_unverified_chain"
+                ):
+                    raise TlsCertificateUntrustedError(
+                        "the pinned fingerprint did not match the server's leaf "
+                        "certificate. This Python (< 3.13) can only check the leaf "
+                        "against a fingerprint pin; pinning a CA fingerprint (to survive "
+                        "leaf rotation) needs Python 3.13+, which exposes the full chain. "
+                        "Pin the leaf certificate's fingerprint, upgrade to Python 3.13+, "
+                        "or trust the CA with with_tls_ca_path(...)"
+                    )
                 raise TlsCertificateUntrustedError(
                     "no certificate in the presented chain matches the pinned fingerprint"
                 )

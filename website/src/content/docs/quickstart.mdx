@@ -67,7 +67,7 @@ let client = ClientOptions::new()
 
 let publisher = client.publisher("email.send")?;
 publisher.publish("hello").await?;
-publisher.publish_delayed("hello later", 30u64).await?;
+publisher.publish_delayed("hello later", std::time::Duration::from_secs(30)).await?;
 
 let mut sub = client
     .subscribe("email.send")?

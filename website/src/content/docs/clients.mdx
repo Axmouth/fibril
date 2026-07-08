@@ -453,11 +453,12 @@ publisher
     .await?;
 
 let offset = publisher
-    .publish_delayed_confirmed("send later and return offset", 30u64)
+    .publish_delayed_confirmed("send later and return offset", Duration::from_secs(30))
     .await?;
 ```
 
-Rust numeric delay helpers are seconds. `std::time::Duration` is also accepted.
+Rust delays are a `std::time::Duration`, so the unit is always explicit (write
+`Duration::from_secs(30)` or `Duration::from_millis(250)`).
 
   </TabItem>
   <TabItem label="TypeScript">
@@ -542,7 +543,7 @@ let msg = sub.recv().await.expect("message");
 msg.retry_after(Duration::from_secs(30)).await?;
 ```
 
-Rust numeric delay helpers are seconds, matching delayed publish.
+Rust delays are a `std::time::Duration`, matching delayed publish.
 
   </TabItem>
   <TabItem label="TypeScript">
