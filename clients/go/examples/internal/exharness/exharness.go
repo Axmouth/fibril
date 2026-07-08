@@ -32,7 +32,7 @@ func Connect(clientName string) *fibril.Client {
 	pass := envOr("FIBRIL_PASS", "fibril")
 	c, err := fibril.Dial(context.Background(), Addr(), fibril.ClientOptions{
 		ClientName: clientName,
-		Auth:       &fibril.Auth{Username: user, Password: pass},
+		Credentials:       &fibril.Credentials{Username: user, Password: pass},
 	})
 	if err != nil {
 		panic(fmt.Sprintf("connect: %v", err))

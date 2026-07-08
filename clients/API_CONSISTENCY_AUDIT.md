@@ -66,6 +66,31 @@ casing idioms (Go initialisms, C# PascalCase) — the *word* is what must not dr
 | Shutdown | `shutdown()` | `shutdown()` | `shutdown()` | `Shutdown()` | `DisposeAsync()` | add C# `ShutdownAsync()` alias (keep `IAsyncDisposable`) | 🟢+alias |
 | Wire codec / headers / error identity | — | — | — | — | — | pinned by vectors + error guide | ✅ |
 
+## Glossary decisions (2026-07-08, locked)
+
+The canonical word for each genuine fork, decided with the user. The reference
+client (Rust) moves where it is the outlier.
+
+- **Positive settle → `complete`.** Keep the work-queue framing (complete/fail/
+  retry as job outcomes). Flip Go/C# `Ack()` → `Complete()`; align the family so
+  the negative is `Fail()` not `Nack()` (public surface only; wire op stays `Ack`).
+- **Text body → `text`.** Flip Rust + TS `content()` (read and write) → `text()`.
+  Python + Go + C# already there. (Content-type accessors keep `content_type`.)
+- **Declare config type → `QueueConfig` / `StreamConfig`.** Flip Go `DeclareQueue`/
+  `DeclarePlexus` and C# `QueueDeclareOptions`/`PlexusDeclareOptions` to the config
+  word (and `Plexus` → `Stream` in the type name). The client *method* stays
+  `DeclareQueue()`/`DeclarePlexus()` (method verb + config-type noun, as in Rust).
+- **Retention count → `retain_records`.** Flip Go/C# `MaxRecords` → `RetainRecords`
+  (and TS's internal `maxRecords` retention field, so method and field agree).
+- **Mechanical defaults (no user call needed):** reconcile policy value → `restore`
+  (`ReconcilePolicy::Restore` / Go `ReconcileRestore` / TS+Py `"restore"`); auth
+  struct → `Credentials` (flip Go `Auth`); raw-bytes read left idiomatic
+  (`raw()` where a method exists, `.Payload` field access in Go/C#); Go/C# decode
+  entry points documented rather than forced into a content-type dispatcher.
+
+Then a CI naming-lint fails when one concept is spelled two ways, so the surface
+cannot drift back (the real lever, per Tier 2 below).
+
 ## Action plan by tier
 
 **Tier 1 — internal defects (fix first; standalone bugs). VERIFIED in-repo.**

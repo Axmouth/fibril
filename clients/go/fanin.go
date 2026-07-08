@@ -4,7 +4,7 @@ package fibril
 // transparently subscribes every partition, supervised so each survives an owner
 // failover, and merges their deliveries into one channel. Ordering is
 // per-partition only (Kafka-style), as the invariants require. Deliveries settle
-// with d.Ack()/d.Nack(), which route to the partition they came from.
+// with d.Complete()/d.Fail()/d.Retry(), which route to the partition they came from.
 //
 // A background growth loop refreshes topology on an interval and attaches any
 // partitions added by a live repartition grow, so a fan-in picks up new

@@ -104,9 +104,9 @@ func (r *reader) optionalDlqPolicy() *DlqPolicy {
 	return p
 }
 
-// DeclareQueue declares a queue with optional dead-letter, retry, partition, and
+// QueueConfig is the queue declaration config: optional dead-letter, retry, partition, and
 // per-message TTL settings.
-type DeclareQueue struct {
+type QueueConfig struct {
 	Topic               string
 	Group               *string
 	DlqPolicy           *DlqPolicy
@@ -115,7 +115,7 @@ type DeclareQueue struct {
 	DefaultMessageTTLms *uint64
 }
 
-func encodeDeclareQueue(d DeclareQueue) []byte {
+func encodeDeclareQueue(d QueueConfig) []byte {
 	w := writer{}
 	w.magic("FDQ1")
 	w.writeStr(d.Topic)
@@ -128,10 +128,10 @@ func encodeDeclareQueue(d DeclareQueue) []byte {
 	return w.buf
 }
 
-func decodeDeclareQueue(body []byte) (DeclareQueue, error) {
+func decodeDeclareQueue(body []byte) (QueueConfig, error) {
 	r := reader{buf: body}
 	r.expectMagic("FDQ1")
-	d := DeclareQueue{
+	d := QueueConfig{
 		Topic:          r.readStr(),
 		Group:          r.optionalStr(),
 		DlqPolicy:      r.optionalDlqPolicy(),
@@ -207,11 +207,11 @@ func (r *reader) durability() StreamDurability {
 type StreamRetention struct {
 	MaxAgeMs   *uint64
 	MaxBytes   *uint64
-	MaxRecords *uint64
+	RetainRecords *uint64
 }
 
-// DeclarePlexus declares a Plexus (fan-out stream) channel.
-type DeclarePlexus struct {
+// StreamConfig is the Plexus (fan-out stream) declaration config.
+type StreamConfig struct {
 	Topic             string
 	PartitionCount    *uint32
 	Durability        StreamDurability
@@ -219,7 +219,7 @@ type DeclarePlexus struct {
 	ReplicationFactor *uint32
 }
 
-func encodeDeclarePlexus(d DeclarePlexus) []byte {
+func encodeDeclarePlexus(d StreamConfig) []byte {
 	w := writer{}
 	w.magic("FDP1")
 	w.writeStr(d.Topic)
@@ -227,16 +227,16 @@ func encodeDeclarePlexus(d DeclarePlexus) []byte {
 	w.durability(d.Durability)
 	w.optionalU64(d.Retention.MaxAgeMs)
 	w.optionalU64(d.Retention.MaxBytes)
-	w.optionalU64(d.Retention.MaxRecords)
+	w.optionalU64(d.Retention.RetainRecords)
 	w.optionalU32(d.ReplicationFactor)
 	return w.buf
 }
 
-func decodeDeclarePlexus(body []byte) (DeclarePlexus, error) {
+func decodeDeclarePlexus(body []byte) (StreamConfig, error) {
 	r := reader{buf: body}
 	r.expectMagic("FDP1")
-	d := DeclarePlexus{Topic: r.readStr(), PartitionCount: r.optionalU32(), Durability: r.durability()}
-	d.Retention = StreamRetention{MaxAgeMs: r.optionalU64(), MaxBytes: r.optionalU64(), MaxRecords: r.optionalU64()}
+	d := StreamConfig{Topic: r.readStr(), PartitionCount: r.optionalU32(), Durability: r.durability()}
+	d.Retention = StreamRetention{MaxAgeMs: r.optionalU64(), MaxBytes: r.optionalU64(), RetainRecords: r.optionalU64()}
 	d.ReplicationFactor = r.optionalU32()
 	return d, r.finish()
 }

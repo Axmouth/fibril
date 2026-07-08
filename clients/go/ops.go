@@ -163,13 +163,13 @@ func decodeHelloOk(body []byte) (helloOk, error) {
 	return h, r.finish()
 }
 
-// Auth is a username/password authentication frame.
-type Auth struct {
+// Credentials is a username/password authentication frame.
+type Credentials struct {
 	Username string
 	Password string
 }
 
-func encodeAuth(a Auth) []byte {
+func encodeAuth(a Credentials) []byte {
 	w := writer{}
 	w.magic("FAU1")
 	w.writeStr(a.Username)
@@ -177,10 +177,10 @@ func encodeAuth(a Auth) []byte {
 	return w.buf
 }
 
-func decodeAuth(body []byte) (Auth, error) {
+func decodeAuth(body []byte) (Credentials, error) {
 	r := reader{buf: body}
 	r.expectMagic("FAU1")
-	a := Auth{Username: r.readStr(), Password: r.readStr()}
+	a := Credentials{Username: r.readStr(), Password: r.readStr()}
 	return a, r.finish()
 }
 

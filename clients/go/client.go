@@ -27,7 +27,7 @@ const defaultMaxRedirects = 3
 type ClientOptions struct {
 	ClientName        string
 	ClientVersion     string
-	Auth              *Auth
+	Credentials       *Credentials
 	HeartbeatInterval time.Duration
 	// MaxRedirects bounds how many owner redirects a single op will follow.
 	MaxRedirects int
@@ -58,7 +58,7 @@ func (o ClientOptions) engineOptions() EngineOptions {
 	return EngineOptions{
 		ClientName:          o.ClientName,
 		ClientVersion:       o.ClientVersion,
-		Auth:                o.Auth,
+		Credentials:         o.Credentials,
 		HeartbeatInterval:   o.HeartbeatInterval,
 		TLS:                 o.TLS,
 		OnAssignmentChanged: o.OnAssignmentChanged,
@@ -643,7 +643,7 @@ func (c *Client) SubscribeStream(ctx context.Context, req SubscribeStream) (*Sub
 
 // DeclareQueue declares a queue (a cluster op, handled on the bootstrap
 // connection), reconnecting once on a transient failure.
-func (c *Client) DeclareQueue(ctx context.Context, d DeclareQueue) (DeclareQueueOk, error) {
+func (c *Client) DeclareQueue(ctx context.Context, d QueueConfig) (DeclareQueueOk, error) {
 	for attempt := 0; attempt < 2; attempt++ {
 		eng, err := c.bootstrapEngine(ctx)
 		if err != nil {
@@ -659,7 +659,7 @@ func (c *Client) DeclareQueue(ctx context.Context, d DeclareQueue) (DeclareQueue
 
 // DeclarePlexus declares a Plexus (fan-out stream) channel (a cluster op on the
 // bootstrap connection), reconnecting once on a transient failure.
-func (c *Client) DeclarePlexus(ctx context.Context, d DeclarePlexus) (DeclarePlexusOk, error) {
+func (c *Client) DeclarePlexus(ctx context.Context, d StreamConfig) (DeclarePlexusOk, error) {
 	for attempt := 0; attempt < 2; attempt++ {
 		eng, err := c.bootstrapEngine(ctx)
 		if err != nil {

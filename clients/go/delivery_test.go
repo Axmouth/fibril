@@ -70,7 +70,7 @@ func TestEngineSubscribeDeliverAck(t *testing.T) {
 		if d.Offset != 7 {
 			t.Errorf("offset = %d, want 7", d.Offset)
 		}
-		if err := e.Ack(d); err != nil {
+		if err := e.Complete(d); err != nil {
 			t.Errorf("Ack: %v", err)
 		}
 	case <-time.After(2 * time.Second):

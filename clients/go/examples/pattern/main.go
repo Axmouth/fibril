@@ -31,6 +31,6 @@ func main() {
 	fmt.Println("listening for events.* (new matching queues attach automatically; Ctrl-C to stop)")
 	for d := range ps.Deliveries {
 		fmt.Printf("%s: %s\n", d.Topic, d.Text())
-		_ = d.Ack()
+		_ = d.Complete()
 	}
 }

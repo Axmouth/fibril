@@ -52,9 +52,9 @@ func main() {
 	doPub := mode == "both" || mode == "pub"
 	doSub := mode == "both" || mode == "sub"
 
-	auth := &fibril.Auth{Username: env("FIBRIL_USER", "fibril"), Password: env("FIBRIL_PASS", "fibril")}
+	auth := &fibril.Credentials{Username: env("FIBRIL_USER", "fibril"), Password: env("FIBRIL_PASS", "fibril")}
 	dial := func() *fibril.Client {
-		c, err := fibril.Dial(context.Background(), addr, fibril.ClientOptions{ClientName: "bench", Auth: auth})
+		c, err := fibril.Dial(context.Background(), addr, fibril.ClientOptions{ClientName: "bench", Credentials: auth})
 		if err != nil {
 			fmt.Println("connect:", err)
 			os.Exit(1)
@@ -65,7 +65,7 @@ func main() {
 	// Declare the stream once up front (on a throwaway connection) so both roles
 	// can run as separate processes.
 	admin := dial()
-	if _, err := admin.DeclarePlexus(context.Background(), fibril.DeclarePlexus{Topic: topic, PartitionCount: &partitions, Durability: durability}); err != nil {
+	if _, err := admin.DeclarePlexus(context.Background(), fibril.StreamConfig{Topic: topic, PartitionCount: &partitions, Durability: durability}); err != nil {
 		fmt.Println("declare plexus:", err)
 		os.Exit(1)
 	}

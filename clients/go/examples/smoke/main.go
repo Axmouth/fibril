@@ -20,7 +20,7 @@ func main() {
 	}
 	c, err := fibril.Dial(context.Background(), addr, fibril.ClientOptions{
 		ClientName: "go-smoke",
-		Auth:       &fibril.Auth{Username: "fibril", Password: "fibril"},
+		Credentials:       &fibril.Credentials{Username: "fibril", Password: "fibril"},
 	})
 	if err != nil {
 		fmt.Println("connect:", err)
@@ -30,7 +30,7 @@ func main() {
 	fmt.Println("connected")
 
 	one := uint32(1)
-	if _, err := c.DeclareQueue(context.Background(), fibril.DeclareQueue{Topic: "gosmoke", PartitionCount: &one}); err != nil {
+	if _, err := c.DeclareQueue(context.Background(), fibril.QueueConfig{Topic: "gosmoke", PartitionCount: &one}); err != nil {
 		fmt.Println("declare:", err)
 		os.Exit(1)
 	}
@@ -59,7 +59,7 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("delivered: %q offset=%d tag=%d\n", d.Text(), d.Offset, d.DeliveryTag.Epoch)
-		if err := d.Ack(); err != nil {
+		if err := d.Complete(); err != nil {
 			fmt.Println("ack:", err)
 			os.Exit(1)
 		}

@@ -1,8 +1,8 @@
 package fibril
 
 // The delivery path: subscribe, receive pushed messages on a per-subscription
-// channel, and settle them with ack/nack. The run goroutine owns the sub-id ->
-// channel map and pushes deliveries; the channel is buffered to the effective
+// channel, and settle them with complete/fail/retry. The run goroutine owns the
+// sub-id -> channel map and pushes deliveries; the channel is buffered to the effective
 // prefetch, so the broker (which never sends beyond prefetch unacked) cannot
 // outrun it and the run goroutine never blocks.
 
@@ -25,22 +25,17 @@ type Delivery struct {
 	PublishReceived uint64
 	SubID           uint64
 	// AutoAck is true when the broker already settled this delivery server-side
-	// (an auto-ack subscription). Ack/Nack are then unnecessary.
+	// (an auto-ack subscription). Settling is then unnecessary.
 	AutoAck bool
 
 	reqID  uint64  // the DELIVER frame's request id, reused when settling
-	engine *Engine // the connection this arrived on, so Ack/Nack route correctly
+	engine *Engine // the connection this arrived on, so settling routes correctly
 }
 
-// Ack settles this delivery as processed, on the connection it arrived on (so it
-// stays correct even when deliveries from several partitions are fanned in).
-// Unnecessary for an auto-ack delivery, but harmless.
-func (d Delivery) Ack() error { return d.engine.Ack(d) }
-
-// Nack returns this delivery unprocessed, optionally requeuing it.
-func (d Delivery) Nack(requeue bool, notBefore *uint64) error {
-	return d.engine.Nack(d, requeue, notBefore)
-}
+// Complete settles this delivery as processed, on the connection it arrived on
+// (so it stays correct even when deliveries from several partitions are fanned
+// in). Unnecessary for an auto-ack delivery, but harmless.
+func (d Delivery) Complete() error { return d.engine.Complete(d) }
 
 // Retry requeues this delivery immediately for redelivery.
 func (d Delivery) Retry() error { return d.engine.Nack(d, true, nil) }
@@ -61,7 +56,7 @@ func (d Delivery) RetryAfter(delay time.Duration) error {
 
 // Subscription is a live single-partition subscription. Deliveries yields
 // messages until the connection closes (the channel is then closed); settle each
-// with its Ack/Nack.
+// with its Complete/Fail/Retry.
 type Subscription struct {
 	SubID      uint64
 	Topic      string
@@ -129,9 +124,9 @@ func (e *Engine) SubscribeStream(ctx context.Context, req SubscribeStream) (*Sub
 	}
 }
 
-// Ack settles a delivery as processed. It is a no-op-worthy call for an auto-ack
-// delivery (already settled server-side) but harmless. Fire-and-forget.
-func (e *Engine) Ack(d Delivery) error {
+// Complete settles a delivery as processed. It is a no-op-worthy call for an
+// auto-ack delivery (already settled server-side) but harmless. Fire-and-forget.
+func (e *Engine) Complete(d Delivery) error {
 	body := encodeAck(ackFrame{Topic: d.Topic, Group: d.Group, Partition: d.Partition, Tags: []DeliveryTag{d.DeliveryTag}})
 	return e.sendWithID(opAck, d.reqID, body)
 }

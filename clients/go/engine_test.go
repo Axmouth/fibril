@@ -42,7 +42,7 @@ func TestEngineHandshakeAuthAndPublish(t *testing.T) {
 
 	e, err := startEngine(context.Background(), client, EngineOptions{
 		ClientName:        "go-test",
-		Auth:              &Auth{Username: "u", Password: "p"},
+		Credentials:       &Credentials{Username: "u", Password: "p"},
 		HeartbeatInterval: time.Hour, // keep pings out of this test
 	})
 	if err != nil {

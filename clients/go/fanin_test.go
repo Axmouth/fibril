@@ -70,7 +70,7 @@ func TestClientFanInAcrossPartitions(t *testing.T) {
 		select {
 		case d := <-fi.Deliveries:
 			seen[d.Partition] = true
-			if err := d.Ack(); err != nil {
+			if err := d.Complete(); err != nil {
 				t.Errorf("ack: %v", err)
 			}
 		case <-time.After(2 * time.Second):

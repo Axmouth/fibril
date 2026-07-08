@@ -253,7 +253,7 @@ await client.declare_queue(QueueConfig("rpc.reply").default_message_ttl(30))
 
 ```go
 ttl := uint64((30 * time.Second).Milliseconds())
-client.DeclareQueue(ctx, fibril.DeclareQueue{
+client.DeclareQueue(ctx, fibril.QueueConfig{
     Topic:               "rpc.reply",
     DefaultMessageTTLms: &ttl,
 })

@@ -41,7 +41,7 @@ func main() {
 
 	c, err := fibril.Dial(context.Background(), addr, fibril.ClientOptions{
 		ClientName: "bench",
-		Auth:       &fibril.Auth{Username: env("FIBRIL_USER", "fibril"), Password: env("FIBRIL_PASS", "fibril")},
+		Credentials:       &fibril.Credentials{Username: env("FIBRIL_USER", "fibril"), Password: env("FIBRIL_PASS", "fibril")},
 	})
 	if err != nil {
 		fmt.Println("connect:", err)

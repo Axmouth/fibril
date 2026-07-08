@@ -27,11 +27,11 @@ func main() {
 
 		first := exharness.Recv(fan.Deliveries, 5*time.Second, "first delivery")
 		exharness.AssertEq(first.Text(), "work", "first payload")
-		exharness.Check(first.Nack(true, nil) == nil, "nack with requeue")
+		exharness.Check(first.Retry() == nil, "retry with requeue")
 
 		second := exharness.Recv(fan.Deliveries, 5*time.Second, "redelivery after nack")
 		exharness.AssertEq(second.Text(), "work", "redelivered payload")
-		exharness.Check(second.Ack() == nil, "ack")
+		exharness.Check(second.Complete() == nil, "complete")
 
 		if _, ok := exharness.TryRecv(fan.Deliveries, 500*time.Millisecond); ok {
 			exharness.Check(false, "no further delivery after ack")

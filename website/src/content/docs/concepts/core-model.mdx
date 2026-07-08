@@ -64,7 +64,7 @@ await msg.fail()          # terminal failure
   <TabItem label="Go">
 
 ```go
-msg.Ack()                        // terminal success
+msg.Complete()                        // terminal success
 msg.Retry()                      // requeue immediately
 msg.RetryAfter(30 * time.Second) // requeue after a delay
 msg.Fail()                       // terminal failure

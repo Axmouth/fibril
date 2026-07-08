@@ -55,7 +55,7 @@ const (
 type EngineOptions struct {
 	ClientName        string
 	ClientVersion     string
-	Auth              *Auth
+	Credentials       *Credentials
 	HeartbeatInterval time.Duration
 	Resume            *ResumeIdentity
 	// TLS, if set, connects over TLS with these trust settings; nil connects
@@ -229,8 +229,8 @@ func startEngine(ctx context.Context, conn net.Conn, opts EngineOptions) (*Engin
 	}
 
 	// AUTH (optional).
-	if opts.Auth != nil {
-		if _, err := conn.Write(encodeFrame(buildFrame(opAuth, authRequestID, encodeAuth(*opts.Auth)))); err != nil {
+	if opts.Credentials != nil {
+		if _, err := conn.Write(encodeFrame(buildFrame(opAuth, authRequestID, encodeAuth(*opts.Credentials)))); err != nil {
 			return nil, &DisconnectionError{Message: "write AUTH: " + err.Error()}
 		}
 		af, err := readFrame(br)
@@ -411,7 +411,7 @@ func (e *Engine) PublishDelayedWithConfirmation(ctx context.Context, p PublishDe
 }
 
 // DeclareQueue declares a queue and waits for the broker's confirmation.
-func (e *Engine) DeclareQueue(ctx context.Context, d DeclareQueue) (DeclareQueueOk, error) {
+func (e *Engine) DeclareQueue(ctx context.Context, d QueueConfig) (DeclareQueueOk, error) {
 	f, err := e.request(ctx, opDeclareQueue, encodeDeclareQueue(d))
 	if err != nil {
 		return DeclareQueueOk{}, err
@@ -420,7 +420,7 @@ func (e *Engine) DeclareQueue(ctx context.Context, d DeclareQueue) (DeclareQueue
 }
 
 // DeclarePlexus declares a Plexus (fan-out stream) channel.
-func (e *Engine) DeclarePlexus(ctx context.Context, d DeclarePlexus) (DeclarePlexusOk, error) {
+func (e *Engine) DeclarePlexus(ctx context.Context, d StreamConfig) (DeclarePlexusOk, error) {
 	f, err := e.request(ctx, opDeclarePlexus, encodeDeclarePlexus(d))
 	if err != nil {
 		return DeclarePlexusOk{}, err

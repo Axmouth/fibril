@@ -105,7 +105,7 @@ import (
 
 ctx := context.Background()
 client, err := fibril.Dial(ctx, "127.0.0.1:9876", fibril.ClientOptions{
-    Auth: &fibril.Auth{Username: "fibril", Password: "fibril"},
+    Credentials: &fibril.Credentials{Username: "fibril", Password: "fibril"},
 })
 ```
 
@@ -198,7 +198,7 @@ client = await (
 
 ```go
 client, err := fibril.Dial(ctx, "broker.internal:9876", fibril.ClientOptions{
-    Auth: &fibril.Auth{Username: "fibril", Password: "fibril"},
+    Credentials: &fibril.Credentials{Username: "fibril", Password: "fibril"},
     TLS:  &fibril.TLSOptions{CAFile: "/var/lib/fibril/tls/ca.pem"},
 })
 ```
@@ -822,7 +822,7 @@ sub, err := client.SubscribeTopic(ctx, "email.send", fibril.TopicSubscribeOption
 for msg := range sub.Deliveries {
     body := msg.Text()
     if err := sendEmail(body); err == nil {
-        msg.Ack()
+        msg.Complete()
     } else {
         msg.Retry()
     }
@@ -949,7 +949,7 @@ client.declare_queue(
 ```go
 group := "workers"
 maxRetries := uint32(3)
-client.DeclareQueue(ctx, fibril.DeclareQueue{
+client.DeclareQueue(ctx, fibril.QueueConfig{
     Topic:         "email.send",
     Group:         &group,
     DlqPolicy:     &fibril.DlqPolicy{Kind: fibril.DlqGlobal},
@@ -1071,7 +1071,7 @@ sub, err := client.SubscribeTopic(ctx, "email.send", fibril.TopicSubscribeOption
 for msg := range sub.Deliveries {
     var j Job
     if msg.JSON(&j) == nil && process(j) {
-        msg.Ack()
+        msg.Complete()
     } else {
         msg.Retry()
     }
@@ -1371,10 +1371,10 @@ for msg in sub:
 ```go
 partitions := uint32(4)
 maxRecords := uint64(1_000_000)
-client.DeclarePlexus(ctx, fibril.DeclarePlexus{
+client.DeclarePlexus(ctx, fibril.StreamConfig{
     Topic:          "events",
     PartitionCount: &partitions,
-    Retention:      fibril.StreamRetention{MaxRecords: &maxRecords},
+    Retention:      fibril.StreamRetention{RetainRecords: &maxRecords},
 })
 
 // Publish uses the normal publisher.
@@ -1389,7 +1389,7 @@ sub, err := client.SubscribeStreamTopic(ctx, "events", fibril.StreamSubscribeOpt
 
 for msg := range sub.Deliveries {
     handle(msg.Text())
-    msg.Ack() // advances the durable cursor
+    msg.Complete() // advances the durable cursor
 }
 ```
 
@@ -1507,7 +1507,7 @@ sub, err := routing.SubscribePattern(ctx, "events.*", fibril.PatternSubscribeOpt
 // Each delivery carries its source topic in msg.Topic.
 for msg := range sub.Deliveries {
     handle(msg.Topic, msg.Text())
-    msg.Ack()
+    msg.Complete()
 }
 ```
 

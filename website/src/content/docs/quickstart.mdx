@@ -163,7 +163,7 @@ for msg in sub:
 
 The Go client lives in `clients/go`. Every network method takes a
 `context.Context` first (use `context.Background()` with no deadline). Delays are
-a `time.Duration`. Deliveries arrive on a channel and settle with `Ack`/`Nack`.
+a `time.Duration`. Deliveries arrive on a channel and settle with `Complete`/`Fail`/`Retry`.
 
 ```go
 import (
@@ -174,7 +174,7 @@ import (
 
 ctx := context.Background()
 client, err := fibril.Dial(ctx, "127.0.0.1:9876", fibril.ClientOptions{
-    Auth: &fibril.Auth{Username: "fibril", Password: "fibril"},
+    Credentials: &fibril.Credentials{Username: "fibril", Password: "fibril"},
 })
 
 publisher := client.Publisher("email.send")
@@ -185,7 +185,7 @@ publisher.PublishDelayed(ctx, fibril.Text("hello later"), 30*time.Second)
 sub, err := client.SubscribeTopic(ctx, "email.send", fibril.TopicSubscribeOptions{Prefetch: 32, AutoAck: false})
 for msg := range sub.Deliveries {
     process(msg.Text())
-    msg.Ack()
+    msg.Complete()
 }
 ```
 

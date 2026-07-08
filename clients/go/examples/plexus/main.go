@@ -20,7 +20,7 @@ func main() {
 
 		topic := exharness.UniqueTopic("plexus")
 		one := uint32(1)
-		_, err := c.DeclarePlexus(context.Background(), fibril.DeclarePlexus{Topic: topic, PartitionCount: &one, Durability: fibril.StreamDurable})
+		_, err := c.DeclarePlexus(context.Background(), fibril.StreamConfig{Topic: topic, PartitionCount: &one, Durability: fibril.StreamDurable})
 		exharness.Check(err == nil, "declare plexus")
 
 		opts := fibril.StreamSubscribeOptions{Start: fibril.StreamStart{Kind: fibril.StreamLatest}, Prefetch: 16, AutoAck: true}
