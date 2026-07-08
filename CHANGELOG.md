@@ -92,6 +92,13 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   milliseconds; pass `Duration::from_secs(30)` or `Duration::from_millis(250)`. The
   Python (seconds) and TypeScript (milliseconds) bare-number conventions are
   unchanged, matching their own language norms.
+- Go client queue and stream declarations are fluent builders. `QueueConfig` and
+  `StreamConfig` are built with `fibril.NewQueueConfig(topic).PartitionCount(4).
+  DlqMaxRetries(3)` and `fibril.NewStreamConfig(topic).Retention(...)` instead of
+  struct literals whose optional fields were pointers to locals (`&group`, a
+  `u32p(3)` helper). This matches the builder shape the Rust, TypeScript, and Python
+  clients already use for their queue and stream config. The wire encoding is
+  unchanged.
 
 ### Fixed
 

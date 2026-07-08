@@ -29,8 +29,7 @@ func main() {
 	defer c.Shutdown()
 	fmt.Println("connected")
 
-	one := uint32(1)
-	if _, err := c.DeclareQueue(context.Background(), fibril.QueueConfig{Topic: "gosmoke", PartitionCount: &one}); err != nil {
+	if _, err := c.DeclareQueue(context.Background(), fibril.NewQueueConfig("gosmoke").PartitionCount(1)); err != nil {
 		fmt.Println("declare:", err)
 		os.Exit(1)
 	}

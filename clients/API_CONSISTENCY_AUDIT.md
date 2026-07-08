@@ -60,7 +60,7 @@ casing idioms (Go initialisms, C# PascalCase) — the *word* is what must not dr
 | Retention field | `retain_records` | `retainRecords` | `retain_records` | `MaxRecords` | `MaxRecords` | one word (`retain_records`) | 🟠 |
 | Auth struct | — | — | — | `Auth` | `Credentials` | one word | 🟠 |
 | Work-queue subscribe | builder | builder | builder | `SubscribeTopic(ctx, t, TopicSubscribeOptions{...})` (was positional `&group, 32, false`) | named args | Go → options struct (match its own `SubscribeStreamTopic`) | 🔴 Go RESOLVED |
-| Go optional declare fields | — | — | — | pointer-to-local (`&group`, `&maxRetries`) | — | option funcs / builder | 🔴 Go |
+| Go optional declare fields | — | — | — | fluent builder `NewQueueConfig(t).PartitionCount(4)` (was pointer-to-local `&group`, `u32p(3)`) | — | option funcs / builder | 🔴 Go RESOLVED |
 | Delay/retry duration | `Duration` + bare `30`=sec | `Date`/ms + bare `30_000`=ms | `timedelta` | `time.Duration` | `TimeSpan` | drop bare-number overload OR unit in name (`publishDelayedSecs`) | ⚠ hazard |
 | Subscribe terminal | `.sub()` after `subscribe()` | `.sub()` | `.sub()` | n/a | n/a | `.open()`/`.consume()` (near-homonym) | · nit |
 | Shutdown | `shutdown()` | `shutdown()` | `shutdown()` | `Shutdown()` | `DisposeAsync()` | add C# `ShutdownAsync()` alias (keep `IAsyncDisposable`) | 🟢+alias |
@@ -122,7 +122,13 @@ wire field name is still legitimate on the wire).
   `SubscribeStreamTopic` (`:219`). Kills positional-boolean + pointer-to-local. Low.
 - Python `content()` write (`message.py:115`) vs `text()` read
   (`subscription.py:74`) → one word. Low.
-- Go pointer-to-local optional declare fields → option funcs/builder. Med.
+- Go pointer-to-local optional declare fields → option funcs/builder. Med. DONE:
+  `QueueConfig`/`StreamConfig` are now fluent builders (`NewQueueConfig(topic).
+  PartitionCount(4).DlqMaxRetries(3)`, `NewStreamConfig(topic).Retention(
+  NewStreamRetention().RetainRecords(...))`) with unexported fields, so a caller
+  never writes `&local` or a `u32p(3)` helper. This also matches the builder shape
+  the Rust/TS/Python `QueueConfig`/`StreamConfig` already use. Byte-exact wire
+  output preserved (wire-vectors test green).
 
 **Tier 2 — glossary pass (free drift) + naming-lint.** Apply the table verbatim,
 casing-idioms only. Add a CI naming-lint that fails when one concept is spelled two

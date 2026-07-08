@@ -65,7 +65,7 @@ func main() {
 	// Declare the stream once up front (on a throwaway connection) so both roles
 	// can run as separate processes.
 	admin := dial()
-	if _, err := admin.DeclarePlexus(context.Background(), fibril.StreamConfig{Topic: topic, PartitionCount: &partitions, Durability: durability}); err != nil {
+	if _, err := admin.DeclarePlexus(context.Background(), fibril.NewStreamConfig(topic).PartitionCount(partitions).Durability(durability)); err != nil {
 		fmt.Println("declare plexus:", err)
 		os.Exit(1)
 	}

@@ -76,14 +76,10 @@ await client.declare_queue(
   <TabItem label="Go">
 
 ```go
-group := "workers"
-maxRetries := uint32(3)
-client.DeclareQueue(ctx, fibril.QueueConfig{
-    Topic:         "orders.created",
-    Group:         &group,
-    DlqPolicy:     &fibril.DlqPolicy{Kind: fibril.DlqGlobal},
-    DlqMaxRetries: &maxRetries,
-})
+client.DeclareQueue(ctx, fibril.NewQueueConfig("orders.created").
+    Group("workers").
+    Dlq(fibril.DlqPolicy{Kind: fibril.DlqGlobal}).
+    DlqMaxRetries(3))
 ```
 
   </TabItem>

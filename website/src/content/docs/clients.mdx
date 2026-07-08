@@ -948,14 +948,10 @@ client.declare_queue(
   <TabItem label="Go">
 
 ```go
-group := "workers"
-maxRetries := uint32(3)
-client.DeclareQueue(ctx, fibril.QueueConfig{
-    Topic:         "email.send",
-    Group:         &group,
-    DlqPolicy:     &fibril.DlqPolicy{Kind: fibril.DlqGlobal},
-    DlqMaxRetries: &maxRetries,
-})
+client.DeclareQueue(ctx, fibril.NewQueueConfig("email.send").
+    Group("workers").
+    Dlq(fibril.DlqPolicy{Kind: fibril.DlqGlobal}).
+    DlqMaxRetries(3))
 ```
 
   </TabItem>
@@ -1374,13 +1370,9 @@ for msg in sub:
   <TabItem label="Go">
 
 ```go
-partitions := uint32(4)
-maxRecords := uint64(1_000_000)
-client.DeclarePlexus(ctx, fibril.StreamConfig{
-    Topic:          "events",
-    PartitionCount: &partitions,
-    Retention:      fibril.StreamRetention{RetainRecords: &maxRecords},
-})
+client.DeclarePlexus(ctx, fibril.NewStreamConfig("events").
+    PartitionCount(4).
+    Retention(fibril.NewStreamRetention().RetainRecords(1_000_000)))
 
 // Publish uses the normal publisher.
 client.Publisher("events").Publish(ctx, fibril.Text("hello"))

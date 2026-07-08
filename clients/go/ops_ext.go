@@ -1,5 +1,7 @@
 package fibril
 
+import "time"
+
 // Cluster, declaration, and stream ops: the second half of the wire surface.
 // Same byte-exact rules as ops.go, pinned by clients/wire_vectors.json.
 
@@ -104,27 +106,53 @@ func (r *reader) optionalDlqPolicy() *DlqPolicy {
 	return p
 }
 
-// QueueConfig is the queue declaration config: optional dead-letter, retry, partition, and
-// per-message TTL settings.
+// QueueConfig is the queue declaration config: optional dead-letter, retry,
+// partition, and per-message TTL settings. Build it fluently from NewQueueConfig
+// so optional fields are set by value, never as a pointer to a local.
 type QueueConfig struct {
-	Topic               string
-	Group               *string
-	DlqPolicy           *DlqPolicy
-	DlqMaxRetries       *uint32
-	PartitionCount      *uint32
-	DefaultMessageTTLms *uint64
+	topic               string
+	group               *string
+	dlqPolicy           *DlqPolicy
+	dlqMaxRetries       *uint32
+	partitionCount      *uint32
+	defaultMessageTTLms *uint64
+}
+
+// NewQueueConfig starts a queue declaration for the given topic.
+func NewQueueConfig(topic string) QueueConfig { return QueueConfig{topic: topic} }
+
+// Group sets the queue namespace (the default namespace when unset).
+func (q QueueConfig) Group(group string) QueueConfig { q.group = &group; return q }
+
+// PartitionCount sets the partition count (defaults to 1 when unset).
+func (q QueueConfig) PartitionCount(count uint32) QueueConfig { q.partitionCount = &count; return q }
+
+// Dlq sets the dead-letter policy for exhausted or rejected messages.
+func (q QueueConfig) Dlq(policy DlqPolicy) QueueConfig { q.dlqPolicy = &policy; return q }
+
+// DlqMaxRetries caps redeliveries before a message is dead-lettered.
+func (q QueueConfig) DlqMaxRetries(retries uint32) QueueConfig {
+	q.dlqMaxRetries = &retries
+	return q
+}
+
+// DefaultMessageTTL drops messages published without their own TTL after this age.
+func (q QueueConfig) DefaultMessageTTL(ttl time.Duration) QueueConfig {
+	ms := uint64(ttl.Milliseconds())
+	q.defaultMessageTTLms = &ms
+	return q
 }
 
 func encodeDeclareQueue(d QueueConfig) []byte {
 	w := writer{}
 	w.magic("FDQ1")
-	w.writeStr(d.Topic)
-	w.optionalStr(d.Group)
-	w.optionalDlqPolicy(d.DlqPolicy)
-	w.optionalU32(d.DlqMaxRetries)
-	w.optionalU32(d.PartitionCount)
+	w.writeStr(d.topic)
+	w.optionalStr(d.group)
+	w.optionalDlqPolicy(d.dlqPolicy)
+	w.optionalU32(d.dlqMaxRetries)
+	w.optionalU32(d.partitionCount)
 	// Trailing so a peer that omits it still decodes (read as nil).
-	w.optionalU64(d.DefaultMessageTTLms)
+	w.optionalU64(d.defaultMessageTTLms)
 	return w.buf
 }
 
@@ -132,14 +160,14 @@ func decodeDeclareQueue(body []byte) (QueueConfig, error) {
 	r := reader{buf: body}
 	r.expectMagic("FDQ1")
 	d := QueueConfig{
-		Topic:          r.readStr(),
-		Group:          r.optionalStr(),
-		DlqPolicy:      r.optionalDlqPolicy(),
-		DlqMaxRetries:  r.optionalU32(),
-		PartitionCount: r.optionalU32(),
+		topic:          r.readStr(),
+		group:          r.optionalStr(),
+		dlqPolicy:      r.optionalDlqPolicy(),
+		dlqMaxRetries:  r.optionalU32(),
+		partitionCount: r.optionalU32(),
 	}
 	if r.remaining() > 0 {
-		d.DefaultMessageTTLms = r.optionalU64()
+		d.defaultMessageTTLms = r.optionalU64()
 	}
 	return d, r.finish()
 }
@@ -202,42 +230,86 @@ func (r *reader) durability() StreamDurability {
 	return durabilityOrder[tag]
 }
 
-// StreamRetention bounds how much of a stream is retained. Each limit is
-// optional (nil = unbounded on that axis).
+// StreamRetention bounds how much of a stream is retained. Each limit is optional
+// (unset = unbounded on that axis). Build it fluently from NewStreamRetention.
 type StreamRetention struct {
-	MaxAgeMs   *uint64
-	MaxBytes   *uint64
-	RetainRecords *uint64
+	maxAgeMs      *uint64
+	maxBytes      *uint64
+	retainRecords *uint64
 }
 
-// StreamConfig is the Plexus (fan-out stream) declaration config.
+// NewStreamRetention starts an unbounded retention policy.
+func NewStreamRetention() StreamRetention { return StreamRetention{} }
+
+// MaxAge drops records older than this age.
+func (r StreamRetention) MaxAge(age time.Duration) StreamRetention {
+	ms := uint64(age.Milliseconds())
+	r.maxAgeMs = &ms
+	return r
+}
+
+// MaxBytes caps the retained bytes per partition.
+func (r StreamRetention) MaxBytes(bytes uint64) StreamRetention { r.maxBytes = &bytes; return r }
+
+// RetainRecords caps the retained record count per partition.
+func (r StreamRetention) RetainRecords(records uint64) StreamRetention {
+	r.retainRecords = &records
+	return r
+}
+
+// StreamConfig is the Plexus (fan-out stream) declaration config. Build it fluently
+// from NewStreamConfig so optional fields are set by value, never a pointer.
 type StreamConfig struct {
-	Topic             string
-	PartitionCount    *uint32
-	Durability        StreamDurability
-	Retention         StreamRetention
-	ReplicationFactor *uint32
+	topic             string
+	partitionCount    *uint32
+	durability        StreamDurability
+	retention         StreamRetention
+	replicationFactor *uint32
+}
+
+// NewStreamConfig starts a stream declaration for the given topic.
+func NewStreamConfig(topic string) StreamConfig { return StreamConfig{topic: topic} }
+
+// PartitionCount sets the partition count (defaults to 1 when unset).
+func (s StreamConfig) PartitionCount(count uint32) StreamConfig { s.partitionCount = &count; return s }
+
+// Durability sets the stream durability tier.
+func (s StreamConfig) Durability(tier StreamDurability) StreamConfig {
+	s.durability = tier
+	return s
+}
+
+// Retention sets the retention policy.
+func (s StreamConfig) Retention(retention StreamRetention) StreamConfig {
+	s.retention = retention
+	return s
+}
+
+// ReplicationFactor sets the replication factor (durable tier only).
+func (s StreamConfig) ReplicationFactor(factor uint32) StreamConfig {
+	s.replicationFactor = &factor
+	return s
 }
 
 func encodeDeclarePlexus(d StreamConfig) []byte {
 	w := writer{}
 	w.magic("FDP1")
-	w.writeStr(d.Topic)
-	w.optionalU32(d.PartitionCount)
-	w.durability(d.Durability)
-	w.optionalU64(d.Retention.MaxAgeMs)
-	w.optionalU64(d.Retention.MaxBytes)
-	w.optionalU64(d.Retention.RetainRecords)
-	w.optionalU32(d.ReplicationFactor)
+	w.writeStr(d.topic)
+	w.optionalU32(d.partitionCount)
+	w.durability(d.durability)
+	w.optionalU64(d.retention.maxAgeMs)
+	w.optionalU64(d.retention.maxBytes)
+	w.optionalU64(d.retention.retainRecords)
+	w.optionalU32(d.replicationFactor)
 	return w.buf
 }
 
 func decodeDeclarePlexus(body []byte) (StreamConfig, error) {
 	r := reader{buf: body}
 	r.expectMagic("FDP1")
-	d := StreamConfig{Topic: r.readStr(), PartitionCount: r.optionalU32(), Durability: r.durability()}
-	d.Retention = StreamRetention{MaxAgeMs: r.optionalU64(), MaxBytes: r.optionalU64(), RetainRecords: r.optionalU64()}
-	d.ReplicationFactor = r.optionalU32()
+	d := StreamConfig{topic: r.readStr(), partitionCount: r.optionalU32(), durability: r.durability()}
+	d.retention = StreamRetention{maxAgeMs: r.optionalU64(), maxBytes: r.optionalU64(), retainRecords: r.optionalU64()}
+	d.replicationFactor = r.optionalU32()
 	return d, r.finish()
 }
 

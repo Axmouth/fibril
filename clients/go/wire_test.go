@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // Pointer and uuid helpers for building option fields and fixed ids.
@@ -82,20 +83,20 @@ func cases() []vcase {
 			SubID: 5, Topic: "t", Partition: 1, Group: sp("g"), Prefetch: 16,
 			ConsumerGroup: sp("cg"), MemberID: uup(fill(4))}),
 			func(b []byte) ([]byte, error) { v, e := decodeSubscribeOk(b); return encodeSubscribeOk(v), e }},
-		{"declare", encodeDeclareQueue(QueueConfig{
-			Topic: "t", Group: sp("g"), DlqPolicy: &DlqPolicy{Kind: DlqCustom, Topic: "dlq"},
-			DlqMaxRetries: u32p(3), PartitionCount: u32p(4), DefaultMessageTTLms: u64p(30000)}),
+		{"declare", encodeDeclareQueue(NewQueueConfig("t").Group("g").
+			Dlq(DlqPolicy{Kind: DlqCustom, Topic: "dlq"}).
+			DlqMaxRetries(3).PartitionCount(4).DefaultMessageTTL(30*time.Second)),
 			func(b []byte) ([]byte, error) { v, e := decodeDeclareQueue(b); return encodeDeclareQueue(v), e }},
-		{"declare_min", encodeDeclareQueue(QueueConfig{Topic: "t"}),
+		{"declare_min", encodeDeclareQueue(NewQueueConfig("t")),
 			func(b []byte) ([]byte, error) { v, e := decodeDeclareQueue(b); return encodeDeclareQueue(v), e }},
 		{"declare_ok", encodeDeclareQueueOk(DeclareQueueOk{Status: "created", PartitionCount: 4}),
 			func(b []byte) ([]byte, error) { v, e := decodeDeclareQueueOk(b); return encodeDeclareQueueOk(v), e }},
-		{"declare_plexus", encodeDeclarePlexus(StreamConfig{
-			Topic: "t", PartitionCount: u32p(4), Durability: StreamSpeculative,
-			Retention:         StreamRetention{MaxAgeMs: u64p(60000), RetainRecords: u64p(1000000)},
-			ReplicationFactor: u32p(2)}),
+		{"declare_plexus", encodeDeclarePlexus(NewStreamConfig("t").PartitionCount(4).
+			Durability(StreamSpeculative).
+			Retention(NewStreamRetention().MaxAge(60*time.Second).RetainRecords(1000000)).
+			ReplicationFactor(2)),
 			func(b []byte) ([]byte, error) { v, e := decodeDeclarePlexus(b); return encodeDeclarePlexus(v), e }},
-		{"declare_plexus_min", encodeDeclarePlexus(StreamConfig{Topic: "t"}),
+		{"declare_plexus_min", encodeDeclarePlexus(NewStreamConfig("t")),
 			func(b []byte) ([]byte, error) { v, e := decodeDeclarePlexus(b); return encodeDeclarePlexus(v), e }},
 		{"declare_plexus_ok", encodeDeclarePlexusOk(DeclarePlexusOk{Status: "created", PartitionCount: 4}),
 			func(b []byte) ([]byte, error) { v, e := decodeDeclarePlexusOk(b); return encodeDeclarePlexusOk(v), e }},
