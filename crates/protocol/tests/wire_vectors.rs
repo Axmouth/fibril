@@ -725,7 +725,7 @@ fn wire_encoders_match_shared_vectors() {
         wire::encode_reconcile_client(
             rid,
             &ReconcileClient {
-                policy: ReconcilePolicy::RestoreClientSubscriptions,
+                policy: ReconcilePolicy::Restore,
                 subscriptions: vec![ReconcileSubscription {
                     sub_id: 1,
                     topic: "t".into(),

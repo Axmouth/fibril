@@ -288,7 +288,7 @@ def _cases() -> dict[str, tuple[bytes, object]]:
         "reconcile_client": (
             wire.encode_reconcile_client_body(
                 wire.ReconcileClient(
-                    policy="restore_client_subscriptions",
+                    policy="restore",
                     subscriptions=[
                         wire.ReconcileSubscription(
                             sub_id=1,

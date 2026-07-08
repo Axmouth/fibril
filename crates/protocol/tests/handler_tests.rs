@@ -768,7 +768,7 @@ async fn restore_policy_recreates_client_only_subscription() {
                 Op::ReconcileClient,
                 2,
                 &ReconcileClient {
-                    policy: ReconcilePolicy::RestoreClientSubscriptions,
+                    policy: ReconcilePolicy::Restore,
                     subscriptions: vec![ReconcileSubscription {
                         sub_id: 99,
                         topic: "reconcile.restore".into(),
@@ -834,7 +834,7 @@ async fn reconcile_restores_exclusive_cohort_membership() {
                 Op::ReconcileClient,
                 2,
                 &ReconcileClient {
-                    policy: ReconcilePolicy::RestoreClientSubscriptions,
+                    policy: ReconcilePolicy::Restore,
                     subscriptions: vec![ReconcileSubscription {
                         sub_id: 99,
                         topic: "reconcile.exclusive".into(),

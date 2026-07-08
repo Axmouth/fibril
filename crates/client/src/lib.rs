@@ -3786,7 +3786,7 @@ where
     // than failure detection, so ownership stays put and there is no failover)
     // the client reconnects to a FRESH session (ResumeRejected/New) that has no
     // memory of the subscriptions. Reconciling lets the broker either restore
-    // them (RestoreClientSubscriptions policy) or report them missing so the
+    // them (Restore policy) or report them missing so the
     // client drops the now-dead streams and the subscription supervisor
     // re-subscribes. Without this, a bounced owner leaves the consumer's streams
     // open but unfed and it silently stops receiving.
@@ -5717,7 +5717,7 @@ mod tests {
         });
 
         let mut client = ClientOptions::new()
-            .reconnect_reconcile_policy(ReconcilePolicy::RestoreClientSubscriptions)
+            .reconnect_reconcile_policy(ReconcilePolicy::Restore)
             // This test's fake server scripts an exact frame sequence and does
             // not answer a topology warm; keep connect to just the handshake.
             .disable_topology_warm()
@@ -5732,7 +5732,7 @@ mod tests {
         assert_eq!(
             reconcile,
             ReconcileClient {
-                policy: ReconcilePolicy::RestoreClientSubscriptions,
+                policy: ReconcilePolicy::Restore,
                 subscriptions: vec![ReconcileSubscription {
                     sub_id: 77,
                     topic: "jobs".into(),

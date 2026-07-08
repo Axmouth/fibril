@@ -54,7 +54,7 @@ casing idioms (Go initialisms, C# PascalCase) — the *word* is what must not dr
 | Text body (write) | `NewMessage.content()` | `.content()` | `.text()` (was `.content()`) | `Text()` | `Text()` | match read accessor | 🟠 |
 | Raw bytes (read) | `raw()` | `raw()` | `raw()` | `.Payload` | `.Payload` | one name | 🟠 (🔴 Go: constructs `Raw()`, reads `.Payload`) |
 | Decode (ct-dispatch) | `deserialize()` | `deserialize()` | `deserialize()` | `JSON(&v)` only | `Json<T>()` only | give Go/C# a ct-dispatcher OR reword the section intro (currently over-promises) | 🟠 |
-| Reconcile policy value | `RestoreClientSubscriptions` | `"restore_client_subscriptions"` | `"restore_client_subscriptions"` | `ReconcileRestore` | `Restore` | one canonical member name | 🟠 |
+| Reconcile policy value | `Restore` (was `RestoreClientSubscriptions`) | `"restore"` | `"restore"` | `ReconcileRestore` (value `"restore"`) | `Restore` | `restore` | 🟠 RESOLVED |
 | Queue config type | `QueueConfig` | `QueueConfig` | `QueueConfig` | `DeclareQueue` | `QueueDeclareOptions` | one scheme | 🟠 |
 | Stream config type | `StreamConfig` | `StreamConfig` | `StreamConfig` | `DeclarePlexus` | `PlexusDeclareOptions` | one scheme | 🟠 |
 | Retention field | `retain_records` | `retainRecords` | `retain_records` | `MaxRecords` | `MaxRecords` | one word (`retain_records`) | 🟠 |
@@ -100,18 +100,20 @@ Tier-1 pass), declare config type `QueueConfig`/`StreamConfig` (Go and C# rename
 retention `retain_records` on the records axis (Go/C# fields + the TS retention
 field aligned with the existing builder), Go auth struct + field -> `Credentials`.
 
-The naming-lint ships as `clients/vocab-lint.sh` (+ a `client-vocab-lint` CI
-workflow). It only bans spellings with no legitimate use left, so it never fires
-on internal wire DTOs. It does NOT yet cover retention or reconcile, whose "old"
-words are still legitimate on the wire.
-
-DEFERRED - reconcile policy value (`restore`). Unlike the others this is not a
+Reconcile policy value -> `restore` is now DONE across the stack too. It was not a
 client-local rename: `ReconcilePolicy` lives in the shared `crates/wire` crate and
-the broker (`crates/protocol`) matches on it, encoded as a numeric byte (so the
-*name* is not on the wire and a rename is wire-compatible, but it reaches into the
-broker, not just the clients). Renaming only the TS/Py strings would re-introduce
-the drift, so it is all-or-nothing across the stack. Left for a follow-up decision
-since it exceeds "client vocabulary."
+the broker (`crates/protocol`) matches on it, encoded as a numeric byte, so the
+rename is wire-compatible (the golden `reconcile_client` vector, which stores the
+byte not the name, is unchanged) but reached into the broker. Rust variant
+`RestoreClientSubscriptions` -> `Restore`; TS/Python/Go string
+`"restore_client_subscriptions"` -> `"restore"` (Go's constant name `ReconcileRestore`
+and C# `Restore` were already idiomatic-canonical). Broker + all client suites green.
+
+The naming-lint ships as `clients/vocab-lint.sh` (+ a `client-vocab-lint` CI
+workflow). It only bans spellings with no legitimate use left, so it never fires on
+internal wire DTOs. It guards the text-body accessor, the settle verb, the declare
+config type, and the reconcile value. It does NOT cover retention (the `max_records`
+wire field name is still legitimate on the wire).
 
 ## Action plan by tier
 

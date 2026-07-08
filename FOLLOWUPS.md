@@ -832,7 +832,7 @@ What exists (code map):
 - crates/protocol/src/v1/mod.rs: ReconcileClient/Server/Result,
   ReconcileAction { Keep, CloseClientSide, CloseServerSide,
   RecreateClientSide }, ReconcilePolicy { Conservative,
-  RestoreClientSubscriptions }, ResumeIdentity/ResumeOutcome.
+  Restore }, ResumeIdentity/ResumeOutcome.
 - crates/protocol/src/v1/handler.rs: reconcile_subscriptions, the resume
   session store (resume_sessions, forget_if_dormant/forget_if_generation),
   reconnect grace (connection.reconnect_grace_ms).

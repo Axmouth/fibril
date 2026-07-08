@@ -74,8 +74,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   `PlexusDeclareOptions`) rename to it while the declare methods keep their verb
   names. The stream retention record count is `retain_records` (Go/C# fields and
   the TypeScript retention field align with the existing builder). The Go auth
-  struct and options field become `Credentials`. A `clients/vocab-lint.sh` CI check
-  guards these against drifting back.
+  struct and options field become `Credentials`. The reconnect reconcile policy
+  value is `restore` (Rust `ReconcilePolicy::Restore`, and the `"restore"` string in
+  the TypeScript, Python, and Go clients) instead of `restore_client_subscriptions`
+  / `RestoreClientSubscriptions`; the wire encoding is an unchanged numeric byte. A
+  `clients/vocab-lint.sh` CI check guards these against drifting back.
 
 ### Fixed
 

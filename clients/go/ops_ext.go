@@ -414,7 +414,7 @@ type ReconcilePolicy string
 
 const (
 	ReconcileConservative ReconcilePolicy = "conservative"
-	ReconcileRestore      ReconcilePolicy = "restore_client_subscriptions"
+	ReconcileRestore      ReconcilePolicy = "restore"
 )
 
 func (w *writer) reconcilePolicy(p ReconcilePolicy) {

@@ -210,7 +210,7 @@ export interface ReconcileSubscription {
   prefetch: number;
 }
 
-export type ReconcilePolicy = "conservative" | "restore_client_subscriptions";
+export type ReconcilePolicy = "conservative" | "restore";
 
 export interface ReconcileClientMsg {
   policy: ReconcilePolicy;

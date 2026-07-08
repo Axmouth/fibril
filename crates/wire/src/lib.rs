@@ -522,7 +522,7 @@ pub struct ReconcileClient {
 #[serde(rename_all = "snake_case")]
 pub enum ReconcilePolicy {
     Conservative,
-    RestoreClientSubscriptions,
+    Restore,
 }
 
 impl Default for ReconcilePolicy {

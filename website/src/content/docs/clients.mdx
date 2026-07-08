@@ -135,10 +135,10 @@ for the current limits.
 
 The default reconciliation policy is conservative. Rust can opt into restoring
 missing server-side subscriptions with
-`reconnect_reconcile_policy(ReconcilePolicy::RestoreClientSubscriptions)`.
+`reconnect_reconcile_policy(ReconcilePolicy::Restore)`.
 TypeScript can do the same with
-`withReconnectReconcilePolicy("restore_client_subscriptions")`, and Python with
-`ClientOptions(reconnect_reconcile_policy="restore_client_subscriptions")`.
+`withReconnectReconcilePolicy("restore")`, and Python with
+`ClientOptions(reconnect_reconcile_policy="restore")`.
 
 ## TLS
 
@@ -266,7 +266,7 @@ clients remap internally.
 use fibril_client::{ClientOptions, ReconcilePolicy};
 
 let client = ClientOptions::new()
-    .reconnect_reconcile_policy(ReconcilePolicy::RestoreClientSubscriptions)
+    .reconnect_reconcile_policy(ReconcilePolicy::Restore)
     .connect("127.0.0.1:9876")
     .await?;
 ```
@@ -277,7 +277,7 @@ let client = ClientOptions::new()
 ```ts
 import { ClientOptions, type ReconcilePolicy } from "@fibril/client"
 
-const policy: ReconcilePolicy = "restore_client_subscriptions"
+const policy: ReconcilePolicy = "restore"
 const client = await new ClientOptions()
   .withReconnectReconcilePolicy(policy)
   .connect("127.0.0.1:9876")
@@ -293,7 +293,7 @@ const client = await new ClientOptions()
 from fibril import ClientOptions
 
 client = await ClientOptions(
-    reconnect_reconcile_policy="restore_client_subscriptions"
+    reconnect_reconcile_policy="restore"
 ).connect("127.0.0.1:9876")
 ```
 
@@ -306,7 +306,7 @@ from fibril.blocking import BlockingClient
 
 client = BlockingClient.connect(
     "127.0.0.1:9876",
-    ClientOptions(reconnect_reconcile_policy="restore_client_subscriptions"),
+    ClientOptions(reconnect_reconcile_policy="restore"),
 )
 ```
 

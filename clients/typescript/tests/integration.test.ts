@@ -169,7 +169,7 @@ test("client reconnect offers previous resume identity", async () => {
     const client = await Client.connect(
       `127.0.0.1:${broker.port}`,
       new ClientOptions({ superviseSubscriptions: false }).withReconnectReconcilePolicy(
-        "restore_client_subscriptions",
+        "restore",
       ),
     );
     const outcome = await client.reconnect();
@@ -325,7 +325,7 @@ test("client sends active subscriptions during reconnect reconciliation", async 
     const client = await Client.connect(
       `127.0.0.1:${broker.port}`,
       new ClientOptions({ superviseSubscriptions: false }).withReconnectReconcilePolicy(
-        "restore_client_subscriptions",
+        "restore",
       ),
     );
     const sub = await client.subscribe("jobs").group("workers").sub();
@@ -333,7 +333,7 @@ test("client sends active subscriptions during reconnect reconciliation", async 
 
     assert.equal(outcome.resumeOutcome, "resumed");
     assert.deepEqual(reconcile, {
-      policy: "restore_client_subscriptions",
+      policy: "restore",
       subscriptions: [
         {
           sub_id: 55n,
@@ -1748,7 +1748,7 @@ test("owner restart: reconnect into a fresh session still reconciles subscriptio
     const client = await Client.connect(
       `127.0.0.1:${broker.port}`,
       new ClientOptions({ superviseSubscriptions: false }).withReconnectReconcilePolicy(
-        "restore_client_subscriptions",
+        "restore",
       ),
     );
     const sub = await client.subscribe("jobs").sub();

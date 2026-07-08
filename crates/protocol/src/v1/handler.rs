@@ -1648,7 +1648,7 @@ async fn reconcile_subscriptions(
                     reason: "server_mismatch".into(),
                 });
             }
-            None if reconcile.policy == ReconcilePolicy::RestoreClientSubscriptions => {
+            None if reconcile.policy == ReconcilePolicy::Restore => {
                 let restored = install_subscription(InstallSubscriptionArgs {
                     broker: broker.clone(),
                     logical: logical.clone(),

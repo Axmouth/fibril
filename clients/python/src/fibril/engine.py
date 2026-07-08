@@ -70,7 +70,7 @@ class EngineOptions:
     client_version: str = "0.4.0"
     auth: Optional[wire.Auth] = None
     resume_identity: Optional[wire.ResumeIdentity] = None
-    reconnect_reconcile_policy: wire.ReconcilePolicy = "restore_client_subscriptions"
+    reconnect_reconcile_policy: wire.ReconcilePolicy = "restore"
     heartbeat_interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL_S
     write_coalesce_bytes: int = DEFAULT_WRITE_COALESCE_BYTES
     write_coalesce_count: int = DEFAULT_WRITE_COALESCE_COUNT

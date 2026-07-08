@@ -88,7 +88,7 @@ _RESUME_OUTCOME_FROM_U8: list[ResumeOutcome] = [
     "resume_rejected",
 ]
 
-ReconcilePolicy = Literal["conservative", "restore_client_subscriptions"]
+ReconcilePolicy = Literal["conservative", "restore"]
 ReconcileAction = Literal[
     "keep", "close_client_side", "close_server_side", "recreate_client_side"
 ]
@@ -286,7 +286,7 @@ class Writer:
             self.dlq_policy(p)
 
     def reconcile_policy(self, p: ReconcilePolicy) -> None:
-        self.u8(1 if p == "restore_client_subscriptions" else 0)
+        self.u8(1 if p == "restore" else 0)
 
     def reconcile_action(self, a: ReconcileAction) -> None:
         self.u8(_RECONCILE_ACTION_TO_U8[a])
@@ -453,7 +453,7 @@ class Reader:
         return self.dlq_policy() if self.u8() == 1 else None
 
     def reconcile_policy(self) -> ReconcilePolicy:
-        return "restore_client_subscriptions" if self.u8() == 1 else "conservative"
+        return "restore" if self.u8() == 1 else "conservative"
 
     def reconcile_action(self) -> ReconcileAction:
         tag = self.u8()

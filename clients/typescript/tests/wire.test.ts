@@ -316,7 +316,7 @@ const reconcileSub = (subId: bigint): ReconcileSubscription => ({
 
 test("reconcile client/server bodies round-trip", () => {
   const rc = {
-    policy: "restore_client_subscriptions" as const,
+    policy: "restore" as const,
     subscriptions: [reconcileSub(1n), reconcileSub(2n)],
   };
   assert.deepEqual(decodeReconcileClientBody(encodeReconcileClientBody(rc)), rc);
@@ -673,7 +673,7 @@ const CANONICAL: Record<string, unknown> = {
   },
   publish_ok: { offset: 777n },
   reconcile_client: {
-    policy: "restore_client_subscriptions",
+    policy: "restore",
     subscriptions: [
       {
         subId: 1n,

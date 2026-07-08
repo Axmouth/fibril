@@ -51,6 +51,10 @@ report "public settle verb (C#)" 'public void (Ack|Nack)\(' 'Complete() (or Fail
 report "declare config type (C#)" 'QueueDeclareOptions|PlexusDeclareOptions' 'QueueConfig / StreamConfig'
 report "declare config type (Go)" 'type Declare(Queue|Plexus) struct' 'QueueConfig / StreamConfig'
 
+# Reconcile policy value is `restore` (the wire stays a numeric byte; only the
+# client-facing spelling is checked here). The old string has no use left.
+report "reconcile policy value" 'restore_client_subscriptions' 'restore'
+
 if [[ "$fail" -ne 0 ]]; then
   echo "Client vocabulary lint FAILED. See clients/API_CONSISTENCY_AUDIT.md for the canonical table."
   exit 1

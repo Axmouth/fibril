@@ -312,7 +312,7 @@ export class Engine {
     // than failure detection, so ownership stays and there is no failover) the
     // client reconnects into a FRESH session (resume_rejected/new) that has no
     // memory of the subscriptions. Reconciling lets the broker either restore
-    // them (restore_client_subscriptions) or report them missing so the dead
+    // them (restore) or report them missing so the dead
     // streams close. Without this a bounced owner leaves the streams open but
     // unfed and the consumer silently stops receiving.
     const reconcileSubs = [...subscriptionRegistry.values()].map((sub) => sub.reconcile);

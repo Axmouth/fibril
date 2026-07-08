@@ -1442,7 +1442,7 @@ fn put_optional_dlq_policy(out: &mut BytesMut, policy: Option<&QueueDlqPolicy>) 
 fn put_reconcile_policy(out: &mut BytesMut, policy: ReconcilePolicy) {
     out.put_u8(match policy {
         ReconcilePolicy::Conservative => 0,
-        ReconcilePolicy::RestoreClientSubscriptions => 1,
+        ReconcilePolicy::Restore => 1,
     });
 }
 
@@ -1912,7 +1912,7 @@ impl<'a> Reader<'a> {
     fn reconcile_policy(&mut self) -> WireResult<ReconcilePolicy> {
         match self.u8()? {
             0 => Ok(ReconcilePolicy::Conservative),
-            1 => Ok(ReconcilePolicy::RestoreClientSubscriptions),
+            1 => Ok(ReconcilePolicy::Restore),
             value => Err(WireError::UnknownTag {
                 context: "reconcile policy",
                 value,

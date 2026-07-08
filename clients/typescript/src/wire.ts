@@ -41,7 +41,7 @@ const RESUME_OUTCOME_FROM_U8: ResumeOutcome[] = [
   "resume_rejected",
 ];
 
-export type ReconcilePolicy = "conservative" | "restore_client_subscriptions";
+export type ReconcilePolicy = "conservative" | "restore";
 export type ReconcileAction =
   | "keep"
   | "close_client_side"
@@ -231,7 +231,7 @@ export class Writer {
     }
   }
   reconcilePolicy(p: ReconcilePolicy): void {
-    this.u8(p === "restore_client_subscriptions" ? 1 : 0);
+    this.u8(p === "restore" ? 1 : 0);
   }
   reconcileAction(a: ReconcileAction): void {
     this.u8(RECONCILE_ACTION_TO_U8[a]);
@@ -406,7 +406,7 @@ export class Reader {
     return this.u8() === 1 ? this.dlqPolicy() : null;
   }
   reconcilePolicy(): ReconcilePolicy {
-    return this.u8() === 1 ? "restore_client_subscriptions" : "conservative";
+    return this.u8() === 1 ? "restore" : "conservative";
   }
   reconcileAction(): ReconcileAction {
     const tag = this.u8();
