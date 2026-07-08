@@ -63,6 +63,19 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   auto-ack arguments, matching its own `SubscribeStreamTopic`, and the Python
   client's text-message constructor is `NewMessage.text()` (was `.content()`) so
   the write name matches the `text()` read accessor.
+- Client API vocabulary, unified across all five clients (glossary pass). The
+  positive settle verb is `complete` everywhere: Go and C# rename `Ack()` to
+  `Complete()` and drop the redundant raw public `Nack()` (`Fail`/`Retry`/
+  `RetryAfter` cover it). The text-body accessor is `text` everywhere: the Rust and
+  TypeScript read accessor and write constructor rename from `content` to `text`,
+  matching the `raw`/`json`/`msgpack` set (content-type accessors are unchanged).
+  The declare config type is `QueueConfig`/`StreamConfig` everywhere: Go
+  (`DeclareQueue`/`DeclarePlexus`) and C# (`QueueDeclareOptions`/
+  `PlexusDeclareOptions`) rename to it while the declare methods keep their verb
+  names. The stream retention record count is `retain_records` (Go/C# fields and
+  the TypeScript retention field align with the existing builder). The Go auth
+  struct and options field become `Credentials`. A `clients/vocab-lint.sh` CI check
+  guards these against drifting back.
 
 ### Fixed
 

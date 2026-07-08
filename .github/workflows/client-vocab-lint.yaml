@@ -1,0 +1,32 @@
+name: Client vocabulary lint
+
+on:
+  workflow_call:
+  pull_request:
+    paths:
+      - ".github/workflows/client-vocab-lint.yaml"
+      - "clients/**"
+      - "crates/client/**"
+      - "crates/cli/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/client-vocab-lint.yaml"
+      - "clients/**"
+      - "crates/client/**"
+      - "crates/cli/**"
+
+permissions:
+  contents: read
+
+jobs:
+  vocab-lint:
+    name: Client vocabulary consistency
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Lint client vocabulary
+        run: clients/vocab-lint.sh

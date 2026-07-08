@@ -91,6 +91,28 @@ client (Rust) moves where it is the outlier.
 Then a CI naming-lint fails when one concept is spelled two ways, so the surface
 cannot drift back (the real lever, per Tier 2 below).
 
+### Execution status (2026-07-08)
+
+DONE across all five clients (code + examples + tests + doc tabs, each client's
+suite green): settle verb `complete` (Go/C# `Ack`->`Complete`, raw public `Nack`
+dropped), text body `text` (Rust + TS `content`->`text`; Python did it in the
+Tier-1 pass), declare config type `QueueConfig`/`StreamConfig` (Go and C# renamed),
+retention `retain_records` on the records axis (Go/C# fields + the TS retention
+field aligned with the existing builder), Go auth struct + field -> `Credentials`.
+
+The naming-lint ships as `clients/vocab-lint.sh` (+ a `client-vocab-lint` CI
+workflow). It only bans spellings with no legitimate use left, so it never fires
+on internal wire DTOs. It does NOT yet cover retention or reconcile, whose "old"
+words are still legitimate on the wire.
+
+DEFERRED - reconcile policy value (`restore`). Unlike the others this is not a
+client-local rename: `ReconcilePolicy` lives in the shared `crates/wire` crate and
+the broker (`crates/protocol`) matches on it, encoded as a numeric byte (so the
+*name* is not on the wire and a rename is wire-compatible, but it reaches into the
+broker, not just the clients). Renaming only the TS/Py strings would re-introduce
+the drift, so it is all-or-nothing across the stack. Left for a follow-up decision
+since it exceeds "client vocabulary."
+
 ## Action plan by tier
 
 **Tier 1 — internal defects (fix first; standalone bugs). VERIFIED in-repo.**
