@@ -30,7 +30,7 @@ func main() {
 		defer c.Shutdown()
 
 		topic := exharness.UniqueTopic("stream")
-		fan, err := c.SubscribeTopic(context.Background(), topic, nil, 64, true)
+		fan, err := c.SubscribeTopic(context.Background(), topic, fibril.TopicSubscribeOptions{Prefetch: 64, AutoAck: true})
 		exharness.Check(err == nil, "subscribe")
 		defer fan.Close()
 		pub := c.Publisher(topic)

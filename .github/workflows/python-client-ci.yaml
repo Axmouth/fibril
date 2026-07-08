@@ -56,9 +56,12 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
+      # The examples publish plain dicts, which default to msgpack encoding, so the
+      # optional msgpack extra must be present here (the test job deliberately omits
+      # it to cover the msgpack-absent path).
       - name: Sync dependencies
         working-directory: clients/python
-        run: uv sync --dev
+        run: uv sync --dev --extra msgpack
 
       # Reuse the published server image instead of building from source: client CI
       # runs against the latest-main broker, which is what client-only changes want

@@ -66,7 +66,7 @@ func main() {
 	if doSub {
 		consumer = dial()
 		defer consumer.Shutdown()
-		fi, err := consumer.SubscribeTopic(context.Background(), topic, nil, prefetch, autoAck)
+		fi, err := consumer.SubscribeTopic(context.Background(), topic, fibril.TopicSubscribeOptions{Prefetch: prefetch, AutoAck: autoAck})
 		if err != nil {
 			fmt.Println("subscribe:", err)
 			os.Exit(1)

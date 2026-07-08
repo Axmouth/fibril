@@ -50,8 +50,8 @@ casing idioms (Go initialisms, C# PascalCase) — the *word* is what must not dr
 | Concept | Rust | TS | Python | Go | C# | Proposed | Class |
 |---|---|---|---|---|---|---|---|
 | Positive settle | `complete()` | `complete()` | `complete()` | `Ack()` | `Ack()` | `ack()`/`Ack()` (matches section title + convention) | 🟠 |
-| Text body (read) | `content()` | `content()` | `text()` | `Text()` | `Text()` | one word, matches write | 🟠 (🔴 Python: writes `content`, reads `text`) |
-| Text body (write) | `NewMessage.content()` | `.content()` | `.content()` | `Text()` | `Text()` | match read accessor | 🟠 |
+| Text body (read) | `content()` | `content()` | `text()` | `Text()` | `Text()` | one word, matches write | 🟠 (Python 🔴 write/read split RESOLVED: write is now `text()`) |
+| Text body (write) | `NewMessage.content()` | `.content()` | `.text()` (was `.content()`) | `Text()` | `Text()` | match read accessor | 🟠 |
 | Raw bytes (read) | `raw()` | `raw()` | `raw()` | `.Payload` | `.Payload` | one name | 🟠 (🔴 Go: constructs `Raw()`, reads `.Payload`) |
 | Decode (ct-dispatch) | `deserialize()` | `deserialize()` | `deserialize()` | `JSON(&v)` only | `Json<T>()` only | give Go/C# a ct-dispatcher OR reword the section intro (currently over-promises) | 🟠 |
 | Reconcile policy value | `RestoreClientSubscriptions` | `"restore_client_subscriptions"` | `"restore_client_subscriptions"` | `ReconcileRestore` | `Restore` | one canonical member name | 🟠 |
@@ -59,7 +59,7 @@ casing idioms (Go initialisms, C# PascalCase) — the *word* is what must not dr
 | Stream config type | `StreamConfig` | `StreamConfig` | `StreamConfig` | `DeclarePlexus` | `PlexusDeclareOptions` | one scheme | 🟠 |
 | Retention field | `retain_records` | `retainRecords` | `retain_records` | `MaxRecords` | `MaxRecords` | one word (`retain_records`) | 🟠 |
 | Auth struct | — | — | — | `Auth` | `Credentials` | one word | 🟠 |
-| Work-queue subscribe | builder | builder | builder | `SubscribeTopic(ctx, t, &group, 32, false)` | named args | Go → options struct (match its own `SubscribeStreamTopic`) | 🔴 Go |
+| Work-queue subscribe | builder | builder | builder | `SubscribeTopic(ctx, t, TopicSubscribeOptions{...})` (was positional `&group, 32, false`) | named args | Go → options struct (match its own `SubscribeStreamTopic`) | 🔴 Go RESOLVED |
 | Go optional declare fields | — | — | — | pointer-to-local (`&group`, `&maxRetries`) | — | option funcs / builder | 🔴 Go |
 | Delay/retry duration | `Duration` + bare `30`=sec | `Date`/ms + bare `30_000`=ms | `timedelta` | `time.Duration` | `TimeSpan` | drop bare-number overload OR unit in name (`publishDelayedSecs`) | ⚠ hazard |
 | Subscribe terminal | `.sub()` after `subscribe()` | `.sub()` | `.sub()` | n/a | n/a | `.open()`/`.consume()` (near-homonym) | · nit |

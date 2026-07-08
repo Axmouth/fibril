@@ -170,12 +170,22 @@ func (fi *FanIn) Close() {
 	}()
 }
 
+// TopicSubscribeOptions configure a whole-topic (queue) fan-in subscription,
+// mirroring StreamSubscribeOptions on the stream side.
+type TopicSubscribeOptions struct {
+	// Group selects the queue namespace. nil (the zero value) is the default
+	// namespace.
+	Group    *string
+	Prefetch uint32
+	AutoAck  bool
+}
+
 // SubscribeTopic subscribes to every partition of a queue topic and fans the
 // deliveries into one channel, supervising each partition and picking up
 // partitions added by a live repartition grow. Prefetch is per partition.
-func (c *Client) SubscribeTopic(ctx context.Context, topic string, group *string, prefetch uint32, autoAck bool) (*FanIn, error) {
-	return c.newFanIn(ctx, topic, group, prefetch, func(ctx context.Context, p uint32) (*SupervisedSubscription, error) {
-		return c.SuperviseSubscribe(ctx, Subscribe{Topic: topic, Partition: p, Group: group, Prefetch: prefetch, AutoAck: autoAck})
+func (c *Client) SubscribeTopic(ctx context.Context, topic string, opts TopicSubscribeOptions) (*FanIn, error) {
+	return c.newFanIn(ctx, topic, opts.Group, opts.Prefetch, func(ctx context.Context, p uint32) (*SupervisedSubscription, error) {
+		return c.SuperviseSubscribe(ctx, Subscribe{Topic: topic, Partition: p, Group: opts.Group, Prefetch: opts.Prefetch, AutoAck: opts.AutoAck})
 	})
 }
 
@@ -186,12 +196,12 @@ const DefaultCohortID = "default"
 // SubscribeTopicCohort fans a queue in as a member of the named exclusive cohort:
 // the broker assigns each partition to a single member, so several members
 // consume the partitioned topic in order with free failover. Prefetch is per
-// partition. Pass an empty group for the default queue namespace.
-func (c *Client) SubscribeTopicCohort(ctx context.Context, topic, consumerGroup string, group *string, prefetch uint32, autoAck bool) (*FanIn, error) {
-	return c.newFanIn(ctx, topic, group, prefetch, func(ctx context.Context, p uint32) (*SupervisedSubscription, error) {
+// partition. Leave opts.Group nil for the default queue namespace.
+func (c *Client) SubscribeTopicCohort(ctx context.Context, topic, consumerGroup string, opts TopicSubscribeOptions) (*FanIn, error) {
+	return c.newFanIn(ctx, topic, opts.Group, opts.Prefetch, func(ctx context.Context, p uint32) (*SupervisedSubscription, error) {
 		return c.SuperviseSubscribe(ctx, Subscribe{
-			Topic: topic, Partition: p, Group: group,
-			ConsumerGroup: &consumerGroup, Prefetch: prefetch, AutoAck: autoAck,
+			Topic: topic, Partition: p, Group: opts.Group,
+			ConsumerGroup: &consumerGroup, Prefetch: opts.Prefetch, AutoAck: opts.AutoAck,
 		})
 	})
 }
@@ -199,8 +209,8 @@ func (c *Client) SubscribeTopicCohort(ctx context.Context, topic, consumerGroup 
 // SubscribeTopicExclusive is SubscribeTopicCohort joining the default cohort, for
 // the common case of one exclusive cohort per queue. Run several instances that
 // all call this on the same queue and they self-organize into the cohort.
-func (c *Client) SubscribeTopicExclusive(ctx context.Context, topic string, prefetch uint32, autoAck bool) (*FanIn, error) {
-	return c.SubscribeTopicCohort(ctx, topic, DefaultCohortID, nil, prefetch, autoAck)
+func (c *Client) SubscribeTopicExclusive(ctx context.Context, topic string, opts TopicSubscribeOptions) (*FanIn, error) {
+	return c.SubscribeTopicCohort(ctx, topic, DefaultCohortID, opts)
 }
 
 // StreamSubscribeOptions configure a whole-stream (Plexus) fan-in subscription.

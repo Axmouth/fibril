@@ -24,7 +24,7 @@ func main() {
 		defer c.Shutdown()
 
 		topic := exharness.UniqueTopic("roundtrip")
-		fan, err := c.SubscribeTopic(ctx, topic, nil, 1, true)
+		fan, err := c.SubscribeTopic(ctx, topic, fibril.TopicSubscribeOptions{Prefetch: 1, AutoAck: true})
 		exharness.Check(err == nil, "subscribe")
 		defer fan.Close()
 

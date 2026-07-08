@@ -15,7 +15,7 @@ def test_raw_text_json_need_no_msgpack(monkeypatch: pytest.MonkeyPatch) -> None:
     # Simulate msgpack not installed (a None entry makes `import msgpack` raise).
     monkeypatch.setitem(sys.modules, "msgpack", None)
     assert message.NewMessage.raw(b"x").payload == b"x"
-    assert message.NewMessage.content("hi").payload == b"hi"
+    assert message.NewMessage.text("hi").payload == b"hi"
     assert message.NewMessage.json({"id": 1}).content_type_value == "json"
     assert message.deserialize_by_content_type("application/json", b'{"id":1}') == {"id": 1}
 

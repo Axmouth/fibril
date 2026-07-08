@@ -18,7 +18,7 @@ func main() {
 		defer c.Shutdown()
 
 		topic := exharness.UniqueTopic("delayed")
-		fan, err := c.SubscribeTopic(context.Background(), topic, nil, 8, true)
+		fan, err := c.SubscribeTopic(context.Background(), topic, fibril.TopicSubscribeOptions{Prefetch: 8, AutoAck: true})
 		exharness.Check(err == nil, "subscribe")
 		defer fan.Close()
 		pub := c.Publisher(topic)

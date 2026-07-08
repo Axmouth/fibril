@@ -665,7 +665,7 @@ from fibril import NewMessage
 await publisher.publish(NewMessage.json({"id": 42, "kind": "welcome"}))
 
 await publisher.publish(
-    NewMessage.content("plain text").header("x-trace-id", "abc123")
+    NewMessage.text("plain text").header("x-trace-id", "abc123")
 )
 
 await publisher.publish(NewMessage.raw(bytes([1, 2, 3])))
@@ -680,7 +680,7 @@ from fibril import NewMessage
 publisher.publish(NewMessage.json({"id": 42, "kind": "welcome"}))
 
 publisher.publish(
-    NewMessage.content("plain text").header("x-trace-id", "abc123")
+    NewMessage.text("plain text").header("x-trace-id", "abc123")
 )
 
 publisher.publish(NewMessage.raw(bytes([1, 2, 3])))
@@ -817,7 +817,7 @@ for msg in sub:
 
 ```go
 group := "workers"
-sub, err := client.SubscribeTopic(ctx, "email.send", &group, 32, false)
+sub, err := client.SubscribeTopic(ctx, "email.send", fibril.TopicSubscribeOptions{Group: &group, Prefetch: 32, AutoAck: false})
 
 for msg := range sub.Deliveries {
     body := msg.Text()
@@ -1066,7 +1066,7 @@ job, _ := fibril.JSON(jobData)
 publisher.PublishConfirmed(ctx, job)
 
 group := "workers"
-sub, err := client.SubscribeTopic(ctx, "email.send", &group, 32, false)
+sub, err := client.SubscribeTopic(ctx, "email.send", fibril.TopicSubscribeOptions{Group: &group, Prefetch: 32, AutoAck: false})
 
 for msg := range sub.Deliveries {
     var j Job
@@ -1243,7 +1243,7 @@ for msg in sub:
   <TabItem label="Go">
 
 ```go
-sub, err := client.SubscribeTopic(ctx, "metrics", nil, 128, true)
+sub, err := client.SubscribeTopic(ctx, "metrics", fibril.TopicSubscribeOptions{Prefetch: 128, AutoAck: true})
 
 for msg := range sub.Deliveries {
     var m Metric

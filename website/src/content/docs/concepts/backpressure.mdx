@@ -43,8 +43,8 @@ sub = await client.subscribe("email.send").prefetch(32).sub()
   <TabItem label="Go">
 
 ```go
-// SubscribeTopic's fourth arg is the per-partition prefetch.
-sub, err := client.SubscribeTopic(ctx, "email.send", nil, 32, false)
+// The Prefetch option is the per-partition prefetch.
+sub, err := client.SubscribeTopic(ctx, "email.send", fibril.TopicSubscribeOptions{Prefetch: 32, AutoAck: false})
 ```
 
   </TabItem>

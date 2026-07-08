@@ -57,7 +57,7 @@ func TestFanInPicksUpGrownPartition(t *testing.T) {
 	c := newClientWith("127.0.0.1:9999", e, ClientOptions{RepartitionPollInterval: 40 * time.Millisecond})
 	defer c.Shutdown()
 
-	fi, err := c.SubscribeTopic(context.Background(), "t", nil, 4, true)
+	fi, err := c.SubscribeTopic(context.Background(), "t", TopicSubscribeOptions{Prefetch: 4, AutoAck: true})
 	if err != nil {
 		t.Fatalf("SubscribeTopic: %v", err)
 	}

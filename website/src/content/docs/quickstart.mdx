@@ -181,8 +181,8 @@ publisher := client.Publisher("email.send")
 publisher.Publish(ctx, fibril.Text("hello"))
 publisher.PublishDelayed(ctx, fibril.Text("hello later"), 30*time.Second)
 
-// SubscribeTopic fans in every partition (nil group, prefetch 32, manual ack).
-sub, err := client.SubscribeTopic(ctx, "email.send", nil, 32, false)
+// SubscribeTopic fans in every partition (default group, prefetch 32, manual ack).
+sub, err := client.SubscribeTopic(ctx, "email.send", fibril.TopicSubscribeOptions{Prefetch: 32, AutoAck: false})
 for msg := range sub.Deliveries {
     process(msg.Text())
     msg.Ack()

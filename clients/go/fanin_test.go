@@ -60,7 +60,7 @@ func TestClientFanInAcrossPartitions(t *testing.T) {
 	c := newClientWith(bootEndpoint, e, ClientOptions{})
 	defer c.Shutdown()
 
-	fi, err := c.SubscribeTopic(context.Background(), "t", nil, 4, false)
+	fi, err := c.SubscribeTopic(context.Background(), "t", TopicSubscribeOptions{Prefetch: 4, AutoAck: false})
 	if err != nil {
 		t.Fatalf("SubscribeTopic: %v", err)
 	}

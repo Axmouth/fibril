@@ -18,7 +18,7 @@ func main() {
 		defer c.Shutdown()
 
 		topic := exharness.UniqueTopic("ackretry")
-		fan, err := c.SubscribeTopic(context.Background(), topic, nil, 4, false) // manual ack
+		fan, err := c.SubscribeTopic(context.Background(), topic, fibril.TopicSubscribeOptions{Prefetch: 4, AutoAck: false}) // manual ack
 		exharness.Check(err == nil, "subscribe")
 		defer fan.Close()
 

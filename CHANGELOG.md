@@ -58,6 +58,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   default-on `msgpack` Cargo feature, so `default-features = false` drops the
   rmp-serde dependency for users who publish JSON, text, or raw bytes. This matches
   the optional-msgpack the TypeScript and Python clients already offer.
+- Client API vocabulary consistency. The Go client's `SubscribeTopic` takes a
+  `TopicSubscribeOptions` struct instead of positional group, prefetch, and
+  auto-ack arguments, matching its own `SubscribeStreamTopic`, and the Python
+  client's text-message constructor is `NewMessage.text()` (was `.content()`) so
+  the write name matches the `text()` read accessor.
 
 ### Fixed
 

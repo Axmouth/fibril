@@ -124,7 +124,7 @@ func TestSubscribeTopicExclusiveJoinsDefaultCohort(t *testing.T) {
 	c := newClientWith("127.0.0.1:9999", e, ClientOptions{})
 	defer c.Shutdown()
 
-	fan, err := c.SubscribeTopicExclusive(context.Background(), "orders", 8, true)
+	fan, err := c.SubscribeTopicExclusive(context.Background(), "orders", TopicSubscribeOptions{Prefetch: 8, AutoAck: true})
 	if err != nil {
 		t.Fatalf("SubscribeTopicExclusive: %v", err)
 	}

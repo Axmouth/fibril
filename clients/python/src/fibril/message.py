@@ -112,7 +112,7 @@ class NewMessage:
         return NewMessage(payload, None, {})
 
     @staticmethod
-    def content(payload: str) -> "NewMessage":
+    def text(payload: str) -> "NewMessage":
         return NewMessage(payload.encode("utf-8"), "text", {})
 
     def header(self, key: str, value: str) -> "NewMessage":
