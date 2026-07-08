@@ -160,10 +160,13 @@ drift again"). Touches all five clients — do as one coordinated pass. Highest 
   field untouched - those are internal formats, same principle as the client wire
   DTOs. fibrilctl updated in lockstep; the vocab-lint now guards `"tp"` / `pub tp:`
   across the admin + cli surface. `expected_version` kept.
-- Still pending (not reconnect-specific): mental-model diagram (TCP -> logical
-  connection -> subscriptions -> settlement); explain the reserved `stroma.*`
-  namespace on the clients page; the Go/C# decode-dispatch doc intro that
-  over-promises `deserialize()`.
+- DONE - remaining doc cleanups: mental-model diagram (TCP -> logical connection
+  -> subscriptions -> settlement) added to `reconnects.md`; the reserved `stroma.*`
+  namespace explained on the clients page (Stroma storage/queue-state metadata, e.g.
+  `stroma.dlq.*`, alongside `fibril.*`); the decode-dispatch intro reworded so it no
+  longer implies Go/C# have a content-type `deserialize()` (they decode explicitly).
+
+Tier 4 is now fully cleared.
 
 **Tier 5 — design deepening (differentiators, bigger, mature over time; 9→10).**
 - Typed stream-close reason (`End`/`ReconciliationFailed`/`ConnectionLost`/

@@ -721,7 +721,7 @@ already-encoded payloads, so the C# client needs no MessagePack dependency.
   </TabItem>
 </Tabs>
 
-Fibril reserves `fibril.*` and `stroma.*` headers for system metadata. User code should not set headers with those prefixes. See [metadata policy](/development/metadata-policy/) for the development note.
+Fibril reserves two header namespaces for system metadata, and the broker rejects a publish that sets either: `fibril.*` for broker and client protocol metadata (for example the reliable-publisher dedup ids), and `stroma.*` for metadata owned by the storage and queue-state layer (Stroma), such as the `stroma.dlq.*` provenance stamped onto a dead-lettered message. User code should not set headers with those prefixes. See [metadata policy](/development/metadata-policy/) for the development note.
 
 ## Manual Acknowledgements
 
@@ -1108,7 +1108,11 @@ Once the configured retry limit is exhausted, the broker routes the failed messa
 
 ## Decode Messages
 
-`deserialize()` chooses a decoder from `content-type`. Missing content type defaults to msgpack.
+In the clients that dispatch on content type, `deserialize()` picks the decoder
+from the message `content-type` (a missing content type defaults to msgpack). Go
+and C# do not dispatch on content type: you decode explicitly with `JSON`/
+`Json<T>` for JSON, `Payload` for raw bytes, and `Text` for text (see the Go and
+C# tabs).
 
 <Tabs syncKey="client-language">
   <TabItem label="Rust">

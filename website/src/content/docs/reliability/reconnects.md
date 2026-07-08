@@ -15,6 +15,30 @@ broker keeps the logical connection dormant for the configured window. If the
 client reconnects with the resume identity before the window expires, the broker
 reattaches the socket to that logical connection.
 
+## Mental model
+
+The TCP socket is the transient part. The logical connection is what actually
+owns your subscriptions and unsettled work, and it can outlive a socket:
+
+```
+Application code
+      |  publish  .  subscribe  .  settle (complete / fail / retry)
+      v
+Logical connection ...... keyed by a resume identity; the broker keeps it
+      |                    dormant through a brief break (the grace window)
+      |  owns -> subscriptions -> in-flight delivery tags
+      v
+TCP socket .............. transient: it can drop and be replaced. A reconnect
+                          presents the resume identity and re-attaches the new
+                          socket to the SAME logical connection, so the
+                          subscriptions and unsettled work above it survive.
+```
+
+When the socket drops and the client reconnects in time, only the bottom layer
+was replaced. When grace expires (or resume is rejected), the whole logical
+connection is torn down and its subscriptions and in-flight work are cleaned up
+and requeued.
+
 ## What It Helps With
 
 Reconnect grace can preserve server-side subscriptions long enough for late
