@@ -5224,17 +5224,18 @@ mod tests {
         let guides: serde_json::Value =
             serde_json::from_str(include_str!("../../../clients/error_guides.json"))
                 .expect("error_guides.json parses");
-        let error = deserialize_by_content_type::<serde_json::Value>(
-            Some("application/json"),
-            b"not json",
-        )
-        .expect_err("a malformed json body must fail to decode");
+        let error =
+            deserialize_by_content_type::<serde_json::Value>(Some("application/json"), b"not json")
+                .expect_err("a malformed json body must fail to decode");
         let message = error.to_string().to_lowercase();
         for keyword in guides["decode_malformed_body"]["must_contain"]
             .as_array()
             .expect("must_contain is an array")
         {
-            let keyword = keyword.as_str().expect("keyword is a string").to_lowercase();
+            let keyword = keyword
+                .as_str()
+                .expect("keyword is a string")
+                .to_lowercase();
             assert!(message.contains(&keyword), "missing {keyword:?}: {message}");
         }
     }

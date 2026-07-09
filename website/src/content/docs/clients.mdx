@@ -244,9 +244,11 @@ client did not present), and `TlsConfig` for client-side option problems. The
 TypeScript and Python names are `TlsRequiredByBrokerError` and so on. None of
 them are retried automatically.
 
-One Python caveat: the fingerprint pin checks the whole presented chain from
-Python 3.13, while older Pythons only expose the leaf certificate, so pin the
-server certificate there or use `with_tls_ca_path`.
+One Python caveat: pinning the broker's leaf fingerprint works with only the
+standard library. Pinning a CA fingerprint (so the leaf can rotate under the same
+CA) path-validates the presented chain, which needs Python 3.13+ (to expose the
+chain) and the optional `cryptography` package (`pip install fibril[tls-pin]`);
+otherwise pin the leaf certificate or use `with_tls_ca_path`.
 
 ## Reconnect Policy
 

@@ -27,7 +27,7 @@ from fibril import (
     TlsNotSupportedByBrokerError,
     TlsRequiredByBrokerError,
 )
-from fibril.client import _normalize_fingerprint
+from fibril.client import _normalize_fingerprint, _verify_pinned_chain
 from fibril.codec import build_frame, encode_frame, read_frame
 from fibril.frames import encode_body
 from fibril.protocol import Op
@@ -274,3 +274,72 @@ def test_fingerprint_normalization() -> None:
         _normalize_fingerprint("abcd")
     with pytest.raises(TlsConfigError):
         _normalize_fingerprint("zz" * 32)
+
+
+def _der(pem_path: Path) -> bytes:
+    return ssl.PEM_cert_to_DER_cert(pem_path.read_text())
+
+
+def _mint_self_signed(tmp: Path, name: str) -> Path:
+    """Mint a self-signed leaf: a certificate whose key an attacker holds but no
+    real CA signed."""
+    key, pem = tmp / f"{name}.key", tmp / f"{name}.pem"
+
+    def ossl(*args: str) -> None:
+        subprocess.run(["openssl", *args], check=True, capture_output=True)
+
+    ossl(
+        "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
+        "-keyout", str(key), "-out", str(pem), "-days", "2", "-nodes", "-subj", f"/CN={name}",
+    )
+    return pem
+
+
+# The MITM a CA pin must resist: the attacker presents its own leaf (whose key it
+# holds, so the handshake signature is valid) stapled next to the genuine, public
+# CA certificate. The CA matches the pin but did not sign the rogue leaf.
+def test_ca_pin_rejects_rogue_leaf_stapled_to_real_ca(tmp_path: Path) -> None:
+    ca_pem, server_pem, _ = _mint_certs(tmp_path)
+    _der(server_pem)  # the real leaf exists; the attacker ignores it
+    ca_der = _der(ca_pem)
+    rogue_der = _der(_mint_self_signed(tmp_path, "rogue"))
+    pin = hashlib.sha256(ca_der).digest()
+    assert _verify_pinned_chain([rogue_der, ca_der], pin) is False
+
+
+def test_ca_pin_accepts_signed_leaf_and_survives_rotation(tmp_path: Path) -> None:
+    ca_pem, server_pem, _ = _mint_certs(tmp_path)
+    ca_der, leaf_der = _der(ca_pem), _der(server_pem)
+    pin = hashlib.sha256(ca_der).digest()
+    assert _verify_pinned_chain([leaf_der, ca_der], pin) is True
+    rotated_pem, _ = _mint_client_cert(tmp_path, "rotated")
+    assert _verify_pinned_chain([_der(rotated_pem), ca_der], pin) is True
+
+
+def test_leaf_pin_is_exact(tmp_path: Path) -> None:
+    ca_pem, server_pem, _ = _mint_certs(tmp_path)
+    ca_der, leaf_der = _der(ca_pem), _der(server_pem)
+    pin = hashlib.sha256(leaf_der).digest()
+    assert _verify_pinned_chain([leaf_der, ca_der], pin) is True
+    other_pem, _ = _mint_client_cert(tmp_path, "other")
+    assert _verify_pinned_chain([_der(other_pem), ca_der], pin) is False
+
+
+# Leaf pinning must stay stdlib-only; only a CA pin needs the optional
+# 'cryptography' package, and its absence must be a loud, actionable error.
+def test_ca_pin_without_cryptography_is_actionable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import fibril.client as client_mod
+
+    def _no_crypto() -> object:
+        raise TlsCertificateUntrustedError(client_mod._TLS_PIN_CA_NEEDS_CRYPTOGRAPHY)
+
+    monkeypatch.setattr(client_mod, "_load_cryptography", _no_crypto)
+    ca_pem, server_pem, _ = _mint_certs(tmp_path)
+    ca_der, leaf_der = _der(ca_pem), _der(server_pem)
+    # Leaf pin needs no cryptography.
+    assert _verify_pinned_chain([leaf_der, ca_der], hashlib.sha256(leaf_der).digest()) is True
+    # CA pin surfaces the install hint.
+    with pytest.raises(TlsCertificateUntrustedError, match="cryptography"):
+        _verify_pinned_chain([leaf_der, ca_der], hashlib.sha256(ca_der).digest())

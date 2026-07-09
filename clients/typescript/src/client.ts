@@ -5,7 +5,7 @@ import {
   type TLSSocket,
 } from "node:tls";
 import { readFileSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, X509Certificate } from "node:crypto";
 import {
   Engine,
   WRITE_COALESCE_BYTES,
@@ -80,8 +80,10 @@ export interface TlsOptions {
   /**
    * SHA-256 fingerprint of the broker CA (or server) certificate, as
    * printed in the broker startup log. Hex digits, colons optional.
-   * Pinning replaces chain-of-trust verification, the handshake still
-   * proves possession of the certificate key.
+   * Pinning replaces the CA trust store: the broker is trusted only when the
+   * pinned certificate is its leaf, or is a CA that genuinely signed the
+   * presented leaf (so a CA pin survives leaf rotation). Hostname verification
+   * is skipped because the pin, not a name, is the trust root.
    */
   caFingerprint?: string;
   /**
@@ -282,7 +284,9 @@ export class ClientOptions {
   /**
    * Return a copy with TLS enabled, pinning the broker certificate by the
    * SHA-256 fingerprint printed in the broker startup log (colons optional).
-   * Pinning replaces chain-of-trust verification.
+   * Pinning replaces the CA trust store: the broker is trusted only when the
+   * pinned certificate is its leaf, or is a CA that genuinely signed the
+   * presented leaf (so a CA pin survives leaf rotation).
    */
   withTlsCaFingerprint(caFingerprint: string): ClientOptions {
     return this.#copy({ tls: { ...(this.tls ?? {}), caFingerprint } });
@@ -656,19 +660,57 @@ function normalizeFingerprint(raw: string): string {
 }
 
 /**
- * Whether any certificate in the presented chain matches the pinned SHA-256
- * fingerprint. Walks issuerCertificate links, which end in a self-referential
- * root.
+ * The certificates the broker presented, leaf first, parsed from the socket.
+ * Walks issuerCertificate links, which end in a self-referential root.
  */
-function chainMatchesPin(socket: TLSSocket, pin: string): boolean {
-  let cert: DetailedPeerCertificate | null = socket.getPeerCertificate(true);
+function presentedChain(socket: TLSSocket): X509Certificate[] {
+  const out: X509Certificate[] = [];
   const seen = new Set<string>();
+  let cert: DetailedPeerCertificate | null = socket.getPeerCertificate(true);
   while (cert && cert.raw) {
-    const fingerprint = createHash("sha256").update(cert.raw).digest("hex");
-    if (fingerprint === pin) return true;
-    if (seen.has(fingerprint)) break;
-    seen.add(fingerprint);
+    const parsed = new X509Certificate(cert.raw);
+    if (seen.has(parsed.fingerprint256)) break;
+    seen.add(parsed.fingerprint256);
+    out.push(parsed);
     cert = cert.issuerCertificate ?? null;
+  }
+  return out;
+}
+
+/**
+ * Enforces a SHA-256 certificate pin against the presented chain (ordered leaf
+ * first). A fingerprint can pin either the leaf or an issuer:
+ *
+ *   - Leaf pin: the pin matches the presented leaf. The handshake already proved
+ *     possession of the leaf's key, so the match stands on its own.
+ *   - CA pin: the pin matches an issuer (so the leaf can rotate under the same
+ *     CA). The pinned certificate merely appearing in the chain proves nothing,
+ *     because the real CA certificate is public and a man-in-the-middle can
+ *     staple it beside a rogue leaf it controls. So the leaf is path-validated
+ *     against the pinned certificate as the sole trust root, and accepted only
+ *     if an unbroken, signature-verified path from the leaf reaches it.
+ */
+export function verifyPinnedChain(chain: X509Certificate[], pin: string): boolean {
+  const sha256Hex = (der: Buffer) => createHash("sha256").update(der).digest("hex");
+  const now = Date.now();
+  const valid = (cert: X509Certificate) =>
+    now >= new Date(cert.validFrom).getTime() && now <= new Date(cert.validTo).getTime();
+
+  let child: X509Certificate | undefined;
+  for (const cert of chain) {
+    if (child === undefined) {
+      // The leaf. A leaf pin matches here; the handshake proved its key.
+      if (sha256Hex(cert.raw) === pin) return true;
+    } else {
+      // For the path to hold, `cert` must be the in-validity issuer that signed
+      // the previous certificate. A CA pin is accepted once such a validated
+      // path reaches the pinned certificate.
+      if (!valid(child) || !child.checkIssued(cert) || !child.verify(cert.publicKey)) {
+        return false;
+      }
+      if (valid(cert) && sha256Hex(cert.raw) === pin) return true;
+    }
+    child = cert;
   }
   return false;
 }
@@ -783,8 +825,9 @@ function openTlsSocket(host: string, port: number, tls: TlsOptions): Promise<Soc
       cert,
       key,
       servername,
-      // A pin replaces chain-of-trust verification; the match happens on
-      // secureConnect below. The handshake still proves key possession.
+      // A pin replaces the CA trust store; the leaf is path-validated against
+      // the pinned certificate on secureConnect below. Hostname is not the trust
+      // basis here (the pin is), so checkServerIdentity is disabled.
       rejectUnauthorized: pin === undefined,
       ...(pin !== undefined ? { checkServerIdentity: () => undefined } : {}),
     });
@@ -792,11 +835,11 @@ function openTlsSocket(host: string, port: number, tls: TlsOptions): Promise<Soc
     socket.once("secureConnect", () => {
       if (settled) return;
       settled = true;
-      if (pin !== undefined && !chainMatchesPin(socket, pin)) {
+      if (pin !== undefined && !verifyPinnedChain(presentedChain(socket), pin)) {
         socket.destroy();
         reject(
           new TlsCertificateUntrustedError(
-            "no certificate in the presented chain matches the pinned fingerprint",
+            "the presented certificate is not the pinned certificate, nor signed by the pinned CA",
           ),
         );
         return;

@@ -34,10 +34,12 @@ jobs:
       # The suite publishes dict payloads, which default to msgpack, so the
       # optional msgpack extra must be present. The msgpack-absent path is covered
       # separately by test_optional_msgpack.py, which monkeypatches the import
-      # rather than relying on msgpack actually being uninstalled here.
+      # rather than relying on msgpack actually being uninstalled here. The tls-pin
+      # extra (cryptography) is needed to path-validate a CA-fingerprint pin; its
+      # absent path is covered by a monkeypatched test the same way.
       - name: Sync dependencies
         working-directory: clients/python
-        run: uv sync --dev --extra msgpack
+        run: uv sync --dev --extra msgpack --extra tls-pin
 
       - name: Type check
         working-directory: clients/python

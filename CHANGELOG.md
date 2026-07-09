@@ -91,10 +91,17 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   clients.
 - A plaintext broker is named as such when a TLS client connects to it, rather
   than surfacing as a generic handshake failure.
-- Python TLS fingerprint pinning on Python older than 3.13 now fails with a clear,
-  actionable message. Those interpreters expose only the leaf certificate, so a
-  CA-fingerprint pin cannot match; the client now says so (pin the leaf fingerprint,
-  upgrade to 3.13+, or trust the CA with a path) instead of a generic no-match error.
+- Security: CA-fingerprint TLS pinning is no longer bypassable by a
+  man-in-the-middle. A CA-fingerprint pin previously accepted any presented chain
+  that merely contained the pinned certificate, so an attacker could staple the
+  broker's public CA certificate beside a leaf it controlled and be trusted. The
+  clients now path-validate the presented leaf against the pinned certificate as
+  the sole trust root, accepting it only when the pinned CA genuinely signed the
+  leaf (so a CA pin still survives leaf rotation). Leaf-fingerprint pins were
+  always sound and are unaffected. Pinning a CA fingerprint in the Python client
+  now needs Python 3.13+ and the optional `cryptography` package
+  (`pip install fibril[tls-pin]`); leaf pinning stays dependency-free and
+  standard-library only.
 
 ## [0.4.0] - 2026-07-04
 

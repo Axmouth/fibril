@@ -18,9 +18,7 @@ async fn main() -> Result<(), FibrilError> {
     let mut sub = client.subscribe(topic)?.prefetch(8).sub_auto_ack().await?;
     let publisher = client.publisher(topic)?;
 
-    let first = publisher
-        .publish_confirmed(NewMessage::text("now"))
-        .await?;
+    let first = publisher.publish_confirmed(NewMessage::text("now")).await?;
     let second = publisher
         .publish_confirmed(NewMessage::text("also now"))
         .await?;

@@ -1,9 +1,11 @@
 # Security fix: CA-fingerprint TLS pinning is MITM-bypassable
 
-Active working doc. Execute this end-to-end, verify against the acceptance criteria,
-then archive (move to `archive/`) and add the CHANGELOG entry. Follows the
-acceptance-criteria-first directive: the criteria below are the contract - if you
-need to diverge from them, consult the user first.
+RESOLVED 2026-07-09 - shipped across all five clients, all of AC1-AC8 met. This is
+the archived design record. Outcome summary in FOLLOWUPS.md ("SECURITY (HIGH) ...
+RESOLVED"). One design note vs the plan below: the Rust fix used rustls's own
+`verify_server_cert_signed_by_trust_anchor` rather than a direct webpki dependency,
+and all five stacks turned out to be lenient on an absent EKU (so the broker's
+no-EKU server cert validates unchanged). Original working doc follows.
 
 ## The vulnerability (confirmed 2026-07-09)
 

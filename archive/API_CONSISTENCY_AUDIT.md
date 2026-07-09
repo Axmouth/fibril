@@ -1,5 +1,11 @@
 # Client API Consistency Audit + Action Plan
 
+> ARCHIVED 2026-07-09. The audit was executed: Tiers 1-4, Tier 5 Group B, and Tier 6
+> are done (see each tier below for the resolution). The two remaining items moved to
+> `FOLLOWUPS.md`: the client API freeze bundle (Tier 5 Group A) and a HIGH-priority
+> SECURITY fix (CA-fingerprint TLS pinning is MITM-bypassable), with acceptance
+> criteria. This doc is kept as the record of what was done and why.
+
 Source: two external design-review passes over the client-usage + reconnect docs
 (2026-07-08), plus in-repo verification of the specific claims. Pre-alpha, no
 stability contract yet — the right moment to unify vocabulary before it hardens.

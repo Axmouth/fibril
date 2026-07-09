@@ -2809,3 +2809,67 @@ Phase 1:
    + recovery fold-then-validate (Enqueue+Cancel annihilate; clean-tail-suffix dangling
    reclassified as expected truncation, not quarantine). Safety anchor: confirm only on
    both-durable, so any dangling enqueue is unconfirmed and safe to drop.
+
+## Client API freeze bundle (#111) - Tier 5 Group A of the client-API audit
+
+From clients/API_CONSISTENCY_AUDIT.md (archived). These reshape the client
+receive/error surface, so they are designed ONCE at the API freeze, not piecemeal.
+Recommended actions (assessed on merit 2026-07-09):
+
+1. Typed stream-close reason (ANCHOR). Today a closed subscription just ends
+   (None/null/channel-close/iteration-end) with no reason. Make the receive surface
+   yield a typed terminal reason (End / Unsubscribed / ReconciledClosed / Recreated /
+   Disconnected / BrokerError / PermissionRevoked). Design decision already made
+   (reconnection-grace note 2026-06-29): the reason travels WITH the stream, not a
+   side channel. This changes every recv()/iteration signature, so design it first;
+   everything else slots in.
+2. Reconnect outcome - TRIM, do not build the full state machine. All 5 clients
+   already return a terminal ReconnectOutcome (Resumed/FreshConnection/...). Just add
+   a ReconciliationFailed terminal variant. Skip the observable transient
+   Reconnecting/Disconnected states - that fights "just works" and users rarely need
+   to watch mid-reconnect.
+3. Whole-surface error taxonomy - SPLIT, mostly do-now. Grow error_guides.json cases
+   + align messages incrementally (the Group B way, no API change). Only the typed
+   retryability accessor on every error type needs the freeze.
+4. Typed unsafe-resume value (pairs with 1). On a non-resume, old subscription
+   handles are unsafe; make them a distinctly-typed value you cannot accidentally
+   treat as live. Reshapes handle types -> design with item 1.
+
+Sequencing: item 3 progresses now (fixtures); items 1 + 4 + the outcome-enum half of
+2 are the one typed-lifecycle freeze pass. Folds in the shelved #102/#103.
+
+## SECURITY (HIGH): CA-fingerprint TLS pinning is MITM-bypassable - RESOLVED 2026-07-09
+
+FIXED across all five clients. The bug: fingerprint pinning accepted the chain if
+ANY presented cert matched the pinned SHA-256 while only the handshake SIGNATURE
+(leaf key) was verified, so a network MITM could present [rogue_leaf (attacker key),
+real_CA_cert] and be trusted (the real CA cert is public). CA-fingerprint pinning was
+bypassable; leaf-fingerprint pinning was already sound.
+
+The fix is uniform across stacks: leaf pin (pin == presented leaf) is accepted
+directly (the handshake proves the leaf key); a CA pin (pin == an issuer) now
+path-validates the presented leaf against the pinned certificate as the sole trust
+anchor, accepting only when the pinned CA genuinely signed the leaf. Hostname is not
+verified (the pin, not a name, is the trust basis). EKU is lenient (absent EKU is
+fine) in every stack, so the broker's no-EKU server cert still validates.
+
+Per-client resolution (each with AC1 adversarial + AC2/AC3/AC4 unit tests):
+- Rust: crates/client/src/tls.rs FingerprintVerifier uses rustls's own
+  `verify_server_cert_signed_by_trust_anchor` (no new dependency, no hostname check).
+  Tests in the same file's `mod tests` (rcgen dev-dep).
+- Go: clients/go/tlsconn.go `verifyPinnedChain` uses x509 CertPool(C) + leaf.Verify.
+  Tests in tlsconn_test.go.
+- C#: clients/csharp/Fibril/Tls.cs `ValidatePinnedChain` uses X509Chain CustomRootTrust
+  with C as the sole custom root. Tests in Fibril.Tests/TlsTest.cs.
+- TS: clients/typescript/src/client.ts `verifyPinnedChain` walks the chain verifying
+  each signed link (X509Certificate checkIssued + verify + validity). Tests in
+  tests/tls.test.ts.
+- Python: clients/python/src/fibril/client.py `_verify_pinned_chain`. Leaf pin is
+  stdlib-only; CA pin path-validates via the OPTIONAL `cryptography` extra
+  (`pip install fibril[tls-pin]`, needs Python 3.13+ for the chain), else a loud
+  actionable error. Tests in tests/test_tls.py (incl. a monkeypatched no-cryptography
+  case). CI installs `--extra tls-pin`.
+
+Broker unchanged (crates/tls still prints the CA fp; its no-EKU cert validates under
+the lenient path check). CHANGELOG has the Security Fixed entry. Full design record
+was archive/SECURITY_CA_PIN_FIX.md.

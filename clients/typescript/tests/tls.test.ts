@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildFrame, tryDecodeFrame, encodeFrame, type Frame } from "../src/codec.js";
 import { COMPLIANCE_STRING, Op, PROTOCOL_V1 } from "../src/protocol.js";
-import { Client, ClientOptions } from "../src/client.js";
+import { Client, ClientOptions, verifyPinnedChain } from "../src/client.js";
 import {
   ERR_TLS_REQUIRED,
   TlsCertificateUntrustedError,
@@ -295,4 +295,52 @@ test("TLS client against a plaintext listener fails fast with the probable cause
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
+});
+
+// Mint a self-signed leaf, modelling a certificate whose key an attacker holds
+// but no real CA signed.
+function mintSelfSigned(dir: string, name: string): string {
+  const key = join(dir, `${name}.key`);
+  const pem = join(dir, `${name}.pem`);
+  execFileSync(
+    "openssl",
+    [
+      "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
+      "-keyout", key, "-out", pem, "-days", "2", "-nodes", "-subj", `/CN=${name}`,
+    ],
+    { stdio: "pipe" },
+  );
+  return pem;
+}
+
+const normalize = (fp: string) => fp.replace(/:/g, "").toLowerCase();
+const parse = (pemPath: string) => new X509Certificate(readFileSync(pemPath));
+
+// The MITM a CA pin must resist: the attacker presents its own leaf (whose key
+// it holds, so the handshake signature is valid) stapled next to the genuine,
+// public CA certificate. The CA matches the pin but did not sign the rogue leaf.
+test("CA fingerprint pin rejects a rogue leaf stapled to the real CA", () => {
+  const { dir, caPem, serverPem } = mintCerts();
+  parse(serverPem); // the real leaf exists; the attacker ignores it
+  const ca = parse(caPem);
+  const rogue = parse(mintSelfSigned(dir, "rogue"));
+  assert.equal(verifyPinnedChain([rogue, ca], normalize(ca.fingerprint256)), false);
+});
+
+test("CA fingerprint pin accepts a signed leaf and survives leaf rotation", () => {
+  const { dir, caPem, serverPem } = mintCerts();
+  const ca = parse(caPem);
+  const leaf = parse(serverPem);
+  assert.equal(verifyPinnedChain([leaf, ca], normalize(ca.fingerprint256)), true);
+  const rotated = parse(mintClientCert(dir, caPem, "rotated").certPem);
+  assert.equal(verifyPinnedChain([rotated, ca], normalize(ca.fingerprint256)), true);
+});
+
+test("leaf fingerprint pin is exact", () => {
+  const { dir, caPem, serverPem } = mintCerts();
+  const ca = parse(caPem);
+  const leaf = parse(serverPem);
+  assert.equal(verifyPinnedChain([leaf, ca], normalize(leaf.fingerprint256)), true);
+  const other = parse(mintClientCert(dir, caPem, "other").certPem);
+  assert.equal(verifyPinnedChain([other, ca], normalize(leaf.fingerprint256)), false);
 });

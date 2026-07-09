@@ -14,8 +14,10 @@ use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls::client::danger::{
     HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
 };
+use tokio_rustls::rustls::client::verify_server_cert_signed_by_trust_anchor;
 use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use tokio_rustls::rustls::{self, DigitallySignedStruct, SignatureScheme};
+use tokio_rustls::rustls::server::ParsedCertificate;
+use tokio_rustls::rustls::{self, DigitallySignedStruct, RootCertStore, SignatureScheme};
 
 use crate::{FibrilError, FibrilResult};
 use fibril_util::net::TcpStream;
@@ -32,8 +34,10 @@ pub struct TlsClientOptions {
     pub ca_path: Option<PathBuf>,
     /// SHA-256 fingerprint of the broker CA (or server) certificate, as
     /// printed in the broker startup log. Hex digits, colons optional.
-    /// Pinning replaces chain-of-trust verification, the handshake still
-    /// proves possession of the certificate key.
+    /// Pinning replaces the CA trust store: the broker is trusted only when
+    /// the pinned certificate is its leaf, or is a CA that genuinely signed
+    /// the presented leaf (so a CA pin survives leaf rotation). Hostname
+    /// verification is skipped because the pin, not a name, is the trust root.
     pub ca_fingerprint: Option<String>,
     /// Name verified against the certificate (and sent as SNI). Defaults to
     /// the host part of the connect address.
@@ -351,9 +355,19 @@ fn parse_fingerprint(raw: &str) -> FibrilResult<Vec<u8>> {
         .collect())
 }
 
-/// Accepts a presented chain when any certificate in it matches the pinned
-/// SHA-256 fingerprint. Handshake signatures are still verified, so a peer
-/// must hold the pinned certificate's key, not merely replay its bytes.
+/// Verifies the broker against a pinned SHA-256 fingerprint.
+///
+/// Two cases, because a fingerprint can pin either the leaf or an issuer:
+///
+/// - The pin matches the presented leaf: accept it. The handshake signature
+///   (verified below) proves the peer holds this leaf's key, so the match is
+///   sound on its own.
+/// - The pin matches an issuer (a CA fingerprint, which survives leaf
+///   rotation): the pinned certificate appearing in the presented chain proves
+///   nothing on its own, because the real CA certificate is public and a
+///   man-in-the-middle can staple it next to a rogue leaf it controls. So the
+///   leaf is path-validated against the pinned certificate as the sole trust
+///   anchor: it is accepted only if it is genuinely signed by the pinned CA.
 #[derive(Debug)]
 struct FingerprintVerifier {
     pin: Vec<u8>,
@@ -367,16 +381,30 @@ impl ServerCertVerifier for FingerprintVerifier {
         intermediates: &[CertificateDer<'_>],
         _server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
-        _now: UnixTime,
+        now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        for cert in std::iter::once(end_entity).chain(intermediates.iter()) {
-            if Sha256::digest(cert.as_ref()).as_slice() == self.pin.as_slice() {
-                return Ok(ServerCertVerified::assertion());
-            }
+        if Sha256::digest(end_entity.as_ref()).as_slice() == self.pin.as_slice() {
+            return Ok(ServerCertVerified::assertion());
         }
-        Err(rustls::Error::InvalidCertificate(
-            rustls::CertificateError::ApplicationVerificationFailure,
-        ))
+        let Some(anchor) = intermediates
+            .iter()
+            .find(|cert| Sha256::digest(cert.as_ref()).as_slice() == self.pin.as_slice())
+        else {
+            return Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::ApplicationVerificationFailure,
+            ));
+        };
+        let mut roots = RootCertStore::empty();
+        roots.add(anchor.clone())?;
+        let leaf = ParsedCertificate::try_from(end_entity)?;
+        verify_server_cert_signed_by_trust_anchor(
+            &leaf,
+            &roots,
+            intermediates,
+            now,
+            self.provider.signature_verification_algorithms.all,
+        )?;
+        Ok(ServerCertVerified::assertion())
     }
 
     fn verify_tls12_signature(
@@ -417,6 +445,112 @@ impl ServerCertVerifier for FingerprintVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ring_provider() -> Arc<rustls::crypto::CryptoProvider> {
+        Arc::new(rustls::crypto::ring::default_provider())
+    }
+
+    // A self-signed CA plus a leaf it issues, mirroring the broker's material.
+    fn make_ca() -> (rcgen::Certificate, rcgen::KeyPair) {
+        let key = rcgen::KeyPair::generate().expect("ca key");
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("ca params");
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "Fibril Test CA");
+        let cert = params.self_signed(&key).expect("ca self-signed");
+        (cert, key)
+    }
+
+    fn leaf_signed_by(
+        ca_cert: &rcgen::Certificate,
+        ca_key: &rcgen::KeyPair,
+    ) -> CertificateDer<'static> {
+        let key = rcgen::KeyPair::generate().expect("leaf key");
+        let params =
+            rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("leaf params");
+        params
+            .signed_by(&key, ca_cert, ca_key)
+            .expect("leaf signed by ca")
+            .der()
+            .clone()
+    }
+
+    // A leaf the attacker controls (its own key), not issued by any real CA.
+    fn rogue_leaf() -> CertificateDer<'static> {
+        let key = rcgen::KeyPair::generate().expect("rogue key");
+        let params =
+            rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("rogue params");
+        params
+            .self_signed(&key)
+            .expect("rogue self-signed")
+            .der()
+            .clone()
+    }
+
+    fn verifier_pinning(cert: &CertificateDer<'_>) -> FingerprintVerifier {
+        FingerprintVerifier {
+            pin: Sha256::digest(cert.as_ref()).to_vec(),
+            provider: ring_provider(),
+        }
+    }
+
+    fn verify(
+        v: &FingerprintVerifier,
+        leaf: &CertificateDer<'_>,
+        chain: &[CertificateDer<'_>],
+    ) -> Result<(), rustls::Error> {
+        let name = ServerName::try_from("localhost").expect("server name");
+        v.verify_server_cert(leaf, chain, &name, &[], UnixTime::now())
+            .map(|_| ())
+    }
+
+    // The MITM the CA pin must resist: the attacker presents its own leaf (whose
+    // key it holds, so the handshake signature checks out) stapled next to the
+    // genuine, public CA certificate. The CA matches the pin but did not sign
+    // the rogue leaf, so path validation must reject it.
+    #[test]
+    fn ca_pin_rejects_a_rogue_leaf_stapled_next_to_the_real_ca() {
+        let (ca_cert, ca_key) = make_ca();
+        let _real_leaf = leaf_signed_by(&ca_cert, &ca_key); // exists; attacker does not use it
+        let rogue = rogue_leaf();
+        let v = verifier_pinning(ca_cert.der());
+        let err = verify(&v, &rogue, &[ca_cert.der().clone()])
+            .expect_err("rogue leaf stapled to the real CA must be rejected");
+        assert!(matches!(err, rustls::Error::InvalidCertificate(_)));
+    }
+
+    #[test]
+    fn ca_pin_accepts_a_leaf_the_pinned_ca_signed() {
+        let (ca_cert, ca_key) = make_ca();
+        let leaf = leaf_signed_by(&ca_cert, &ca_key);
+        let v = verifier_pinning(ca_cert.der());
+        verify(&v, &leaf, &[ca_cert.der().clone()]).expect("legitimate leaf under the pinned CA");
+    }
+
+    // A CA pin exists precisely so the leaf can rotate under the same CA.
+    #[test]
+    fn ca_pin_survives_leaf_rotation() {
+        let (ca_cert, ca_key) = make_ca();
+        let v = verifier_pinning(ca_cert.der());
+        let first = leaf_signed_by(&ca_cert, &ca_key);
+        verify(&v, &first, &[ca_cert.der().clone()]).expect("first leaf");
+        let rotated = leaf_signed_by(&ca_cert, &ca_key);
+        verify(&v, &rotated, &[ca_cert.der().clone()]).expect("rotated leaf under the same CA");
+    }
+
+    // Leaf pinning stays sound and exact: the pinned leaf is accepted, any other
+    // leaf (even under the same CA) is not, because the pin is the leaf itself.
+    #[test]
+    fn leaf_pin_accepts_only_the_pinned_leaf() {
+        let (ca_cert, ca_key) = make_ca();
+        let leaf = leaf_signed_by(&ca_cert, &ca_key);
+        let v = verifier_pinning(&leaf);
+        verify(&v, &leaf, &[ca_cert.der().clone()]).expect("the pinned leaf itself");
+        let other = leaf_signed_by(&ca_cert, &ca_key);
+        verify(&v, &other, &[ca_cert.der().clone()])
+            .expect_err("a different leaf must not match a leaf pin");
+    }
 
     #[test]
     fn fingerprint_parses_colon_hex_and_bare_hex() {

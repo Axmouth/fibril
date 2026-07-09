@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.IO;
 using System.Net.Security;
 using System.Security.Authentication;
@@ -17,8 +18,10 @@ public sealed record TlsOptions
 
     /// <summary>
     /// Pins the broker certificate by its SHA-256 fingerprint (hex, colons optional).
-    /// Pinning replaces chain verification. The handshake still proves possession of
-    /// the key. Takes precedence over <see cref="CaFile"/>.
+    /// Pinning replaces the CA trust store: the broker is trusted only when the pinned
+    /// certificate is its leaf, or is a CA that genuinely signed the presented leaf (so
+    /// a CA pin survives leaf rotation). Hostname verification is skipped because the
+    /// pin is the trust root. Takes precedence over <see cref="CaFile"/>.
     /// </summary>
     public string? CaFingerprint { get; init; }
 
@@ -81,13 +84,13 @@ internal static class Tls
 
         if (pin is not null)
         {
-            // The pin replaces chain-of-trust and hostname verification. The match
-            // happens after the handshake, which still proves the key is held.
-            if (MatchesPin(cert, chain, pin))
+            // The pin replaces the CA trust store and hostname verification. The
+            // handshake still proves possession of the leaf key.
+            if (ValidatePinnedChain(PresentedChain(cert, chain), pin))
             {
                 return true;
             }
-            rejection.Detail = "no certificate in the presented chain matches the pinned fingerprint";
+            rejection.Detail = "the presented certificate is not the pinned certificate, nor signed by the pinned CA";
             return false;
         }
 
@@ -119,23 +122,69 @@ internal static class Tls
         return false;
     }
 
-    private static bool MatchesPin(X509Certificate leaf, X509Chain? chain, byte[] pin)
+    // The certificates the broker presented, leaf first, as the chain engine saw
+    // them. Used as the input to pin validation.
+    private static IReadOnlyList<X509Certificate2> PresentedChain(X509Certificate leaf, X509Chain? chain)
     {
-        if (SHA256.HashData(leaf.GetRawCertData()).AsSpan().SequenceEqual(pin))
+        if (chain is not null && chain.ChainElements.Count > 0)
+        {
+            var certs = new List<X509Certificate2>(chain.ChainElements.Count);
+            foreach (var element in chain.ChainElements)
+            {
+                certs.Add(element.Certificate);
+            }
+            return certs;
+        }
+        return new List<X509Certificate2> { new X509Certificate2(leaf.GetRawCertData()) };
+    }
+
+    // Enforces a SHA-256 certificate pin against the presented chain (ordered
+    // leaf first). A fingerprint can pin either the leaf or an issuer:
+    //
+    //   - Leaf pin: the pin matches the presented leaf. The handshake already
+    //     proved possession of the leaf's key, so the match stands on its own.
+    //   - CA pin: the pin matches an issuer (so the leaf can rotate under the same
+    //     CA). The pinned certificate merely appearing in the chain proves nothing,
+    //     because the real CA certificate is public and a man-in-the-middle can
+    //     staple it beside a rogue leaf it controls. So the leaf is path-validated
+    //     against the pinned certificate as the sole trust root, and accepted only
+    //     if it is genuinely signed by it.
+    internal static bool ValidatePinnedChain(IReadOnlyList<X509Certificate2> presented, byte[] pin)
+    {
+        if (presented.Count == 0)
+        {
+            return false;
+        }
+        var leaf = presented[0];
+        if (Sha256Matches(leaf, pin))
         {
             return true;
         }
-        if (chain is not null)
+        for (var i = 1; i < presented.Count; i++)
         {
-            foreach (var element in chain.ChainElements)
+            if (Sha256Matches(presented[i], pin) && LeafSignedByPinnedAnchor(leaf, presented[i], presented))
             {
-                if (SHA256.HashData(element.Certificate.RawData).AsSpan().SequenceEqual(pin))
-                {
-                    return true;
-                }
+                return true;
             }
         }
         return false;
+    }
+
+    private static bool Sha256Matches(X509Certificate2 cert, byte[] pin) =>
+        SHA256.HashData(cert.RawData).AsSpan().SequenceEqual(pin);
+
+    private static bool LeafSignedByPinnedAnchor(X509Certificate2 leaf, X509Certificate2 anchor, IReadOnlyList<X509Certificate2> presented)
+    {
+        using var built = new X509Chain();
+        built.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+        built.ChainPolicy.CustomTrustStore.Add(anchor);
+        built.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+        foreach (var cert in presented)
+        {
+            built.ChainPolicy.ExtraStore.Add(cert);
+        }
+        // No hostname check: the pin, not a name, is the trust root.
+        return built.Build(leaf);
     }
 
     private static byte[] ParseFingerprint(string raw)

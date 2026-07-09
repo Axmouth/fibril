@@ -19,12 +19,14 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Typing :: Typed",
 ]
-# No required runtime dependencies. msgpack is optional - only the msgpack
-# payload codec needs it (raw/text/json work without it).
+# No required runtime dependencies. Optional extras: msgpack for the msgpack
+# payload codec (raw/text/json work without it), tls-pin for path-validating a
+# CA-fingerprint pin (leaf-fingerprint pinning works without it).
 dependencies = []
 
 [project.optional-dependencies]
 msgpack = ["msgpack>=1.0"]
+tls-pin = ["cryptography>=42"]
 
 [dependency-groups]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "mypy>=1.10"]
@@ -43,4 +45,8 @@ files = ["src/fibril"]
 
 [[tool.mypy.overrides]]
 module = "msgpack"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "cryptography.*"
 ignore_missing_imports = true

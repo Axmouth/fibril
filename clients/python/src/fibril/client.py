@@ -14,8 +14,8 @@ import hashlib
 import socket as _socket
 import ssl
 from dataclasses import dataclass, field, replace
-from datetime import timedelta
-from typing import TYPE_CHECKING, Callable, Optional, Union
+from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 from . import wire
 from .engine import (
@@ -74,10 +74,12 @@ class TlsOptions:
     ca_path: Optional[str] = None
     #: SHA-256 fingerprint of the broker CA (or server) certificate, as
     #: printed in the broker startup log. Hex digits, colons optional.
-    #: Pinning replaces chain-of-trust verification, the handshake still
-    #: proves possession of the certificate key. On Python older than 3.13
-    #: only the leaf certificate is visible to the pin check, so pin the
-    #: server certificate there or use ``ca_path``.
+    #: Pinning replaces the CA trust store: the broker is trusted only when the
+    #: pinned certificate is its leaf, or is a CA that genuinely signed the
+    #: presented leaf. Pinning the leaf works with only the standard library;
+    #: a CA-fingerprint pin (surviving leaf rotation) path-validates the chain,
+    #: which needs Python 3.13+ and the optional ``cryptography`` package
+    #: (``pip install fibril[tls-pin]``), else pin the leaf or use ``ca_path``.
     ca_fingerprint: Optional[str] = None
     #: Name verified against the certificate (and sent as SNI). Defaults to
     #: the host part of the connect address.
@@ -163,11 +165,14 @@ class ClientOptions:
         """TLS pinning the broker certificate by the SHA-256 fingerprint printed
         in the broker startup log (colons optional).
 
-        On Python 3.13+ the pin can match any certificate in the presented chain, so
-        pinning the CA fingerprint survives leaf-certificate rotation. On older
-        Pythons only the leaf certificate is available, so a CA-fingerprint pin will
-        not match (the connection is rejected with a message that says so) - pin the
-        leaf fingerprint, upgrade Python, or use ``with_tls_ca_path`` instead."""
+        Pinning replaces the CA trust store: the broker is trusted only when the
+        pinned certificate is its leaf, or is a CA that genuinely signed the
+        presented leaf (so a CA pin survives leaf rotation). Pinning the leaf works
+        with only the standard library. Pinning a CA fingerprint path-validates the
+        chain, which needs Python 3.13+ (to expose the chain) and the optional
+        ``cryptography`` package (``pip install fibril[tls-pin]``); otherwise the
+        connection is rejected with a message that says so - pin the leaf
+        fingerprint or use ``with_tls_ca_path`` instead."""
         return replace(
             self, tls=replace(self.tls or TlsOptions(), ca_fingerprint=ca_fingerprint)
         )
@@ -398,8 +403,9 @@ def _certificate_required_error(
 def _build_ssl_context(tls: TlsOptions) -> ssl.SSLContext:
     if tls.ca_fingerprint is not None:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        # The pin replaces chain-of-trust verification; the match happens
-        # after the handshake, which still proves key possession.
+        # The pin replaces the CA trust store; the presented chain is validated
+        # against the pin after the handshake (see _verify_pinned_connection).
+        # Hostname is not the trust basis here, so it is not verified.
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
     elif tls.ca_path is not None:
@@ -424,22 +430,101 @@ def _build_ssl_context(tls: TlsOptions) -> ssl.SSLContext:
     return context
 
 
-def _chain_matches_pin(ssl_object: ssl.SSLObject, pin: bytes) -> bool:
-    # get_unverified_chain (Python 3.13+) exposes the whole presented chain
-    # so a CA pin can match. Older Pythons expose only the leaf certificate.
-    certs: list[bytes] = []
-    chain_getter = getattr(ssl_object, "get_unverified_chain", None)
-    if chain_getter is not None:
+_TLS_PIN_CA_NEEDS_CRYPTOGRAPHY = (
+    "pinning a CA fingerprint (so the broker leaf can rotate under the same CA) "
+    "requires the 'cryptography' package to path-validate the chain. Install it "
+    "with `pip install fibril[tls-pin]`, or pin the broker leaf certificate's "
+    "fingerprint instead, or trust the CA with with_tls_ca_path(...)"
+)
+
+_TLS_PIN_CA_NEEDS_313 = (
+    "the pinned fingerprint did not match the broker's leaf certificate, and this "
+    "Python (< 3.13) cannot inspect the rest of the presented chain. Pinning a CA "
+    "fingerprint (to survive leaf rotation) needs Python 3.13+; pin the leaf "
+    "certificate's fingerprint, upgrade Python, or trust the CA with "
+    "with_tls_ca_path(...)"
+)
+
+
+def _verify_pinned_chain(chain_der: list[bytes], pin: bytes) -> bool:
+    """Enforce a SHA-256 certificate pin against the presented chain (leaf first).
+
+    A fingerprint can pin either the leaf or an issuer:
+
+    - Leaf pin: the pin matches the presented leaf. The handshake already proved
+      possession of the leaf's key, so the match stands on its own. Checked with
+      only the standard library.
+    - CA pin: the pin matches an issuer (so the leaf can rotate under the same
+      CA). The pinned certificate merely appearing in the chain proves nothing,
+      because the real CA certificate is public and a man-in-the-middle can
+      staple it beside a rogue leaf it controls. So the leaf is path-validated
+      against the pinned certificate as the sole trust root, using the optional
+      'cryptography' package, and accepted only if it is genuinely signed by it.
+    """
+    if not chain_der:
+        return False
+    if hashlib.sha256(chain_der[0]).digest() == pin:
+        return True
+    if not any(hashlib.sha256(der).digest() == pin for der in chain_der[1:]):
+        return False
+
+    x509, InvalidSignature = _load_cryptography()
+    certs = [x509.load_der_x509_certificate(der) for der in chain_der]
+    now = datetime.now(timezone.utc)
+    for anchor in range(1, len(certs)):
+        if hashlib.sha256(chain_der[anchor]).digest() == pin and _signed_path(
+            certs, anchor, now, InvalidSignature
+        ):
+            return True
+    return False
+
+
+def _signed_path(
+    certs: list[Any], anchor: int, now: datetime, invalid_signature: type[BaseException]
+) -> bool:
+    """Whether every link from the leaf up to certs[anchor] is in its validity
+    window, names its issuer, and carries that issuer's signature."""
+    for i in range(anchor):
+        cert, issuer = certs[i], certs[i + 1]
+        if not (cert.not_valid_before_utc <= now <= cert.not_valid_after_utc):
+            return False
         try:
-            for cert in chain_getter() or []:
-                certs.append(ssl.PEM_cert_to_DER_cert(cert.public_bytes()))
-        except ssl.SSLError:
-            certs = []
-    if not certs:
-        leaf = ssl_object.getpeercert(binary_form=True)
-        if leaf:
-            certs.append(leaf)
-    return any(hashlib.sha256(der).digest() == pin for der in certs)
+            cert.verify_directly_issued_by(issuer)
+        except (ValueError, TypeError, invalid_signature):
+            return False
+    anchor_cert = certs[anchor]
+    return bool(anchor_cert.not_valid_before_utc <= now <= anchor_cert.not_valid_after_utc)
+
+
+def _load_cryptography() -> tuple[Any, type[BaseException]]:
+    try:
+        from cryptography import x509
+        from cryptography.exceptions import InvalidSignature
+    except ImportError as err:
+        raise TlsCertificateUntrustedError(_TLS_PIN_CA_NEEDS_CRYPTOGRAPHY) from err
+    return x509, InvalidSignature
+
+
+def _verify_pinned_connection(ssl_object: ssl.SSLObject, pin: bytes) -> bool:
+    leaf = ssl_object.getpeercert(binary_form=True)
+    if not leaf:
+        return False
+    if hashlib.sha256(leaf).digest() == pin:
+        return True  # leaf pin: sound with only the standard library
+    # A CA pin needs the rest of the presented chain, exposed only on 3.13+.
+    chain_getter = getattr(ssl_object, "get_unverified_chain", None)
+    if chain_getter is None:
+        raise TlsCertificateUntrustedError(_TLS_PIN_CA_NEEDS_313)
+    chain_der = [leaf]
+    try:
+        presented = chain_getter() or []
+    except ssl.SSLError:
+        presented = []
+    for cert in presented:
+        der = ssl.PEM_cert_to_DER_cert(cert.public_bytes())
+        if der != leaf:
+            chain_der.append(der)
+    return _verify_pinned_chain(chain_der, pin)
 
 
 async def _open_connection(
@@ -490,25 +575,19 @@ async def _open_connection(
             raise DisconnectionError(f"failed to connect to {host}:{port}: {err}") from err
         if pin is not None:
             ssl_object = writer.get_extra_info("ssl_object")
-            if ssl_object is None or not _chain_matches_pin(ssl_object, pin):
+            try:
+                trusted = ssl_object is not None and _verify_pinned_connection(ssl_object, pin)
+            except BaseException:
+                # A CA pin that cannot be validated (no chain on < 3.13, or the
+                # 'cryptography' package missing) raises an actionable error; close
+                # the connection before surfacing it.
                 writer.close()
-                # On Python < 3.13 there is no chain introspection, so only the leaf
-                # certificate can be checked against the pin. Say so loudly instead of
-                # letting a CA-fingerprint pin fail with an opaque message: the pin is
-                # doing less than a 3.13+ interpreter would, and the fix differs.
-                if ssl_object is not None and not hasattr(
-                    ssl_object, "get_unverified_chain"
-                ):
-                    raise TlsCertificateUntrustedError(
-                        "the pinned fingerprint did not match the server's leaf "
-                        "certificate. This Python (< 3.13) can only check the leaf "
-                        "against a fingerprint pin; pinning a CA fingerprint (to survive "
-                        "leaf rotation) needs Python 3.13+, which exposes the full chain. "
-                        "Pin the leaf certificate's fingerprint, upgrade to Python 3.13+, "
-                        "or trust the CA with with_tls_ca_path(...)"
-                    )
+                raise
+            if not trusted:
+                writer.close()
                 raise TlsCertificateUntrustedError(
-                    "no certificate in the presented chain matches the pinned fingerprint"
+                    "the presented certificate is not the pinned certificate, "
+                    "nor signed by the pinned CA"
                 )
     sock = writer.get_extra_info("socket")
     if sock is not None:

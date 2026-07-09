@@ -1351,6 +1351,7 @@ dependencies = [
  "fibril-wire",
  "futures",
  "parking_lot",
+ "rcgen",
  "rmp-serde",
  "rustls-native-certs",
  "rustls-pemfile",

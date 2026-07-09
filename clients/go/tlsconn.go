@@ -24,8 +24,11 @@ type TLSOptions struct {
 	// generated <data_dir>/tls/ca.pem). Empty uses the OS trust store.
 	CAFile string
 	// CAFingerprint pins the broker certificate by its SHA-256 fingerprint (hex,
-	// colons optional). Pinning replaces chain verification; the handshake still
-	// proves possession of the key. Takes precedence over CAFile.
+	// colons optional). Pinning replaces the CA trust store: the broker is
+	// trusted only when the pinned certificate is its leaf, or is a CA that
+	// genuinely signed the presented leaf (so a CA pin survives leaf rotation).
+	// Hostname verification is skipped because the pin is the trust root. Takes
+	// precedence over CAFile.
 	CAFingerprint string
 	// ServerName is the name verified against the certificate and sent as SNI.
 	// Empty defaults to the dial host.
@@ -77,17 +80,12 @@ func buildTLSConfig(opts *TLSOptions, host string) (*tls.Config, error) {
 		if err != nil {
 			return nil, err
 		}
-		// The pin replaces chain-of-trust verification; the match happens after
-		// the handshake, which still proves the certificate key is held.
+		// The pin replaces the CA trust store. Hostname verification is skipped
+		// because the pin, not a name, is the trust root; the handshake still
+		// proves possession of the leaf key.
 		cfg.InsecureSkipVerify = true
 		cfg.VerifyConnection = func(cs tls.ConnectionState) error {
-			for _, cert := range cs.PeerCertificates {
-				sum := sha256.Sum256(cert.Raw)
-				if bytes.Equal(sum[:], pin) {
-					return nil
-				}
-			}
-			return &TlsCertificateUntrustedError{Detail: "no certificate in the presented chain matches the pinned fingerprint"}
+			return verifyPinnedChain(cs.PeerCertificates, pin)
 		}
 	case opts.CAFile != "":
 		pem, err := os.ReadFile(opts.CAFile)
@@ -121,6 +119,46 @@ func parseFingerprint(raw string) ([]byte, error) {
 		return nil, &TlsConfigError{Message: "tls CAFingerprint must be 64 hex digits (SHA-256, colons optional)"}
 	}
 	return b, nil
+}
+
+// verifyPinnedChain enforces a SHA-256 certificate pin against the presented
+// chain. A fingerprint can pin either the leaf or an issuer:
+//
+//   - Leaf pin: the pin matches the presented leaf. The handshake already
+//     proved possession of the leaf's key, so the match stands on its own.
+//   - CA pin: the pin matches an issuer (which lets the leaf rotate under the
+//     same CA). The pinned certificate merely appearing in the chain proves
+//     nothing, because the real CA certificate is public and a man-in-the-middle
+//     can staple it beside a rogue leaf it controls. So the leaf is
+//     path-validated against the pinned certificate as the sole trust root, and
+//     accepted only if it is genuinely signed by it.
+func verifyPinnedChain(chain []*x509.Certificate, pin []byte) error {
+	if len(chain) == 0 {
+		return &TlsCertificateUntrustedError{Detail: "the broker presented no certificate"}
+	}
+	leaf := chain[0]
+	if sum := sha256.Sum256(leaf.Raw); bytes.Equal(sum[:], pin) {
+		return nil
+	}
+	for _, cert := range chain[1:] {
+		if sum := sha256.Sum256(cert.Raw); !bytes.Equal(sum[:], pin) {
+			continue
+		}
+		roots := x509.NewCertPool()
+		roots.AddCert(cert)
+		intermediates := x509.NewCertPool()
+		for _, inter := range chain[1:] {
+			intermediates.AddCert(inter)
+		}
+		// No DNSName: the pin is the trust root, so hostname is not verified.
+		if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, Intermediates: intermediates}); err != nil {
+			return &TlsCertificateUntrustedError{
+				Detail: "the presented leaf is not signed by the pinned CA certificate: " + err.Error(),
+			}
+		}
+		return nil
+	}
+	return &TlsCertificateUntrustedError{Detail: "no certificate in the presented chain matches the pinned fingerprint"}
 }
 
 func classifyTLSDialError(err error, addr string) error {

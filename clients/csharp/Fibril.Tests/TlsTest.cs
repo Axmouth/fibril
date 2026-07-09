@@ -177,4 +177,70 @@ public class TlsTest
         await Assert.ThrowsAsync<TlsClientCertificateRequiredException>(
             () => Client.ConnectAsync(broker.Address, Opts(new TlsOptions { CaFingerprint = Fingerprint(cert) }), Timeout()));
     }
+
+    // A self-signed CA able to issue leaves. The RSA key is deliberately not
+    // disposed so the returned certificate can keep signing.
+    private static X509Certificate2 MakeCa()
+    {
+        var rsa = RSA.Create(2048);
+        var req = new CertificateRequest("CN=Fibril Pin Test CA", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        req.CertificateExtensions.Add(new X509BasicConstraintsExtension(certificateAuthority: true, hasPathLengthConstraint: false, pathLengthConstraint: 0, critical: true));
+        return req.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+    }
+
+    private static X509Certificate2 IssueLeaf(X509Certificate2 ca)
+    {
+        using var rsa = RSA.Create(2048);
+        var req = new CertificateRequest("CN=localhost", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        var san = new SubjectAlternativeNameBuilder();
+        san.AddDnsName("localhost");
+        req.CertificateExtensions.Add(san.Build());
+        var serial = new byte[8];
+        RandomNumberGenerator.Fill(serial);
+        using var signed = req.Create(ca, DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1), serial);
+        return X509CertificateLoader.LoadCertificate(signed.Export(X509ContentType.Cert));
+    }
+
+    // A leaf whose key an attacker holds, signed by nobody the client trusts.
+    private static X509Certificate2 RogueLeaf()
+    {
+        using var rsa = RSA.Create(2048);
+        var req = new CertificateRequest("CN=localhost", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        using var self = req.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+        return X509CertificateLoader.LoadCertificate(self.Export(X509ContentType.Cert));
+    }
+
+    private static byte[] PinBytes(X509Certificate2 cert) => SHA256.HashData(cert.RawData);
+
+    // The MITM a CA pin must resist: the attacker presents its own leaf (whose key
+    // it holds, so the handshake signature is valid) stapled next to the genuine,
+    // public CA certificate. The CA matches the pin but did not sign the rogue leaf.
+    [Fact]
+    public void CaPinRejectsRogueLeafStapledToRealCa()
+    {
+        using var ca = MakeCa();
+        using var realLeaf = IssueLeaf(ca); // exists; the attacker ignores it
+        using var rogue = RogueLeaf();
+        Assert.False(Tls.ValidatePinnedChain(new[] { rogue, ca }, PinBytes(ca)));
+    }
+
+    [Fact]
+    public void CaPinAcceptsSignedLeafAndSurvivesRotation()
+    {
+        using var ca = MakeCa();
+        using var leaf = IssueLeaf(ca);
+        Assert.True(Tls.ValidatePinnedChain(new[] { leaf, ca }, PinBytes(ca)));
+        using var rotated = IssueLeaf(ca);
+        Assert.True(Tls.ValidatePinnedChain(new[] { rotated, ca }, PinBytes(ca)));
+    }
+
+    [Fact]
+    public void LeafPinIsExact()
+    {
+        using var ca = MakeCa();
+        using var leaf = IssueLeaf(ca);
+        Assert.True(Tls.ValidatePinnedChain(new[] { leaf, ca }, PinBytes(leaf)));
+        using var other = IssueLeaf(ca);
+        Assert.False(Tls.ValidatePinnedChain(new[] { other, ca }, PinBytes(leaf)));
+    }
 }
