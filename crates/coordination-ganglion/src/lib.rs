@@ -3688,11 +3688,27 @@ mod tests {
             Some("{\"v\":1}"),
             "attributes must survive controller writes"
         );
+        // The trait snapshot()/watch() view updates through the spawned watch
+        // forwarder, so it lags the committed controller write by a task hop.
+        // Wait bounded for the assignment to propagate instead of reading
+        // immediately, like the neighboring placement tests.
+        let mut watch = provider.watch();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while watch
+                .borrow_and_update()
+                .assignment_for("orders", Partition::new(0), Some("workers"))
+                .is_none()
+            {
+                watch.changed().await.expect("watch open");
+            }
+        })
+        .await
+        .expect("controller assigned the catalogue queue");
         let assigned = provider
             .snapshot()
             .assignment_for("orders", Partition::new(0), Some("workers"))
             .cloned()
-            .expect("controller assigned the catalogue queue");
+            .expect("assignment visible once the watch caught up");
         assert_eq!(assigned.owner, "broker-a");
 
         provider.deregister_queue(&queue).await.expect("deregister");
@@ -4504,7 +4520,17 @@ mod tests {
         let dead = provider.live_nodes(Duration::from_millis(1));
         assert!(dead.is_empty(), "expired heartbeats filtered: {dead:?}");
 
-        // The watch/trait surface sees the registrations too.
+        // The watch/trait surface sees the registrations too. It updates
+        // through the spawned watch forwarder, so wait bounded rather than
+        // assuming instant propagation.
+        let mut watch = provider.watch();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while watch.borrow_and_update().nodes.len() < 2 {
+                watch.changed().await.expect("watch open");
+            }
+        })
+        .await
+        .expect("watch view caught up with both registrations");
         assert_eq!(provider.snapshot().nodes.len(), 2);
 
         provider
