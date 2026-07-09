@@ -388,7 +388,12 @@
         }
         clearPageTimers();
         const title = doc.querySelector("title");
-        if (title) document.title = title.textContent;
+        if (title) {
+          document.title = title.textContent;
+          // The topbar crumb lives outside #page-root, so carry it over too.
+          const crumb = document.querySelector(".crumb");
+          if (crumb) crumb.textContent = title.textContent;
+        }
         current.innerHTML = next.innerHTML;
         await runScripts(current);
         current.classList.remove("swapping");
