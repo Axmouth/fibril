@@ -1572,11 +1572,11 @@ client.Shutdown()
   <TabItem label="C#">
 
 ```csharp
-await client.DisposeAsync();
+await client.ShutdownAsync();
 ```
 
-`Client` is `IAsyncDisposable`, so `await using var client = ...` also disposes it
-automatically at the end of scope.
+`ShutdownAsync()` is an alias for `DisposeAsync()`. `Client` is `IAsyncDisposable`,
+so `await using var client = ...` also disposes it automatically at the end of scope.
 
   </TabItem>
 </Tabs>

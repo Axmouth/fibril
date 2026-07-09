@@ -534,6 +534,14 @@ public sealed partial class Client : IAsyncDisposable
         return eng.PublishDelayedWithConfirmation(p, ct);
     }
 
+    /// <summary>
+    /// Shuts the client down, closing the bootstrap connection and every pooled
+    /// connection. A named alias for <see cref="DisposeAsync"/> so the shutdown
+    /// vocabulary the other clients use (<c>shutdown()</c>) is greppable here too.
+    /// The client remains <c>await using</c>-able via <see cref="IAsyncDisposable"/>.
+    /// </summary>
+    public ValueTask ShutdownAsync() => DisposeAsync();
+
     /// <summary>Closes the bootstrap connection and every pooled connection.</summary>
     public async ValueTask DisposeAsync()
     {

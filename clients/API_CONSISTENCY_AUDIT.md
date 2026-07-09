@@ -215,8 +215,23 @@ so they are the client API freeze (#111) design bundle - one typed lifecycle
 designed once, not bolted on. Also parked there: the deeper TLS soundness question
 noted in Tier 3 (CA-fingerprint pinning under `verify_mode=CERT_NONE`).
 
-**Tier 6 — nits.** `subscribe`/`.sub()` terminal; `publish_confirmed` vs
-`publish_with_confirmation` legibility; long enum names; C# `ShutdownAsync()` alias.
+**Tier 6 — nits. Assessed.**
+- C# `ShutdownAsync()` alias: DONE. Added as a named alias for `DisposeAsync()` so
+  the `shutdown()` vocabulary the other clients use is greppable/discoverable in C#
+  (the client stays `IAsyncDisposable` / `await using`-able). Docs updated.
+- Long enum names: nothing actionable. The one offender (`RestoreClientSubscriptions`)
+  was already fixed to `Restore` in the glossary. C#'s `StreamDurabilityTier` keeps
+  its `Tier` suffix on purpose - it disambiguates the public enum from the internal
+  wire `StreamDurability` (both exist in the C# client).
+- `.sub()` / `.sub_auto_ack()` subscribe terminal: LEAVE. The `sub`/`sub_auto_ack`
+  pair reads fine, and every clean rename (`open`/`consume`) turns clunky on the
+  auto-ack variant (`open_auto_ack`). The `subscribe(...)...sub()` homonym is mild and
+  not worth a public rename across three clients plus every example and doc.
+- `publish_confirmed` vs `publish_with_confirmation`: LEAVE. These are genuinely
+  different operations - one awaits the confirmation and returns the offset, the other
+  returns a deferred handle for pipelining - and the names describe that accurately
+  ("confirmed" = done; "with confirmation" = you get the confirmation to await). A
+  rename would risk making them less precise, not more.
 
 **Leave alone (assessed).** Idiomatic divergences (ctx-first, CancellationToken/
 IAsyncDisposable/DisposeAsync, Duration types, casing, Python blocking facade) —
