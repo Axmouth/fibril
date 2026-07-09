@@ -24,7 +24,17 @@ key. Operators either supply their own PEM files or opt into per-deployment
 generation (the Elasticsearch 8 pattern), which creates a CA and a server
 certificate under the data dir and prints the CA fingerprint so clients can pin
 it. Generated mode serves the leaf plus the CA so a client pinning the CA
-fingerprint can match it against the presented chain.
+fingerprint has the CA in the presented chain to validate against.
+
+A fingerprint pin is not a presence check. The client accepts the broker only
+when the pinned certificate is the presented leaf, or is a CA that actually
+signed the presented leaf - path validation with the pinned certificate as the
+sole trust anchor. Accepting the connection merely because the pinned
+certificate appears somewhere in the chain would be bypassable: the CA
+certificate is public, so a man-in-the-middle could staple it beside a leaf
+whose key it holds and be trusted. Path validation is what lets a CA pin survive
+leaf rotation without trusting a rogue leaf. Hostname is not checked under a pin,
+because the pin, not a name, is the trust root.
 
 ### Naming a transport mismatch
 
