@@ -62,6 +62,19 @@ report "reconcile policy value" 'restore_client_subscriptions' 'restore'
 # reintroduced `"tp"` JSON key or a `pub tp:` request field.
 report "admin topic field" '"tp"|pub tp:' 'topic'
 
+# Admin templates build JSON request bodies by hand in inline JS, so a bare
+# `tp:` object key or a `.tp` response read is wire vocabulary there too (it
+# serializes to the "tp" field the admin API no longer accepts). Scanned
+# separately from SCAN because crates/admin/src legitimately reads the
+# persisted storage `.tp` field internally.
+template_hits="$(grep -rnE '\btp\b *:|\.tp\b' crates/admin/templates 2>/dev/null | grep -v http)"
+if [[ -n "$template_hits" ]]; then
+  echo "VOCAB DRIFT [admin template topic field]: use 'topic' instead."
+  echo "$template_hits"
+  echo
+  fail=1
+fi
+
 if [[ "$fail" -ne 0 ]]; then
   echo "Client vocabulary lint FAILED. See clients/API_CONSISTENCY_AUDIT.md for the canonical table."
   exit 1

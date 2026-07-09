@@ -215,7 +215,7 @@ async function submitCreateStream() {
   if (!topic) return setCreateMessage("Enter a topic.", "warning");
   if (!(count >= 1)) return setCreateMessage("Partition count must be at least 1.", "warning");
 
-  const body = { tp: topic, partition_count: count, durability };
+  const body = { topic, partition_count: count, durability };
   const records = document.getElementById("create.max_records").value.trim();
   const bytes = document.getElementById("create.max_bytes").value.trim();
   const age = document.getElementById("create.max_age_ms").value.trim();

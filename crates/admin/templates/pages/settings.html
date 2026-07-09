@@ -371,7 +371,7 @@
         <label class="settings-field">
           <span class="settings-label">Target topic</span>
           <span class="settings-help">Queue topic that receives dead-lettered messages.</span>
-          <input id="global-dlq.tp" placeholder="_dlq.default">
+          <input id="global-dlq.topic" placeholder="_dlq.default">
         </label>
         <label class="settings-field">
           <span class="settings-label">Target group</span>
@@ -400,7 +400,7 @@
         <label class="settings-field">
           <span class="settings-label">Queue topic</span>
           <span class="settings-help">Source queue to configure.</span>
-          <input id="queue-dlq.tp" required placeholder="orders.created">
+          <input id="queue-dlq.topic" required placeholder="orders.created">
         </label>
         <label class="settings-field">
           <span class="settings-label">Queue group</span>
@@ -436,7 +436,7 @@
         <label class="settings-field">
           <span class="settings-label">Target topic</span>
           <span class="settings-help">Queue topic that receives this queue's dead-lettered messages.</span>
-          <input id="queue-dlq.target.tp" placeholder="_dlq.orders">
+          <input id="queue-dlq.target.topic" placeholder="_dlq.orders">
         </label>
         <label class="settings-field">
           <span class="settings-label">Target group</span>
@@ -623,7 +623,7 @@ function renderGlobalDlq(data) {
   currentGlobalDlqTarget = data.target || null;
   const enabled = !!data.target;
   field("global-dlq.enabled").checked = enabled;
-  field("global-dlq.tp").value = data.target?.tp || "";
+  field("global-dlq.topic").value = data.target?.topic || "";
   field("global-dlq.group").value = data.target?.group || "";
   setGlobalDlqFieldsEnabled(enabled);
   updateQueueDlqPolicyWarning();
@@ -676,7 +676,7 @@ function collectGlobalDlqTarget() {
     return null;
   }
   return {
-    tp: field("global-dlq.tp").value.trim(),
+    topic: field("global-dlq.topic").value.trim(),
     group: optionalTextValue("global-dlq.group"),
   };
 }
@@ -685,13 +685,13 @@ function collectQueueDlqRequest() {
   const policy = field("queue-dlq.policy").value;
   const target = policy === "custom"
     ? {
-        tp: field("queue-dlq.target.tp").value.trim(),
+        topic: field("queue-dlq.target.topic").value.trim(),
         group: optionalTextValue("queue-dlq.target.group"),
       }
     : null;
   const maxRetries = field("queue-dlq.max_retries").value.trim();
   return {
-    tp: field("queue-dlq.tp").value.trim(),
+    topic: field("queue-dlq.topic").value.trim(),
     group: optionalTextValue("queue-dlq.group"),
     policy,
     target,
@@ -833,7 +833,7 @@ async function loadGlobalDlq(message = "Global DLQ loaded.") {
 // view) so an operator is not declaring blind. Materialized queues only; an
 // on-disk-but-unloaded queue reports that its declared values apply on next load.
 async function loadCurrentQueueDlq() {
-  const tp = field("queue-dlq.tp").value.trim();
+  const tp = field("queue-dlq.topic").value.trim();
   const group = field("queue-dlq.group").value.trim();
   const el = field("queue-dlq-current");
   if (!tp) {

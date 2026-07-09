@@ -386,14 +386,14 @@ async function submitCreateQueue() {
   if (!topic) return setCreateMessage("Enter a topic.", "warning");
   if (!(count >= 1)) return setCreateMessage("Partition count must be at least 1.", "warning");
 
-  const body = { tp: topic, group: group || null, partition_count: count };
+  const body = { topic, group: group || null, partition_count: count };
   if (dlq) {
     body.policy = dlq;
     if (dlq === "custom") {
       const dlqTopic = document.getElementById("create.dlq_topic").value.trim();
       if (!dlqTopic) return setCreateMessage("Custom DLQ needs a target topic.", "warning");
       const dlqGroup = document.getElementById("create.dlq_group").value.trim();
-      body.target = { tp: dlqTopic, group: dlqGroup || null };
+      body.target = { topic: dlqTopic, group: dlqGroup || null };
     }
   }
   if (maxRetriesRaw !== "") body.max_retries = Number(maxRetriesRaw);
@@ -420,7 +420,7 @@ async function deleteQueue(btn) {
     return;
   }
   const body = {
-    tp: topic,
+    topic,
     group: group && group !== "default" ? group : null,
     partition_count: partitions,
   };
