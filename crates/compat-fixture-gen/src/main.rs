@@ -100,7 +100,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         publisher
             .publish_delayed(
                 NewMessage::raw(format!("orders-delayed-{i:03}").into_bytes()),
-                DELAY_SECONDS,
+                Duration::from_secs(DELAY_SECONDS),
             )
             .await?;
     }
