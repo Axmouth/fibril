@@ -85,7 +85,7 @@ func cases() []vcase {
 			func(b []byte) ([]byte, error) { v, e := decodeSubscribeOk(b); return encodeSubscribeOk(v), e }},
 		{"declare", encodeDeclareQueue(NewQueueConfig("t").Group("g").
 			Dlq(DlqPolicy{Kind: DlqCustom, Topic: "dlq"}).
-			DlqMaxRetries(3).PartitionCount(4).DefaultMessageTTL(30*time.Second)),
+			DlqMaxRetries(3).PartitionCount(4).DefaultMessageTTL(30 * time.Second)),
 			func(b []byte) ([]byte, error) { v, e := decodeDeclareQueue(b); return encodeDeclareQueue(v), e }},
 		{"declare_min", encodeDeclareQueue(NewQueueConfig("t")),
 			func(b []byte) ([]byte, error) { v, e := decodeDeclareQueue(b); return encodeDeclareQueue(v), e }},
@@ -93,7 +93,7 @@ func cases() []vcase {
 			func(b []byte) ([]byte, error) { v, e := decodeDeclareQueueOk(b); return encodeDeclareQueueOk(v), e }},
 		{"declare_plexus", encodeDeclarePlexus(NewStreamConfig("t").PartitionCount(4).
 			Durability(StreamSpeculative).
-			Retention(NewStreamRetention().MaxAge(60*time.Second).RetainRecords(1000000)).
+			Retention(NewStreamRetention().MaxAge(60 * time.Second).RetainRecords(1000000)).
 			ReplicationFactor(2)),
 			func(b []byte) ([]byte, error) { v, e := decodeDeclarePlexus(b); return encodeDeclarePlexus(v), e }},
 		{"declare_plexus_min", encodeDeclarePlexus(NewStreamConfig("t")),

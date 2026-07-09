@@ -19,8 +19,8 @@ func main() {
 		addr = "127.0.0.1:9876"
 	}
 	c, err := fibril.Dial(context.Background(), addr, fibril.ClientOptions{
-		ClientName: "go-smoke",
-		Credentials:       &fibril.Credentials{Username: "fibril", Password: "fibril"},
+		ClientName:  "go-smoke",
+		Credentials: &fibril.Credentials{Username: "fibril", Password: "fibril"},
 	})
 	if err != nil {
 		fmt.Println("connect:", err)

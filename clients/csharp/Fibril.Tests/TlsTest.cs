@@ -178,14 +178,16 @@ public class TlsTest
             () => Client.ConnectAsync(broker.Address, Opts(new TlsOptions { CaFingerprint = Fingerprint(cert) }), Timeout()));
     }
 
-    // A self-signed CA able to issue leaves. The RSA key is deliberately not
-    // disposed so the returned certificate can keep signing.
+    // A self-signed CA able to issue leaves. Its validity is deliberately much
+    // wider than a leaf's, so a leaf minted a moment later (its notAfter computed
+    // after the CA's) still fits inside the issuer window that .NET enforces at
+    // creation. The RSA key is not disposed so the certificate can keep signing.
     private static X509Certificate2 MakeCa()
     {
         var rsa = RSA.Create(2048);
         var req = new CertificateRequest("CN=Fibril Pin Test CA", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
         req.CertificateExtensions.Add(new X509BasicConstraintsExtension(certificateAuthority: true, hasPathLengthConstraint: false, pathLengthConstraint: 0, critical: true));
-        return req.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+        return req.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(10));
     }
 
     private static X509Certificate2 IssueLeaf(X509Certificate2 ca)

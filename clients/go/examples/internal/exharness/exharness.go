@@ -31,8 +31,8 @@ func Connect(clientName string) *fibril.Client {
 	user := envOr("FIBRIL_USER", "fibril")
 	pass := envOr("FIBRIL_PASS", "fibril")
 	c, err := fibril.Dial(context.Background(), Addr(), fibril.ClientOptions{
-		ClientName: clientName,
-		Credentials:       &fibril.Credentials{Username: user, Password: pass},
+		ClientName:  clientName,
+		Credentials: &fibril.Credentials{Username: user, Password: pass},
 	})
 	if err != nil {
 		panic(fmt.Sprintf("connect: %v", err))

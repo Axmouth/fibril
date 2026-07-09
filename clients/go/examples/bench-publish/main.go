@@ -40,8 +40,8 @@ func main() {
 	warmup := time.Duration(envNum("WARMUP_S", 2) * float64(time.Second))
 
 	c, err := fibril.Dial(context.Background(), addr, fibril.ClientOptions{
-		ClientName: "bench",
-		Credentials:       &fibril.Credentials{Username: env("FIBRIL_USER", "fibril"), Password: env("FIBRIL_PASS", "fibril")},
+		ClientName:  "bench",
+		Credentials: &fibril.Credentials{Username: env("FIBRIL_USER", "fibril"), Password: env("FIBRIL_PASS", "fibril")},
 	})
 	if err != nil {
 		fmt.Println("connect:", err)
