@@ -43,38 +43,82 @@
   <link rel="stylesheet" href="/static/css/admin.css">
 </head>
 <body class="admin-body">
+  <aside class="side-nav">
+    <a class="brand" href="/">
+      <svg width="22" height="22" viewBox="0 0 22 22" fill="none" aria-hidden="true">
+        <path d="M3 19C7 15 5.5 8 11 3" stroke="var(--accent)" stroke-width="1.7" stroke-linecap="round"/>
+        <path d="M6 19.5C9.5 16 9 9 14.5 4.5" stroke="var(--accent)" stroke-width="1.7" stroke-linecap="round" opacity=".62"/>
+        <path d="M9.5 20C12.5 17 12.5 10.5 18 6.5" stroke="var(--accent)" stroke-width="1.7" stroke-linecap="round" opacity=".3"/>
+      </svg>
+      <span class="word">fibril<em>·</em>admin</span>
+    </a>
+    <nav class="nav-links" aria-label="Admin navigation">
+      <a class="nav-link {% if page == "dashboard" %}active{% endif %}" href="/">
+        <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="9" y="1.5" width="5.5" height="5.5" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="1.5" y="9" width="5.5" height="5.5" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="9" y="9" width="5.5" height="5.5" rx="1" stroke="currentColor" stroke-width="1.3"/></svg>
+        <span>Overview</span>
+      </a>
+      <div class="nav-section">Messaging</div>
+      <a class="nav-link {% if page == "queues" %}active{% endif %}" href="/admin/queues">
+        <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 4.5h12M2 8h12M2 11.5h8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+        <span>Queues</span>
+      </a>
+      <a class="nav-link {% if page == "streams" %}active{% endif %}" href="/admin/streams">
+        <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 4c2.5 0 2.5 2 5 2s2.5-2 5-2 2 1 2 1M2 8c2.5 0 2.5 2 5 2s2.5-2 5-2 2 1 2 1M2 12c2.5 0 2.5 2 5 2s2.5-2 5-2 2 1 2 1" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+        <span>Streams</span>
+      </a>
+      <a class="nav-link {% if page == "messages" %}active{% endif %}" href="/admin/messages">
+        <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.3"/><path d="M10.5 10.5 14 14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+        <span>Messages</span>
+      </a>
+      <div class="nav-section">Clients</div>
+      <a class="nav-link {% if page == "connections" %}active{% endif %}" href="/admin/connections">
+        <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M5 2v4M11 2v4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M3.5 6h9v2.5a4.5 4.5 0 0 1-9 0V6Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 13v1.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+        <span>Connections</span>
+      </a>
+      <a class="nav-link {% if page == "subscriptions" %}active{% endif %}" href="/admin/subscriptions">
+        <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 13a10 10 0 0 1 10-10M3 8.5A5.5 5.5 0 0 1 8.5 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="4" cy="12" r="1.4" fill="currentColor"/></svg>
+        <span>Subscriptions</span>
+      </a>
+      <div class="nav-section">Operate</div>
+      <a class="nav-link {% if page == "topology" %}active{% endif %}" href="/admin/topology">
+        <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="3.4" r="1.9" stroke="currentColor" stroke-width="1.3"/><circle cx="3.4" cy="11.6" r="1.9" stroke="currentColor" stroke-width="1.3"/><circle cx="12.6" cy="11.6" r="1.9" stroke="currentColor" stroke-width="1.3"/><path d="M6.8 4.9 4.3 9.9M9.2 4.9l2.5 5M5.3 11.6h5.4" stroke="currentColor" stroke-width="1.2"/></svg>
+        <span>Cluster</span>
+      </a>
+      <a class="nav-link {% if page == "diagnostics" %}active{% endif %}" href="/admin/diagnostics">
+        <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M1.5 8h3l1.5-4 3 8 1.5-4h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>Diagnostics</span>
+      </a>
+      <a class="nav-link {% if page == "settings" %}active{% endif %}" href="/admin/settings">
+        <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 4.5h8M12.5 4.5H14M2 11.5h3M7.5 11.5H14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="10.7" cy="4.5" r="1.8" stroke="currentColor" stroke-width="1.3"/><circle cx="5.3" cy="11.5" r="1.8" stroke="currentColor" stroke-width="1.3"/></svg>
+        <span>Settings</span>
+      </a>
+    </nav>
+    <div class="side-foot">
+      <span>fast · deterministic · predictably boring</span>
+      <span class="foot-links">
+        <a href="https://github.com/axmouth/fibril" target="_blank">GitHub</a>
+        <a href="https://axmouth.dev" target="_blank">Author</a>
+      </span>
+    </div>
+  </aside>
   <div class="main-container">
     <header class="site-header">
-      <nav class="admin-nav" aria-label="Admin navigation">
-        <a class="brand" href="/">
-          <span class="mark" aria-hidden="true">
-            <span></span>
-            <span></span>
-          </span>
-          <span>fibril admin</span>
-        </a>
-        <div class="nav-links">
-          <a class="nav-link {% if page == "dashboard" %}active{% endif %}" href="/">Dashboard</a>
-          <a class="nav-link {% if page == "connections" %}active{% endif %}" href="/admin/connections">Connections</a>
-          <a class="nav-link {% if page == "subscriptions" %}active{% endif %}" href="/admin/subscriptions">Subscriptions</a>
-          <a class="nav-link {% if page == "queues" %}active{% endif %}" href="/admin/queues">Queues</a>
-          <a class="nav-link {% if page == "streams" %}active{% endif %}" href="/admin/streams">Streams</a>
-          <a class="nav-link {% if page == "diagnostics" %}active{% endif %}" href="/admin/diagnostics">Diagnostics</a>
-          <a class="nav-link {% if page == "topology" %}active{% endif %}" href="/admin/topology">Topology</a>
-          <a class="nav-link {% if page == "settings" %}active{% endif %}" href="/admin/settings">Settings</a>
-        </div>
-        <div class="nav-actions">
-          {% if auth_enabled %}
-            <a href="/logout" class="icon-link" aria-label="Log out" title="Log out">
-              <span class="icon icon-logout" aria-hidden="true"></span>
-              <span>Logout</span>
-            </a>
-          {% else %}
-            <span class="admin-auth-pill">Auth disabled</span>
-          {% endif %}
-          <button class="theme-toggle" type="button" data-theme-toggle aria-label="Use light theme"></button>
-        </div>
-      </nav>
+      <span class="crumb">{{ title }}</span>
+      <div class="nav-actions">
+        <button class="searchbtn" type="button" data-palette-open>
+          <span class="searchlabel">Jump to a page…</span>
+          <kbd>⌘K</kbd>
+        </button>
+        {% if auth_enabled %}
+          <a href="/logout" class="icon-link" aria-label="Log out" title="Log out">
+            <span class="icon icon-logout" aria-hidden="true"></span>
+            <span>Logout</span>
+          </a>
+        {% else %}
+          <span class="admin-auth-pill">Auth disabled</span>
+        {% endif %}
+        <button class="theme-toggle" type="button" data-theme-toggle aria-label="Use light theme"></button>
+      </div>
     </header>
     <div class="content-container">
       <div class="content-area">
@@ -84,20 +128,12 @@
         </main>
       </div>
     </div>
-    <footer class="footer">
-      <span class="copyright">
-        Fibril © 2025 - fast · deterministic · predictably boring
-      </span>
-      ·
-      <a href="https://github.com/axmouth/fibril" target="_blank">
-        <span class="icon icon-github" aria-hidden="true"></span> GitHub
-      </a>
-      ·
-      <a href="https://axmouth.dev" target="_blank">
-        <span class="icon icon-user" aria-hidden="true"></span> Author
-      </a>
-    </footer>
-
+  </div>
+  <div class="palette-overlay" id="palette-overlay" hidden>
+    <div class="palette">
+      <input id="palette-input" placeholder="Jump to a page…" autocomplete="off" aria-label="Jump to a page">
+      <div class="palette-list" id="palette-list"></div>
+    </div>
   </div>
   <script>
     (() => {
@@ -121,6 +157,75 @@
         root.classList.add("theme-transition");
         applyTheme(next);
         window.setTimeout(() => root.classList.remove("theme-transition"), 260);
+      });
+    })();
+  </script>
+  <script>
+    // Command palette: layout-owned page jumper. Items are plain internal
+    // anchors, so boosted navigation below handles the actual page swap.
+    (() => {
+      const overlay = document.getElementById("palette-overlay");
+      const input = document.getElementById("palette-input");
+      const list = document.getElementById("palette-list");
+      if (!overlay || !input || !list) return;
+
+      const pages = [
+        { label: "Overview", href: "/" },
+        { label: "Queues", href: "/admin/queues" },
+        { label: "Streams", href: "/admin/streams" },
+        { label: "Messages", href: "/admin/messages" },
+        { label: "Connections", href: "/admin/connections" },
+        { label: "Subscriptions", href: "/admin/subscriptions" },
+        { label: "Cluster", href: "/admin/topology" },
+        { label: "Diagnostics", href: "/admin/diagnostics" },
+        { label: "Settings", href: "/admin/settings" },
+      ];
+
+      function render(query) {
+        const q = (query || "").trim().toLowerCase();
+        const hits = pages.filter((p) => p.label.toLowerCase().includes(q));
+        if (!hits.length) {
+          list.innerHTML = '<div class="palette-empty">No page matches. Try a shorter word.</div>';
+          return;
+        }
+        list.innerHTML = hits
+          .map((p, i) =>
+            `<a class="palette-item${i === 0 ? " sel" : ""}" href="${p.href}">` +
+            `<span>${p.label}</span><span class="kind">page</span></a>`)
+          .join("");
+      }
+
+      function open() {
+        overlay.hidden = false;
+        input.value = "";
+        render("");
+        input.focus();
+      }
+
+      function close() {
+        overlay.hidden = true;
+      }
+
+      input.addEventListener("input", () => render(input.value));
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          const first = list.querySelector(".palette-item");
+          if (first) first.click();
+        }
+      });
+      overlay.addEventListener("click", (event) => {
+        if (event.target === overlay) close();
+        if (event.target.closest(".palette-item")) close();
+      });
+      document.addEventListener("click", (event) => {
+        if (event.target.closest("[data-palette-open]")) open();
+      });
+      document.addEventListener("keydown", (event) => {
+        if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+          event.preventDefault();
+          overlay.hidden ? open() : close();
+        }
+        if (event.key === "Escape" && !overlay.hidden) close();
       });
     })();
   </script>
