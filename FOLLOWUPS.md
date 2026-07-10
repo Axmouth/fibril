@@ -2873,3 +2873,38 @@ Per-client resolution (each with AC1 adversarial + AC2/AC3/AC4 unit tests):
 Broker unchanged (crates/tls still prints the CA fp; its no-EKU cert validates under
 the lenient path check). CHANGELOG has the Security Fixed entry. Full design record
 was archive/SECURITY_CA_PIN_FIX.md.
+
+## BUG REPORT (open, 2026-07-10): publish wedged until restart under e2e_c load
+
+Reported while running `benches` e2e_c (writer -m 50000 -c 10 --size 1024, then
+reader): publishing stalled permanently mid-run; only a broker restart cleared
+it. Logs around the time show only routine reconnect-grace entries/expiries
+(all 20 conns dropping at once when the e2e processes exit is normal). Not
+reproduced on demand yet.
+
+Facts from the captured excerpt (note: excerpt is from a FRESH restart, uptime
+20s, over an inherited data dir - the wedge event itself is not in it):
+- ready=5,078,479 on topic1/0 with settled offset ~70.7M (data dir carries
+  many prior runs).
+- total_expired > 0 and climbing (a message TTL is in play); the expiry worker
+  drains expired messages in 8192-message iterations.
+- KERATIN IO fsync times ~0.9-1.2s per batch: the drive is saturated
+  (consistent with the consumer-NVMe fsync floor) under writer traffic +
+  truncate storms + snapshot writes.
+- Stroma command lane depths all 0 at snapshot time (no actor backlog then).
+
+Wedge candidates (unconfirmed - trace before patching):
+1. Publish confirm path stalled behind pathological storage IO (expiry storm
+   over a huge aged backlog + truncations), looking like a hang from the
+   client.
+2. State wedge in the connection/session layer (grace cleanup interacting
+   with resume sessions) blocking new publishes or new HELLOs.
+3. A leaked permit/backpressure cap on the publish path that a dropped
+   connection never returns.
+
+Capture kit when it recurs (all now on the dashboard): does a brand-new client
+connect and publish (isolates session-layer vs storage)? Admin Diagnostics
+command-lane depths, Overview backlog/throughput charts, /metrics snapshot,
+stroma debug report, disk/CPU busy-ness, and whether admin API stays
+responsive. Also worth one repro attempt on a CLEAN data dir to see whether
+the inherited 70M-offset backlog + TTL expiry storm is a precondition.
