@@ -1661,3 +1661,43 @@ textarea:focus {
 .queue-actions .queue-delete-btn {
   margin-left: 8px;
 }
+
+/* Page description: one plain-language line under the title (bunqueue's
+   header formula). */
+.page-desc {
+  color: var(--muted);
+  font-size: 12.5px;
+  margin: -6px 0 14px;
+  max-width: 78ch;
+}
+
+/* Generic colored chips for state-bearing labels. */
+.chip-ok {
+  background: var(--ok-soft);
+  border-radius: var(--radius-sm);
+  color: var(--ok);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 7px;
+  white-space: nowrap;
+}
+
+.chip-warn {
+  background: var(--warn-soft);
+  border-radius: var(--radius-sm);
+  color: var(--warn);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 7px;
+  white-space: nowrap;
+}
+
+.chip-bad {
+  background: var(--bad-soft);
+  border-radius: var(--radius-sm);
+  color: var(--bad);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 7px;
+  white-space: nowrap;
+}

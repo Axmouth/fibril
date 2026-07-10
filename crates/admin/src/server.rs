@@ -378,6 +378,7 @@ impl AdminServer {
             .route("/admin/subscriptions", get(subscriptions_page))
             .route("/admin/queues", get(queues_page))
             .route("/admin/queue", get(queue_detail_page))
+            .route("/admin/dlq", get(dlq_page))
             .route("/admin/streams", get(streams_page))
             .route("/admin/messages", get(messages_page))
             .route("/admin/diagnostics", get(diagnostics_page))
@@ -539,6 +540,20 @@ async fn queues_page(
     Ok(render(Queues {
         page: "queues",
         title: "Queues",
+        auth_enabled: server.config.auth.is_some(),
+    }))
+}
+
+/// Dead letters across the broker: the global target, its backlog, and every
+/// queue that declares a dead-letter policy.
+async fn dlq_page(
+    State(server): State<Arc<AdminServer>>,
+    headers: HeaderMap,
+) -> Result<Html<String>, Redirect> {
+    page_auth(&server, &headers).await?;
+    Ok(render(DlqPage {
+        page: "dlq",
+        title: "Dead letters",
         auth_enabled: server.config.auth.is_some(),
     }))
 }
@@ -713,6 +728,14 @@ struct Streams {
 #[derive(Template)]
 #[template(path = "pages/messages.html")]
 struct Messages {
+    page: &'static str,
+    title: &'static str,
+    auth_enabled: bool,
+}
+
+#[derive(Template)]
+#[template(path = "pages/dlq.html")]
+struct DlqPage {
     page: &'static str,
     title: &'static str,
     auth_enabled: bool,
@@ -1787,6 +1810,27 @@ mod tests {
             manager.calls.lock().unwrap().as_slice(),
             ["add:2:127.0.0.1:9202", "remove:2"]
         );
+    }
+
+    #[tokio::test]
+    async fn dlq_page_renders() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/dlq")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Global dead-letter target"), "global card present");
+        assert!(body.contains("dlq-rows"), "policy table present");
     }
 
     #[tokio::test]

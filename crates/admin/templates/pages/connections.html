@@ -1,21 +1,64 @@
 {% extends "layout.html" %}
 {% block content %}
 <h4 class="metrics-header">Connections</h4>
-<table class="table table-compact narrow metric-table" id="table"></table>
+<p class="page-desc">Every open client connection on this broker. A connection
+  carries any number of subscriptions; drops enter a short reconnect grace
+  before their state is released.</p>
+
+<div id="conn-strip" class="stat-strip"></div>
+
+<div class="queue-controls">
+  <input id="conn-search" type="search" placeholder="filter by peer or id" />
+</div>
+
+<div class="queue-table-wrap">
+  <table class="table table-compact metric-table">
+    <thead>
+      <tr>
+        <th>Connection</th>
+        <th class="text-right">Subscriptions</th>
+        <th>Auth</th>
+        <th class="text-right">Uptime</th>
+      </tr>
+    </thead>
+    <tbody id="conn-rows"></tbody>
+  </table>
+</div>
+<p class="queue-group-note" id="conn-empty" hidden>
+  No client connections. Clients connect to the broker port (default 9876).</p>
+
 <script src="/static/js/api.js"></script>
 <script src="/static/js/admin.js"></script>
 <script>
 async function refresh() {
   const rows = await api('/admin/api/connections');
-  const t = document.getElementById("table");
-  t.innerHTML = `<tr><th>Peer</th><th>Uptime</th><th>Subs</th><th>Auth</th></tr>` +
-    rows.map(r=>`<tr>
-      <td>${r.peer}</td>
-      <td>${fmtUptime(r.uptime)}</td>
-      <td>${r.subs}</td>
-      <td>${r.authenticated}</td>
-    </tr>`).join('');
+  const list = Array.isArray(rows) ? rows : [];
+  const search = (document.getElementById("conn-search")?.value || "").trim().toLowerCase();
+  const visible = list.filter((r) =>
+    !search || `${r.peer || ""} ${r.id || ""}`.toLowerCase().includes(search));
+
+  const authed = list.filter((r) => r.authenticated).length;
+  const subs = list.reduce((acc, r) => acc + (r.subs || 0), 0);
+  document.getElementById("conn-strip").innerHTML = `
+    <span><b>${list.length}</b> connections</span>
+    <span><b class="v-active">${subs}</b> subscriptions</span>
+    <span><b class="${authed ? "v-ok" : "v-dim"}">${authed}</b> authenticated</span>`;
+
+  document.getElementById("conn-empty").hidden = visible.length > 0;
+  document.getElementById("conn-rows").innerHTML = visible.map((r) => `
+    <tr>
+      <td>
+        <div class="ident-name mono">${escapeHtml(r.peer)}</div>
+        <div class="ident-sub mono">${escapeHtml(r.id)}</div>
+      </td>
+      <td class="text-right ${r.subs > 0 ? "v-active" : "v-dim"}">${r.subs ?? 0}</td>
+      <td>${r.authenticated
+        ? '<span class="chip-ok">authenticated</span>'
+        : '<span class="chip-plain">anonymous</span>'}</td>
+      <td class="text-right">${escapeHtml(fmtUptime(r.uptime ?? 0))}</td>
+    </tr>`).join("");
 }
+document.getElementById("conn-search").addEventListener("input", refresh);
 autoRefresh(refresh, 2000);
 refresh();
 </script>
