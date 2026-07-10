@@ -64,3 +64,103 @@ function autoRefresh(refreshFn, intervalMs) {
 
   setInterval(tick, intervalMs);
 }
+
+// ---- tiny SVG charts, shared by every page ----
+// All charts read their size from the svg's width/height attributes and draw in
+// that coordinate space (preserveAspectRatio="none" makes them stretch). Values
+// are plain number arrays; missing/NaN entries break the line.
+
+function chartScale(values, height, pad) {
+  const finite = values.filter(Number.isFinite);
+  const max = finite.length ? Math.max(...finite) : 1;
+  const min = finite.length ? Math.min(...finite, 0) : 0;
+  const span = max - min || 1;
+  return (v) => height - pad - ((v - min) / span) * (height - 2 * pad);
+}
+
+function chartPath(values, width, yOf) {
+  const n = values.length;
+  if (n === 0) return "";
+  if (n === 1) return `M0,${yOf(values[0])}L${width},${yOf(values[0])}`;
+  let d = "";
+  for (let i = 0; i < n; i++) {
+    const v = values[i];
+    if (!Number.isFinite(v)) continue;
+    const x = (i / (n - 1)) * width;
+    d += `${d && Number.isFinite(values[i - 1]) ? "L" : "M"}${x.toFixed(1)},${yOf(v).toFixed(1)}`;
+  }
+  return d;
+}
+
+// A row-sized trend line with a soft area fill and an endpoint dot.
+function renderSparkline(svg, values, color) {
+  const w = Number(svg.getAttribute("width")) || 110;
+  const h = Number(svg.getAttribute("height")) || 26;
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  if (!values || values.length === 0) {
+    svg.innerHTML = "";
+    return;
+  }
+  const yOf = chartScale(values, h, 2);
+  const d = chartPath(values, w, yOf);
+  const last = values[values.length - 1];
+  const endY = Number.isFinite(last) ? yOf(last).toFixed(1) : h / 2;
+  svg.innerHTML =
+    `<path d="${d}" fill="none" stroke="${color}" stroke-width="1.4" vector-effect="non-scaling-stroke"/>` +
+    `<path d="${d}L${w},${h}L0,${h}Z" fill="${color}" opacity=".12" stroke="none"/>` +
+    `<circle cx="${w - 1}" cy="${endY}" r="2.2" fill="${color}"/>`;
+}
+
+// A panel chart: faint gridlines, one or more series, oldest left. Series:
+// { values, color, fill } - fill draws a soft area under that series.
+function renderChart(svg, seriesList) {
+  const w = Number(svg.getAttribute("width")) || 720;
+  const h = Number(svg.getAttribute("height")) || 180;
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  const all = seriesList.flatMap((s) => s.values);
+  if (all.filter(Number.isFinite).length === 0) {
+    svg.innerHTML = "";
+    return;
+  }
+  const yOf = chartScale(all, h, 6);
+  let out = "";
+  for (let i = 1; i < 4; i++) {
+    const y = ((h * i) / 4).toFixed(1);
+    out += `<line x1="0" y1="${y}" x2="${w}" y2="${y}" stroke="var(--line)" stroke-width="1"/>`;
+  }
+  for (const series of seriesList) {
+    const d = chartPath(series.values, w, yOf);
+    if (!d) continue;
+    if (series.fill) {
+      out += `<path d="${d}L${w},${h}L0,${h}Z" fill="${series.color}" opacity=".10" stroke="none"/>`;
+    }
+    out += `<path d="${d}" fill="none" stroke="${series.color}" stroke-width="1.6" vector-effect="non-scaling-stroke"/>`;
+  }
+  svg.innerHTML = out;
+}
+
+// One word for where a series is heading, comparing now against a moment ago.
+function trendWord(values, lookback = 12) {
+  if (!values || values.length < 2) return "";
+  const last = values[values.length - 1];
+  const past = values[Math.max(0, values.length - 1 - lookback)];
+  if (!Number.isFinite(last) || !Number.isFinite(past)) return "";
+  const base = Math.max(Math.abs(past), 1);
+  const change = (last - past) / base;
+  if (change > 0.05) return "rising";
+  if (change < -0.05) return "falling";
+  return "steady";
+}
+
+// Shared HTML escaping for pages that build rows from API data.
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[c]);
+}
+
+function fmtCount(n) {
+  return Number.isFinite(n) ? Number(n).toLocaleString("en-US") : "--";
+}
