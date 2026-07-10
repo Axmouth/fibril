@@ -51,10 +51,6 @@ function escapeHtml(value) {
     .replace(/'/g, "&#039;");
 }
 
-function queueKey(item) {
-  return `${item.topic}\u0000${item.partition}\u0000${item.group || ""}`;
-}
-
 // Topics whose per-partition rows are expanded. Module-level so the state
 // survives the 2s refresh that re-renders the table.
 const expandedTopics = new Set();
@@ -135,6 +131,11 @@ function stateClass(item, activity) {
 // "topic group" (raw group, empty when none). Feeds the row sparklines.
 let depthSeries = new Map();
 
+// Broker activity is tracked per queue (topic + group), not per partition.
+function activityKey(topic, group) {
+  return `${topic}\u0000${group || ""}`;
+}
+
 async function refresh() {
   const [data, history] = await Promise.all([
     api('/admin/api/queues_debug'),
@@ -147,7 +148,8 @@ async function refresh() {
     ]),
   );
   const container = document.getElementById("queues");
-  const activityByQueue = new Map((data.broker_activity || []).map(item => [queueKey(item), item]));
+  const activityByQueue = new Map((data.broker_activity || [])
+    .map(item => [activityKey(item.topic, item.group), item]));
   // /admin/api/queues_debug returns work queues only (the server filters streams,
   // which reuse the queue handle, into /admin/api/streams_debug).
   const queues = data.queues || [];
@@ -163,7 +165,7 @@ async function refresh() {
   const search = (document.getElementById("queue-search")?.value || "").trim().toLowerCase();
   const hideInactive = document.getElementById("queue-hide-inactive")?.checked ?? false;
   const isActive = (item) => {
-    const a = activityByQueue.get(queueKey(item));
+    const a = activityByQueue.get(activityKey(item.topic, item.group));
     return (a?.active_publishers ?? 0) > 0 || (a?.active_subscribers ?? 0) > 0;
   };
   const visibleQueues = queues.filter((item) => {
@@ -279,7 +281,7 @@ async function refresh() {
         parts.sort((a, b) => num(a.partition) - num(b.partition));
         const open = expandedTopics.has(topicKeyOf(group, topic));
         const loaded = parts.filter(p => p.materialized).length;
-        const sumAct = (field) => parts.reduce((acc, p) => acc + num(activityByQueue.get(queueKey(p))?.[field]), 0);
+        const act = activityByQueue.get(activityKey(topic, parts[0]?.group));
         const sumState = (field) => parts.filter(p => p.materialized).reduce((acc, p) => acc + num(p.state[field]), 0);
         const dlqItem = parts.find(p => p.materialized);
         const dlqChips = (state) => state
@@ -287,18 +289,18 @@ async function refresh() {
             + (state.dlq_max_retries != null ? ` <span class="chip-plain">retry ${escapeHtml(String(state.dlq_max_retries))}</span>` : "")
           : '<span class="v-dim">—</span>';
         const aggReady = sumState("ready_count");
-        const aggSubs = sumAct("active_subscribers");
+        const aggSubs = num(act?.active_subscribers);
         const subsClass = aggSubs > 0 ? "v-ok" : (aggReady > 0 ? "v-warn" : "v-dim");
         const dataAttrs = `data-group="${escapeHtml(group)}" data-topic="${escapeHtml(topic)}"`;
         const agg = `
           <tr class="queue-row queue-agg-row" ${dataAttrs} data-partitions="${parts.length}" style="cursor:pointer">
             <td class="queue-topic-cell" title="${escapeHtml(topic)}"><span class="queue-caret">${open ? "▼" : "▶"}</span> ${escapeHtml(topic)}</td>
             <td>${loaded}/${parts.length} loaded</td>
-            <td class="text-right">${sumAct("active_publishers")}</td>
+            <td class="text-right">${num(act?.active_publishers)}</td>
             <td class="text-right ${subsClass}">${aggSubs}</td>
-            <td class="text-right">-</td>
-            <td>-</td>
-            <td>-</td>
+            <td class="text-right">${escapeHtml(formatDuration(act?.idle_for_ms))}</td>
+            <td>${escapeHtml(formatLastLeaseActivity(act))}</td>
+            <td>${escapeHtml(cleanupOutcomeLabel(act?.last_eviction_attempt))}</td>
             <td class="text-right">${aggReady}</td>
             <td class="queue-spark-cell"><svg class="queue-spark" data-key="${escapeHtml(`${topic} ${parts[0]?.group || ""}`)}" width="90" height="22" aria-label="Depth over the last 30 minutes"></svg></td>
             <td class="text-right v-active">${sumState("inflight_count")}</td>
@@ -308,16 +310,15 @@ async function refresh() {
             <td><button type="button" class="queue-delete-btn" ${dataAttrs} data-partitions="${parts.length}">Delete</button></td>
           </tr>`;
         const childRows = parts.map(item => {
-          const activity = activityByQueue.get(queueKey(item));
           return `
-          <tr class="${rowClass(item, activity)} queue-part-row" ${dataAttrs}${open ? "" : ' style="display:none"'}>
+          <tr class="${rowClass(item, act)} queue-part-row" ${dataAttrs}${open ? "" : ' style="display:none"'}>
             <td class="queue-part-cell">partition ${num(item.partition)}</td>
-            <td><span class="${stateClass(item, activity)}">${escapeHtml(loadStateLabel(item, activity))}</span></td>
-            <td class="text-right">${activity?.active_publishers ?? 0}</td>
-            <td class="text-right">${activity?.active_subscribers ?? 0}</td>
-            <td class="text-right">${escapeHtml(formatDuration(activity?.idle_for_ms))}</td>
-            <td>${escapeHtml(formatLastLeaseActivity(activity))}</td>
-            <td>${escapeHtml(cleanupOutcomeLabel(activity?.last_eviction_attempt))}</td>
+            <td><span class="${stateClass(item, act)}">${escapeHtml(loadStateLabel(item, act))}</span></td>
+            <td class="text-right v-dim">—</td>
+            <td class="text-right v-dim">—</td>
+            <td class="text-right v-dim">—</td>
+            <td class="v-dim">—</td>
+            <td class="v-dim">—</td>
             <td class="text-right">${formatQueueStateValue(item, item.state.ready_count)}</td>
             <td></td>
             <td class="text-right">${formatQueueStateValue(item, item.state.inflight_count)}</td>
