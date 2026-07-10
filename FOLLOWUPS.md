@@ -2902,9 +2902,22 @@ Wedge candidates (unconfirmed - trace before patching):
 3. A leaked permit/backpressure cap on the publish path that a dropped
    connection never returns.
 
-Capture kit when it recurs (all now on the dashboard): does a brand-new client
-connect and publish (isolates session-layer vs storage)? Admin Diagnostics
-command-lane depths, Overview backlog/throughput charts, /metrics snapshot,
-stroma debug report, disk/CPU busy-ness, and whether admin API stays
-responsive. Also worth one repro attempt on a CLEAN data dir to see whether
-the inherited 70M-offset backlog + TTL expiry storm is a precondition.
+SECOND OCCURRENCE (same day, better evidence): with the broker wedged,
+- fresh writer runs each push ~20k msgs/connection then stall or die with
+  BrokenPipe - the TCP-backpressure shape of the broker no longer draining
+  its read sockets;
+- fresh READER runs receive 0 (subscribe succeeds, nothing delivered);
+- accept/HELLO/subscribe stay healthy throughout.
+Everything through the topic1 queue actor is stuck while the control plane
+lives => REFINED PRIME SUSPECT: a lost append/durability completion wedging
+the stroma queue actor, most plausibly in the new keratin parallel-fsync /
+fsync-fusion path under drive saturation (0.9-1.2s fsyncs, 300k-record fused
+batches) interleaved with truncation storms and the TTL-expiry worker
+(8192/iteration over an aged 5M backlog).
+Smoking-gun check at wedge time: the periodic Stroma debug report in the
+broker log (or the admin Diagnostics page) - a command lane pinned high with
+the queue frozen dirty confirms the actor wedge.
+Hunt plan: dedicated instrumented session - reproduce with an aged data dir +
+TTL + repeated 5M x 1KB writer runs under drive saturation; instrument
+keratin fsync-fusion completion-set accounting and watch stroma lane depths.
+Trace before patching.
