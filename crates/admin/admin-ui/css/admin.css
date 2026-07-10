@@ -1540,3 +1540,79 @@ textarea:focus {
   font-size: 10.5px;
   margin-top: 1px;
 }
+
+/* ---------------- mock-alignment pass ---------------- */
+
+/* Value colors round out the state palette on numerals. */
+.v-warn {
+  color: var(--warn);
+}
+
+.v-dim {
+  color: var(--dim);
+}
+
+/* Card-integrated header row, the mock's "chead": a micro label plus chips
+   inside the card, instead of a plain heading floating above it. */
+.card-head {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  padding: 10px 14px;
+}
+
+.card-head .micro {
+  flex: none;
+}
+
+.card-head .queue-group-note {
+  margin-left: auto;
+}
+
+/* Queue memory-state pills, colored by state instead of samey outlines. */
+.queue-state-pill.queue-state-loaded {
+  background: var(--ok-soft);
+  border-color: transparent;
+  color: var(--ok);
+}
+
+.queue-state-pill.queue-state-active {
+  background: color-mix(in srgb, var(--active) 13%, transparent);
+  border-color: transparent;
+  color: var(--active);
+}
+
+.queue-state-pill.queue-state-unloading {
+  background: var(--warn-soft);
+  border-color: transparent;
+  color: var(--warn);
+}
+
+.queue-state-pill.queue-state-unloaded {
+  color: var(--dim);
+}
+
+/* Queues summary cards match the overview stat cards. */
+.queue-summary-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.queue-summary-card span {
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+
+.queue-summary-card strong {
+  font-family: var(--mono);
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  letter-spacing: -.01em;
+}
