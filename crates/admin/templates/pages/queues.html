@@ -33,6 +33,19 @@
 
 <div id="queues"></div>
 
+<div class="spark-pop" id="spark-pop" hidden>
+  <div class="spark-pop-head">
+    <span class="mono" id="spark-pop-title"></span>
+    <span class="micro">depth · 30 min</span>
+    <button class="close" id="spark-pop-close" type="button" aria-label="Close">×</button>
+  </div>
+  <svg id="spark-pop-chart" class="chart" style="height:100px" width="300" height="100"></svg>
+  <div class="spark-pop-vals">
+    <div>depth now<b id="spark-pop-depth">--</b></div>
+    <div>leased now<b id="spark-pop-leased">--</b></div>
+  </div>
+</div>
+
 <script src="/static/js/api.js"></script>
 <script src="/static/js/admin.js"></script>
 <script>
@@ -146,7 +159,10 @@ async function refresh() {
   depthSeries = new Map(
     (history.queues || []).map((entry) => [
       `${entry.topic} ${entry.group || ""}`,
-      entry.samples.map((point) => point.depth),
+      {
+        depths: entry.samples.map((point) => point.depth),
+        leased: entry.samples.map((point) => point.leased),
+      },
     ]),
   );
   const container = document.getElementById("queues");
@@ -334,11 +350,51 @@ async function refresh() {
 
   container.innerHTML = summary + replicationHtml + html;
   container.querySelectorAll(".queue-spark").forEach((svg) => {
-    renderSparkline(svg, depthSeries.get(svg.dataset.key) ?? [], "var(--accent)");
+    renderSparkline(svg, depthSeries.get(svg.dataset.key)?.depths ?? [], "var(--accent)");
   });
 }
 
+const sparkPop = document.getElementById("spark-pop");
+function hideSparkPop() {
+  sparkPop.hidden = true;
+}
+document.getElementById("spark-pop-close").addEventListener("click", hideSparkPop);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") hideSparkPop();
+});
+document.addEventListener("click", (event) => {
+  if (!sparkPop.hidden && !sparkPop.contains(event.target) && !event.target.closest(".queue-spark")) {
+    hideSparkPop();
+  }
+});
+
+function openSparkPop(svg) {
+  const key = svg.dataset.key || "";
+  const series = depthSeries.get(key);
+  const depths = series?.depths ?? [];
+  const leased = series?.leased ?? [];
+  document.getElementById("spark-pop-title").textContent = key.trim().replace(" ", " · ");
+  renderChart(document.getElementById("spark-pop-chart"), [
+    { values: depths, color: "var(--accent)", fill: true },
+    { values: leased, color: "var(--active)" },
+  ]);
+  document.getElementById("spark-pop-depth").textContent =
+    depths.length ? fmtCount(depths[depths.length - 1]) : "--";
+  document.getElementById("spark-pop-leased").textContent =
+    leased.length ? fmtCount(leased[leased.length - 1]) : "--";
+  const rect = svg.getBoundingClientRect();
+  sparkPop.style.left = Math.max(8, Math.min(window.innerWidth - 346, rect.left - 60)) + "px";
+  sparkPop.style.top = Math.min(window.innerHeight - 210, rect.bottom + 8) + "px";
+  sparkPop.hidden = false;
+}
+
 document.getElementById("queues").addEventListener("click", (event) => {
+  const spark = event.target.closest(".queue-spark");
+  if (spark) {
+    event.stopPropagation();
+    openSparkPop(spark);
+    return;
+  }
   // The Delete button lives inside the aggregate row - handle it separately so a
   // click does not also toggle the partition expansion.
   const deleteBtn = event.target.closest(".queue-delete-btn");
@@ -428,10 +484,10 @@ async function deleteQueue(btn) {
   };
   const { ok, data } = await apiPost("/admin/api/queues/delete", body);
   if (ok) {
-    setCreateMessage(`Deleted "${topic}" (${data?.partition_count ?? partitions} partition(s)).`, "info");
+    toast(`Deleted "${topic}" (${data?.partition_count ?? partitions} partition(s)).`);
     refresh();
   } else {
-    setCreateMessage(`Delete failed: ${data?.message || data?.error || "request failed"}`, "warning");
+    toast(`Delete failed: ${data?.message || data?.error || "request failed"}`);
   }
 }
 

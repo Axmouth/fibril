@@ -1960,3 +1960,131 @@ html[data-theme="light"][data-flavor="iris"] {
   height: 11px;
   width: 11px;
 }
+
+/* ---------------- toast, live pill, nav badge, spark popover ---------------- */
+
+.toast {
+  background: var(--panel-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-lg);
+  bottom: 22px;
+  box-shadow: var(--shadow);
+  font-size: 12.5px;
+  left: 50%;
+  opacity: 0;
+  padding: 9px 16px;
+  pointer-events: none;
+  position: fixed;
+  transform: translate(-50%, 8px);
+  transition: opacity .18s, transform .18s;
+  z-index: 120;
+}
+
+.toast.on {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.live-pill {
+  align-items: center;
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 600;
+  gap: 6px;
+  padding: 3px 10px;
+}
+
+.live-pill .dot {
+  border-radius: 999px;
+  height: 6px;
+  width: 6px;
+}
+
+.live-pill.live {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.live-pill.live .dot {
+  animation: live-pulse 2.4s infinite;
+  background: var(--accent);
+}
+
+.live-pill.stale {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.live-pill.stale .dot {
+  background: var(--warn);
+}
+
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .35; }
+}
+
+.nav-badge {
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  margin-left: auto;
+  padding: 1px 7px;
+}
+
+.nav-badge.warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.nav-badge.crit {
+  background: var(--bad-soft);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--bad) 25%, transparent);
+  color: var(--bad);
+}
+
+.spark-pop {
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  padding: 12px 14px;
+  position: fixed;
+  width: 330px;
+  z-index: 90;
+}
+
+.spark-pop-head {
+  align-items: baseline;
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.spark-pop-head .close {
+  background: none;
+  border: none;
+  color: var(--dim);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  margin-left: auto;
+}
+
+.spark-pop-vals {
+  color: var(--muted);
+  display: flex;
+  font-size: 11.5px;
+  gap: 16px;
+  margin-top: 8px;
+}
+
+.spark-pop-vals b {
+  color: var(--text);
+  display: block;
+  font-family: var(--mono);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}

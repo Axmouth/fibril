@@ -58,6 +58,7 @@
       <a class="nav-link {% if page == "dashboard" %}active{% endif %}" href="/">
         <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="9" y="1.5" width="5.5" height="5.5" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="1.5" y="9" width="5.5" height="5.5" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="9" y="9" width="5.5" height="5.5" rx="1" stroke="currentColor" stroke-width="1.3"/></svg>
         <span>Overview</span>
+        <span class="nav-badge" id="attention-badge" hidden></span>
       </a>
       <div class="nav-section">Messaging</div>
       <a class="nav-link {% if page == "queues" %}active{% endif %}" href="/admin/queues">
@@ -114,6 +115,7 @@
   <div class="main-container">
     <header class="site-header">
       <span class="crumb">{{ title }}</span>
+      <span class="live-pill live" id="live-pill" hidden><span class="dot"></span><span id="live-pill-text">live</span></span>
       <div class="broker-switch" id="broker-switch" hidden>
         <button class="broker-switch-btn mono" type="button" id="broker-switch-btn" aria-haspopup="listbox"></button>
         <div class="broker-switch-menu" id="broker-switch-menu" hidden></div>
@@ -176,6 +178,54 @@
         applyTheme(next);
         window.setTimeout(() => root.classList.remove("theme-transition"), 260);
       });
+    })();
+  </script>
+  <script>
+    // Live pill: pages poll their data through api(), which stamps the last
+    // success. Green while fresh, amber "stale" once polls stop answering.
+    (() => {
+      const pill = document.getElementById("live-pill");
+      const text = document.getElementById("live-pill-text");
+      if (!pill || !text) return;
+      window.__nativeSetInterval(() => {
+        const last = window.__fibrilLastOk || 0;
+        if (!last) return;
+        const stale = Date.now() - last > 10000;
+        pill.hidden = false;
+        pill.classList.toggle("live", !stale);
+        pill.classList.toggle("stale", stale);
+        text.textContent = stale ? "stale" : "live";
+      }, 2000);
+    })();
+  </script>
+  <script>
+    // Attention badge on the Overview nav entry: how many conditions need an
+    // operator, red when any is critical.
+    (() => {
+      const badge = document.getElementById("attention-badge");
+      if (!badge) return;
+      async function load() {
+        let data;
+        try {
+          const r = await fetch("/admin/api/attention");
+          if (!r.ok) return;
+          data = await r.json();
+        } catch {
+          return;
+        }
+        const items = (data && data.items) || [];
+        if (!items.length) {
+          badge.hidden = true;
+          return;
+        }
+        badge.textContent = String(items.length);
+        const critical = items.some((item) => item.severity === "critical");
+        badge.classList.toggle("crit", critical);
+        badge.classList.toggle("warn", !critical);
+        badge.hidden = false;
+      }
+      load();
+      window.__nativeSetInterval(load, 15000);
     })();
   </script>
   <script>
@@ -315,18 +365,59 @@
         { label: "Settings", href: "/admin/settings" },
       ];
 
+      function esc(v) {
+        return String(v).replace(/[&<>"']/g, (c) => ({
+          "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+        })[c]);
+      }
+
       function render(query) {
         const q = (query || "").trim().toLowerCase();
-        const hits = pages.filter((p) => p.label.toLowerCase().includes(q));
+        const pageHits = pages
+          .filter((p) => p.label.toLowerCase().includes(q))
+          .map((p) => ({ label: p.label, kind: "page", href: p.href }));
+        const liveHits = liveItems.filter((p) => p.label.toLowerCase().includes(q));
+        const hits = pageHits.concat(liveHits).slice(0, 14);
         if (!hits.length) {
-          list.innerHTML = '<div class="palette-empty">No page matches. Try a shorter word.</div>';
+          list.innerHTML = '<div class="palette-empty">No page, queue, or broker matches. Try a shorter word.</div>';
           return;
         }
         list.innerHTML = hits
           .map((p, i) =>
-            `<a class="palette-item${i === 0 ? " sel" : ""}" href="${p.href}">` +
-            `<span>${p.label}</span><span class="kind">page</span></a>`)
+            `<a class="palette-item${i === 0 ? " sel" : ""}" href="${esc(p.href)}">` +
+            `<span class="${p.kind === "queue" ? "mono" : ""}">${esc(p.label)}</span><span class="kind">${p.kind}</span></a>`)
           .join("");
+      }
+
+      // Live entries: queues and brokers, fetched when the palette opens so
+      // jumping to a topic by name works without a standing poll.
+      let liveItems = [];
+      async function loadLive() {
+        const results = await Promise.allSettled([
+          fetch("/admin/api/queues_debug").then((r) => (r.ok ? r.json() : null)),
+          fetch("/admin/api/topology").then((r) => (r.ok ? r.json() : null)),
+        ]);
+        const items = [];
+        const debug = results[0].status === "fulfilled" ? results[0].value : null;
+        const seen = new Set();
+        for (const q of (debug && debug.queues) || []) {
+          const key = q.topic + "/" + (q.group || "");
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const params = new URLSearchParams({ topic: q.topic });
+          if (q.group) params.set("group", q.group);
+          items.push({
+            label: q.group ? q.topic + " · " + q.group : q.topic,
+            kind: "queue",
+            href: "/admin/queue?" + params,
+          });
+        }
+        const topo = results[1].status === "fulfilled" ? results[1].value : null;
+        for (const n of (topo && topo.coordination && topo.coordination.nodes) || []) {
+          items.push({ label: n.node_id, kind: "broker", href: "/admin/topology" });
+        }
+        liveItems = items;
+        render(input.value);
       }
 
       function open() {
@@ -334,6 +425,7 @@
         input.value = "";
         render("");
         input.focus();
+        loadLive();
       }
 
       function close() {

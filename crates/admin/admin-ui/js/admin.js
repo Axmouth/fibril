@@ -175,3 +175,20 @@ function dlqPolicyKind(raw) {
   if (s.startsWith("Discard")) return "discard";
   return s ? s.toLowerCase() : "none";
 }
+
+// Shared toast: a short-lived confirmation for quick actions. Durable results
+// keep using inline op-message spans.
+let __toastTimer;
+function toast(text) {
+  let el = document.getElementById("shared-toast");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "shared-toast";
+    el.className = "toast";
+    document.body.appendChild(el);
+  }
+  el.textContent = text;
+  el.classList.add("on");
+  clearTimeout(__toastTimer);
+  __toastTimer = setTimeout(() => el.classList.remove("on"), 2400);
+}
