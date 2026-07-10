@@ -2088,3 +2088,12 @@ html[data-theme="light"][data-flavor="iris"] {
   font-size: 14px;
   font-variant-numeric: tabular-nums;
 }
+
+.live-pill.dead {
+  background: var(--bad-soft);
+  color: var(--bad);
+}
+
+.live-pill.dead .dot {
+  background: var(--bad);
+}

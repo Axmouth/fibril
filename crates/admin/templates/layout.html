@@ -190,11 +190,13 @@
       window.__nativeSetInterval(() => {
         const last = window.__fibrilLastOk || 0;
         if (!last) return;
-        const stale = Date.now() - last > 10000;
+        const silence = Date.now() - last;
+        const state = silence > 30000 ? "dead" : silence > 10000 ? "stale" : "live";
         pill.hidden = false;
-        pill.classList.toggle("live", !stale);
-        pill.classList.toggle("stale", stale);
-        text.textContent = stale ? "stale" : "live";
+        pill.classList.toggle("live", state === "live");
+        pill.classList.toggle("stale", state === "stale");
+        pill.classList.toggle("dead", state === "dead");
+        text.textContent = state === "dead" ? "unreachable" : state;
       }, 2000);
     })();
   </script>
