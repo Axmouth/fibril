@@ -377,6 +377,7 @@ impl AdminServer {
             .route("/admin/connections", get(connections_page))
             .route("/admin/subscriptions", get(subscriptions_page))
             .route("/admin/queues", get(queues_page))
+            .route("/admin/queue", get(queue_detail_page))
             .route("/admin/streams", get(streams_page))
             .route("/admin/messages", get(messages_page))
             .route("/admin/diagnostics", get(diagnostics_page))
@@ -542,6 +543,20 @@ async fn queues_page(
     }))
 }
 
+/// One queue in depth. The topic and group ride in the query string and are
+/// read client-side, so the template itself is static like every other page.
+async fn queue_detail_page(
+    State(server): State<Arc<AdminServer>>,
+    headers: HeaderMap,
+) -> Result<Html<String>, Redirect> {
+    page_auth(&server, &headers).await?;
+    Ok(render(QueueDetail {
+        page: "queues",
+        title: "Queue",
+        auth_enabled: server.config.auth.is_some(),
+    }))
+}
+
 async fn streams_page(
     State(server): State<Arc<AdminServer>>,
     headers: HeaderMap,
@@ -698,6 +713,14 @@ struct Streams {
 #[derive(Template)]
 #[template(path = "pages/messages.html")]
 struct Messages {
+    page: &'static str,
+    title: &'static str,
+    auth_enabled: bool,
+}
+
+#[derive(Template)]
+#[template(path = "pages/queue.html")]
+struct QueueDetail {
     page: &'static str,
     title: &'static str,
     auth_enabled: bool,
@@ -1764,6 +1787,28 @@ mod tests {
             manager.calls.lock().unwrap().as_slice(),
             ["add:2:127.0.0.1:9202", "remove:2"]
         );
+    }
+
+    #[tokio::test]
+    async fn queue_detail_page_renders() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/queue?topic=orders&group=workers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        // The page is static chrome; topic and group are read client-side.
+        assert!(body.contains("All queues"), "back link present");
+        assert!(body.contains("q-partitions"), "partitions grid present");
     }
 
     #[tokio::test]
