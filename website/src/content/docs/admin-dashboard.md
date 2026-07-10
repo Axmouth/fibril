@@ -8,7 +8,7 @@ queues, runtime settings, and message inspection tools.
 
 The UI is a sidebar shell with a command palette (Ctrl/Cmd-K jumps to any
 page), dark and light modes, and optional named flavors that re-key the accent
-(neuronic, chlorophyll, crimson, fuchsin, azure, iris). It vendors only the
+(neuronic, chlorophyll, crimson, eosin, azure, iris). It vendors only the
 small icon set it needs and makes no external requests. In cluster mode the
 top bar shows which broker you are on and switches to another broker's admin
 on the same page.

@@ -129,7 +129,7 @@ async function refresh() {
     <tr>
       <td><a class="mono" href="${queueHref(r.topic, r.group)}">${escapeHtml(r.topic)}</a></td>
       <td>${r.group ? `<span class="chip-group">${escapeHtml(r.group)}</span>` : '<span class="v-dim">—</span>'}</td>
-      <td><span class="chip-plain">${escapeHtml(String(r.policy))}</span></td>
+      <td><span class="${r.policy === "discard" ? "chip-warn" : r.policy === "custom" ? "chip-group" : "chip-plain"}">${escapeHtml(String(r.policy))}</span></td>
       <td class="text-right">${r.retries != null ? escapeHtml(String(r.retries)) : '<span class="v-dim">default</span>'}</td>
       <td class="text-right">${fmtCount(r.depth)}</td>
       <td><a class="queue-messages-link" href="${inspectHref(r.topic, r.group)}">Inspect</a></td>

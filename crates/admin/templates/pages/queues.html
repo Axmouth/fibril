@@ -262,8 +262,10 @@ async function refresh() {
         const act = activityByQueue.get(activityKey(topic, parts[0]?.group));
         const sumState = (field) => parts.filter(p => p.materialized).reduce((acc, p) => acc + num(p.state[field]), 0);
         const dlqItem = parts.find(p => p.materialized);
+        const policyChipClass = (policy) =>
+          policy === "discard" ? "chip-warn" : policy === "custom" ? "chip-group" : "chip-plain";
         const dlqChips = (state) => state
-          ? `<span class="chip-plain">dlq ${escapeHtml(String(state.dlq_policy ?? "none"))}</span>`
+          ? `<span class="${policyChipClass(String(state.dlq_policy ?? "none"))}">dlq ${escapeHtml(String(state.dlq_policy ?? "none"))}</span>`
             + (state.dlq_max_retries != null ? ` <span class="chip-plain">retry ${escapeHtml(String(state.dlq_max_retries))}</span>` : "")
           : '<span class="v-dim">—</span>';
         const aggReady = sumState("ready_count");
