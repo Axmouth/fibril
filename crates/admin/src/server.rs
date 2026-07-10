@@ -379,6 +379,7 @@ impl AdminServer {
             .route("/admin/queues", get(queues_page))
             .route("/admin/queue", get(queue_detail_page))
             .route("/admin/dlq", get(dlq_page))
+            .route("/admin/security", get(security_page))
             .route("/admin/streams", get(streams_page))
             .route("/admin/messages", get(messages_page))
             .route("/admin/diagnostics", get(diagnostics_page))
@@ -540,6 +541,20 @@ async fn queues_page(
     Ok(render(Queues {
         page: "queues",
         title: "Queues",
+        auth_enabled: server.config.auth.is_some(),
+    }))
+}
+
+/// Transport and access: served-certificate status with live reload, and the
+/// admin user store.
+async fn security_page(
+    State(server): State<Arc<AdminServer>>,
+    headers: HeaderMap,
+) -> Result<Html<String>, Redirect> {
+    page_auth(&server, &headers).await?;
+    Ok(render(SecurityPage {
+        page: "security",
+        title: "Security",
         auth_enabled: server.config.auth.is_some(),
     }))
 }
@@ -728,6 +743,14 @@ struct Streams {
 #[derive(Template)]
 #[template(path = "pages/messages.html")]
 struct Messages {
+    page: &'static str,
+    title: &'static str,
+    auth_enabled: bool,
+}
+
+#[derive(Template)]
+#[template(path = "pages/security.html")]
+struct SecurityPage {
     page: &'static str,
     title: &'static str,
     auth_enabled: bool,
@@ -1810,6 +1833,27 @@ mod tests {
             manager.calls.lock().unwrap().as_slice(),
             ["add:2:127.0.0.1:9202", "remove:2"]
         );
+    }
+
+    #[tokio::test]
+    async fn security_page_renders() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/security")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Admin users"), "users card present");
+        assert!(body.contains("tls-body"), "transport card present");
     }
 
     #[tokio::test]

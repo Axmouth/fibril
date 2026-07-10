@@ -92,6 +92,10 @@
         <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M1.5 8h3l1.5-4 3 8 1.5-4h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span>Diagnostics</span>
       </a>
+      <a class="nav-link {% if page == "security" %}active{% endif %}" href="/admin/security">
+        <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 1.8 13 3.6v4c0 3.4-2.2 5.6-5 6.8-2.8-1.2-5-3.4-5-6.8v-4L8 1.8Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+        <span>Security</span>
+      </a>
       <a class="nav-link {% if page == "settings" %}active{% endif %}" href="/admin/settings">
         <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 4.5h8M12.5 4.5H14M2 11.5h3M7.5 11.5H14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="10.7" cy="4.5" r="1.8" stroke="currentColor" stroke-width="1.3"/><circle cx="5.3" cy="11.5" r="1.8" stroke="currentColor" stroke-width="1.3"/></svg>
         <span>Settings</span>
@@ -108,6 +112,10 @@
   <div class="main-container">
     <header class="site-header">
       <span class="crumb">{{ title }}</span>
+      <div class="broker-switch" id="broker-switch" hidden>
+        <button class="broker-switch-btn mono" type="button" id="broker-switch-btn" aria-haspopup="listbox"></button>
+        <div class="broker-switch-menu" id="broker-switch-menu" hidden></div>
+      </div>
       <div class="nav-actions">
         <button class="searchbtn" type="button" data-palette-open>
           <span class="searchlabel">Jump to a page…</span>
@@ -165,6 +173,64 @@
     })();
   </script>
   <script>
+    // Broker switcher: in a cluster, jump to another broker's admin on the
+    // same page. Reads the committed topology; each broker registers its
+    // admin address there. Sessions are per broker, so the target may ask
+    // for a login. Hidden outside cluster mode.
+    (() => {
+      const wrap = document.getElementById("broker-switch");
+      const btn = document.getElementById("broker-switch-btn");
+      const menu = document.getElementById("broker-switch-menu");
+      if (!wrap || !btn || !menu) return;
+
+      function esc(s) {
+        return String(s).replace(/[&<>"']/g, (c) => ({
+          "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+        })[c]);
+      }
+
+      async function load() {
+        let data;
+        try {
+          const r = await fetch("/admin/api/topology");
+          if (!r.ok) return;
+          data = await r.json();
+        } catch {
+          return;
+        }
+        const coordination = data && data.coordination;
+        const nodes = (coordination && coordination.nodes) || [];
+        const selfId = coordination && coordination.node_id;
+        const reachable = nodes.filter((n) => n.admin_addr);
+        if (!selfId || nodes.length < 2 || reachable.length === 0) {
+          wrap.hidden = true;
+          return;
+        }
+        btn.textContent = `${selfId} ▾`;
+        menu.innerHTML = nodes.map((n) => {
+          const self = n.node_id === selfId;
+          if (self || !n.admin_addr) {
+            return `<span class="broker-switch-item is-self mono">${esc(n.node_id)}${self ? " · here" : " · no admin"}</span>`;
+          }
+          const href = `${window.location.protocol}//${esc(n.admin_addr)}${window.location.pathname}${window.location.search}`;
+          return `<a class="broker-switch-item mono" data-no-boost href="${href}">${esc(n.node_id)}</a>`;
+        }).join("");
+        wrap.hidden = false;
+      }
+
+      btn.addEventListener("click", () => {
+        menu.hidden = !menu.hidden;
+      });
+      document.addEventListener("click", (event) => {
+        if (!wrap.contains(event.target)) menu.hidden = true;
+      });
+
+      load();
+      // Layout-owned poller: native timer so boosted navigation keeps it.
+      window.__nativeSetInterval(load, 30000);
+    })();
+  </script>
+  <script>
     // Command palette: layout-owned page jumper. Items are plain internal
     // anchors, so boosted navigation below handles the actual page swap.
     (() => {
@@ -183,6 +249,7 @@
         { label: "Subscriptions", href: "/admin/subscriptions" },
         { label: "Cluster", href: "/admin/topology" },
         { label: "Diagnostics", href: "/admin/diagnostics" },
+        { label: "Security", href: "/admin/security" },
         { label: "Settings", href: "/admin/settings" },
       ];
 

@@ -1,0 +1,172 @@
+{% extends "layout.html" %}
+{% block content %}
+<h4 class="metrics-header">Security</h4>
+<p class="page-desc">Transport encryption and who may open this dashboard and
+  the broker API. Certificates rotate live - serving connections keep their
+  session, new handshakes get the new leaf.</p>
+
+<div class="overview-two">
+  <section class="overview-panel" aria-label="Transport">
+    <div class="overview-panel-heading">
+      <h5>Transport</h5>
+    </div>
+    <div id="tls-body"></div>
+  </section>
+
+  <section class="overview-panel" aria-label="Admin users">
+    <div class="overview-panel-heading">
+      <h5>Admin users</h5>
+      <p>Credentials for this dashboard and the admin API.</p>
+    </div>
+    <div class="queue-table-wrap" id="users-wrap">
+      <table class="table table-compact metric-table">
+        <thead>
+          <tr>
+            <th>User</th>
+            <th>Created</th>
+            <th>Updated</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="user-rows"></tbody>
+      </table>
+    </div>
+    <p class="queue-group-note" id="users-note" hidden></p>
+    <div class="settings-inline-form" style="margin-top: 12px">
+      <label class="settings-field">
+        <span class="settings-label">Username</span>
+        <input id="user-name" autocomplete="off">
+      </label>
+      <label class="settings-field">
+        <span class="settings-label">Password</span>
+        <input id="user-pass" type="password" autocomplete="new-password">
+      </label>
+      <button class="btn btn-primary" id="user-save" type="button">Add or update</button>
+    </div>
+    <span id="user-message" class="op-message"></span>
+  </section>
+</div>
+
+<script src="/static/js/api.js"></script>
+<script src="/static/js/admin.js"></script>
+<script>
+function fmtDay(ms) {
+  if (!ms) return "-";
+  return new Intl.DateTimeFormat(undefined, {
+    year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(new Date(ms));
+}
+
+function renderTls(info) {
+  const body = document.getElementById("tls-body");
+  if (!info) {
+    body.innerHTML = `<p class="queue-group-note">TLS is not enabled on this
+      broker. Turn it on with <span class="mono">tls.enabled = true</span>
+      (auto-generated per-deployment material) or provide certificate paths -
+      see the configuration docs.</p>`;
+    return;
+  }
+  const now = Date.now() / 1000;
+  const notAfter = info.not_after_unix;
+  const daysLeft = notAfter ? Math.floor((notAfter - now) / 86400) : null;
+  let expiry = '<span class="chip-plain">validity unknown</span>';
+  if (daysLeft !== null) {
+    expiry = daysLeft < 0
+      ? '<span class="chip-bad">expired</span>'
+      : daysLeft <= 30
+        ? `<span class="chip-warn">expires in ${daysLeft} day(s)</span>`
+        : `<span class="chip-ok">expires in ${daysLeft} day(s)</span>`;
+  }
+  body.innerHTML = `
+    <p>${info.subject ? `<span class="chip-plain">${escapeHtml(info.subject)}</span> ` : ""}${expiry}</p>
+    <div class="overview-panel-heading" style="margin-top:10px"><p>Served-certificate SHA-256 fingerprint —
+      clients pin this (or the CA's, printed at startup) with
+      <span class="mono">tls_ca_fingerprint(…)</span>.</p></div>
+    <div class="fp-row">
+      <span class="mono" id="tls-fp">${escapeHtml(info.fingerprint || "")}</span>
+      <button class="btn btn-sm" id="tls-copy" type="button">Copy</button>
+    </div>
+    <div class="settings-actions">
+      <button class="btn" id="tls-reload" type="button">Reload certificate from disk</button>
+      <span id="tls-message" class="op-message"></span>
+    </div>`;
+  document.getElementById("tls-copy").addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(info.fingerprint || "");
+      document.getElementById("tls-message").textContent = "Fingerprint copied.";
+    } catch {
+      document.getElementById("tls-message").textContent = "Copy failed - select it manually.";
+    }
+  });
+  document.getElementById("tls-reload").addEventListener("click", async () => {
+    const el = document.getElementById("tls-message");
+    el.textContent = "Reloading…";
+    const { ok, data } = await apiPost("/admin/api/tls/reload", {});
+    el.textContent = ok
+      ? `Reloaded - new handshakes serve the new leaf.`
+      : `Reload failed: ${data?.message || data?.error || "see broker log"}`;
+    if (ok) refresh();
+  });
+}
+
+async function refresh() {
+  const [tls, users] = await Promise.all([
+    api('/admin/api/tls').catch(() => null),
+    api('/admin/api/users').catch(() => null),
+  ]);
+  renderTls(tls);
+
+  const wrap = document.getElementById("users-wrap");
+  const note = document.getElementById("users-note");
+  if (!Array.isArray(users)) {
+    wrap.hidden = true;
+    note.hidden = false;
+    note.innerHTML = `No user store on this broker - admin auth is configured
+      off, or managed cluster-wide. Enable it with
+      <span class="mono">admin.auth</span> in the configuration.`;
+    return;
+  }
+  wrap.hidden = false;
+  note.hidden = users.length > 0;
+  note.textContent = "No users yet - add the first one below.";
+  document.getElementById("user-rows").innerHTML = users.map((u) => `
+    <tr>
+      <td class="mono">${escapeHtml(u.username)}</td>
+      <td>${fmtDay(u.created_ms)}</td>
+      <td>${fmtDay(u.updated_ms)}</td>
+      <td class="text-right"><button class="btn btn-sm btn-warning user-del" data-user="${escapeHtml(u.username)}" type="button">Remove</button></td>
+    </tr>`).join("");
+  document.querySelectorAll(".user-del").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const name = btn.dataset.user;
+      if (!confirm(`Remove admin user "${name}"? Their sessions stop working immediately.`)) return;
+      const response = await fetch(`/admin/api/users/${encodeURIComponent(name)}`, { method: "DELETE" });
+      document.getElementById("user-message").textContent =
+        response.ok ? `Removed ${name}.` : `Remove failed: HTTP ${response.status}`;
+      refresh();
+    });
+  });
+}
+
+document.getElementById("user-save").addEventListener("click", async () => {
+  const username = document.getElementById("user-name").value.trim();
+  const password = document.getElementById("user-pass").value;
+  const el = document.getElementById("user-message");
+  if (!username || !password) {
+    el.textContent = "Enter a username and a password.";
+    return;
+  }
+  const { ok, data } = await apiPost("/admin/api/users", { username, password });
+  el.textContent = ok
+    ? `Saved ${username}.`
+    : `Save failed: ${data?.message || data?.error || "request failed"}`;
+  if (ok) {
+    document.getElementById("user-pass").value = "";
+    refresh();
+  }
+});
+
+autoRefresh(refresh, 10000);
+refresh();
+</script>
+{% endblock %}
