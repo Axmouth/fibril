@@ -1773,3 +1773,190 @@ a.broker-switch-item:hover {
   flex: none;
   margin-left: auto;
 }
+
+/* ---------------- flavors ----------------
+   A flavor re-keys the accent family and, in dark mode, tints the grounds
+   toward its hue. Plain dark/light stay the default edges. Semantic state
+   colors stay put in every flavor: the accent lives on chrome, links, and
+   chips, never on health. Names from the tissue-and-stain family. */
+
+html[data-flavor="neuronic"] {
+  --accent: #e3b341;
+  --accent-soft: rgba(227, 179, 65, .15);
+  --accent-line: rgba(227, 179, 65, .48);
+  --bg: #121108;
+  --panel: #191710;
+  --panel-2: #201d14;
+}
+
+html[data-flavor="chlorophyll"] {
+  --accent: #5fbf6f;
+  --accent-soft: rgba(95, 191, 111, .15);
+  --accent-line: rgba(95, 191, 111, .48);
+  --bg: #0d120e;
+  --panel: #141a15;
+  --panel-2: #1a211b;
+}
+
+html[data-flavor="crimson"] {
+  --accent: #d95970;
+  --accent-soft: rgba(217, 89, 112, .15);
+  --accent-line: rgba(217, 89, 112, .48);
+  --bg: #130e10;
+  --panel: #1a1417;
+  --panel-2: #211a1d;
+}
+
+html[data-flavor="fuchsin"] {
+  --accent: #e0619e;
+  --accent-soft: rgba(224, 97, 158, .15);
+  --accent-line: rgba(224, 97, 158, .48);
+  --bg: #120e12;
+  --panel: #191419;
+  --panel-2: #201a20;
+}
+
+html[data-flavor="azure"] {
+  --accent: #5da9e8;
+  --accent-soft: rgba(93, 169, 232, .15);
+  --accent-line: rgba(93, 169, 232, .48);
+  --bg: #0e1014;
+  --panel: #14181e;
+  --panel-2: #1a1f26;
+}
+
+html[data-flavor="iris"] {
+  --accent: #9a7ce0;
+  --accent-soft: rgba(154, 124, 224, .15);
+  --accent-line: rgba(154, 124, 224, .48);
+  --bg: #100f14;
+  --panel: #16141c;
+  --panel-2: #1c1a23;
+}
+
+/* Light mode keeps the boring paper grounds; a flavor only re-keys the
+   accent, darkened for contrast. */
+html[data-theme="light"][data-flavor="neuronic"] {
+  --accent: #97731a;
+  --accent-soft: rgba(151, 115, 26, .12);
+  --accent-line: rgba(151, 115, 26, .45);
+  --bg: #f2f1ed;
+  --panel: #fbfaf8;
+  --panel-2: #ffffff;
+}
+
+html[data-theme="light"][data-flavor="chlorophyll"] {
+  --accent: #2f7d3c;
+  --accent-soft: rgba(47, 125, 60, .11);
+  --accent-line: rgba(47, 125, 60, .45);
+  --bg: #f2f1ed;
+  --panel: #fbfaf8;
+  --panel-2: #ffffff;
+}
+
+html[data-theme="light"][data-flavor="crimson"] {
+  --accent: #a83349;
+  --accent-soft: rgba(168, 51, 73, .11);
+  --accent-line: rgba(168, 51, 73, .45);
+  --bg: #f2f1ed;
+  --panel: #fbfaf8;
+  --panel-2: #ffffff;
+}
+
+html[data-theme="light"][data-flavor="fuchsin"] {
+  --accent: #a83a72;
+  --accent-soft: rgba(168, 58, 114, .11);
+  --accent-line: rgba(168, 58, 114, .45);
+  --bg: #f2f1ed;
+  --panel: #fbfaf8;
+  --panel-2: #ffffff;
+}
+
+html[data-theme="light"][data-flavor="azure"] {
+  --accent: #2f6ea8;
+  --accent-soft: rgba(47, 110, 168, .11);
+  --accent-line: rgba(47, 110, 168, .45);
+  --bg: #f2f1ed;
+  --panel: #fbfaf8;
+  --panel-2: #ffffff;
+}
+
+html[data-theme="light"][data-flavor="iris"] {
+  --accent: #6b4fb0;
+  --accent-soft: rgba(107, 79, 176, .11);
+  --accent-line: rgba(107, 79, 176, .45);
+  --bg: #f2f1ed;
+  --panel: #fbfaf8;
+  --panel-2: #ffffff;
+}
+
+/* ---------------- flavor picker ---------------- */
+
+.flavor-pick {
+  position: relative;
+}
+
+.flavor-pick-btn {
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  display: inline-flex;
+  height: 26px;
+  justify-content: center;
+  width: 30px;
+}
+
+.flavor-pick-btn:hover {
+  background: var(--panel-2);
+}
+
+.flavor-dot {
+  background: var(--accent);
+  border-radius: 999px;
+  display: inline-block;
+  height: 11px;
+  width: 11px;
+}
+
+.flavor-menu {
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 60;
+}
+
+.flavor-item {
+  align-items: center;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  cursor: pointer;
+  display: flex;
+  font-size: 12px;
+  gap: 9px;
+  padding: 5px 9px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.flavor-item:hover,
+.flavor-item.on {
+  background: var(--accent-soft);
+}
+
+.flavor-item .swatch {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  height: 11px;
+  width: 11px;
+}

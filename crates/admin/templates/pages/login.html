@@ -40,6 +40,8 @@
       const stored = window.localStorage.getItem("fibril-admin-theme");
       const prefersLight = window.matchMedia("(prefers-color-scheme: light)").matches;
       document.documentElement.dataset.theme = stored || (prefersLight ? "light" : "dark");
+      const flavor = window.localStorage.getItem("fibril-admin-flavor");
+      if (flavor) document.documentElement.dataset.flavor = flavor;
     })();
   </script>
 </body>

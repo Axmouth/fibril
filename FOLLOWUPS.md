@@ -2940,7 +2940,9 @@ path, and watch stroma lane depths. Trace before patching.
 User idea (2026-07-10): first-run TLS setup from the Security page - e.g. a
 "Enable TLS" flow that triggers the auto-self-signed generation (the material
 machinery already exists) and switches the listeners over, without touching
-the config file. Design questions to settle: listeners currently build TLS at
+the config file. Precedent exists: setup.mode already does exactly this flow
+at FIRST boot (crates/admin/src/setup.rs); the idea extends it to a running
+broker. Design questions to settle: listeners currently build TLS at
 startup, so this needs live listener rebinding or a dual-listen window; how
 the choice persists across restarts without a config write (persist a
 data-dir marker? write back to config with consent?); and the plaintext-426

@@ -10,6 +10,8 @@
       const stored = window.localStorage.getItem(storageKey);
       const prefersLight = window.matchMedia("(prefers-color-scheme: light)").matches;
       document.documentElement.dataset.theme = stored || (prefersLight ? "light" : "dark");
+      const flavor = window.localStorage.getItem("fibril-admin-flavor");
+      if (flavor) document.documentElement.dataset.flavor = flavor;
     })();
   </script>
   <script>
@@ -129,6 +131,10 @@
         {% else %}
           <span class="admin-auth-pill">Auth disabled</span>
         {% endif %}
+        <div class="flavor-pick" id="flavor-pick">
+          <button class="flavor-pick-btn" type="button" id="flavor-btn" aria-label="Choose a flavor" title="Flavor"><span class="flavor-dot"></span></button>
+          <div class="flavor-menu" id="flavor-menu" hidden></div>
+        </div>
         <button class="theme-toggle" type="button" data-theme-toggle aria-label="Use light theme"></button>
       </div>
     </header>
@@ -169,6 +175,62 @@
         root.classList.add("theme-transition");
         applyTheme(next);
         window.setTimeout(() => root.classList.remove("theme-transition"), 260);
+      });
+    })();
+  </script>
+  <script>
+    // Flavor picker: named accent-and-tint variants over the dark/light modes.
+    (() => {
+      const wrap = document.getElementById("flavor-pick");
+      const btn = document.getElementById("flavor-btn");
+      const menu = document.getElementById("flavor-menu");
+      if (!wrap || !btn || !menu) return;
+
+      const flavors = [
+        { id: "", label: "plain", swatch: "#e8907c" },
+        { id: "neuronic", label: "neuronic", swatch: "#e3b341" },
+        { id: "chlorophyll", label: "chlorophyll", swatch: "#5fbf6f" },
+        { id: "crimson", label: "crimson", swatch: "#d95970" },
+        { id: "fuchsin", label: "fuchsin", swatch: "#e0619e" },
+        { id: "azure", label: "azure", swatch: "#5da9e8" },
+        { id: "iris", label: "iris", swatch: "#9a7ce0" },
+      ];
+
+      function current() {
+        return document.documentElement.dataset.flavor || "";
+      }
+
+      function apply(id) {
+        if (id) {
+          document.documentElement.dataset.flavor = id;
+          window.localStorage.setItem("fibril-admin-flavor", id);
+        } else {
+          delete document.documentElement.dataset.flavor;
+          window.localStorage.removeItem("fibril-admin-flavor");
+        }
+        render();
+      }
+
+      function render() {
+        const active = current();
+        menu.innerHTML = flavors.map((f) =>
+          `<button class="flavor-item${f.id === active ? " on" : ""}" type="button" data-flavor-id="${f.id}">` +
+          `<span class="swatch" style="background:${f.swatch}"></span>${f.label}</button>`)
+          .join("");
+      }
+
+      render();
+      btn.addEventListener("click", () => {
+        menu.hidden = !menu.hidden;
+      });
+      menu.addEventListener("click", (event) => {
+        const item = event.target.closest("[data-flavor-id]");
+        if (!item) return;
+        apply(item.dataset.flavorId);
+        menu.hidden = true;
+      });
+      document.addEventListener("click", (event) => {
+        if (!wrap.contains(event.target)) menu.hidden = true;
       });
     })();
   </script>

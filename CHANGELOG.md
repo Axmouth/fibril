@@ -12,6 +12,17 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- The admin dashboard rebuilt as an operations surface. A sidebar shell with a
+  command palette, live 30-minute throughput and backlog charts, a
+  needs-attention panel computed by the broker (backlog with no consumer,
+  certificate near expiry, failed settings load, quarantined partition - each
+  with a link to its fix), per-queue depth sparklines and a queue detail page,
+  a dead-letters page, connections and subscriptions views with identity-first
+  tables, a security page (certificate status with live reload, admin users),
+  the first drain button, and - in cluster mode - a top-bar switcher to any
+  other broker's admin. State is color: leased work is blue, completions
+  green, failures red, attention amber, everywhere. Dark and light modes plus
+  named accent flavors (neuronic, chlorophyll, crimson, fuchsin, azure, iris).
 - Admin dashboard mechanisms behind the new operations views: a per-broker
   in-memory time series (`GET /admin/api/history`, sampled every 5s over the last
   30 minutes) for throughput and backlog-over-time; a server-computed attention

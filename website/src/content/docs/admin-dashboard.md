@@ -6,8 +6,12 @@ description: Use the Fibril admin UI for operational inspection and runtime sett
 The admin dashboard is for operators. It shows broker state, active connections,
 queues, runtime settings, and message inspection tools.
 
-The UI uses the same dark/light visual language as the public site and vendors
-only the small icon set it needs.
+The UI is a sidebar shell with a command palette (Ctrl/Cmd-K jumps to any
+page), dark and light modes, and optional named flavors that re-key the accent
+(neuronic, chlorophyll, crimson, fuchsin, azure, iris). It vendors only the
+small icon set it needs and makes no external requests. In cluster mode the
+top bar shows which broker you are on and switches to another broker's admin
+on the same page.
 
 The dashboard is not meant to be a high-frequency monitoring feed. Use it to
 answer specific operational questions, and point Prometheus at the `/metrics`
@@ -29,18 +33,31 @@ without TLS, and the broker starts once the choice is applied. See
 
 ## Overview And Diagnostics
 
-The overview page is intentionally curated. It shows broker throughput, process
-resource use, reconnect outcomes, and a small set of storage and queue health
-signals that help answer whether queue processing or persistence is backing up.
+The overview page is intentionally curated. It leads with a needs-attention
+panel - conditions the broker itself flags, like a backlog with no consumer
+reading it, a certificate near expiry, a failed settings load, or a
+quarantined partition, each linking to where it is fixed - then live
+throughput and backlog-over-time charts, state-colored stat cards, process
+resource use, reconnect outcomes, and a small set of storage health signals.
+Chart history is sampled in memory on the broker (the last 30 minutes) and
+resets on restart; Prometheus stays the durable history.
 
 The diagnostics page shows lower-level storage and queue metrics, including
 command-lane depths and timings, command-kind counters, append stats, snapshot
 cost, and recovery counters. Use it when the overview suggests pressure and you
 need the next level of detail.
 
+## Security
+
+The security page shows the served certificate (subject, expiry, and the
+SHA-256 fingerprint clients pin, with a copy button) and reloads certificate
+material from disk without a restart - new handshakes get the new leaf while
+existing sessions keep serving. It also manages the admin users described
+below.
+
 ## Users
 
-The settings page has a Users section: create or rotate a user (argon2-hashed,
+The security page manages users (the settings page retains its section): create or rotate a user (argon2-hashed,
 never shown), remove a user, and see the current list with timestamps. The
 built-in `fibril`/`fibril` pair works from loopback only, so create a user for
 remote access. In cluster mode edits replicate to every node. The same
@@ -73,8 +90,11 @@ active publisher/subscriber counts, idle time when known, last used time for the
 current process, and the most recent idle-cleanup result or skip reason.
 
 Partitioned queues are shown as one row per topic with their partition and
-loaded counts. Expand a topic to see each partition's own state, and each row
-shows the queue's dead-letter policy.
+loaded counts, a 30-minute depth trend sparkline, and the queue's dead-letter
+policy. Expand a topic to see each partition's own state, or open **Detail**
+for the full picture of one queue: its depth and leased charts, per-partition
+cards, live consumers with their settlement mode, and its declared
+configuration.
 
 When this broker is replicating queues from their owners, the page also shows a
 follower-replication section: which partitions this broker follows, each
@@ -124,6 +144,13 @@ short preview in the table. Use the payload modal for a larger preview. Large
 page sizes and large payload previews ask for confirmation because they can read
 a lot of persisted data.
 
+## Dead Letters
+
+The dead-letters page gathers the failure lane in one place: the global
+dead-letter target with its backlog now and over time, and every queue that
+declares a dead-letter policy with its depth and an inspector link. Browsing
+and replaying individual dead letters happens in message inspection.
+
 ## DLQ Replay
 
 When inspecting a DLQ queue, select specific offsets and use **Replay selected
@@ -162,8 +189,11 @@ cluster: registered brokers, per-partition ownership with fencing epochs and
 followers, and the consensus block (leader and voters). See
 [clustering](/concepts/clustering/).
 
-The page also exposes two operator actions, each with a confirmation:
+The page also exposes three operator actions, each with a confirmation:
 
+- **Drain this broker**: clients are told to move and, in coordinated mode,
+  partition ownership hands off to caught-up followers before the call
+  returns - zero partitions remaining means stopping the process is gap-free.
 - **Repartition** a queue by setting its partition count.
 - **Add or remove a consensus voting member.**
 
