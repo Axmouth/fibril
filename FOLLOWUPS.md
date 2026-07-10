@@ -2917,6 +2917,13 @@ batches) interleaved with truncation storms and the TTL-expiry worker
 Smoking-gun check at wedge time: the periodic Stroma debug report in the
 broker log (or the admin Diagnostics page) - a command lane pinned high with
 the queue frozen dirty confirms the actor wedge.
+THIRD occurrence: with the broker wedged, a fresh reader's connections are
+RESET (os error 104) at connect time - not accepted-then-silent like before.
+New candidate that fits active resets: RESOURCE EXHAUSTION, most plausibly
+file descriptors (leaked sockets from dormant/grace sessions + segment file
+churn under truncate storms). Capture next time: `ls /proc/$(pidof
+fibril*)/fd | wc -l` and `ulimit -n` while wedged, plus whether the admin
+port also resets.
 Hypothesis space stays OPEN: the wedge could equally live in the protocol
 handler / session layer (read loop stalled on something other than the actor
 lane, writer-task wedge, permit accounting) - the actor/fsync-fusion lead is
