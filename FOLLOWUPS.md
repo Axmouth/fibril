@@ -2917,7 +2917,13 @@ batches) interleaved with truncation storms and the TTL-expiry worker
 Smoking-gun check at wedge time: the periodic Stroma debug report in the
 broker log (or the admin Diagnostics page) - a command lane pinned high with
 the queue frozen dirty confirms the actor wedge.
+Hypothesis space stays OPEN: the wedge could equally live in the protocol
+handler / session layer (read loop stalled on something other than the actor
+lane, writer-task wedge, permit accounting) - the actor/fsync-fusion lead is
+the strongest single candidate, not a conclusion. The wedged-era data dir
+still exists (server restarted and published over it since, so it is
+polluted but may retain structure worth a look).
 Hunt plan: dedicated instrumented session - reproduce with an aged data dir +
 TTL + repeated 5M x 1KB writer runs under drive saturation; instrument
-keratin fsync-fusion completion-set accounting and watch stroma lane depths.
-Trace before patching.
+keratin fsync-fusion completion-set accounting AND the handler read/publish
+path, and watch stroma lane depths. Trace before patching.
