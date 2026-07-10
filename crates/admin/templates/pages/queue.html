@@ -97,6 +97,18 @@
         <dt>Max retries</dt>
         <dd id="q-cfg-retries">--</dd>
       </div>
+      <div>
+        <dt>Idle for</dt>
+        <dd id="q-ops-idle">--</dd>
+      </div>
+      <div>
+        <dt>Last lease activity</dt>
+        <dd id="q-ops-lease">--</dd>
+      </div>
+      <div>
+        <dt>Last cleanup</dt>
+        <dd id="q-ops-cleanup">--</dd>
+      </div>
     </dl>
     <div class="settings-actions">
       <a class="btn" id="q-inspect" href="/admin/messages">Inspect messages</a>
@@ -127,6 +139,23 @@ function stateLabel(item) {
   if (item.materialized) return "Loaded";
   if (item.exists_on_disk) return "On disk";
   return "Not loaded";
+}
+
+function fmtMs(ms) {
+  if (ms === null || ms === undefined) return "not idle";
+  if (ms < 1000) return `${ms} ms`;
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds} s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} m`;
+  return `${Math.floor(minutes / 60)} h ${minutes % 60} m`;
+}
+
+function fmtAt(ms) {
+  if (!ms) return "not seen this run";
+  return new Intl.DateTimeFormat(undefined, {
+    month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+  }).format(new Date(ms));
 }
 
 function statePillClass(item) {
@@ -217,6 +246,13 @@ async function refresh() {
     configured && configured.state.dlq_max_retries != null
       ? String(configured.state.dlq_max_retries)
       : "default";
+
+  document.getElementById("q-ops-idle").textContent = fmtMs(activity?.idle_for_ms);
+  document.getElementById("q-ops-lease").textContent = fmtAt(activity?.last_active_ms);
+  const cleanup = activity?.last_eviction_attempt;
+  document.getElementById("q-ops-cleanup").textContent = cleanup
+    ? `${String(cleanup.kind || "")} · ${String(cleanup.outcome || "")}`
+    : "no cleanup yet";
 
   const inspect = new URLSearchParams({ topic });
   if (group) inspect.set("group", group);

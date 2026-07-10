@@ -1,9 +1,11 @@
 {% extends "layout.html" %}
 {% block content %}
-<h4 class="metrics-header">Queues</h4>
+<div class="page-head-row">
+  <h4 class="metrics-header">Queues</h4>
+  <button class="btn" id="create-toggle" type="button">Declare queue</button>
+</div>
 
-<details class="queue-create-panel">
-  <summary>Create a queue</summary>
+<div class="queue-create-panel" id="create-panel" hidden>
   <div class="queue-create-fields">
     <input id="create.topic" placeholder="topic" />
     <input id="create.group" placeholder="group (optional)" />
@@ -22,7 +24,7 @@
     <button id="create.submit" type="button">Create</button>
     <span id="create-message" class="op-message"></span>
   </div>
-</details>
+</div>
 
 <div class="queue-controls">
   <input id="queue-search" type="search" placeholder="filter by topic or group" />
@@ -184,39 +186,15 @@ async function refresh() {
   }
 
   const summary = `
-    <div class="queue-summary-grid">
-      <div class="queue-summary-card">
-        <span>Indexed queues</span>
-        <strong>${queues.length}</strong>
-      </div>
-      <div class="queue-summary-card">
-        <span>Loaded in memory</span>
-        <strong class="v-accent">${loaded}</strong>
-      </div>
-      <div class="queue-summary-card">
-        <span>Unloading now</span>
-        <strong class="${unloading > 0 ? "v-warn" : "v-dim"}">${unloading}</strong>
-      </div>
-      <div class="queue-summary-card">
-        <span>Seen by broker</span>
-        <strong>${tracked}</strong>
-      </div>
-      <div class="queue-summary-card">
-        <span>Active now</span>
-        <strong class="v-active">${activitySummary.active_queue_count ?? 0}</strong>
-      </div>
-      <div class="queue-summary-card">
-        <span>Idle now</span>
-        <strong>${activitySummary.idle_queue_count ?? 0}</strong>
-      </div>
-      <div class="queue-summary-card">
-        <span>Cleanup attempts</span>
-        <strong>${cleanupMetrics.attempts_total ?? 0}</strong>
-      </div>
-      <div class="queue-summary-card">
-        <span>Unloaded by cleanup</span>
-        <strong>${cleanupMetrics.storage_evicted_total ?? 0}</strong>
-      </div>
+    <div class="stat-strip">
+      <span><b>${queues.length}</b> indexed</span>
+      <span><b class="v-accent">${loaded}</b> loaded</span>
+      <span><b class="${unloading > 0 ? "v-warn" : "v-dim"}">${unloading}</b> unloading</span>
+      <span><b>${tracked}</b> seen by broker</span>
+      <span><b class="v-active">${activitySummary.active_queue_count ?? 0}</b> active</span>
+      <span><b class="v-dim">${activitySummary.idle_queue_count ?? 0}</b> idle</span>
+      <span><b>${cleanupMetrics.attempts_total ?? 0}</b> cleanup attempts</span>
+      <span><b>${cleanupMetrics.storage_evicted_total ?? 0}</b> unloaded by cleanup</span>
     </div>
   `;
 
@@ -295,37 +273,29 @@ async function refresh() {
         const agg = `
           <tr class="queue-row queue-agg-row" ${dataAttrs} data-partitions="${parts.length}" style="cursor:pointer">
             <td class="queue-topic-cell" title="${escapeHtml(topic)}"><span class="queue-caret">${open ? "▼" : "▶"}</span> ${escapeHtml(topic)}</td>
-            <td>${loaded}/${parts.length} loaded</td>
-            <td class="text-right">${num(act?.active_publishers)}</td>
-            <td class="text-right ${subsClass}">${aggSubs}</td>
-            <td class="text-right">${escapeHtml(formatDuration(act?.idle_for_ms))}</td>
-            <td>${escapeHtml(formatLastLeaseActivity(act))}</td>
-            <td>${escapeHtml(cleanupOutcomeLabel(act?.last_eviction_attempt))}</td>
+            <td><span class="chip-plain">${loaded}/${parts.length} loaded</span></td>
             <td class="text-right">${aggReady}</td>
             <td class="queue-spark-cell"><svg class="queue-spark" data-key="${escapeHtml(`${topic} ${parts[0]?.group || ""}`)}" width="90" height="22" aria-label="Depth over the last 30 minutes"></svg></td>
             <td class="text-right v-active">${sumState("inflight_count")}</td>
-            <td class="text-right">-</td>
+            <td class="text-right">${num(act?.active_publishers)}</td>
+            <td class="text-right ${subsClass}">${aggSubs}</td>
+            <td class="text-right v-dim">—</td>
             <td>${dlqChips(dlqItem?.state)}</td>
-            <td><a class="queue-messages-link" href="/admin/queue?${new URLSearchParams({ topic, ...(parts[0]?.group ? { group: parts[0].group } : {}) })}">Detail</a></td>
-            <td><button type="button" class="queue-delete-btn" ${dataAttrs} data-partitions="${parts.length}">Delete</button></td>
+            <td class="queue-actions"><a class="queue-messages-link" href="/admin/queue?${new URLSearchParams({ topic, ...(parts[0]?.group ? { group: parts[0].group } : {}) })}">Detail</a> <button type="button" class="queue-delete-btn" ${dataAttrs} data-partitions="${parts.length}">Delete</button></td>
           </tr>`;
         const childRows = parts.map(item => {
           return `
           <tr class="${rowClass(item, act)} queue-part-row" ${dataAttrs}${open ? "" : ' style="display:none"'}>
             <td class="queue-part-cell">partition ${num(item.partition)}</td>
             <td><span class="${stateClass(item, act)}">${escapeHtml(loadStateLabel(item, act))}</span></td>
-            <td class="text-right v-dim">—</td>
-            <td class="text-right v-dim">—</td>
-            <td class="text-right v-dim">—</td>
-            <td class="v-dim">—</td>
-            <td class="v-dim">—</td>
             <td class="text-right">${formatQueueStateValue(item, item.state.ready_count)}</td>
-            <td></td>
+            <td class="v-dim">—</td>
             <td class="text-right">${formatQueueStateValue(item, item.state.inflight_count)}</td>
+            <td class="text-right v-dim">—</td>
+            <td class="text-right v-dim">—</td>
             <td class="text-right">${formatQueueStateValue(item, item.state.settled_until)}</td>
-            <td>${item.materialized ? dlqChips(item.state) : '<span class="v-dim">—</span>'}</td>
+            <td class="v-dim">—</td>
             <td><a class="queue-messages-link" href="${inspectHref(item)}" title="Inspect messages">Inspect</a></td>
-            <td>-</td>
           </tr>`;
         }).join("");
         return agg + childRows;
@@ -342,18 +312,14 @@ async function refresh() {
           <table class="table table-compact narrow metric-table queue-table">
             <tr>
               <th>Topic / partition</th>
-              <th>Memory state</th>
+              <th>State</th>
+              <th class="text-right">Depth</th>
+              <th>Trend — 30 min</th>
+              <th class="text-right">Leased</th>
               <th class="text-right">Publishers</th>
-              <th class="text-right">Subscribers</th>
-              <th class="text-right">Idle for</th>
-              <th>Last lease activity</th>
-              <th>Last cleanup</th>
-              <th class="text-right">Ready</th>
-              <th>Depth — 30 min</th>
-              <th class="text-right">In-flight</th>
+              <th class="text-right">Consumers</th>
               <th class="text-right">Settled until</th>
-              <th>DLQ policy</th>
-              <th>Messages</th>
+              <th>Policy</th>
               <th>Actions</th>
             </tr>
             ${topicRows}
@@ -436,6 +402,11 @@ async function submitCreateQueue() {
 }
 
 document.getElementById("create.submit").addEventListener("click", submitCreateQueue);
+document.getElementById("create-toggle").addEventListener("click", () => {
+  const panel = document.getElementById("create-panel");
+  panel.hidden = !panel.hidden;
+  if (!panel.hidden) document.getElementById("create.topic").focus();
+});
 
 // ---- delete queue ----
 async function deleteQueue(btn) {

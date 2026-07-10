@@ -402,7 +402,6 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .content-area {
-  margin: 0 auto;
   max-width: 1340px;
   padding: 20px 22px 60px;
 }
@@ -1615,4 +1614,50 @@ textarea:focus {
   font-variant-numeric: tabular-nums;
   font-weight: 600;
   letter-spacing: -.01em;
+}
+
+/* Page header row: title left, primary page action right. */
+.page-head-row {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.page-head-row .metrics-header {
+  margin: 0;
+}
+
+.page-head-row .btn {
+  margin-left: auto;
+}
+
+.queue-create-panel {
+  margin-bottom: 14px;
+}
+
+/* Compact one-line stat strip: the counts without the card weight. */
+.stat-strip {
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 12px;
+  gap: 6px 20px;
+  margin: 0 0 14px;
+}
+
+.stat-strip b {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13.5px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.queue-actions {
+  white-space: nowrap;
+}
+
+.queue-actions .queue-delete-btn {
+  margin-left: 8px;
 }
