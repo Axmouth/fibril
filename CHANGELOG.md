@@ -12,6 +12,15 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- Admin dashboard mechanisms behind the new operations views: a per-broker
+  in-memory time series (`GET /admin/api/history`, sampled every 5s over the last
+  30 minutes) for throughput and backlog-over-time; a server-computed attention
+  feed (`GET /admin/api/attention`) that names conditions needing an operator -
+  a backlog with no consumer, a certificate near expiry, a settings document
+  that failed to load, a quarantined partition - each with a link to its fix;
+  and served-certificate metadata (`GET /admin/api/tls`: fingerprint, validity,
+  subject). All in-memory and reset on restart; Prometheus (`/metrics`) remains
+  the durable history.
 - Go client (`clients/go`), the fourth first-party client, at full parity with
   the others. Native `context.Context` on every network method, a byte-exact wire
   codec pinned to the shared conformance vectors, TLS, cluster routing with

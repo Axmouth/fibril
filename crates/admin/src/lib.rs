@@ -1,4 +1,6 @@
+mod attention;
 mod auth;
+mod history;
 mod metrics_route;
 pub mod prometheus;
 mod routes;
@@ -7,7 +9,7 @@ pub mod setup;
 
 pub use server::{
     AdminConfig, AdminServer, AdminServerError, AdminUserInfo, BrokerDrainController,
-    CoordinationMembershipManager, DrainOutcome, QueueRepartitionManager,
+    CertInfoProvider, CoordinationMembershipManager, DrainOutcome, QueueRepartitionManager,
     RuntimeSettingsClusterStore, RuntimeSettingsClusterUpdateOutcome, StartupConfigSummary,
     UserAdmin,
 };

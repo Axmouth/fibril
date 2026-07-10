@@ -88,6 +88,12 @@ pub struct DrainOutcome {
 /// certificate fingerprint. Errors leave the old material serving.
 pub type TlsReloadHandler = dyn Fn() -> Result<String, String> + Send + Sync;
 
+/// Returns presentation metadata for the certificate the broker currently
+/// serves, as JSON (fingerprint, validity window, subject). The broker wires
+/// one in when TLS is enabled; feeds the security view and the certificate
+/// expiry attention rule.
+pub type CertInfoProvider = dyn Fn() -> serde_json::Value + Send + Sync;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeSettingsClusterUpdateOutcome {
     Stored(RuntimeSettingsSnapshot),
@@ -191,6 +197,11 @@ pub struct AdminServer {
     pub drain: Option<Arc<dyn BrokerDrainController>>,
     /// Optional live TLS reload for `POST /admin/api/tls/reload`.
     pub tls_reload: Option<Arc<TlsReloadHandler>>,
+    /// Optional served-certificate metadata (fingerprint, validity) for the
+    /// security view and the certificate-expiry attention rule.
+    pub cert_info: Option<Arc<CertInfoProvider>>,
+    /// Recent throughput and backlog time series, sampled by a background task.
+    pub history: crate::history::History,
 }
 
 fn render<T: Template>(tpl: T) -> Html<String> {
@@ -232,6 +243,8 @@ impl AdminServer {
             users: None,
             drain: None,
             tls_reload: None,
+            cert_info: None,
+            history: crate::history::History::new(),
         }
     }
 
@@ -250,6 +263,13 @@ impl AdminServer {
     /// Attach the live TLS reload for `POST /admin/api/tls/reload`.
     pub fn with_tls_reload(mut self, reload: Arc<TlsReloadHandler>) -> Self {
         self.tls_reload = Some(reload);
+        self
+    }
+
+    /// Attach served-certificate metadata for `GET /admin/api/tls` and the
+    /// certificate-expiry attention rule.
+    pub fn with_cert_info(mut self, cert_info: Arc<CertInfoProvider>) -> Self {
+        self.cert_info = Some(cert_info);
         self
     }
 
@@ -303,6 +323,9 @@ impl AdminServer {
 
     pub async fn run(self) -> Result<(), AdminServerError> {
         let state = Arc::new(self);
+
+        // Background time-series sampler feeding /admin/api/history.
+        tokio::spawn(crate::history::run_sampler(state.clone()));
 
         let app = Self::router(state.clone());
 
@@ -360,6 +383,9 @@ impl AdminServer {
             .route("/admin/topology", get(topology_page))
             .route("/admin/settings", get(settings_page))
             .route("/admin/api/overview", get(routes::overview))
+            .route("/admin/api/history", get(crate::history::history))
+            .route("/admin/api/attention", get(crate::attention::attention))
+            .route("/admin/api/tls", get(routes::tls_info))
             .route("/admin/api/connections", get(routes::connections))
             .route("/admin/api/subscriptions", get(routes::subscriptions))
             .route(
@@ -1024,6 +1050,138 @@ mod tests {
             .next()
             .unwrap()
             .to_string()
+    }
+
+    #[tokio::test]
+    async fn history_endpoint_reports_cadence_and_samples() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        // The sampler runs on its own task in run(); here we record directly to
+        // assert the route serves what the ring holds.
+        crate::history::run_sampler_once(&server).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/history")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["interval_ms"], 5000);
+        let samples = body["samples"].as_array().expect("samples array");
+        assert_eq!(samples.len(), 1);
+        assert!(samples[0]["at"].as_i64().unwrap() > 0);
+        assert!(samples[0]["backlog"].is_number());
+    }
+
+    #[tokio::test]
+    async fn attention_flags_a_backlog_with_no_consumer() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        // Publish a message but connect no subscriber: the backlog has nobody
+        // reading it, which is exactly the condition the rule names.
+        let headers = MessageHeaders {
+            published: 1,
+            publish_received: 2,
+            content_type: Some(MessageContentType::Text),
+            extra: Default::default(),
+        };
+        let (completion, rx) = KeratinAppendCompletion::pair();
+        server
+            .storage
+            .publish("orders", 0, None, &headers, b"work".to_vec(), completion)
+            .await
+            .unwrap();
+        rx.await.unwrap().unwrap();
+
+        let app = AdminServer::router(server);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/attention")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        let items = body["items"].as_array().expect("items array");
+        let no_consumer = items
+            .iter()
+            .find(|item| item["kind"] == "no_consumer")
+            .expect("a no_consumer item");
+        assert_eq!(no_consumer["severity"], "warning");
+        assert_eq!(no_consumer["subject"], "orders");
+        assert_eq!(no_consumer["action_href"], "/admin/queues");
+    }
+
+    #[tokio::test]
+    async fn attention_endpoint_is_empty_when_healthy() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/attention")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        // A fresh broker with no queues, good settings, and no TLS has nothing
+        // to flag.
+        assert_eq!(body["items"].as_array().expect("items array").len(), 0);
+    }
+
+    #[tokio::test]
+    async fn tls_endpoint_is_null_without_certificate_then_reports_it() {
+        let base = test_server(RuntimeSettingsLocks::default()).await;
+        let server = Arc::try_unwrap(base).ok().expect("sole owner");
+
+        // No TLS: null.
+        let bare = AdminServer::router(Arc::new(AdminServer {
+            cert_info: None,
+            ..server
+        }));
+        let response = bare
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/tls")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response_json(response).await.is_null());
+
+        // With a certificate-info provider: it reports it verbatim.
+        let with_cert = test_server(RuntimeSettingsLocks::default()).await;
+        let with_cert = Arc::try_unwrap(with_cert).ok().expect("sole owner");
+        let app = AdminServer::router(Arc::new(AdminServer {
+            cert_info: Some(Arc::new(
+                || json!({ "fingerprint": "AA:BB", "not_after_unix": 4102444800i64 }),
+            )),
+            ..with_cert
+        }));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/tls")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = response_json(response).await;
+        assert_eq!(body["fingerprint"], "AA:BB");
     }
 
     #[tokio::test]

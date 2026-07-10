@@ -1680,10 +1680,21 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     let admin = admin.with_users(user_admin);
     let admin = match &server_tls {
         Some(tls) => {
-            let tls = tls.clone();
-            admin.with_tls_reload(Arc::new(move || {
-                tls.reload().map_err(|err| err.to_string())
-            }))
+            let reload_tls = tls.clone();
+            let info_tls = tls.clone();
+            admin
+                .with_tls_reload(Arc::new(move || {
+                    reload_tls.reload().map_err(|err| err.to_string())
+                }))
+                .with_cert_info(Arc::new(move || {
+                    let meta = info_tls.leaf_metadata();
+                    serde_json::json!({
+                        "fingerprint": meta.fingerprint,
+                        "not_before_unix": meta.not_before_unix,
+                        "not_after_unix": meta.not_after_unix,
+                        "subject": meta.subject,
+                    })
+                }))
         }
         None => admin,
     };

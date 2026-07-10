@@ -120,6 +120,42 @@ impl ServerTls {
     pub fn leaf_fingerprint(&self) -> String {
         fingerprint_der(&self.resolver.current.load().cert[0])
     }
+
+    /// Presentation metadata for the leaf certificate currently being served:
+    /// its fingerprint, validity window (Unix seconds), and subject. Feeds the
+    /// admin dashboard's certificate view and its expiry warning.
+    pub fn leaf_metadata(&self) -> CertMetadata {
+        let certified = self.resolver.current.load();
+        cert_metadata(&certified.cert[0])
+    }
+}
+
+/// Presentation metadata parsed from a leaf certificate. Absent validity fields
+/// mean the certificate did not parse; the fingerprint is always available.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertMetadata {
+    pub fingerprint: String,
+    pub not_before_unix: Option<i64>,
+    pub not_after_unix: Option<i64>,
+    pub subject: Option<String>,
+}
+
+fn cert_metadata(cert: &CertificateDer<'_>) -> CertMetadata {
+    let fingerprint = fingerprint_der(cert);
+    match x509_parser::parse_x509_certificate(cert.as_ref()) {
+        Ok((_, parsed)) => CertMetadata {
+            fingerprint,
+            not_before_unix: Some(parsed.validity().not_before.timestamp()),
+            not_after_unix: Some(parsed.validity().not_after.timestamp()),
+            subject: Some(parsed.subject().to_string()),
+        },
+        Err(_) => CertMetadata {
+            fingerprint,
+            not_before_unix: None,
+            not_after_unix: None,
+            subject: None,
+        },
+    }
 }
 
 /// Serves the current certificate to every new handshake, swappable at
