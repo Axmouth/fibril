@@ -241,7 +241,7 @@ async function refresh() {
   document.getElementById("q-cfg-group").textContent = group || "none";
   document.getElementById("q-cfg-parts").textContent = String(parts.length);
   document.getElementById("q-cfg-dlq").textContent =
-    configured ? String(configured.state.dlq_policy ?? "none") : "load a partition to read";
+    configured ? dlqPolicyKind(configured.state.dlq_policy) : "load a partition to read";
   document.getElementById("q-cfg-retries").textContent =
     configured && configured.state.dlq_max_retries != null
       ? String(configured.state.dlq_max_retries)

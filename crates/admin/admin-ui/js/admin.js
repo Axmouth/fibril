@@ -164,3 +164,14 @@ function escapeHtml(s) {
 function fmtCount(n) {
   return Number.isFinite(n) ? Number(n).toLocaleString("en-US") : "--";
 }
+
+// The queue debug snapshot reports the storage dead-letter policy enum via its
+// Debug string (Discard, GlobalDQL, CustomDQL(..)). Normalize to the admin
+// vocabulary before display.
+function dlqPolicyKind(raw) {
+  const s = String(raw || "");
+  if (s.startsWith("CustomDQL")) return "custom";
+  if (s.startsWith("GlobalDQL")) return "global";
+  if (s.startsWith("Discard")) return "discard";
+  return s ? s.toLowerCase() : "none";
+}

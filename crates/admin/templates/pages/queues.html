@@ -262,12 +262,14 @@ async function refresh() {
         const act = activityByQueue.get(activityKey(topic, parts[0]?.group));
         const sumState = (field) => parts.filter(p => p.materialized).reduce((acc, p) => acc + num(p.state[field]), 0);
         const dlqItem = parts.find(p => p.materialized);
-        const policyChipClass = (policy) =>
-          policy === "discard" ? "chip-warn" : policy === "custom" ? "chip-group" : "chip-plain";
-        const dlqChips = (state) => state
-          ? `<span class="${policyChipClass(String(state.dlq_policy ?? "none"))}">dlq ${escapeHtml(String(state.dlq_policy ?? "none"))}</span>`
-            + (state.dlq_max_retries != null ? ` <span class="chip-plain">retry ${escapeHtml(String(state.dlq_max_retries))}</span>` : "")
-          : '<span class="v-dim">—</span>';
+        const policyChipClass = (kind) =>
+          kind === "discard" ? "chip-warn" : kind === "custom" ? "chip-group" : "chip-plain";
+        const dlqChips = (state) => {
+          if (!state) return '<span class="v-dim">—</span>';
+          const kind = dlqPolicyKind(state.dlq_policy);
+          return `<span class="${policyChipClass(kind)}">dlq ${escapeHtml(kind)}</span>`
+            + (state.dlq_max_retries != null ? ` <span class="chip-plain">retry ${escapeHtml(String(state.dlq_max_retries))}</span>` : "");
+        };
         const aggReady = sumState("ready_count");
         const aggSubs = num(act?.active_subscribers);
         const subsClass = aggSubs > 0 ? "v-ok" : (aggReady > 0 ? "v-warn" : "v-dim");

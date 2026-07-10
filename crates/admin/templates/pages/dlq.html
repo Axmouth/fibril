@@ -113,8 +113,10 @@ async function refresh() {
   const byQueue = new Map();
   for (const q of queues) {
     if (!q.materialized) continue;
-    const policy = q.state.dlq_policy;
-    if (!policy || policy === "none") continue;
+    // Only queues that actually dead-letter somewhere; discard (the default)
+    // drops failures after retries, and the queues page flags it in amber.
+    const policy = dlqPolicyKind(q.state.dlq_policy);
+    if (policy !== "global" && policy !== "custom") continue;
     const key = `${q.topic} ${q.group || ""}`;
     const entry = byQueue.get(key) || {
       topic: q.topic, group: q.group, policy,
@@ -129,7 +131,7 @@ async function refresh() {
     <tr>
       <td><a class="mono" href="${queueHref(r.topic, r.group)}">${escapeHtml(r.topic)}</a></td>
       <td>${r.group ? `<span class="chip-group">${escapeHtml(r.group)}</span>` : '<span class="v-dim">—</span>'}</td>
-      <td><span class="${r.policy === "discard" ? "chip-warn" : r.policy === "custom" ? "chip-group" : "chip-plain"}">${escapeHtml(String(r.policy))}</span></td>
+      <td><span class="${r.policy === "custom" ? "chip-group" : "chip-plain"}">${escapeHtml(String(r.policy))}</span></td>
       <td class="text-right">${r.retries != null ? escapeHtml(String(r.retries)) : '<span class="v-dim">default</span>'}</td>
       <td class="text-right">${fmtCount(r.depth)}</td>
       <td><a class="queue-messages-link" href="${inspectHref(r.topic, r.group)}">Inspect</a></td>
