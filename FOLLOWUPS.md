@@ -2934,3 +2934,15 @@ Hunt plan: dedicated instrumented session - reproduce with an aged data dir +
 TTL + repeated 5M x 1KB writer runs under drive saturation; instrument
 keratin fsync-fusion completion-set accounting AND the handler read/publish
 path, and watch stroma lane depths. Trace before patching.
+
+## Future: enable TLS from the dashboard (no config edit)
+
+User idea (2026-07-10): first-run TLS setup from the Security page - e.g. a
+"Enable TLS" flow that triggers the auto-self-signed generation (the material
+machinery already exists) and switches the listeners over, without touching
+the config file. Design questions to settle: listeners currently build TLS at
+startup, so this needs live listener rebinding or a dual-listen window; how
+the choice persists across restarts without a config write (persist a
+data-dir marker? write back to config with consent?); and the plaintext-426
+guidance story during the switchover. Pairs well with the existing live
+rotation and the cert card already on the Security page.
