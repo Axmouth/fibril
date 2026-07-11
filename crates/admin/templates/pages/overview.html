@@ -87,6 +87,27 @@
     aria-label="Total backlog over the last 30 minutes"></svg>
 </section>
 
+<details class="overview-details overview-panel" id="resource-graphs">
+  <summary>Resources — last 30 min (memory, CPU, disk)</summary>
+  <div class="resource-grid">
+    <div>
+      <h5 class="micro">Memory, MB</h5>
+      <svg id="chart-rss" class="chart chart-short" width="720" height="90" role="img"
+        aria-label="Resident memory over the last 30 minutes"></svg>
+    </div>
+    <div>
+      <h5 class="micro">CPU</h5>
+      <svg id="chart-cpu" class="chart chart-short" width="720" height="90" role="img"
+        aria-label="Process CPU over the last 30 minutes"></svg>
+    </div>
+    <div>
+      <h5 class="micro">Disk, MB</h5>
+      <svg id="chart-disk" class="chart chart-short" width="720" height="90" role="img"
+        aria-label="Data directory usage over the last 30 minutes"></svg>
+    </div>
+  </div>
+</details>
+
 <section class="overview-panel" aria-label="Stroma timings">
   <div class="overview-panel-heading">
     <h5>Stroma Timings</h5>
@@ -299,6 +320,18 @@ function renderHistory(history) {
   setCompact(document.getElementById("connections_count"), latest ? latest.connections : NaN);
   document.getElementById("subscriptions_count").textContent = latest ? fmtCompact(latest.subscriptions) : "--";
   setCompact(document.getElementById("backlog-now"), latest ? latest.backlog : NaN);
+
+  // Resource graphs (collapsed by default; the open state sticks per browser).
+  const resourceTimes = samples.map((s) => s.at);
+  renderChart(document.getElementById("chart-rss"), [
+    { values: samples.map((s) => s.rss_mb), color: "var(--accent)", fill: true, label: "MB" },
+  ], { hover: true, times: resourceTimes });
+  renderChart(document.getElementById("chart-cpu"), [
+    { values: samples.map((s) => s.cpu), color: "var(--active)", fill: true, label: "cpu" },
+  ], { hover: true, times: resourceTimes });
+  renderChart(document.getElementById("chart-disk"), [
+    { values: samples.map((s) => (s.disk_used || 0) / (1024 * 1024)), color: "var(--accent)", fill: true, label: "MB" },
+  ], { hover: true, times: resourceTimes });
   document.getElementById("backlog-trend").textContent = trendWord(backlog);
 }
 
@@ -353,6 +386,13 @@ async function refresh() {
   ]);
   render({ overview, history, attention });
 }
+// Remember whether the resource graphs were left open.
+const resourcePanel = document.getElementById("resource-graphs");
+resourcePanel.open = window.localStorage.getItem("fibril-admin-resources") === "open";
+resourcePanel.addEventListener("toggle", () => {
+  window.localStorage.setItem("fibril-admin-resources", resourcePanel.open ? "open" : "closed");
+});
+
 liveData(["overview", "history", "attention"], render, refresh);
 </script>
 {% endblock %}

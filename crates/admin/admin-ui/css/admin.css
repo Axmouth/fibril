@@ -2165,3 +2165,18 @@ html[data-theme="light"][data-flavor="iris"] {
 .seg-2 { background: color-mix(in srgb, var(--accent) 55%, var(--panel)); }
 .seg-3 { background: color-mix(in srgb, var(--active) 55%, var(--panel)); }
 .seg-other { background: var(--dim); }
+
+/* ---- optional resource graphs (Overview, collapsed by default) ---- */
+.resource-grid {
+  display: grid;
+  gap: 14px;
+  margin-top: 10px;
+}
+.resource-grid .micro { margin: 0 0 4px; }
+
+.settings-actions-note {
+  color: var(--muted);
+  font-size: 12px;
+  align-self: center;
+  max-width: 480px;
+}

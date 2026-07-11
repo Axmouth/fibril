@@ -51,6 +51,12 @@ pub struct Sample {
     pub inflight: u64,
     pub connections: u64,
     pub subscriptions: u64,
+    /// Resident process memory at the sample, in MB.
+    pub rss_mb: f64,
+    /// Process CPU usage at the sample.
+    pub cpu: f64,
+    /// Approximate data-directory bytes at the sample.
+    pub disk_used: u64,
 }
 
 /// One per-queue instant: depth and leased work for a (topic, group) queue.
@@ -162,6 +168,8 @@ fn now_unix() -> i64 {
 pub async fn run_sampler_once(server: &AdminServer) {
     let broker = server.metrics.broker().snapshot();
     let connections = server.metrics.connections();
+    let sys = server.metrics.system().snapshot();
+    let disk_used = server.storage.estimate_disk_used().await.unwrap_or_default();
     let at = now_unix();
 
     let mut backlog = 0u64;
@@ -197,6 +205,9 @@ pub async fn run_sampler_once(server: &AdminServer) {
         inflight,
         connections: connections.open_connections() as u64,
         subscriptions: connections.open_subscriptions() as u64,
+        rss_mb: sys.rss_mb,
+        cpu: sys.cpu as f64,
+        disk_used,
     };
     server.history.record(sample, queue_points);
 }
@@ -248,6 +259,9 @@ mod tests {
             published_per_sec: 0.0,
             delivered_per_sec: 0.0,
             completed_per_sec: 0.0,
+            rss_mb: 0.0,
+            cpu: 0.0,
+            disk_used: 0,
             backlog: 0,
             inflight: 0,
             connections: 0,
