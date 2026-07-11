@@ -41,6 +41,11 @@
     </article>
   </section>
 
+  <div class="queue-controls" aria-label="Publish a test message">
+    <input id="q-test-text" placeholder="test message text (optional)" />
+    <button class="btn" id="q-test-send" type="button">Publish test message</button>
+  </div>
+
   <section class="overview-panel" aria-label="Depth over time">
     <div class="overview-panel-heading">
       <h5>Depth — last 30 min
@@ -258,6 +263,24 @@ async function refresh() {
   if (group) inspect.set("group", group);
   document.getElementById("q-inspect").href = `/admin/messages?${inspect}`;
 }
+// Publish one operator test message through the broker's real publish path.
+// It lands with a fibril.test header so consumers can recognize it.
+document.getElementById("q-test-send").addEventListener("click", async () => {
+  const input = document.getElementById("q-test-text");
+  const text = input.value.trim() || "test message from the dashboard";
+  const btn = document.getElementById("q-test-send");
+  btn.disabled = true;
+  const { ok, data } = await apiPost("/admin/api/publish", { topic, group: group || null, text });
+  btn.disabled = false;
+  if (ok) {
+    toast(`Test message confirmed durable on partition ${data?.partition ?? "?"}`);
+    input.value = "";
+    refresh();
+  } else {
+    toast(`Publish failed: ${data?.message || data?.error || "request failed"}`);
+  }
+});
+
 autoRefresh(refresh, 2000);
 refresh();
 </script>

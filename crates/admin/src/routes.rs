@@ -891,6 +891,56 @@ pub async fn reload_tls(
     }
 }
 
+#[derive(Deserialize)]
+pub struct TestPublishRequest {
+    pub topic: String,
+    #[serde(default)]
+    pub group: Option<String>,
+    /// Text body of the test message, published with a text content type.
+    pub text: String,
+}
+
+pub async fn publish_test_message(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<TestPublishRequest>,
+) -> Result<Response, StatusCode> {
+    check_auth(&server, &headers).await?;
+
+    let Some(publisher) = &server.test_publisher else {
+        return Ok(admin_error(
+            StatusCode::NOT_FOUND,
+            "publish_unavailable",
+            "test publish is not available on this broker",
+        ));
+    };
+
+    let topic = request.topic.trim();
+    if topic.is_empty() {
+        return Ok(admin_error(
+            StatusCode::BAD_REQUEST,
+            "topic_required",
+            "topic must not be empty",
+        ));
+    }
+    let group = request
+        .group
+        .as_deref()
+        .map(str::trim)
+        .filter(|g| !g.is_empty());
+
+    match publisher.publish_text(topic, group, request.text).await {
+        Ok(outcome) => {
+            Ok(Json(serde_json::to_value(&outcome).unwrap_or_default()).into_response())
+        }
+        Err(message) => Ok(admin_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "publish_failed",
+            message,
+        )),
+    }
+}
+
 pub async fn drain(
     State(server): State<Arc<AdminServer>>,
     headers: axum::http::HeaderMap,

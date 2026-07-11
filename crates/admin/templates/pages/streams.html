@@ -144,6 +144,7 @@ async function refresh() {
               ${durabilityChip}
               <span class="chip-plain">retention ${escapeHtml(retention)}</span>
               <span class="queue-group-note">${parts.length} partition(s)</span>
+              <button class="btn" type="button" data-test-publish="${escapeHtml(topic)}">Publish test record</button>
             </div>
             <table class="table table-compact narrow metric-table queue-table">
               <tr>
@@ -248,6 +249,26 @@ document.getElementById("create-toggle").addEventListener("click", () => {
   panel.hidden = !panel.hidden;
   if (!panel.hidden) document.getElementById("create.topic").focus();
 });
+// Test-publish one record into a stream through the broker's real publish
+// path (delegated: the cards re-render every poll). Lands with a fibril.test
+// header so subscribers can recognize it.
+document.getElementById("streams").addEventListener("click", async (event) => {
+  const btn = event.target.closest("[data-test-publish]");
+  if (!btn) return;
+  btn.disabled = true;
+  const { ok, data } = await apiPost("/admin/api/publish", {
+    topic: btn.dataset.testPublish,
+    text: "test record from the dashboard",
+  });
+  btn.disabled = false;
+  if (ok) {
+    toast(`Test record confirmed on partition ${data?.partition ?? "?"}`);
+    refresh();
+  } else {
+    toast(`Publish failed: ${data?.message || data?.error || "request failed"}`);
+  }
+});
+
 wireUrlFilter(document.getElementById("stream-search"), "q", refresh);
 
 autoRefresh(refresh, 2000);

@@ -97,7 +97,10 @@ loaded counts, a 30-minute depth trend sparkline, and the queue's dead-letter
 policy. Expand a topic to see each partition's own state, or open **Detail**
 for the full picture of one queue: its depth and leased charts, per-partition
 cards, live consumers with their settlement mode, and its declared
-configuration.
+configuration. The detail page can also **publish a test message** through the
+broker's real publish path - durable confirm and delivery included - so you can
+verify a queue end to end without a client. Test messages carry a reserved
+`fibril.test: admin` header consumers can recognize and filter.
 
 When this broker is replicating queues from their owners, the page also shows a
 follower-replication section: which partitions this broker follows, each
@@ -115,7 +118,9 @@ channels this broker is currently hosting, grouped by topic. Each partition row
 shows its head and tail offsets, how many records are retained, its live
 subscription count, and how often a subscriber overflowed its live buffer and
 went through lag recovery. The topic heading shows the declared durability
-tier and retention bound.
+tier and retention bound, and a **publish test record** button that sends one
+marked record through the real publish path, the same end-to-end check the
+queue detail page offers.
 
 You can **create a stream** from the page: a topic, a partition count, a
 durability tier, and optional retention bounds (records, bytes, or age). A topic

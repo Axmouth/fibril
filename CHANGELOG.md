@@ -27,6 +27,13 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   streams, connections, and subscriptions pages (and the hide-inactive toggle
   on queues) mirror into query parameters, so a filtered view survives reload
   and can be shared by copying the address.
+- Publish a test message from the dashboard. The queue detail page and each
+  stream card gain a button that sends one text message through the broker's
+  real publish path (`POST /admin/api/publish`) - partition pick, durable
+  confirm, and delivery all engage, so an operator can verify a queue or
+  stream end to end without a client. Test messages carry a reserved
+  `fibril.test: admin` header, which clients cannot forge, so consumers can
+  recognize operator traffic.
 - Admin dashboard mechanisms behind the new operations views: a per-broker
   in-memory time series (`GET /admin/api/history`, sampled every 5s over the last
   30 minutes) for throughput and backlog-over-time; a server-computed attention

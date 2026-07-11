@@ -84,6 +84,28 @@ pub struct DrainOutcome {
     pub handoff_waited_ms: u64,
 }
 
+/// Publish a single operator test message through the broker's real publish
+/// path, durable confirm included. Backs the queue-detail "publish test
+/// message" button, so an operator can verify a queue end to end without a
+/// client. The error string is shown to the operator verbatim.
+#[async_trait]
+pub trait BrokerTestPublisher: Send + Sync + 'static {
+    async fn publish_text(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+        text: String,
+    ) -> Result<TestPublishOutcome, String>;
+}
+
+/// Where a test publish landed once the broker confirmed it durable.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TestPublishOutcome {
+    pub partition: u32,
+    /// Whether the topic resolved to a work queue or a Plexus stream.
+    pub kind: String,
+}
+
 /// Re-reads and swaps the broker's TLS material, returning the new leaf
 /// certificate fingerprint. Errors leave the old material serving.
 pub type TlsReloadHandler = dyn Fn() -> Result<String, String> + Send + Sync;
@@ -195,6 +217,8 @@ pub struct AdminServer {
     pub users: Option<Arc<dyn UserAdmin>>,
     /// Optional drain controller for `POST /admin/api/drain`.
     pub drain: Option<Arc<dyn BrokerDrainController>>,
+    /// Optional test-message publisher for `POST /admin/api/publish`.
+    pub test_publisher: Option<Arc<dyn BrokerTestPublisher>>,
     /// Optional live TLS reload for `POST /admin/api/tls/reload`.
     pub tls_reload: Option<Arc<TlsReloadHandler>>,
     /// Optional served-certificate metadata (fingerprint, validity) for the
@@ -242,6 +266,7 @@ impl AdminServer {
             streams: None,
             users: None,
             drain: None,
+            test_publisher: None,
             tls_reload: None,
             cert_info: None,
             history: crate::history::History::new(),
@@ -257,6 +282,12 @@ impl AdminServer {
     /// Attach the drain controller for `POST /admin/api/drain`.
     pub fn with_drain(mut self, drain: Arc<dyn BrokerDrainController>) -> Self {
         self.drain = Some(drain);
+        self
+    }
+
+    /// Attach the test-message publisher for `POST /admin/api/publish`.
+    pub fn with_test_publisher(mut self, publisher: Arc<dyn BrokerTestPublisher>) -> Self {
+        self.test_publisher = Some(publisher);
         self
     }
 
@@ -426,6 +457,10 @@ impl AdminServer {
                 axum::routing::post(routes::repartition_queue),
             )
             .route("/admin/api/drain", axum::routing::post(routes::drain))
+            .route(
+                "/admin/api/publish",
+                axum::routing::post(routes::publish_test_message),
+            )
             .route(
                 "/admin/api/tls/reload",
                 axum::routing::post(routes::reload_tls),
@@ -1653,6 +1688,128 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = response_json(response).await;
         assert_eq!(body["code"], "invalid_topic");
+    }
+
+    struct FakeTestPublisher {
+        seen: StdArc<StdMutex<Vec<(String, Option<String>, String)>>>,
+        result: Result<u32, String>,
+    }
+
+    #[async_trait]
+    impl BrokerTestPublisher for FakeTestPublisher {
+        async fn publish_text(
+            &self,
+            topic: &str,
+            group: Option<&str>,
+            text: String,
+        ) -> Result<TestPublishOutcome, String> {
+            self.seen.lock().unwrap().push((
+                topic.to_string(),
+                group.map(str::to_string),
+                text,
+            ));
+            self.result.clone().map(|partition| TestPublishOutcome {
+                partition,
+                kind: "queue".to_string(),
+            })
+        }
+    }
+
+    fn publish_request(body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/admin/api/publish")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    fn with_fake_publisher(server: Arc<AdminServer>, fake: FakeTestPublisher) -> Arc<AdminServer> {
+        StdArc::new(
+            StdArc::try_unwrap(server)
+                .ok()
+                .expect("test server has a single handle")
+                .with_test_publisher(StdArc::new(fake)),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_publish_unavailable_without_seam() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(publish_request(json!({ "topic": "orders", "text": "hi" })))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "publish_unavailable");
+    }
+
+    #[tokio::test]
+    async fn test_publish_flows_through_the_seam() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let seen = StdArc::new(StdMutex::new(Vec::new()));
+        let server = with_fake_publisher(
+            server,
+            FakeTestPublisher {
+                seen: seen.clone(),
+                result: Ok(2),
+            },
+        );
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(publish_request(
+                json!({ "topic": "orders", "group": "billing", "text": "hi" }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["partition"], 2);
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            &[(
+                "orders".to_string(),
+                Some("billing".to_string()),
+                "hi".to_string()
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_publish_rejects_empty_topic_and_reports_errors() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let server = with_fake_publisher(
+            server,
+            FakeTestPublisher {
+                seen: StdArc::new(StdMutex::new(Vec::new())),
+                result: Err("no publishable partition".to_string()),
+            },
+        );
+        let app = AdminServer::router(server);
+
+        let response = app
+            .clone()
+            .oneshot(publish_request(json!({ "topic": "  ", "text": "hi" })))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "topic_required");
+
+        let response = app
+            .oneshot(publish_request(json!({ "topic": "orders", "text": "hi" })))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "publish_failed");
+        assert_eq!(body["message"], "no publishable partition");
     }
 
     #[tokio::test]

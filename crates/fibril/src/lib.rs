@@ -26,8 +26,8 @@ use fibril_broker::{
         StickyConsumerGroupAssignor, StreamIdentity,
     },
     queue_engine::{
-        KeratinConfig, QueueEngine as _, RecoveryMismatchPolicy, SnapshotConfig, StromaEngine,
-        StromaError, StromaKeratinConfig,
+        KeratinConfig, MessageContentType, MessageHeaders, QueueEngine as _,
+        RecoveryMismatchPolicy, SnapshotConfig, StromaEngine, StromaError, StromaKeratinConfig,
     },
     runtime_settings::{
         ConnectionRuntimeSettings as BrokerConnectionRuntimeSettings, ConsumerGroupRuntimeSettings,
@@ -317,6 +317,170 @@ impl fibril_admin::BrokerDrainController for ConnectionSettingsDrainController {
             handoff_complete: remaining == 0,
             handoff_waited_ms: started.elapsed().as_millis() as u64,
         }
+    }
+}
+
+/// Admin test publish: one operator message through the broker's real publish
+/// path (partition pick, durable confirm, delivery wakeup), so the dashboard
+/// can verify a queue end to end without a client.
+struct AdminTestPublisher {
+    broker: Arc<Broker<StromaEngine>>,
+    engine: StromaEngine,
+}
+
+impl AdminTestPublisher {
+    /// Test-publish into a Plexus stream through the same channel path the
+    /// publish handler takes: durability confirm first, then the assignment's
+    /// replication policy, exactly like a client publish.
+    async fn publish_stream_text(
+        &self,
+        topic: &str,
+        local_partition_count: Option<u32>,
+        text: String,
+    ) -> Result<fibril_admin::TestPublishOutcome, String> {
+        // Without a locally open channel the count is unknown - try partition
+        // zero and let the ownership check say who serves this stream.
+        let mut partitions: Vec<u32> = (0..local_partition_count.unwrap_or(1).max(1)).collect();
+        fastrand::shuffle(&mut partitions);
+        let mut last_error = String::new();
+        for part in partitions {
+            if let Err(e) = self.broker.ensure_stream_owner(topic, part) {
+                last_error = e.to_string();
+                continue;
+            }
+            let Some(channel) = self.broker.route_stream(topic, part).await else {
+                last_error = format!("stream partition {part} is not open on this broker");
+                continue;
+            };
+            let now = fibril_util::unix_millis();
+            let mut extra = std::collections::HashMap::new();
+            extra.insert("fibril.test".to_string(), "admin".to_string());
+            if channel.durability() == fibril_broker::stream::StreamDurability::Speculative {
+                extra.insert(
+                    fibril_protocol::v1::HEADER_SPECULATIVE.to_string(),
+                    "1".to_string(),
+                );
+            }
+            let headers = MessageHeaders {
+                published: now,
+                publish_received: now,
+                content_type: Some(MessageContentType::Text),
+                extra,
+            };
+            let confirm = channel
+                .publish_pipelined(headers, text.clone().into_bytes())
+                .await
+                .map_err(|e| format!("stream publish failed: {e}"))?;
+            let offset = match tokio::time::timeout(Duration::from_secs(10), confirm).await {
+                Ok(Ok(Ok(offset))) => offset,
+                Ok(Ok(Err(e))) => return Err(format!("stream publish failed: {e}")),
+                Ok(Err(_)) => return Err("publish confirmation dropped".to_string()),
+                Err(_) => return Err("timed out waiting for the durable confirm".to_string()),
+            };
+            self.broker
+                .await_replication_confirm(
+                    topic,
+                    fibril_broker::storage::Partition::new(part),
+                    None,
+                    offset,
+                )
+                .await
+                .map_err(|e| format!("stream replication confirm failed: {e}"))?;
+            return Ok(fibril_admin::TestPublishOutcome {
+                partition: part,
+                kind: "stream".to_string(),
+            });
+        }
+        Err(format!(
+            "no publishable stream partition on this broker: {last_error}"
+        ))
+    }
+}
+
+#[async_trait]
+impl fibril_admin::BrokerTestPublisher for AdminTestPublisher {
+    async fn publish_text(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+        text: String,
+    ) -> Result<fibril_admin::TestPublishOutcome, String> {
+        // Streams resolve first, mirroring the publish handler's routing: a
+        // topic declared as a stream must never grow queue state as a side
+        // effect of a test message.
+        let stream_partitions = self
+            .broker
+            .stream_partition_counts()
+            .into_iter()
+            .find(|(tp, _)| tp == topic)
+            .map(|(_, count)| count);
+        if stream_partitions.is_some() || self.broker.stream_declared_in_coordination(topic) {
+            if group.is_some() {
+                return Err("streams have no consumer groups - leave group empty".to_string());
+            }
+            return self.publish_stream_text(topic, stream_partitions, text).await;
+        }
+
+        let mut partitions: Vec<u32> = self
+            .engine
+            .list_partitions()
+            .await
+            .map_err(|e| format!("could not list partitions: {e}"))?
+            .into_iter()
+            .filter(|(tp, _, grp)| tp == topic && grp.as_deref() == group)
+            .map(|(_, part, _)| part)
+            .collect();
+        if partitions.is_empty() {
+            return Err(format!(
+                "no queue or stream named '{topic}' on this broker"
+            ));
+        }
+
+        // Random starting partition, then try the rest in turn: in cluster mode
+        // this node may own only some of them and get_publisher refuses the rest.
+        fastrand::shuffle(&mut partitions);
+        let group: Option<fibril_broker::storage::Group> = group.map(str::to_string);
+        let mut last_error = String::new();
+        for part in partitions {
+            let handle = match self
+                .broker
+                .get_publisher(topic, fibril_broker::storage::Partition::new(part), &group)
+                .await
+            {
+                Ok(handle) => handle,
+                Err(e) => {
+                    last_error = e.to_string();
+                    continue;
+                }
+            };
+            let now = fibril_util::unix_millis();
+            // Mark the message in the reserved broker header namespace so
+            // consumers can recognize operator test traffic. Clients cannot
+            // set fibril.* headers themselves, so the marker is trustworthy.
+            let mut extra = std::collections::HashMap::new();
+            extra.insert("fibril.test".to_string(), "admin".to_string());
+            let confirm = handle
+                .publish(
+                    text.clone().into_bytes(),
+                    now,
+                    now,
+                    Some(MessageContentType::Text),
+                    extra,
+                    None,
+                )
+                .await
+                .map_err(|e| format!("publish failed: {e}"))?;
+            return match tokio::time::timeout(Duration::from_secs(10), confirm).await {
+                Ok(Ok(Ok(_))) => Ok(fibril_admin::TestPublishOutcome {
+                    partition: part,
+                    kind: "queue".to_string(),
+                }),
+                Ok(Ok(Err(e))) => Err(format!("publish failed: {e}")),
+                Ok(Err(_)) => Err("publish confirmation dropped".to_string()),
+                Err(_) => Err("timed out waiting for the durable confirm".to_string()),
+            };
+        }
+        Err(format!("no publishable partition on this broker: {last_error}"))
     }
 }
 
@@ -1714,6 +1878,13 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         }
     };
     let admin = admin.with_drain(Arc::new(drain_controller));
+
+    // Operator test publish from the queue detail page, through the real
+    // publish path so counters, delivery, and durability all engage.
+    let admin = admin.with_test_publisher(Arc::new(AdminTestPublisher {
+        broker: broker.clone(),
+        engine: engine.clone(),
+    }));
 
     // Per-broker exclusive-cohort view (this node's local cohort membership).
     let admin = admin.with_cohorts({

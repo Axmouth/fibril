@@ -209,6 +209,7 @@ See also: [reconnects](/reliability/reconnects/) and
 | Restore-client-subscriptions policy | Implemented | Broker, Rust client, TypeScript client, Python client, Go client, C# client |
 | Reconnect observability | Implemented | Admin overview, TCP metrics log, structured reconciliation logs |
 | Planned restart drain | Implemented | `POST /admin/api/drain` broadcasts a `GoingAway` push (grace deadline + message) to connected clients, surfaced by all three clients as an app-observable event. In coordinated mode the node also marks itself draining: the controller hands each partition with a caught-up follower to it through the same fenced promotion as failover, the draining node receives no new placements, and the call returns with handoff progress once ownership has moved or `connection.drain_handoff_timeout_ms` (default 30s) elapses. Follower-less partitions stay put and fail over reactively as before |
+| Operator test publish | Implemented | `POST /admin/api/publish` sends one text message through the broker's real publish path (partition pick, durable confirm, delivery) to a queue or Plexus stream, stamped with a reserved `fibril.test: admin` header so consumers can recognize operator traffic. Surfaced as a button on the dashboard's queue detail page and stream cards |
 | Durable broker restart reconciliation | Planned | Design notes only |
 | In-flight publish replay | Out of scope | Clients do not replay old in-flight protocol requests |
 
