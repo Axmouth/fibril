@@ -1,0 +1,30 @@
+# Cluster membership churn: nodes leave and rejoin while you watch the
+# Cluster page and the Activity feed record node_left / node_joined.
+# Run: scripts/scenario.sh scripts/scenarios/membership-churn.scenario --nodes 3 --ganglion
+# Watch: /admin/topology and /admin/activity on node 1 (http://127.0.0.1:8081).
+
+say Cluster is up - give the coordinator a moment
+wait 10
+
+say Declaring a queue so ownership is visible on the Cluster page
+declare-queue orders 3
+publish-burst orders 1000 256
+wait 10
+
+say Killing node 3 - watch the Cluster page react and Activity record node_left
+node-kill 3
+wait 30
+
+say Bringing node 3 back - node_joined lands in the feed
+node-start 3
+wait 20
+
+say Killing node 2 this time
+node-kill 2
+wait 30
+
+say And back again
+node-start 2
+wait 15
+
+say Done - browse the pages, then Ctrl-C to tear down

@@ -1,6 +1,6 @@
 use std::{
     fs,
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    net::SocketAddr,
     path::PathBuf,
     sync::{
         Arc,
@@ -37,6 +37,7 @@ fn percentile(sorted: &[u64], percentile: f64) -> u64 {
 }
 
 async fn run_load_test(
+    addr: SocketAddr,
     num_clients: usize,
     msgs_per_client: usize,
     start_reader: bool,
@@ -66,7 +67,7 @@ async fn run_load_test(
         let topic = topic.clone();
         handles.push(tokio::spawn(async move {
             let payload = vec![8u8; payload_size];
-            let address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from([127, 0, 0, 1]), 9876));
+            let address = addr;
             let client = ClientOptions::new()
                 .auth("fibril", "fibril")
                 .connect(address)
@@ -354,6 +355,10 @@ struct Args {
     /// different topics against one broker to separate per-topic contention.
     #[arg(long, default_value = "topic1")]
     topic: String,
+
+    /// Broker address to connect to.
+    #[arg(long, default_value = "127.0.0.1:9876")]
+    addr: SocketAddr,
 }
 
 #[tokio::main]
@@ -368,6 +373,7 @@ async fn main() {
 
     tokio::spawn(async move {
         run_load_test(
+            args.addr,
             args.clients,
             args.messages,
             args.reader,

@@ -1,0 +1,32 @@
+# A tour of the Activity feed and attention panel on one broker.
+# Run: scripts/scenario.sh scripts/scenarios/activity-tour.scenario
+# Watch: /admin/activity and the Overview attention panel.
+
+say Declaring queues and a stream - watch Activity fill
+declare-queue orders 2
+declare-queue invoices
+declare-stream events 1 durable
+wait 3
+
+say Publishing a backlog with NO consumer - attention should raise no_consumer within ~15s
+publish-burst orders 2000 256
+wait 20
+
+say Attaching a consumer - the condition resolves (watch Activity for the resolved entry)
+consume orders 15
+wait 20
+
+say Operator test messages (they land with the fibril.test header)
+test-publish orders hello from the scenario
+test-publish events stream check
+wait 3
+
+say Deleting a queue - a warning entry in the feed
+delete-queue invoices
+wait 3
+
+say Announcing a drain - the feed records it and attention flags the parked drain
+drain 5000
+wait 5
+
+say Done - browse the feed, then Ctrl-C to tear down
