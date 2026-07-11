@@ -2874,7 +2874,56 @@ Broker unchanged (crates/tls still prints the CA fp; its no-EKU cert validates u
 the lenient path check). CHANGELOG has the Security Fixed entry. Full design record
 was archive/SECURITY_CA_PIN_FIX.md.
 
-## BUG REPORT (open, 2026-07-10): publish wedged until restart under e2e_c load
+## BUG REPORT (ROOT CAUSE CONFIRMED 2026-07-11): publish wedged until restart under e2e_c load
+
+RESOLUTION OF THE HUNT (Phase 1, 2026-07-11): the wedge is a deadlock between
+the keratin writer thread and its fsync worker, confirmed by captured thread
+stacks in a controlled repro. Mechanism, in keratin-log/src/writer.rs:
+
+- The writer sends commits to the fsync worker over a bounded channel
+  (fsync_tx, capacity = max_inflight_fsyncs) with a BLOCKING send in commit().
+- maybe_commit_due's second disjunct (elapsed >= fsync_interval) issues
+  commits without honoring the inflight cap, so under saturated-drive fsyncs
+  (0.9-1.2s each vs a 5ms interval) the writer routinely fills the channel and
+  parks in fsync_tx.send.
+- The fsync-fusion drain (recv + try_recv loop) can collect one MORE request
+  than the channel capacity when the parked writer wakes and enqueues while
+  the worker is preempted mid-drain. The worker then owes cap+1 FsyncDones,
+  delivered by BLOCKING sends into done_tx, which is also sized to cap.
+- If the writer has meanwhile refilled fsync_tx and parked again, the worker
+  parks mid-fan-out: writer waits for the worker to recv, worker waits for
+  the writer to drain dones. Both are plain OS threads with no timeout -
+  permanent mutual park. Every later append piles into the writer command
+  channel (cap 8192) and then blocks its senders, wedging the stroma queue
+  actor: queue flow dead, control plane alive, exactly the field shape. The
+  preemption-race window is microseconds, which is why the field hit it only
+  three times across days of saturated benching.
+
+Evidence: keratin-log/examples/wedge_stress.rs (real writer, AfterFsync
+appends) run single-core-pinned on the nvme scratch drive with a parallel
+dd+fsync hog stretching ext4 journal commits to field latencies. Wedged in
+~90s. gdb stacks show the writer parked in crossbeam send<FsyncReq> at
+writer.rs:1547 (via maybe_commit_due writer.rs:1212) and the fsync worker
+parked in crossbeam send<FsyncDone> at writer.rs:394, completions counter
+frozen. fd count at wedge: 18, so no fd exhaustion. The third occurrence's
+connect-time ECONNRESETs were a downstream symptom of the wedged broker, not
+a cause.
+
+FIX SHIPPED (keratin, same day): scheduled commits now honor the pipeline
+capacity as a hard cap (the interval-due branch no longer overruns it), and
+every fsync handoff runs behind an ensure_fsync_slot gate that drains
+completions until a slot is free, so no fsync_tx send can ever park and the
+worker's fused group always fits the done channel - the cycle is structurally
+impossible. Verified: full keratin workspace suite green, and the wedge recipe
+(cap=1, single core, dd-fsync drive hog) that killed the unfixed writer in
+~90s at 514 completions ran 22 minutes clean to 3.2M completions (cap=8
+variant likewise, 2.95M), with a side bonus of ~30x saturated-throughput at
+cap=1 because the writer keeps staging instead of parking. Repro tool kept as
+keratin-log/examples/wedge_stress.rs (no unsafe).
+
+Original case file kept below for the record.
+
+## BUG REPORT original notes (2026-07-10): publish wedged until restart under e2e_c load
 
 Reported while running `benches` e2e_c (writer -m 50000 -c 10 --size 1024, then
 reader): publishing stalled permanently mid-run; only a broker restart cleared
