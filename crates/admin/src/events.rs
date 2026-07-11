@@ -36,10 +36,11 @@ pub enum Family {
     Subscriptions,
     Cohorts,
     GlobalDlq,
+    Audit,
 }
 
 impl Family {
-    pub const ALL: [Family; 10] = [
+    pub const ALL: [Family; 11] = [
         Family::Overview,
         Family::History,
         Family::Attention,
@@ -50,6 +51,7 @@ impl Family {
         Family::Subscriptions,
         Family::Cohorts,
         Family::GlobalDlq,
+        Family::Audit,
     ];
 
     pub fn name(self) -> &'static str {
@@ -64,6 +66,7 @@ impl Family {
             Family::Subscriptions => "subscriptions",
             Family::Cohorts => "cohorts",
             Family::GlobalDlq => "global_dlq",
+            Family::Audit => "audit",
         }
     }
 
@@ -180,6 +183,9 @@ async fn family_payload(server: &AdminServer, family: Family) -> serde_json::Val
                 .unwrap_or_default(),
             Err(_) => serde_json::Value::Null,
         },
+        Family::Audit => {
+            serde_json::to_value(crate::audit::audit_payload(server)).unwrap_or_default()
+        }
     }
 }
 

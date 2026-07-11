@@ -27,6 +27,12 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   streams, connections, and subscriptions pages (and the hide-inactive toggle
   on queues) mirror into query parameters, so a filtered view survives reload
   and can be shared by copying the address.
+- An Activity page: a live control-plane feed of what happened on this broker
+  - queue and stream declares, deletes, drains, operator test publishes,
+  attention conditions raised and resolved, and cluster membership changes -
+  with severity-colored entries and a filter. Served at `/admin/activity`,
+  backed by `GET /admin/api/audit` (a bounded in-memory ring of the newest 512
+  entries, reset on restart) and pushed live over the events stream.
 - More at-a-glance color on the queues and streams views. Queue depth numbers
   take a tone from their 30-minute trend (a growing backlog warns, a draining
   one reassures), publisher counts light up when live, stream partition roles

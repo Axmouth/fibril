@@ -1,4 +1,5 @@
 mod attention;
+mod audit;
 mod auth;
 mod events;
 mod history;

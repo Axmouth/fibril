@@ -344,7 +344,15 @@ pub async fn create_stream(
         .declare_stream(&request.topic, partition_count, durability, retention)
         .await
     {
-        Ok(()) => Ok(Json(serde_json::json!({ "status": "created" })).into_response()),
+        Ok(()) => {
+            server.audit.record(
+                "stream_declared",
+                "info",
+                request.topic.clone(),
+                format!("Stream declared with {partition_count} partitions"),
+            );
+            Ok(Json(serde_json::json!({ "status": "created" })).into_response())
+        }
         Err(StromaError::InvalidArgument(message)) => Ok(admin_error(
             StatusCode::BAD_REQUEST,
             "invalid_argument",
@@ -947,6 +955,12 @@ pub async fn publish_test_message(
 
     match publisher.publish_text(topic, group, request.text).await {
         Ok(outcome) => {
+            server.audit.record(
+                "test_publish",
+                "info",
+                topic.to_string(),
+                format!("Operator test message confirmed on partition {}", outcome.partition),
+            );
             Ok(Json(serde_json::to_value(&outcome).unwrap_or_default()).into_response())
         }
         Err(message) => Ok(admin_error(
@@ -972,9 +986,19 @@ pub async fn drain(
         ));
     };
 
+    let message = request.message.clone();
     let outcome = controller
         .announce_drain(request.grace_ms, request.message)
         .await;
+    server.audit.record(
+        "drain",
+        "warning",
+        message,
+        format!(
+            "Drain announced to {} connections, {} partitions still owned",
+            outcome.connections_notified, outcome.owned_partitions_remaining
+        ),
+    );
     Ok(Json(serde_json::to_value(&outcome).unwrap_or_default()).into_response())
 }
 
@@ -1443,6 +1467,12 @@ pub async fn create_queue(
         }
     }
 
+    server.audit.record(
+        "queue_declared",
+        "info",
+        request.topic.clone(),
+        format!("Queue declared with {partition_count} partitions"),
+    );
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({
@@ -1524,6 +1554,12 @@ pub async fn delete_queue(
         }
     }
 
+    server.audit.record(
+        "queue_deleted",
+        "warning",
+        request.topic.clone(),
+        format!("Queue deleted ({partition_count} partitions)"),
+    );
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({

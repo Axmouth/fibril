@@ -1,0 +1,70 @@
+{% extends "layout.html" %}
+{% block content %}
+<h4 class="metrics-header">Activity</h4>
+<p class="page-desc">What happened on this broker: operator actions, attention
+  conditions raised and resolved, and cluster membership changes. Held in
+  memory (the newest 512 entries) and reset on restart - the broker log is the
+  durable trail.</p>
+
+<div class="queue-controls">
+  <input id="feed-search" type="search" placeholder="filter by kind, subject, or text" />
+</div>
+
+<div class="queue-table-wrap">
+  <table class="table table-compact metric-table">
+    <thead>
+      <tr>
+        <th>When</th>
+        <th>Severity</th>
+        <th>Kind</th>
+        <th>Subject</th>
+        <th>Detail</th>
+      </tr>
+    </thead>
+    <tbody id="feed-rows"></tbody>
+  </table>
+</div>
+<p class="queue-group-note" id="feed-empty" hidden>
+  Nothing yet this run. Declare a queue, publish a test message, or drain the
+  broker and it lands here.</p>
+
+<script src="/static/js/api.js"></script>
+<script src="/static/js/admin.js"></script>
+<script>
+function severityChip(severity) {
+  if (severity === "critical") return '<span class="chip-bad">critical</span>';
+  if (severity === "warning") return '<span class="chip-warn">warning</span>';
+  return '<span class="chip-plain">info</span>';
+}
+
+function kindChip(kind) {
+  const label = String(kind || "").replace(/_/g, " ");
+  return `<span class="chip-group">${escapeHtml(label)}</span>`;
+}
+
+function render(bundle) {
+  const entries = (bundle.audit && bundle.audit.entries) || [];
+  const search = (document.getElementById("feed-search")?.value || "").trim().toLowerCase();
+  const visible = entries.filter((e) =>
+    !search || `${e.kind} ${e.subject} ${e.detail}`.toLowerCase().includes(search));
+
+  document.getElementById("feed-empty").hidden = visible.length > 0;
+  document.getElementById("feed-rows").innerHTML = visible.map((e) => `
+    <tr>
+      <td class="v-dim" title="${new Date(e.at_ms).toLocaleString()}">${timeAgoShort(e.at_ms / 1000)}</td>
+      <td>${severityChip(e.severity)}</td>
+      <td>${kindChip(e.kind)}</td>
+      <td class="mono">${escapeHtml(e.subject)}</td>
+      <td>${escapeHtml(e.detail)}</td>
+    </tr>`).join("");
+}
+
+// Fetch-based refresh: re-renders on filter edits and is the polling
+// fallback when the event stream is out.
+async function refresh() {
+  render({ audit: await api('/admin/api/audit') });
+}
+wireUrlFilter(document.getElementById("feed-search"), "q", refresh);
+liveData(["audit"], render, refresh);
+</script>
+{% endblock %}

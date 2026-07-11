@@ -50,6 +50,12 @@ once no matter how many pages watch it. An idle dashboard costs the broker
 nothing, and pages fall back to polling automatically if the stream is
 unavailable. The live pill in the top bar tracks the stream's health.
 
+The Activity page is the broker's own diary: operator actions (declares,
+deletes, drains, test publishes), attention conditions raised and resolved,
+and cluster membership changes, newest first with severity-colored entries
+and a filter. It holds the newest 512 entries in memory and resets on
+restart - the broker log remains the durable trail.
+
 The diagnostics page shows lower-level storage and queue metrics, including
 command-lane depths and timings, command-kind counters, append stats, snapshot
 cost, and recovery counters. Use it when the overview suggests pressure and you

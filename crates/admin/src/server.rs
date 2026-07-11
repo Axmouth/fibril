@@ -228,6 +228,8 @@ pub struct AdminServer {
     pub history: crate::history::History,
     /// Fan-out hub for the dashboard's live event stream.
     pub events: crate::events::EventBroadcaster,
+    /// Bounded control-plane activity feed.
+    pub audit: crate::audit::AuditLog,
 }
 
 fn render<T: Template>(tpl: T) -> Html<String> {
@@ -273,6 +275,7 @@ impl AdminServer {
             cert_info: None,
             history: crate::history::History::new(),
             events: crate::events::EventBroadcaster::default(),
+            audit: crate::audit::AuditLog::default(),
         }
     }
 
@@ -362,6 +365,8 @@ impl AdminServer {
         tokio::spawn(crate::history::run_sampler(state.clone()));
         // Push loop feeding /admin/api/events subscribers.
         tokio::spawn(crate::events::run_broadcaster(state.clone()));
+        // Transition watcher feeding the activity feed.
+        tokio::spawn(crate::audit::run_watcher(state.clone()));
 
         let app = Self::router(state.clone());
 
@@ -411,6 +416,7 @@ impl AdminServer {
             .route("/login", get(login_page).post(login_submit))
             .route("/logout", get(logout))
             .route("/admin/connections", get(connections_page))
+            .route("/admin/activity", get(activity_page))
             .route("/admin/subscriptions", get(subscriptions_page))
             .route("/admin/queues", get(queues_page))
             .route("/admin/queue", get(queue_detail_page))
@@ -463,6 +469,7 @@ impl AdminServer {
             )
             .route("/admin/api/drain", axum::routing::post(routes::drain))
             .route("/admin/api/events", axum::routing::get(crate::events::events))
+            .route("/admin/api/audit", axum::routing::get(crate::audit::audit))
             .route(
                 "/admin/api/publish",
                 axum::routing::post(routes::publish_test_message),
@@ -558,6 +565,18 @@ async fn connections_page(
     Ok(render(Connections {
         page: "connections",
         title: "Connections",
+        auth_enabled: server.config.auth.is_some(),
+    }))
+}
+
+async fn activity_page(
+    State(server): State<Arc<AdminServer>>,
+    headers: HeaderMap,
+) -> Result<Html<String>, Redirect> {
+    page_auth(&server, &headers).await?;
+    Ok(render(Activity {
+        page: "activity",
+        title: "Activity",
         auth_enabled: server.config.auth.is_some(),
     }))
 }
@@ -744,6 +763,14 @@ async fn logout(State(server): State<Arc<AdminServer>>, headers: HeaderMap) -> R
 #[derive(Template)]
 #[template(path = "pages/overview.html")]
 struct OverviewPage {
+    page: &'static str,
+    title: &'static str,
+    auth_enabled: bool,
+}
+
+#[derive(Template)]
+#[template(path = "pages/activity.html")]
+struct Activity {
     page: &'static str,
     title: &'static str,
     auth_enabled: bool,
@@ -1737,6 +1764,47 @@ mod tests {
                 .expect("test server has a single handle")
                 .with_test_publisher(StdArc::new(fake)),
         )
+    }
+
+    #[tokio::test]
+    async fn audit_feed_records_admin_actions() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/api/queues")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({ "topic": "audited", "partition_count": 2 }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/audit")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        let entries = body["entries"].as_array().expect("entries array");
+        assert!(
+            entries.iter().any(|entry| entry["kind"] == "queue_declared"
+                && entry["subject"] == "audited"
+                && entry["severity"] == "info"),
+            "{entries:?}"
+        );
     }
 
     #[tokio::test]
