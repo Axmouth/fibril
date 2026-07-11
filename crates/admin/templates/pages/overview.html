@@ -278,9 +278,9 @@ async function refresh() {
     api('/admin/api/attention'),
   ]);
   const stroma = d.stroma ?? {};
-  document.getElementById("delivered").textContent = metric(d.broker.delivered_per_sec_1m);
-  document.getElementById("acked").textContent = metric(d.broker.acked_per_sec_1m);
-  document.getElementById("published").textContent = metric(d.broker.published_per_sec_1m);
+  setCompact(document.getElementById("delivered"), d.broker.delivered_per_sec_1m);
+  setCompact(document.getElementById("acked"), d.broker.acked_per_sec_1m);
+  setCompact(document.getElementById("published"), d.broker.published_per_sec_1m);
   document.getElementById("rss_mb").textContent = metric(d.sys.rss_mb / 1024, 2);
   document.getElementById("cpu").textContent = metric(d.sys.cpu, 2);
   document.getElementById("disk").textContent = metric(d.storage_used / (1024 * 1024), 2);
@@ -289,7 +289,7 @@ async function refresh() {
   document.getElementById("stroma_max_process_ms").textContent = metric(maxLaneValue(stroma, "max_process_ms"), 2, " ms");
   document.getElementById("snapshot_total_ms").textContent = metric(stroma.snapshot?.avg_total_ms, 2, " ms");
   document.getElementById("stroma_backlog").textContent = laneBacklog(stroma);
-  document.getElementById("stroma_event_appends_per_sec").textContent = metric(stroma.log?.event_log?.appends_per_sec_1m);
+  setCompact(document.getElementById("stroma_event_appends_per_sec"), stroma.log?.event_log?.appends_per_sec_1m);
   document.getElementById("stroma_event_bytes").textContent = bytes(stroma.log?.event_log?.total_bytes);
   document.getElementById("snapshot_attempts").textContent = stroma.snapshot?.attempts_total ?? "--";
   document.getElementById("snapshot_size").textContent = bytes(stroma.snapshot?.last_snapshot_size_bytes);
