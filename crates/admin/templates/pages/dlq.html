@@ -97,16 +97,15 @@ async function refresh() {
       .filter((q) => q.topic === target.topic && (q.group || "") === (target.group || ""))
       .reduce((acc, q) => acc + (q.materialized ? num(q.state.ready_count) : 0), 0);
   }
-  document.getElementById("dlq-depth-now").textContent =
-    targetDepth === null ? "--" : fmtCount(targetDepth);
+  setCompact(document.getElementById("dlq-depth-now"), targetDepth === null ? NaN : targetDepth);
   const series = target
     ? (history.queues || []).find((entry) =>
         entry.topic === target.topic && (entry.group || "") === (target.group || ""))
     : null;
   const depths = series ? series.samples.map((p) => p.depth) : [];
   renderChart(document.getElementById("dlq-chart"), [
-    { values: depths, color: "var(--bad)", fill: true },
-  ]);
+    { values: depths, color: "var(--bad)", fill: true, label: "dead letters" },
+  ], { hover: true, times: series ? series.samples.map((p) => p.at) : undefined });
   document.getElementById("dlq-depth-trend").textContent = trendWord(depths);
 
   // Queues that declare a dead-letter policy, one row per (topic, group).

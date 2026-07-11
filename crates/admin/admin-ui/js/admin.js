@@ -114,7 +114,7 @@ function renderSparkline(svg, values, color) {
 
 // A panel chart: faint gridlines, one or more series, oldest left. Series:
 // { values, color, fill } - fill draws a soft area under that series.
-function renderChart(svg, seriesList) {
+function renderChart(svg, seriesList, opts) {
   const w = Number(svg.getAttribute("width")) || 720;
   const h = Number(svg.getAttribute("height")) || 180;
   svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
@@ -139,6 +139,12 @@ function renderChart(svg, seriesList) {
     out += `<path d="${d}" fill="none" stroke="${series.color}" stroke-width="1.6" vector-effect="non-scaling-stroke"/>`;
   }
   svg.innerHTML = out;
+  const prevIdx = svg.__chart ? svg.__chart.idx : null;
+  svg.__chart = { series: seriesList, times: opts && opts.times, idx: prevIdx };
+  if (opts && opts.hover) {
+    chartHoverWire(svg);
+    chartHoverDraw(svg);
+  }
 }
 
 // One word for where a series is heading, comparing now against a moment ago.
@@ -191,4 +197,108 @@ function toast(text) {
   el.classList.add("on");
   clearTimeout(__toastTimer);
   __toastTimer = setTimeout(() => el.classList.remove("on"), 2400);
+}
+
+// Compact display for large counts: 12.4k, 5.08M. Pair with a title attribute
+// carrying the exact value.
+function fmtCompact(n) {
+  if (!Number.isFinite(n)) return "--";
+  const abs = Math.abs(n);
+  if (abs < 10000) return Number(n).toLocaleString("en-US");
+  const units = [[1e9, "B"], [1e6, "M"], [1e3, "k"]];
+  for (const [div, suffix] of units) {
+    if (abs >= div) {
+      const v = n / div;
+      return (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2)) + suffix;
+    }
+  }
+  return String(n);
+}
+
+// Set a stat element to the compact form with the exact value on hover.
+function setCompact(el, n) {
+  el.textContent = fmtCompact(n);
+  el.title = Number.isFinite(n) ? Number(n).toLocaleString("en-US") : "";
+}
+
+function timeAgoShort(unixSec) {
+  const d = Math.max(0, Date.now() / 1000 - unixSec);
+  if (d < 90) return Math.round(d) + "s ago";
+  if (d < 5400) return Math.round(d / 60) + "m ago";
+  return (d / 3600).toFixed(1) + "h ago";
+}
+
+// ---- chart hover readout ----
+// renderChart(svg, series, { hover: true, times }) attaches a cursor line and
+// a floating readout naming each series' value at the pointer. State lives on
+// the svg so the 2s re-render keeps the cursor in place.
+
+function chartHoverEnsureTip(svg) {
+  let tip = svg.__chartTip;
+  if (tip) return tip;
+  const parent = svg.parentElement;
+  parent.classList.add("chart-host");
+  tip = document.createElement("div");
+  tip.className = "chart-tip";
+  tip.hidden = true;
+  parent.appendChild(tip);
+  svg.__chartTip = tip;
+  return tip;
+}
+
+function chartHoverDraw(svg) {
+  const state = svg.__chart;
+  const tip = svg.__chartTip;
+  if (!state || !tip) return;
+  const idx = state.idx;
+  const n = Math.max(...state.series.map((s) => s.values.length), 0);
+  if (idx == null || n < 2) {
+    tip.hidden = true;
+    return;
+  }
+  const w = Number(svg.getAttribute("width")) || 720;
+  const h = Number(svg.getAttribute("height")) || 180;
+  const x = ((idx / (n - 1)) * w).toFixed(1);
+  svg.insertAdjacentHTML(
+    "beforeend",
+    `<line class="chart-cursor" x1="${x}" y1="0" x2="${x}" y2="${h}" stroke="var(--dim)" stroke-width="1" vector-effect="non-scaling-stroke" opacity=".7"/>`,
+  );
+  const parts = state.series
+    .filter((s) => Number.isFinite(s.values[idx]))
+    .map((s) => {
+      const v = s.values[idx];
+      const shown = Number.isInteger(v) ? fmtCompact(v) : v.toFixed(1);
+      return `<span class="tip-dot" style="background:${s.color}"></span>${s.label ? escapeHtml(s.label) + " " : ""}${shown}`;
+    });
+  const at = state.times && state.times[idx] ? ` · ${timeAgoShort(state.times[idx])}` : "";
+  tip.innerHTML = parts.join("&ensp;") + `<span class="tip-when">${at}</span>`;
+  const svgRect = svg.getBoundingClientRect();
+  const hostRect = svg.parentElement.getBoundingClientRect();
+  const px = svgRect.left - hostRect.left + (idx / (n - 1)) * svgRect.width;
+  tip.hidden = false;
+  const clamped = Math.max(4, Math.min(hostRect.width - tip.offsetWidth - 4, px - tip.offsetWidth / 2));
+  tip.style.left = clamped + "px";
+  tip.style.top = (svgRect.top - hostRect.top - tip.offsetHeight - 6) + "px";
+}
+
+function chartHoverWire(svg) {
+  if (svg.__hoverWired) return;
+  svg.__hoverWired = true;
+  chartHoverEnsureTip(svg);
+  svg.addEventListener("mousemove", (event) => {
+    const state = svg.__chart;
+    if (!state) return;
+    const n = Math.max(...state.series.map((s) => s.values.length), 0);
+    if (n < 2) return;
+    const rect = svg.getBoundingClientRect();
+    const frac = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+    state.idx = Math.round(frac * (n - 1));
+    svg.querySelectorAll(".chart-cursor").forEach((el) => el.remove());
+    chartHoverDraw(svg);
+  });
+  svg.addEventListener("mouseleave", () => {
+    if (svg.__chart) svg.__chart.idx = null;
+    svg.querySelectorAll(".chart-cursor").forEach((el) => el.remove());
+    if (svg.__chartTip) svg.__chartTip.hidden = true;
+  });
 }

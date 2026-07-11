@@ -434,11 +434,24 @@
         overlay.hidden = true;
       }
 
+      function moveSelection(step) {
+        const items = [...list.querySelectorAll(".palette-item")];
+        if (!items.length) return;
+        let idx = items.findIndex((el) => el.classList.contains("sel"));
+        idx = (idx + step + items.length) % items.length;
+        items.forEach((el, i) => el.classList.toggle("sel", i === idx));
+        items[idx].scrollIntoView({ block: "nearest" });
+      }
+
       input.addEventListener("input", () => render(input.value));
       input.addEventListener("keydown", (event) => {
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.preventDefault();
+          moveSelection(event.key === "ArrowDown" ? 1 : -1);
+        }
         if (event.key === "Enter") {
-          const first = list.querySelector(".palette-item");
-          if (first) first.click();
+          const selected = list.querySelector(".palette-item.sel") || list.querySelector(".palette-item");
+          if (selected) selected.click();
         }
       });
       overlay.addEventListener("click", (event) => {

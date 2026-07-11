@@ -249,24 +249,25 @@ function renderAttention(items) {
 function renderHistory(history) {
   const samples = history.samples ?? [];
   document.getElementById("history-note").hidden = samples.length >= 3;
+  const times = samples.map((s) => s.at);
   const published = samples.map((s) => s.published_per_sec);
   const delivered = samples.map((s) => s.delivered_per_sec);
   renderChart(document.getElementById("chart-throughput"), [
-    { values: published, color: "var(--accent)", fill: true },
-    { values: delivered, color: "var(--muted)" },
-  ]);
+    { values: published, color: "var(--accent)", fill: true, label: "published/s" },
+    { values: delivered, color: "var(--muted)", label: "delivered/s" },
+  ], { hover: true, times });
 
   const backlog = samples.map((s) => s.backlog);
   renderChart(document.getElementById("chart-backlog"), [
-    { values: backlog, color: "var(--active)", fill: true },
-  ]);
+    { values: backlog, color: "var(--active)", fill: true, label: "backlog" },
+  ], { hover: true, times });
 
   const latest = samples[samples.length - 1];
-  document.getElementById("backlog").textContent = latest ? fmtCount(latest.backlog) : "--";
-  document.getElementById("inflight").textContent = latest ? fmtCount(latest.inflight) : "--";
-  document.getElementById("connections_count").textContent = latest ? fmtCount(latest.connections) : "--";
-  document.getElementById("subscriptions_count").textContent = latest ? fmtCount(latest.subscriptions) : "--";
-  document.getElementById("backlog-now").textContent = latest ? fmtCount(latest.backlog) : "--";
+  setCompact(document.getElementById("backlog"), latest ? latest.backlog : NaN);
+  setCompact(document.getElementById("inflight"), latest ? latest.inflight : NaN);
+  setCompact(document.getElementById("connections_count"), latest ? latest.connections : NaN);
+  document.getElementById("subscriptions_count").textContent = latest ? fmtCompact(latest.subscriptions) : "--";
+  setCompact(document.getElementById("backlog-now"), latest ? latest.backlog : NaN);
   document.getElementById("backlog-trend").textContent = trendWord(backlog);
 }
 

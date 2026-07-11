@@ -193,8 +193,8 @@ async function refresh() {
   const pubs = num(activity?.active_publishers);
   const loadedCount = parts.filter((p) => p.materialized).length;
 
-  document.getElementById("q-depth").textContent = fmtCount(depth);
-  document.getElementById("q-leased").textContent = fmtCount(leased);
+  setCompact(document.getElementById("q-depth"), depth);
+  setCompact(document.getElementById("q-leased"), leased);
   document.getElementById("q-pubs").textContent = fmtCount(pubs);
   document.getElementById("q-subs").textContent = fmtCount(consumers.length);
   document.getElementById("q-loaded").textContent = `${loadedCount}/${parts.length}`;
@@ -204,10 +204,10 @@ async function refresh() {
   const depths = series ? series.samples.map((p) => p.depth) : [];
   const leasedSeries = series ? series.samples.map((p) => p.leased) : [];
   renderChart(document.getElementById("q-chart"), [
-    { values: depths, color: "var(--accent)", fill: true },
-    { values: leasedSeries, color: "var(--active)" },
-  ]);
-  document.getElementById("q-depth-now").textContent = fmtCount(depth);
+    { values: depths, color: "var(--accent)", fill: true, label: "depth" },
+    { values: leasedSeries, color: "var(--active)", label: "leased" },
+  ], { hover: true, times: series ? series.samples.map((p) => p.at) : undefined });
+  setCompact(document.getElementById("q-depth-now"), depth);
   document.getElementById("q-depth-trend").textContent = trendWord(depths);
 
   document.getElementById("q-partitions").innerHTML = parts.map((p) => {
