@@ -1825,6 +1825,11 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
             admin_bind: config.admin.listener.bind.to_string(),
             admin_auth_enabled: config.admin.auth.enabled,
             keratin_fsync_interval_ms: config.storage.keratin.fsync_interval_ms,
+            keratin_min_fsync_interval_ms: config.storage.keratin.min_fsync_interval_ms,
+            keratin_segment_preallocate_bytes: config.storage.keratin.segment_preallocate_bytes
+                as u64,
+            keratin_max_inflight_fsyncs: config.storage.keratin.max_inflight_fsyncs as u64,
+            keratin_pipeline_commit_records: config.storage.keratin.pipeline_commit_records,
             keratin_message_log_segment_max_bytes: config
                 .storage
                 .keratin

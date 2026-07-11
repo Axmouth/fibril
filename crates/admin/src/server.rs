@@ -184,6 +184,10 @@ pub struct StartupConfigSummary {
     pub admin_bind: String,
     pub admin_auth_enabled: bool,
     pub keratin_fsync_interval_ms: u64,
+    pub keratin_min_fsync_interval_ms: u64,
+    pub keratin_segment_preallocate_bytes: u64,
+    pub keratin_max_inflight_fsyncs: u64,
+    pub keratin_pipeline_commit_records: u64,
     pub keratin_message_log_segment_max_bytes: u64,
     pub keratin_event_log_segment_max_bytes: u64,
     pub coordination_heartbeat_interval_ms: u64,
@@ -998,6 +1002,10 @@ mod tests {
                 admin_bind: "127.0.0.1:0".into(),
                 admin_auth_enabled,
                 keratin_fsync_interval_ms: 5,
+                keratin_min_fsync_interval_ms: 0,
+                keratin_segment_preallocate_bytes: 0,
+                keratin_max_inflight_fsyncs: 8,
+                keratin_pipeline_commit_records: 2048,
                 keratin_message_log_segment_max_bytes: 16 * 1024 * 1024,
                 keratin_event_log_segment_max_bytes: 16 * 1024 * 1024,
                 coordination_heartbeat_interval_ms: 3000,
@@ -3435,7 +3443,7 @@ mod tests {
         assert!(body.contains("Target partitions per consumer"));
         assert!(!body.contains("Queue partition"));
         assert!(!body.contains("consumer group"));
-        assert!(body.contains("Save settings"));
+        assert!(body.contains("Save runtime settings"));
         assert!(!body.contains("Log out"));
         assert!(!body.contains("href=\"/logout\""));
     }
