@@ -3016,7 +3016,8 @@ Phase 2 - Quick feature wins, one sitting each, in order:
   2.4 Storage breakdown segmented bar behind the Overview disk stat.
 
 Phase 3 - SSE for live dashboard data, replacing the 2s polling (autoRefresh
-centralizes the plumbing). Must land before Phase 4.
+centralizes the plumbing). Must land before Phase 4. Full plan below in
+"Phase 3 SSE plan (SCOPED 2026-07-11)".
 
 Phase 4 - The feed layer:
   4.1 Control-plane audit feed page (bounded in-memory event ring: declares,
@@ -3038,4 +3039,66 @@ rule - every phase still adds its own CHANGELOG bullet and doc touch in the
 same change; Phase 6 is the final consistency pass over the accumulated
 surface, not a deferral of docs work.
 
-Floating (slot on mood): enable-TLS-from-UI (own design pass), flavor tuning.
+Floating (slot on mood): enable-TLS-from-UI (own design pass), flavor tuning,
+deny_unknown_fields hardening on admin request DTOs (a typoed field name in a
+declare request is silently ignored today - guided-errors philosophy says name
+it).
+
+## Phase 3 SSE plan (SCOPED 2026-07-11)
+
+Goal: replace the dashboard's 2s polling with one server-sent-events stream
+per open page, so data pushes on the broker's clock and an idle dashboard
+costs the broker nothing.
+
+Design decisions (settled):
+- ONE multiplexed SSE endpoint, GET /admin/api/events?families=a,b,c - named
+  events per data family (overview, queues_debug, history, attention,
+  subscriptions, cohorts, connections). One EventSource per page, never more
+  (browsers cap ~6 connections per origin on HTTP/1, and connection hygiene
+  under boosted navigation must be deterministic).
+- Full-snapshot pushes on a server tick (~2s), reusing the existing JSON
+  producers verbatim. Deltas/true events are Phase 4 (audit feed), not here.
+- Broadcaster task in the admin crate (history sampler is the structural
+  precedent): each tick serializes every family WITH at least one subscriber
+  exactly once and fans the shared string out over a tokio broadcast channel.
+  Zero subscribers = no tick work at all. Lagging receivers drop and the
+  client reconnects (EventSource auto-retry).
+- Client: a shared liveData(families, onData) helper in admin.js owning the
+  page's single EventSource; page scripts pass the same refresh callbacks
+  they use today. Teardown rides the existing boosted-nav timer hygiene
+  (extend the __spaIntervals-style registry to close EventSources on swap -
+  leaked connections across swaps are the failure mode to test for).
+- Live pill driven by the SSE connection state (open / reconnecting / dead)
+  instead of last-fetch age stamping.
+- Fallback: if EventSource is unavailable or stays failed, pages fall back to
+  the current autoRefresh polling (which therefore stays in admin.js as the
+  fallback engine, not deleted).
+- Mutations (declare/delete/publish/drain) stay plain POSTs; pages may keep
+  their immediate one-shot refresh after actions, the next tick converges
+  everyone else.
+- Auth: the SSE route goes through check_auth like every admin route
+  (same-origin EventSource carries the session cookie).
+
+Acceptance criteria:
+1. All dashboard pages receive their data over one SSE connection at <= 2s
+   freshness with the polling loops gone in the SSE path.
+2. Server serializes each family once per tick regardless of subscriber
+   count, and does no tick work with zero subscribers.
+3. After N boosted navigations the broker holds exactly the connections of
+   the currently open pages (leak check via server-side connection count or
+   fd inspection).
+4. Live pill states track the stream (live / reconnecting-stale / dead).
+5. With EventSource broken (simulate), every page still works via the
+   polling fallback.
+6. Workspace suite green, new tests for the events route (auth, family
+   filter, event shape) and the broadcaster (tick sharing, zero-subscriber
+   pause); changelog + admin-dashboard.md + implemented-surface row in the
+   same change.
+
+Execution order: recon (axum SSE idiom for the pinned version, autoRefresh +
+timer-hygiene internals) -> broadcaster + route with the four core families
+(overview, queues_debug, history, attention) -> liveData helper + migrate
+Overview as proof -> migrate the remaining pages, extending families
+(subscriptions, cohorts, connections, streams debug) -> live pill + fallback
+-> leak/regression verification incl. a dashboard-open-during-bench sanity ->
+docs/changelog sweep for the phase.
