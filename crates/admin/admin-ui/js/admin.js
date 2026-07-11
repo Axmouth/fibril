@@ -403,3 +403,37 @@ function liveData(families, onTick, fallbackRefresh) {
     }
   };
 }
+
+// Native combobox for "existing name" fields: attach a lazily-filled
+// <datalist> of known values (from the queue catalogue) to an input, so
+// existing topics and groups are one keystroke away while free typing for
+// new names keeps working. `pick` maps a queues_debug entry to a suggestion.
+function wireCatalogDatalist(input, pick) {
+  if (!input) return;
+  const id = `dl-${input.id.replace(/[^a-zA-Z0-9-]/g, "-")}`;
+  let list = document.getElementById(id);
+  if (!list) {
+    list = document.createElement("datalist");
+    list.id = id;
+    document.body.appendChild(list);
+    input.setAttribute("list", id);
+  }
+  let loaded = false;
+  input.addEventListener("focus", async () => {
+    if (loaded) return;
+    loaded = true;
+    try {
+      const data = await api('/admin/api/queues_debug');
+      const values = new Set();
+      for (const q of data.queues || []) {
+        const value = pick(q);
+        if (value) values.add(value);
+      }
+      list.innerHTML = [...values].sort()
+        .map((v) => `<option value="${escapeHtml(v)}"></option>`)
+        .join("");
+    } catch (_err) {
+      // Suggestions are a convenience; typing works regardless.
+    }
+  });
+}

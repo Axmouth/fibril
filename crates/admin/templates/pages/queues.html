@@ -522,6 +522,11 @@ hideInactiveBox.addEventListener("change", () => {
   refresh();
 });
 
+// Existing groups and topics suggest themselves in the declare panel.
+wireCatalogDatalist(document.getElementById("create.group"), (q) => q.group);
+wireCatalogDatalist(document.getElementById("create.dlq_topic"), (q) => q.topic);
+wireCatalogDatalist(document.getElementById("create.dlq_group"), (q) => q.group);
+
 liveData(["queues_debug", "history"], render, refresh);
 </script>
 {% endblock %}

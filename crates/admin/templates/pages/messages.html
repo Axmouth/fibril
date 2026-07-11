@@ -93,6 +93,7 @@
 </main>
 
 <script src="/static/js/api.js"></script>
+<script src="/static/js/admin.js"></script>
 <script>
 const form = document.getElementById("message-inspection-form");
 const results = document.getElementById("message-results");
@@ -478,5 +479,9 @@ applyInitialQuery();
 if (field("message-topic").value.trim()) {
   loadMessages().catch(err => setMessage("error", err.message || String(err)));
 }
+
+// Existing topics and groups are one keystroke away; new names still type free.
+wireCatalogDatalist(field("message-topic"), (q) => q.topic);
+wireCatalogDatalist(field("message-group"), (q) => q.group);
 </script>
 {% endblock %}

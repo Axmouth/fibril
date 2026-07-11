@@ -27,6 +27,16 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   streams, connections, and subscriptions pages (and the hide-inactive toggle
   on queues) mirror into query parameters, so a filtered view survives reload
   and can be shared by copying the address.
+- A scenario builder for demos and dashboard verification:
+  `scripts/scenario.sh` runs a scripted sequence of operator actions (declare,
+  publish bursts, consumers, test messages, deletes, drains, node kill and
+  restart in cluster mode) against script-managed brokers on non-default
+  ports, with example scenarios under `scripts/scenarios/`. The `e2e_c` bench
+  client gained an `--addr` flag to point at any broker.
+- Existing names suggest themselves: the message-inspection topic and group
+  fields and the declare panel's group and dead-letter fields are native
+  comboboxes now, lazily filled from the queue catalogue - one keystroke to an
+  existing name, free typing for new ones.
 - Six more attention rules, so the needs-attention panel (and the desktop
   notifications and Activity feed built on it) covers the conditions that
   hurt most when unnoticed: the data directory's filesystem running low
@@ -117,6 +127,9 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Changed
 
+- Clearer sidebar icons: Messages is an envelope, Dead letters an
+  undeliverable (struck-through) envelope, and Activity takes the alert badge,
+  leaving the pulse line to Diagnostics alone.
 - The settings page says what saves what: the save button is named "Save
   runtime settings" with a note that it applies the runtime section live,
   while Startup Config below is read-only. The startup summary gains the
@@ -167,6 +180,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- Deleting a queue from the dashboard works again on standalone brokers. The
+  cluster-only guard keyed off having a coordination handle, which every
+  broker gained when the topology page's single-node view was wired, so a
+  plain broker's deletes were refused as "cluster mode". The guard now keys
+  off an explicit cluster flag set only under real coordination.
 - Dashboard pages that read their query parameters (the queue detail topic,
   message inspection, the persisted filters) got the PREVIOUS page's address
   when reached through an in-dashboard link: the boosted navigation pushed the
