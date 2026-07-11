@@ -30,8 +30,8 @@
 <script src="/static/js/api.js"></script>
 <script src="/static/js/admin.js"></script>
 <script>
-async function refresh() {
-  const rows = await api('/admin/api/connections');
+function render(bundle) {
+  const rows = bundle.connections;
   const list = Array.isArray(rows) ? rows : [];
   const search = (document.getElementById("conn-search")?.value || "").trim().toLowerCase();
   const visible = list.filter((r) =>
@@ -58,8 +58,12 @@ async function refresh() {
       <td class="text-right">${escapeHtml(fmtUptime(r.uptime ?? 0))}</td>
     </tr>`).join("");
 }
+// Fetch-based refresh: re-renders on filter edits and is the polling
+// fallback when the event stream is out.
+async function refresh() {
+  render({ connections: await api('/admin/api/connections') });
+}
 wireUrlFilter(document.getElementById("conn-search"), "q", refresh);
-autoRefresh(refresh, 2000);
-refresh();
+liveData(["connections"], render, refresh);
 </script>
 {% endblock %}

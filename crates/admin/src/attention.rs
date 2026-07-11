@@ -200,12 +200,15 @@ pub async fn attention(
     headers: HeaderMap,
 ) -> Result<Json<AttentionResponse>, StatusCode> {
     check_auth(&server, &headers).await?;
+    Ok(Json(attention_payload(&server).await))
+}
 
-    let mut items = quarantine_items(&server);
-    items.extend(settings_items(&server));
-    items.extend(cert_items(&server));
-    items.extend(no_consumer_items(&server).await);
+/// The attention feed, shared by the GET route and the events stream.
+pub(crate) async fn attention_payload(server: &AdminServer) -> AttentionResponse {
+    let mut items = quarantine_items(server);
+    items.extend(settings_items(server));
+    items.extend(cert_items(server));
+    items.extend(no_consumer_items(server).await);
     items.sort_by_key(|item| severity_rank(item.severity));
-
-    Ok(Json(AttentionResponse { items }))
+    AttentionResponse { items }
 }

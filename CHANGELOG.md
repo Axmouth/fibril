@@ -27,6 +27,13 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   streams, connections, and subscriptions pages (and the hide-inactive toggle
   on queues) mirror into query parameters, so a filtered view survives reload
   and can be shared by copying the address.
+- The dashboard's data now arrives over one server-sent-events stream per open
+  page (`GET /admin/api/events`) instead of polling every two seconds. The
+  broker pushes each page's data families on its own tick, serializing each
+  family once no matter how many pages watch, and does no work at all while no
+  dashboard is open. Pages fall back to the previous polling automatically
+  when the stream is unavailable, and the live pill tracks the stream's
+  health.
 - Storage breakdown on the Overview disk stat: a segmented bar under the disk
   number shows which queues the bytes belong to (largest first, split into
   message-log and event-log bytes in the admin payload), so "disk is growing"

@@ -151,11 +151,9 @@ function activityKey(topic, group) {
   return `${topic}\u0000${group || ""}`;
 }
 
-async function refresh() {
-  const [data, history] = await Promise.all([
-    api('/admin/api/queues_debug'),
-    api('/admin/api/history').catch(() => ({ queues: [] })),
-  ]);
+function render(bundle) {
+  const data = bundle.queues_debug || {};
+  const history = bundle.history || { queues: [] };
   depthSeries = new Map(
     (history.queues || []).map((entry) => [
       `${entry.topic} ${entry.group || ""}`,
@@ -491,9 +489,19 @@ async function deleteQueue(btn) {
   }
 }
 
+// Fetch-based refresh: re-renders on filter edits, refreshes after actions,
+// and is the polling fallback when the event stream is out.
+async function refresh() {
+  const [queues_debug, history] = await Promise.all([
+    api('/admin/api/queues_debug'),
+    api('/admin/api/history').catch(() => ({ queues: [] })),
+  ]);
+  render({ queues_debug, history });
+}
+
 // Filters live in the URL (?q=, ?hide=inactive) so a filtered view survives
-// reload and can be shared. Re-render immediately on change (the 2s poll also
-// re-applies them).
+// reload and can be shared. Re-render immediately on change (the push tick
+// also re-applies them).
 wireUrlFilter(document.getElementById("queue-search"), "q", refresh);
 const hideInactiveBox = document.getElementById("queue-hide-inactive");
 hideInactiveBox.checked = urlParamGet("hide") === "inactive";
@@ -502,7 +510,6 @@ hideInactiveBox.addEventListener("change", () => {
   refresh();
 });
 
-autoRefresh(refresh, 2000);
-refresh();
+liveData(["queues_debug", "history"], render, refresh);
 </script>
 {% endblock %}

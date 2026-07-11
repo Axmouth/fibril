@@ -64,12 +64,10 @@ function inspectHref(topic, group) {
   return `/admin/messages?${params}`;
 }
 
-async function refresh() {
-  const [global, debug, history] = await Promise.all([
-    api('/admin/api/global-dlq').catch(() => null),
-    api('/admin/api/queues_debug'),
-    api('/admin/api/history').catch(() => ({ queues: [] })),
-  ]);
+function render(bundle) {
+  const global = bundle.global_dlq;
+  const debug = bundle.queues_debug || {};
+  const history = bundle.history || { queues: [] };
 
   // Global target card.
   const target = global?.target;
@@ -136,7 +134,15 @@ async function refresh() {
       <td><a class="queue-messages-link" href="${inspectHref(r.topic, r.group)}">Inspect</a></td>
     </tr>`).join("");
 }
-autoRefresh(refresh, 2000);
-refresh();
+// Fetch-based refresh: the polling fallback when the event stream is out.
+async function refresh() {
+  const [global_dlq, queues_debug, history] = await Promise.all([
+    api('/admin/api/global-dlq').catch(() => null),
+    api('/admin/api/queues_debug'),
+    api('/admin/api/history').catch(() => ({ queues: [] })),
+  ]);
+  render({ global_dlq, queues_debug, history });
+}
+liveData(["global_dlq", "queues_debug", "history"], render, refresh);
 </script>
 {% endblock %}

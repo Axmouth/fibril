@@ -1,5 +1,6 @@
 mod attention;
 mod auth;
+mod events;
 mod history;
 mod metrics_route;
 pub mod prometheus;

@@ -23,26 +23,32 @@ function fmtAgo(ts) {
 // interval of the last interaction (pointer, key, wheel, focus), and it never
 // overlaps refreshes. It also restores the window scroll position if a rebuild
 // shifted it. The page's own event-driven refresh (search, expand) still runs.
-function autoRefresh(refreshFn, intervalMs) {
+// Shared "is the user in the middle of something" gate: rebuilding the DOM
+// under a click, a focused form field, or a text selection is what the
+// refresh machinery must never do, whether the data arrives by poll or push.
+function interactionGuard(quietMs) {
   let lastInteraction = 0;
-  let running = false;
   const mark = () => {
     lastInteraction = Date.now();
   };
   for (const ev of ["pointerdown", "keydown", "wheel", "focusin"]) {
     document.addEventListener(ev, mark, { passive: true });
   }
-
-  const busy = () => {
+  return () => {
     if (document.hidden) return true;
-    if (running) return true;
-    if (Date.now() - lastInteraction < intervalMs) return true;
+    if (Date.now() - lastInteraction < quietMs) return true;
     const el = document.activeElement;
     if (el && /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName)) return true;
     const selection = window.getSelection && window.getSelection();
     if (selection && !selection.isCollapsed && String(selection).length > 0) return true;
     return false;
   };
+}
+
+function autoRefresh(refreshFn, intervalMs) {
+  let running = false;
+  const guardBusy = interactionGuard(intervalMs);
+  const busy = () => running || guardBusy();
 
   const tick = async () => {
     if (busy()) return;
@@ -324,4 +330,76 @@ function wireUrlFilter(input, param, onChange) {
     urlParamSet(param, input.value.trim());
     onChange();
   });
+}
+
+// ---- live data over server-sent events ----
+// One EventSource per page, multiplexing every data family the page shows as
+// a single "tick" event (a JSON object keyed by family). Registers with the
+// layout's __spaEventSources so boosted navigation closes it. When SSE is
+// unavailable or the stream dies for good, the page falls back to polling its
+// old fetch-based refresh. Renders hold off while the user interacts, exactly
+// like autoRefresh, and the deferred bundle paints once the page is quiet.
+function liveData(families, onTick, fallbackRefresh) {
+  const fallBack = () => {
+    fallbackRefresh();
+    autoRefresh(fallbackRefresh, 2000);
+  };
+  if (typeof EventSource === "undefined") {
+    fallBack();
+    return;
+  }
+
+  const busy = interactionGuard(1000);
+  let pending = null;
+  let flushTimer = null;
+  const paint = (bundle) => {
+    const x = window.scrollX;
+    const y = window.scrollY;
+    try {
+      onTick(bundle);
+    } catch (_err) {
+      // Swallow: the next tick repaints. Matches autoRefresh.
+    }
+    if (window.scrollX !== x || window.scrollY !== y) {
+      window.scrollTo(x, y);
+    }
+  };
+  const render = (bundle) => {
+    if (!busy()) {
+      pending = null;
+      paint(bundle);
+      return;
+    }
+    pending = bundle;
+    if (flushTimer) return;
+    flushTimer = setInterval(() => {
+      if (!pending || busy()) return;
+      const bundle = pending;
+      pending = null;
+      paint(bundle);
+    }, 500);
+  };
+
+  const es = new EventSource(`/admin/api/events?families=${families.join(",")}`);
+  window.__spaEventSources?.add(es);
+  es.addEventListener("tick", (event) => {
+    // The live pill reads this stamp: a healthy stream keeps it fresh, a
+    // reconnecting one lets it age into stale, then dead.
+    window.__fibrilLastOk = Date.now();
+    let bundle;
+    try {
+      bundle = JSON.parse(event.data);
+    } catch (_err) {
+      return;
+    }
+    render(bundle);
+  });
+  es.onerror = () => {
+    // Transient errors auto-reconnect. CLOSED is final (e.g. an auth
+    // redirect): fall back to polling for the rest of this page view.
+    if (es.readyState === EventSource.CLOSED) {
+      window.__spaEventSources?.delete(es);
+      fallBack();
+    }
+  };
 }

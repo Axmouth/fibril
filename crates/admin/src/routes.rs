@@ -406,6 +406,11 @@ pub async fn overview(
 ) -> Result<Json<OverviewResponse>, StatusCode> {
     check_auth(&server, &headers).await?;
 
+    Ok(Json(overview_payload(&server).await))
+}
+
+/// The overview data bundle, shared by the GET route and the events stream.
+pub(crate) async fn overview_payload(server: &AdminServer) -> OverviewResponse {
     // One walk serves both the total and its per-queue segments.
     let storage_breakdown = server
         .storage
@@ -417,15 +422,15 @@ pub async fn overview(
         .map(|entry| entry.message_bytes + entry.event_bytes)
         .sum();
 
-    Ok(Json(OverviewResponse {
+    OverviewResponse {
         broker: server.metrics.broker().snapshot(),
         storage: server.metrics.storage().snapshot(),
         tcp: server.metrics.tcp().snapshot(),
-        stroma: stroma_overview(&server),
+        stroma: stroma_overview(server),
         sys: server.metrics.system().snapshot(),
         storage_used,
         storage_breakdown,
-    }))
+    }
 }
 
 fn stroma_overview(server: &AdminServer) -> serde_json::Value {
@@ -488,7 +493,7 @@ pub async fn queues(
 /// returns both kinds; this filters to one (`keep_streams` selects which),
 /// recomputes the counts, then merges the same broker observability. Queues and
 /// streams get a symmetric shape so each admin page reads exactly its resource.
-async fn partition_debug_value(
+pub(crate) async fn partition_debug_value(
     server: &AdminServer,
     keep_streams: bool,
 ) -> Result<serde_json::Value, Response> {

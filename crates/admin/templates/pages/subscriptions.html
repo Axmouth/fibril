@@ -44,8 +44,8 @@ function queueHref(topic, group) {
   return `/admin/queue?${params}`;
 }
 
-async function refresh() {
-  const rows = await api('/admin/api/subscriptions');
+function render(bundle) {
+  const rows = bundle.subscriptions;
   const list = Array.isArray(rows) ? rows : [];
   const search = (document.getElementById("sub-search")?.value || "").trim().toLowerCase();
   const visible = list.filter((r) =>
@@ -74,8 +74,8 @@ async function refresh() {
     </tr>`).join("");
 }
 
-async function refreshCohorts() {
-  const data = await api('/admin/api/cohorts');
+function renderCohorts(bundle) {
+  const data = bundle.cohorts || {};
   const container = document.getElementById("cohorts");
   const cohorts = Array.isArray(data.cohorts) ? data.cohorts : [];
   if (cohorts.length === 0) {
@@ -109,12 +109,20 @@ async function refreshCohorts() {
     </div>`;
 }
 
-function refreshAll() {
-  refresh();
-  refreshCohorts();
+function renderAll(bundle) {
+  render(bundle);
+  renderCohorts(bundle);
 }
-wireUrlFilter(document.getElementById("sub-search"), "q", refresh);
-autoRefresh(refreshAll, 2000);
-refreshAll();
+// Fetch-based refresh: re-renders on filter edits and is the polling
+// fallback when the event stream is out.
+async function refreshAll() {
+  const [subscriptions, cohorts] = await Promise.all([
+    api('/admin/api/subscriptions'),
+    api('/admin/api/cohorts').catch(() => ({ cohorts: [] })),
+  ]);
+  renderAll({ subscriptions, cohorts });
+}
+wireUrlFilter(document.getElementById("sub-search"), "q", refreshAll);
+liveData(["subscriptions", "cohorts"], renderAll, refreshAll);
 </script>
 {% endblock %}

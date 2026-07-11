@@ -302,12 +302,10 @@ function renderHistory(history) {
   document.getElementById("backlog-trend").textContent = trendWord(backlog);
 }
 
-async function refresh() {
-  const [d, history, attention] = await Promise.all([
-    api('/admin/api/overview'),
-    api('/admin/api/history'),
-    api('/admin/api/attention'),
-  ]);
+function render(bundle) {
+  const d = bundle.overview;
+  const history = bundle.history || { queues: [] };
+  const attention = bundle.attention || { items: [] };
   const stroma = d.stroma ?? {};
   setCompact(document.getElementById("delivered"), d.broker.delivered_per_sec_1m);
   setCompact(document.getElementById("acked"), d.broker.acked_per_sec_1m);
@@ -346,7 +344,15 @@ async function refresh() {
   renderHistory(history);
   renderAttention(attention.items ?? []);
 }
-autoRefresh(refresh, 2000);
-refresh();
+// Fetch-based refresh: the polling fallback when the event stream is out.
+async function refresh() {
+  const [overview, history, attention] = await Promise.all([
+    api('/admin/api/overview'),
+    api('/admin/api/history'),
+    api('/admin/api/attention'),
+  ]);
+  render({ overview, history, attention });
+}
+liveData(["overview", "history", "attention"], render, refresh);
 </script>
 {% endblock %}

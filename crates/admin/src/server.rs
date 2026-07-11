@@ -226,6 +226,8 @@ pub struct AdminServer {
     pub cert_info: Option<Arc<CertInfoProvider>>,
     /// Recent throughput and backlog time series, sampled by a background task.
     pub history: crate::history::History,
+    /// Fan-out hub for the dashboard's live event stream.
+    pub events: crate::events::EventBroadcaster,
 }
 
 fn render<T: Template>(tpl: T) -> Html<String> {
@@ -270,6 +272,7 @@ impl AdminServer {
             tls_reload: None,
             cert_info: None,
             history: crate::history::History::new(),
+            events: crate::events::EventBroadcaster::default(),
         }
     }
 
@@ -357,6 +360,8 @@ impl AdminServer {
 
         // Background time-series sampler feeding /admin/api/history.
         tokio::spawn(crate::history::run_sampler(state.clone()));
+        // Push loop feeding /admin/api/events subscribers.
+        tokio::spawn(crate::events::run_broadcaster(state.clone()));
 
         let app = Self::router(state.clone());
 
@@ -457,6 +462,7 @@ impl AdminServer {
                 axum::routing::post(routes::repartition_queue),
             )
             .route("/admin/api/drain", axum::routing::post(routes::drain))
+            .route("/admin/api/events", axum::routing::get(crate::events::events))
             .route(
                 "/admin/api/publish",
                 axum::routing::post(routes::publish_test_message),
@@ -1731,6 +1737,62 @@ mod tests {
                 .expect("test server has a single handle")
                 .with_test_publisher(StdArc::new(fake)),
         )
+    }
+
+    #[tokio::test]
+    async fn events_rejects_unknown_and_missing_families() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        for uri in [
+            "/admin/api/events",
+            "/admin/api/events?families=",
+            "/admin/api/events?families=overview,nope",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn events_streams_a_first_tick_with_the_requested_families() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/events?families=history,attention")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(content_type.starts_with("text/event-stream"), "{content_type}");
+
+        // The body is an open stream; read only the first frame (the inline
+        // first tick) rather than draining to the end.
+        let mut body = response.into_body().into_data_stream();
+        let first = futures::StreamExt::next(&mut body)
+            .await
+            .expect("first tick frame")
+            .expect("frame bytes");
+        let text = String::from_utf8_lossy(&first);
+        assert!(text.contains("event: tick"), "{text}");
+        assert!(text.contains("\"history\":"), "{text}");
+        assert!(text.contains("\"attention\":"), "{text}");
+        assert!(!text.contains("\"overview\":"), "{text}");
     }
 
     #[tokio::test]

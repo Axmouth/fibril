@@ -71,11 +71,9 @@ function formatTime(ms) {
   }).format(new Date(ms));
 }
 
-async function refresh() {
-  const [stats, debug] = await Promise.all([
-    api('/admin/api/streams'),
-    api('/admin/api/streams_debug'),
-  ]);
+function render(bundle) {
+  const stats = bundle.streams || { streams: [] };
+  const debug = bundle.streams_debug || {};
   const container = document.getElementById("streams");
   const search = (document.getElementById("stream-search")?.value || "").trim().toLowerCase();
 
@@ -269,9 +267,17 @@ document.getElementById("streams").addEventListener("click", async (event) => {
   }
 });
 
+// Fetch-based refresh: re-renders on filter edits, refreshes after actions,
+// and is the polling fallback when the event stream is out.
+async function refresh() {
+  const [streams, streams_debug] = await Promise.all([
+    api('/admin/api/streams'),
+    api('/admin/api/streams_debug'),
+  ]);
+  render({ streams, streams_debug });
+}
 wireUrlFilter(document.getElementById("stream-search"), "q", refresh);
 
-autoRefresh(refresh, 2000);
-refresh();
+liveData(["streams", "streams_debug"], render, refresh);
 </script>
 {% endblock %}

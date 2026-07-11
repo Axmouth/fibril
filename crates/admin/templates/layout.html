@@ -26,6 +26,10 @@
       window.__nativeClearTimeout = window.clearTimeout.bind(window);
       window.__spaIntervals = new Set();
       window.__spaTimeouts = new Set();
+      // EventSources opened by page scripts (liveData) register here so
+      // navigation can close them - a leaked stream per swap would pile
+      // connections onto the broker.
+      window.__spaEventSources = new Set();
       window.setInterval = (fn, ms, ...rest) => {
         const id = window.__nativeSetInterval(fn, ms, ...rest);
         window.__spaIntervals.add(id);
@@ -567,6 +571,8 @@
         window.__spaIntervals.clear();
         for (const id of window.__spaTimeouts) window.__nativeClearTimeout(id);
         window.__spaTimeouts.clear();
+        for (const es of window.__spaEventSources) es.close();
+        window.__spaEventSources.clear();
       }
 
       function setActiveNav(pathname) {

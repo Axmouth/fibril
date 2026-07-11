@@ -225,12 +225,17 @@ pub async fn history(
     headers: HeaderMap,
 ) -> Result<Json<HistoryResponse>, StatusCode> {
     check_auth(&server, &headers).await?;
+    Ok(Json(history_payload(&server)))
+}
+
+/// The history time series, shared by the GET route and the events stream.
+pub(crate) fn history_payload(server: &AdminServer) -> HistoryResponse {
     let (samples, queues) = server.history.snapshot();
-    Ok(Json(HistoryResponse {
+    HistoryResponse {
         interval_ms: SAMPLE_INTERVAL.as_millis() as u64,
         samples,
         queues,
-    }))
+    }
 }
 
 #[cfg(test)]

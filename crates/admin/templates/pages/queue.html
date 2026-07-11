@@ -169,13 +169,11 @@ function statePillClass(item) {
   return "queue-state-pill queue-state-unloaded";
 }
 
-async function refresh() {
-  const [data, history, subs, cohortData] = await Promise.all([
-    api('/admin/api/queues_debug'),
-    api('/admin/api/history').catch(() => ({ queues: [] })),
-    api('/admin/api/subscriptions').catch(() => []),
-    api('/admin/api/cohorts').catch(() => ({ cohorts: [] })),
-  ]);
+function render(bundle) {
+  const data = bundle.queues_debug || {};
+  const history = bundle.history || { queues: [] };
+  const subs = bundle.subscriptions;
+  const cohortData = bundle.cohorts || {};
 
   const parts = (data.queues || [])
     .filter((q) => q.topic === topic && (q.group || "") === group)
@@ -304,7 +302,17 @@ document.getElementById("q-test-send").addEventListener("click", async () => {
   }
 });
 
-autoRefresh(refresh, 2000);
-refresh();
+// Fetch-based refresh: refreshes after actions and is the polling fallback
+// when the event stream is out.
+async function refresh() {
+  const [queues_debug, history, subscriptions, cohorts] = await Promise.all([
+    api('/admin/api/queues_debug'),
+    api('/admin/api/history').catch(() => ({ queues: [] })),
+    api('/admin/api/subscriptions').catch(() => []),
+    api('/admin/api/cohorts').catch(() => ({ cohorts: [] })),
+  ]);
+  render({ queues_debug, history, subscriptions, cohorts });
+}
+liveData(["queues_debug", "history", "subscriptions", "cohorts"], render, refresh);
 </script>
 {% endblock %}

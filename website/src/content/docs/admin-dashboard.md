@@ -44,6 +44,12 @@ to, largest first, so growth points at its cause.
 Chart history is sampled in memory on the broker (the last 30 minutes) and
 resets on restart; Prometheus stays the durable history.
 
+Pages update live: each open page holds one server-sent-events stream and the
+broker pushes its data every couple of seconds, serializing each data family
+once no matter how many pages watch it. An idle dashboard costs the broker
+nothing, and pages fall back to polling automatically if the stream is
+unavailable. The live pill in the top bar tracks the stream's health.
+
 The diagnostics page shows lower-level storage and queue metrics, including
 command-lane depths and timings, command-kind counters, append stats, snapshot
 cost, and recovery counters. Use it when the overview suggests pressure and you
