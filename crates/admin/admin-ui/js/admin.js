@@ -302,3 +302,26 @@ function chartHoverWire(svg) {
     if (svg.__chartTip) svg.__chartTip.hidden = true;
   });
 }
+
+// Mirror filter controls into the URL query string so a filtered view can be
+// reloaded or shared by copying the address. replaceState keeps typing from
+// piling entries onto the back button.
+function urlParamGet(name) {
+  return new URLSearchParams(location.search).get(name) || "";
+}
+
+function urlParamSet(name, value) {
+  const url = new URL(location.href);
+  if (value) url.searchParams.set(name, value);
+  else url.searchParams.delete(name);
+  history.replaceState(history.state, "", url);
+}
+
+// Seed a text filter from the URL, then mirror edits back and re-render.
+function wireUrlFilter(input, param, onChange) {
+  input.value = urlParamGet(param);
+  input.addEventListener("input", () => {
+    urlParamSet(param, input.value.trim());
+    onChange();
+  });
+}

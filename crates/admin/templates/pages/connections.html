@@ -58,7 +58,7 @@ async function refresh() {
       <td class="text-right">${escapeHtml(fmtUptime(r.uptime ?? 0))}</td>
     </tr>`).join("");
 }
-document.getElementById("conn-search").addEventListener("input", refresh);
+wireUrlFilter(document.getElementById("conn-search"), "q", refresh);
 autoRefresh(refresh, 2000);
 refresh();
 </script>

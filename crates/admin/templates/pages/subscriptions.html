@@ -110,7 +110,7 @@ function refreshAll() {
   refresh();
   refreshCohorts();
 }
-document.getElementById("sub-search").addEventListener("input", refresh);
+wireUrlFilter(document.getElementById("sub-search"), "q", refresh);
 autoRefresh(refreshAll, 2000);
 refreshAll();
 </script>

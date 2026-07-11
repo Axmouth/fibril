@@ -491,9 +491,16 @@ async function deleteQueue(btn) {
   }
 }
 
-// Re-render immediately when the filters change (the 2s poll also re-applies them).
-document.getElementById("queue-search").addEventListener("input", refresh);
-document.getElementById("queue-hide-inactive").addEventListener("change", refresh);
+// Filters live in the URL (?q=, ?hide=inactive) so a filtered view survives
+// reload and can be shared. Re-render immediately on change (the 2s poll also
+// re-applies them).
+wireUrlFilter(document.getElementById("queue-search"), "q", refresh);
+const hideInactiveBox = document.getElementById("queue-hide-inactive");
+hideInactiveBox.checked = urlParamGet("hide") === "inactive";
+hideInactiveBox.addEventListener("change", () => {
+  urlParamSet("hide", hideInactiveBox.checked ? "inactive" : "");
+  refresh();
+});
 
 autoRefresh(refresh, 2000);
 refresh();

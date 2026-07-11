@@ -83,6 +83,9 @@ dead-letter policy, and an optional default message TTL) and **delete a queue**
 from its row. Delete is single-node: it is refused while a partition still has
 inflight work, and refused in cluster mode pending coordinated teardown. A
 **hide-inactive** toggle and a **search** filter help when the list is long.
+Filters persist in the page URL (here and on the streams, connections, and
+subscriptions pages), so a filtered view survives reload and can be shared by
+copying the address.
 
 For sparse workloads, the page also shows whether each queue is currently loaded
 in memory, only indexed on disk, or recently unloaded after being idle. It shows

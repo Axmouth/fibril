@@ -248,7 +248,7 @@ document.getElementById("create-toggle").addEventListener("click", () => {
   panel.hidden = !panel.hidden;
   if (!panel.hidden) document.getElementById("create.topic").focus();
 });
-document.getElementById("stream-search").addEventListener("input", refresh);
+wireUrlFilter(document.getElementById("stream-search"), "q", refresh);
 
 autoRefresh(refresh, 2000);
 refresh();
