@@ -128,6 +128,12 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- Dashboard pages that read their query parameters (the queue detail topic,
+  message inspection, the persisted filters) got the PREVIOUS page's address
+  when reached through an in-dashboard link: the boosted navigation pushed the
+  new URL only after running the new page's scripts. A queue's Detail link
+  rendered the "no queue with this topic" panel until a manual refresh. The
+  URL now updates before the scripts run.
 - The dashboard's publisher and consumer activity counts always read zero. The
   queues page looked activity up under a per-partition key while the broker
   reports it per topic and group, so the lookup never matched. Activity is now

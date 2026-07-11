@@ -636,10 +636,13 @@
           if (crumb) crumb.textContent = title.textContent;
         }
         current.innerHTML = next.innerHTML;
+        // Push BEFORE running the page's scripts: they read their query
+        // parameters from window.location (the queue detail page's topic, the
+        // list pages' filters), so the address must already be the new page's.
+        if (push) window.history.pushState({ spa: true }, "", url);
         await runScripts(current);
         current.classList.remove("swapping");
         setActiveNav(new URL(url, window.location.origin).pathname);
-        if (push) window.history.pushState({ spa: true }, "", url);
         window.scrollTo(0, 0);
       }
 
