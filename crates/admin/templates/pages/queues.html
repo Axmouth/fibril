@@ -151,6 +151,18 @@ function activityKey(topic, group) {
   return `${topic}\u0000${group || ""}`;
 }
 
+// Color the depth number by where it is heading: a growing backlog warns, a
+// draining one reassures, and an empty or flat queue stays neutral.
+function depthTone(series, ready) {
+  const depths = series?.depths || [];
+  if (depths.length < 4 || ready === 0) return "";
+  const recent = depths[depths.length - 1];
+  const before = depths[Math.max(0, depths.length - 6)];
+  if (recent > before * 1.05 + 1) return "v-warn";
+  if (recent < before * 0.95 - 1) return "v-ok";
+  return "";
+}
+
 function render(bundle) {
   const data = bundle.queues_debug || {};
   const history = bundle.history || { queues: [] };
@@ -292,10 +304,10 @@ function render(bundle) {
           <tr class="queue-row queue-agg-row" ${dataAttrs} data-partitions="${parts.length}" style="cursor:pointer">
             <td class="queue-topic-cell" title="${escapeHtml(topic)}"><span class="queue-caret">${open ? "▼" : "▶"}</span> ${escapeHtml(topic)}</td>
             <td><span class="chip-plain">${loaded}/${parts.length} loaded</span></td>
-            <td class="text-right">${aggReady}</td>
+            <td class="text-right ${depthTone(depthSeries.get(`${topic} ${parts[0]?.group || ""}`), aggReady)}" title="${aggReady}">${fmtCompact(aggReady)}</td>
             <td class="queue-spark-cell"><svg class="queue-spark" data-key="${escapeHtml(`${topic} ${parts[0]?.group || ""}`)}" width="90" height="22" aria-label="Depth over the last 30 minutes"></svg></td>
-            <td class="text-right v-active">${sumState("inflight_count")}</td>
-            <td class="text-right">${num(act?.active_publishers)}</td>
+            <td class="text-right v-active">${fmtCompact(sumState("inflight_count"))}</td>
+            <td class="text-right ${num(act?.active_publishers) > 0 ? "v-active" : "v-dim"}">${num(act?.active_publishers)}</td>
             <td class="text-right ${subsClass}">${aggSubs}</td>
             <td class="text-right v-dim">—</td>
             <td>${dlqChips(dlqItem?.state)}</td>

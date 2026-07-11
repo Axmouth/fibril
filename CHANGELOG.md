@@ -27,6 +27,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   streams, connections, and subscriptions pages (and the hide-inactive toggle
   on queues) mirror into query parameters, so a filtered view survives reload
   and can be shared by copying the address.
+- More at-a-glance color on the queues and streams views. Queue depth numbers
+  take a tone from their 30-minute trend (a growing backlog warns, a draining
+  one reassures), publisher counts light up when live, stream partition roles
+  become chips, live stream subscriptions get a per-topic chip, and lag
+  recoveries warn when nonzero.
 - The dashboard's data now arrives over one server-sent-events stream per open
   page (`GET /admin/api/events`) instead of polling every two seconds. The
   broker pushes each page's data families on its own tick, serializing each

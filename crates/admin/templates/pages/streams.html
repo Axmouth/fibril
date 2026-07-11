@@ -115,20 +115,25 @@ function render(bundle) {
         const hosted = parts.find(p => p.durability != null);
         const durability = hosted?.durability ?? "-";
         const retention = hosted ? retentionLabel(hosted) : "-";
+        const totalSubs = parts.reduce((acc, p) => acc + (p.live_subscriptions || 0), 0);
         const rows = parts.map(entry => {
           const hasStats = entry.head != null;
           const depth = hasStats ? Math.max(0, Number(entry.tail) - Number(entry.head)) : null;
-          const role = entry.role ? humanizeSnake(entry.role) : "-";
+          const roleChip = entry.role
+            ? `<span class="${String(entry.role).includes("owner") ? "chip-group" : "chip-plain"}">${escapeHtml(humanizeSnake(entry.role))}</span>`
+            : '<span class="v-dim">-</span>';
+          const subs = entry.live_subscriptions;
+          const lag = entry.lag_evictions;
           return `
             <tr class="queue-row">
               <td class="queue-part-cell">partition ${entry.partition}</td>
-              <td>${escapeHtml(role)}</td>
+              <td>${roleChip}</td>
               <td class="text-right">${hasStats ? entry.head : "-"}</td>
               <td class="text-right">${hasStats ? entry.tail : "-"}</td>
-              <td class="text-right">${depth != null ? depth : "-"}</td>
+              <td class="text-right">${depth != null ? fmtCompact(depth) : "-"}</td>
               <td class="text-right">${entry.applied_upto != null ? entry.applied_upto : "-"}</td>
-              <td class="text-right">${entry.live_subscriptions != null ? entry.live_subscriptions : "-"}</td>
-              <td class="text-right">${entry.lag_evictions != null ? entry.lag_evictions : "-"}</td>
+              <td class="text-right ${subs > 0 ? "v-active" : "v-dim"}">${subs != null ? subs : "-"}</td>
+              <td class="text-right ${lag > 0 ? "v-warn" : "v-dim"}">${lag != null ? lag : "-"}</td>
             </tr>`;
         }).join("");
         const durabilityChip = durability === "durable"
@@ -141,6 +146,7 @@ function render(bundle) {
               <span class="chip-group">${escapeHtml(topic)}</span>
               ${durabilityChip}
               <span class="chip-plain">retention ${escapeHtml(retention)}</span>
+              <span class="${totalSubs > 0 ? "chip-ok" : "chip-plain"}">${totalSubs} live sub${totalSubs === 1 ? "" : "s"}</span>
               <span class="queue-group-note">${parts.length} partition(s)</span>
               <button class="btn" type="button" data-test-publish="${escapeHtml(topic)}">Publish test record</button>
             </div>
