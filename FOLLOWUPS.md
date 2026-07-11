@@ -2948,3 +2948,32 @@ the choice persists across restarts without a config write (persist a
 data-dir marker? write back to config with consent?); and the plaintext-426
 guidance story during the switchover. Pairs well with the existing live
 rotation and the cert card already on the Security page.
+
+## Dashboard follow-up menu (post-redesign, user wants to work through these)
+
+Frontend-only:
+- Filter state in the URL (?q=...) on queues/subscriptions/connections so a
+  filtered view survives refresh and can be shared.
+- Deeper Cluster diagram/list restyle (the redesign kept the internals as-is;
+  the diagram region is also the mascot's future home - see the mascot memory:
+  sprite rings per broker + procedural tendrils, staged S0-S4).
+
+Small backend + UI:
+- Publish a test message from the queue detail page (admin publish endpoint +
+  button; the last "Control"-style gap vs the bunqueue reference).
+- Per-partition consumer coverage on queue detail via the cohorts endpoint
+  (queue-level activity cannot attribute consumers to partitions).
+
+Own mini-arcs:
+- SSE for live dashboard data replacing the 2s polling (autoRefresh already
+  centralizes the plumbing).
+- Control-plane audit feed page (declares, deletes, drains, settings changes,
+  quarantines, membership changes - never per-message traffic); needs a small
+  bounded in-memory event ring like the history sampler.
+- Desktop notifications + optional user-defined threshold rules layered on the
+  built-in attention feed.
+- Storage breakdown (messages vs events vs snapshots) behind the Overview disk
+  stat, as a segmented bar.
+
+Merge checklist for administrative-ascension: full workspace test suite +
+vocab-lint at the branch tip, click-through sign-off, squash-vs-history call.
