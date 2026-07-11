@@ -418,10 +418,12 @@ function wireCatalogDatalist(input, pick) {
     document.body.appendChild(list);
     input.setAttribute("list", id);
   }
-  let loaded = false;
+  // Refill on every focus so names declared after the page opened appear
+  // without a reload. One light fetch per click-into-field, none while typing.
+  let fetching = false;
   input.addEventListener("focus", async () => {
-    if (loaded) return;
-    loaded = true;
+    if (fetching) return;
+    fetching = true;
     try {
       const data = await api('/admin/api/queues_debug');
       const values = new Set();
@@ -434,6 +436,8 @@ function wireCatalogDatalist(input, pick) {
         .join("");
     } catch (_err) {
       // Suggestions are a convenience; typing works regardless.
+    } finally {
+      fetching = false;
     }
   });
 }
