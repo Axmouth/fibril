@@ -1245,6 +1245,7 @@ dependencies = [
  "fibril-metrics",
  "fibril-protocol",
  "fibril-util",
+ "fs2",
  "futures",
  "http",
  "mime_guess",

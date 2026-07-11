@@ -27,6 +27,15 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   streams, connections, and subscriptions pages (and the hide-inactive toggle
   on queues) mirror into query parameters, so a filtered view survives reload
   and can be shared by copying the address.
+- Six more attention rules, so the needs-attention panel (and the desktop
+  notifications and Activity feed built on it) covers the conditions that
+  hurt most when unnoticed: the data directory's filesystem running low
+  (warning under 10% free, critical under 3%), a replication follower that
+  is behind and has stopped advancing, a backlog growing despite live
+  consumers, a queue whose state reports an error short of quarantine, a
+  broker left draining, and stream subscribers repeatedly lag-recovering
+  (as Activity entries). An expired certificate now escalates from warning
+  to critical.
 - Desktop notifications for new attention conditions, opt-in from the
   settings page: critical only, or critical and warning. The browser is asked
   for permission on enable, the choice lives in that browser alone, and a

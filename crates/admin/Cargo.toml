@@ -11,6 +11,7 @@ fibril-broker = { path = "../broker" }
 fibril-protocol = { path = "../protocol" }
 fibril-metrics = { path = "../metrics" }
 fibril-util = { path = "../util" }
+fs2 = "0.4"
 askama = { version = "0.15" }
 async-trait = "0.1"
 axum = "0.8"

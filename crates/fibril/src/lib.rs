@@ -1891,6 +1891,9 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         engine: engine.clone(),
     }));
 
+    // The parked-drain attention rule reads this node's draining state.
+    let admin = admin.with_draining_flag(draining.clone());
+
     // Per-broker exclusive-cohort view (this node's local cohort membership,
     // with each member's live per-partition coverage for the queue detail page).
     let admin = admin.with_cohorts({

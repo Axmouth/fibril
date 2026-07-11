@@ -234,6 +234,12 @@ pub struct AdminServer {
     pub events: crate::events::EventBroadcaster,
     /// Bounded control-plane activity feed.
     pub audit: crate::audit::AuditLog,
+    /// Standing conditions derived across time by the audit watcher (e.g.
+    /// stalled replication followers), read by the attention rules.
+    pub derived: crate::audit::DerivedConditions,
+    /// Whether this node is draining (set by the drain flow), for the
+    /// attention rule that flags a parked drain.
+    pub draining_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 fn render<T: Template>(tpl: T) -> Html<String> {
@@ -280,6 +286,8 @@ impl AdminServer {
             history: crate::history::History::new(),
             events: crate::events::EventBroadcaster::default(),
             audit: crate::audit::AuditLog::default(),
+            derived: crate::audit::DerivedConditions::default(),
+            draining_flag: None,
         }
     }
 
@@ -298,6 +306,15 @@ impl AdminServer {
     /// Attach the test-message publisher for `POST /admin/api/publish`.
     pub fn with_test_publisher(mut self, publisher: Arc<dyn BrokerTestPublisher>) -> Self {
         self.test_publisher = Some(publisher);
+        self
+    }
+
+    /// Attach this node's draining flag for the parked-drain attention rule.
+    pub fn with_draining_flag(
+        mut self,
+        flag: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        self.draining_flag = Some(flag);
         self
     }
 

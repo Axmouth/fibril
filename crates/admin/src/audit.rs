@@ -4,7 +4,7 @@
 //! resolved, membership changes). In-memory and reset on restart, like the
 //! history samples: the durable trail is the broker log.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -156,6 +156,97 @@ pub async fn watch_once(server: &AdminServer, seen: &mut WatchState) {
         }
         seen.nodes = Some(nodes);
     }
+
+    watch_followers(server, seen);
+    watch_stream_lag(server, seen).await;
+}
+
+/// Track replication followers across passes: one that is behind and not
+/// advancing its offsets for a few passes is stalled - data safety eroding
+/// quietly. Feeds the attention rule via [`DerivedConditions`].
+fn watch_followers(server: &AdminServer, seen: &mut WatchState) {
+    let Some(observability) = &server.broker_queue_observability else {
+        return;
+    };
+    let value = observability();
+    let followers = value
+        .get("replication_followers")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut next: HashMap<String, (String, u64, u64, u32)> = HashMap::new();
+    let mut stalled = Vec::new();
+    for follower in &followers {
+        let topic = follower.get("topic").and_then(|v| v.as_str()).unwrap_or("?");
+        let partition = follower
+            .get("partition")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let state = follower.get("state");
+        let status = state
+            .and_then(|s| s.get("status"))
+            .and_then(|s| s.get("status"))
+            .and_then(|s| s.as_str())
+            .unwrap_or("unknown");
+        let message_next = state
+            .and_then(|s| s.get("message_next_offset"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let event_next = state
+            .and_then(|s| s.get("event_next_offset"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let subject = format!("{topic}/{partition}");
+        let record = advance_follower(seen.followers.get(&subject), status, message_next, event_next);
+        if record.3 >= FOLLOWER_STALL_PASSES {
+            stalled.push(subject.clone());
+        }
+        next.insert(subject, record);
+    }
+    seen.followers = next;
+    stalled.sort();
+    server.derived.set_stalled_followers(stalled);
+}
+
+/// Record a feed entry when a stream partition's lag-eviction count grows: a
+/// subscriber fell behind the live buffer and went through lag recovery. An
+/// event rather than a standing condition, so it lands in the feed, not the
+/// attention panel.
+async fn watch_stream_lag(server: &AdminServer, seen: &mut WatchState) {
+    let Some(streams) = &server.streams else {
+        return;
+    };
+    let stats = streams.stream_stats().await;
+    let mut current: HashMap<String, u64> = HashMap::new();
+    for entry in serde_json::to_value(&stats)
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+    {
+        let topic = entry.get("topic").and_then(|v| v.as_str()).unwrap_or("?");
+        let partition = entry.get("partition").and_then(|v| v.as_u64()).unwrap_or(0);
+        let lag = entry
+            .get("lag_evictions")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let subject = format!("{topic}/{partition}");
+        if let Some(previous) = seen.stream_lag.as_ref().and_then(|m| m.get(&subject))
+            && lag > *previous
+        {
+            server.audit.record(
+                "stream_lagging",
+                "warning",
+                subject.clone(),
+                format!(
+                    "A subscriber overflowed the live buffer and lag-recovered ({} total)",
+                    lag
+                ),
+            );
+        }
+        current.insert(subject, lag);
+    }
+    seen.stream_lag = Some(current);
 }
 
 /// What the watcher saw last pass. `None` fields mean "first pass": nothing is
@@ -165,6 +256,65 @@ pub async fn watch_once(server: &AdminServer, seen: &mut WatchState) {
 pub struct WatchState {
     attention: Option<HashSet<(String, String, String)>>,
     nodes: Option<HashSet<String>>,
+    /// Per follower `(status, message_next, event_next, passes_without_progress)`.
+    followers: HashMap<String, (String, u64, u64, u32)>,
+    /// Per stream partition, the last lag-eviction count seen.
+    stream_lag: Option<HashMap<String, u64>>,
+}
+
+/// A non-caught-up follower gets this many watcher passes (15s each) to move
+/// its offsets before it counts as stalled.
+const FOLLOWER_STALL_PASSES: u32 = 4;
+
+/// Standing conditions the watcher derives across passes, read by the
+/// attention rules (which are otherwise computed fresh per request).
+#[derive(Default)]
+pub struct DerivedConditions {
+    /// Follower subjects ("topic/partition") that are behind and have not
+    /// advanced for [`FOLLOWER_STALL_PASSES`] watcher passes.
+    stalled_followers: Mutex<Vec<String>>,
+}
+
+impl DerivedConditions {
+    pub fn stalled_followers(&self) -> Vec<String> {
+        self.stalled_followers
+            .lock()
+            .expect("derived conditions poisoned")
+            .clone()
+    }
+
+    fn set_stalled_followers(&self, subjects: Vec<String>) {
+        *self
+            .stalled_followers
+            .lock()
+            .expect("derived conditions poisoned") = subjects;
+    }
+}
+
+/// Advance one follower's stall accounting: returns the updated record given
+/// what this pass observed. Pure so the state machine is unit-testable.
+fn advance_follower(
+    previous: Option<&(String, u64, u64, u32)>,
+    status: &str,
+    message_next: u64,
+    event_next: u64,
+) -> (String, u64, u64, u32) {
+    if status == "caught_up" {
+        return (status.to_string(), message_next, event_next, 0);
+    }
+    match previous {
+        Some((_, prev_msg, prev_event, passes))
+            if *prev_msg == message_next && *prev_event == event_next =>
+        {
+            (
+                status.to_string(),
+                message_next,
+                event_next,
+                passes.saturating_add(1),
+            )
+        }
+        _ => (status.to_string(), message_next, event_next, 0),
+    }
 }
 
 /// Drive the watcher forever. Spawned next to the history sampler.
@@ -181,6 +331,18 @@ pub async fn run_watcher(server: Arc<AdminServer>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn follower_stall_counts_passes_without_progress() {
+        let start = advance_follower(None, "pending_retry", 10, 20);
+        assert_eq!(start.3, 0);
+        let stuck = advance_follower(Some(&start), "pending_retry", 10, 20);
+        assert_eq!(stuck.3, 1);
+        let advanced = advance_follower(Some(&stuck), "pending_retry", 11, 20);
+        assert_eq!(advanced.3, 0, "offset progress resets the stall count");
+        let caught = advance_follower(Some(&stuck), "caught_up", 10, 20);
+        assert_eq!(caught.3, 0, "caught up is never stalled");
+    }
 
     #[test]
     fn ring_is_bounded_and_newest_first() {

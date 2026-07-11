@@ -117,7 +117,7 @@ impl History {
         }
     }
 
-    fn snapshot(&self) -> (Vec<Sample>, Vec<QueueHistory>) {
+    pub(crate) fn snapshot(&self) -> (Vec<Sample>, Vec<QueueHistory>) {
         let rings = self.lock();
         let cluster = rings.cluster.iter().cloned().collect();
         let queues = rings

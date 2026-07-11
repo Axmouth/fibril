@@ -61,9 +61,11 @@ fn subscribed_topics(server: &AdminServer) -> HashSet<String> {
     topics
 }
 
-/// A queue holding messages that no live consumer is reading. Work-queue
-/// messages persist until consumed or expired, so an unread backlog only grows.
-async fn no_consumer_items(server: &AdminServer) -> Vec<AttentionItem> {
+/// Conditions read off one queue-stats walk: a queue holding messages no live
+/// consumer is reading (work-queue messages persist until consumed or expired,
+/// so an unread backlog only grows), and a queue whose state reports an error
+/// short of full quarantine.
+async fn queue_state_items(server: &AdminServer) -> Vec<AttentionItem> {
     let snapshot = match server.storage.queue_stats_snapshot().await {
         Ok(snapshot) => snapshot,
         Err(_) => return Vec::new(),
@@ -74,25 +76,156 @@ async fn no_consumer_items(server: &AdminServer) -> Vec<AttentionItem> {
     // multi-partition queue is judged as one queue, not one row per partition.
     let mut ready_by_topic: std::collections::BTreeMap<String, u64> =
         std::collections::BTreeMap::new();
+    let mut items = Vec::new();
     for (key, state) in &snapshot.queues {
-        if let fibril_metrics::QueueStateSnapshot::Ok { ready_count, .. } = state {
-            *ready_by_topic.entry(key.topic.clone()).or_default() += *ready_count as u64;
+        match state {
+            fibril_metrics::QueueStateSnapshot::Ok { ready_count, .. } => {
+                *ready_by_topic.entry(key.topic.clone()).or_default() += *ready_count as u64;
+            }
+            fibril_metrics::QueueStateSnapshot::Error { message } => {
+                items.push(AttentionItem {
+                    severity: "warning",
+                    kind: "queue_state_error",
+                    subject: key.topic.clone(),
+                    headline: format!("Queue state reports an error: {message}"),
+                    action_href: "/admin/queues",
+                });
+            }
         }
     }
 
-    ready_by_topic
+    items.extend(
+        ready_by_topic
+            .into_iter()
+            .filter(|(topic, ready)| *ready > 0 && !subscribed.contains(topic))
+            .map(|(topic, ready)| AttentionItem {
+                severity: "warning",
+                kind: "no_consumer",
+                headline: format!(
+                    "{ready} message(s) waiting on {topic} with no consumer reading them"
+                ),
+                subject: topic,
+                action_href: "/admin/queues",
+            }),
+    );
+    items
+}
+
+/// The data directory's filesystem running out of room. An append-only broker
+/// out of disk is its worst failure mode, so this warns early and escalates.
+fn disk_items(server: &AdminServer) -> Vec<AttentionItem> {
+    let Some(config) = &server.startup_config else {
+        return Vec::new();
+    };
+    let path = std::path::Path::new(&config.data_dir);
+    let (Ok(free), Ok(total)) = (fs2::available_space(path), fs2::total_space(path)) else {
+        return Vec::new();
+    };
+    if total == 0 {
+        return Vec::new();
+    }
+    let free_pct = (free as f64 / total as f64) * 100.0;
+    let severity = if free_pct < 3.0 {
+        "critical"
+    } else if free_pct < 10.0 {
+        "warning"
+    } else {
+        return Vec::new();
+    };
+    let free_gb = free as f64 / (1024.0 * 1024.0 * 1024.0);
+    vec![AttentionItem {
+        severity,
+        kind: "disk_low",
+        subject: config.data_dir.clone(),
+        headline: format!(
+            "The data directory's filesystem is {free_pct:.1}% free ({free_gb:.1} GB) - an append-only broker must not run out of disk"
+        ),
+        action_href: "/",
+    }]
+}
+
+/// This node is draining: fine mid-restart, a parked operation if forgotten.
+fn draining_items(server: &AdminServer) -> Vec<AttentionItem> {
+    let Some(flag) = &server.draining_flag else {
+        return Vec::new();
+    };
+    if !flag.load(std::sync::atomic::Ordering::Relaxed) {
+        return Vec::new();
+    }
+    vec![AttentionItem {
+        severity: "warning",
+        kind: "draining",
+        subject: "this broker".to_string(),
+        headline: "This broker is draining - restart it to finish, or it stays parked"
+            .to_string(),
+        action_href: "/admin/topology",
+    }]
+}
+
+/// Replication followers that are behind and not advancing (derived across
+/// watcher passes): data safety eroding quietly.
+fn follower_stall_items(server: &AdminServer) -> Vec<AttentionItem> {
+    server
+        .derived
+        .stalled_followers()
         .into_iter()
-        .filter(|(topic, ready)| *ready > 0 && !subscribed.contains(topic))
-        .map(|(topic, ready)| AttentionItem {
+        .map(|subject| AttentionItem {
             severity: "warning",
-            kind: "no_consumer",
+            kind: "replication_stalled",
             headline: format!(
-                "{ready} message(s) waiting on {topic} with no consumer reading them"
+                "Follower replication on {subject} is behind and has stopped advancing"
             ),
-            subject: topic,
+            subject,
             action_href: "/admin/queues",
         })
         .collect()
+}
+
+/// A queue whose backlog has grown materially across the recent history
+/// window DESPITE having consumers: they are not keeping up. The no-consumer
+/// rule covers the consumer-less case.
+fn backlog_growth_items(server: &AdminServer) -> Vec<AttentionItem> {
+    let subscribed = subscribed_topics(server);
+    let (_, queues) = server.history.snapshot();
+    queues
+        .into_iter()
+        .filter_map(|queue| {
+            if !subscribed.contains(&queue.topic) {
+                return None;
+            }
+            // Judge over up to the last ~10 minutes, requiring at least ~2
+            // minutes of samples so a fresh queue is not judged on noise.
+            let window = queue.samples.len().min(120);
+            if window < 24 {
+                return None;
+            }
+            let recent = &queue.samples[queue.samples.len() - window..];
+            let first = recent.first()?.depth;
+            let last = recent.last()?.depth;
+            if !growth_is_alarming(first, last) {
+                return None;
+            }
+            let subject = match &queue.group {
+                Some(group) => format!("{} ({group})", queue.topic),
+                None => queue.topic.clone(),
+            };
+            Some(AttentionItem {
+                severity: "warning",
+                kind: "backlog_rising",
+                headline: format!(
+                    "Backlog on {subject} grew from {first} to {last} despite live consumers - they are not keeping up"
+                ),
+                subject,
+                action_href: "/admin/queues",
+            })
+        })
+        .collect()
+}
+
+/// Whether a depth move counts as alarming growth: material in absolute terms
+/// and clearly beyond noise relative to where it started.
+fn growth_is_alarming(first: u64, last: u64) -> bool {
+    last > first && last >= 100 && (last - first) >= (first / 2).max(100)
 }
 
 /// A served certificate that has expired or is close to it. Reads the optional
@@ -115,20 +248,26 @@ fn cert_items(server: &AdminServer) -> Vec<AttentionItem> {
         .and_then(|v| v.as_str())
         .unwrap_or("the broker certificate")
         .to_string();
-    let headline = if remaining <= 0 {
-        "The served certificate has expired - rotate it now".to_string()
+    let (severity, headline) = if remaining <= 0 {
+        (
+            "critical",
+            "The served certificate has expired - rotate it now".to_string(),
+        )
     } else {
-        format!(
-            "The served certificate expires in {} day(s) - rotate the leaf before it does",
-            remaining / (24 * 60 * 60)
+        (
+            "warning",
+            format!(
+                "The served certificate expires in {} day(s) - rotate the leaf before it does",
+                remaining / (24 * 60 * 60)
+            ),
         )
     };
     vec![AttentionItem {
-        severity: "warning",
+        severity,
         kind: "cert_expiring",
         subject,
         headline,
-        action_href: "/admin/settings",
+        action_href: "/admin/security",
     }]
 }
 
@@ -208,7 +347,25 @@ pub(crate) async fn attention_payload(server: &AdminServer) -> AttentionResponse
     let mut items = quarantine_items(server);
     items.extend(settings_items(server));
     items.extend(cert_items(server));
-    items.extend(no_consumer_items(server).await);
+    items.extend(queue_state_items(server).await);
+    items.extend(disk_items(server));
+    items.extend(draining_items(server));
+    items.extend(follower_stall_items(server));
+    items.extend(backlog_growth_items(server));
     items.sort_by_key(|item| severity_rank(item.severity));
     AttentionResponse { items }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn growth_heuristic_ignores_noise_and_flags_real_growth() {
+        assert!(!growth_is_alarming(0, 50), "small absolute depth is noise");
+        assert!(!growth_is_alarming(100, 90), "draining is never growth");
+        assert!(!growth_is_alarming(1000, 1050), "within noise of the start");
+        assert!(growth_is_alarming(0, 150), "fresh material backlog");
+        assert!(growth_is_alarming(200, 400), "doubled and material");
+    }
 }

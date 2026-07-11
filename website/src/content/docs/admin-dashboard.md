@@ -35,8 +35,10 @@ without TLS, and the broker starts once the choice is applied. See
 
 The overview page is intentionally curated. It leads with a needs-attention
 panel - conditions the broker itself flags, like a backlog with no consumer
-reading it, a certificate near expiry, a failed settings load, or a
-quarantined partition, each linking to where it is fixed - then live
+reading it (or one growing despite consumers), a certificate near expiry, a
+failed settings load, a quarantined partition, low disk on the data
+directory, a stalled replication follower, or a broker left draining, each
+linking to where it is fixed - then live
 throughput and backlog-over-time charts, state-colored stat cards, process
 resource use, reconnect outcomes, and a small set of storage health signals.
 The disk card carries a segmented breakdown of which queues the bytes belong
