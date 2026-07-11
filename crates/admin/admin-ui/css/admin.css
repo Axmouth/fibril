@@ -2180,3 +2180,12 @@ html[data-theme="light"][data-flavor="iris"] {
   align-self: center;
   max-width: 480px;
 }
+
+/* The runtime-settings save row marks a semantic frontier: everything above
+   it is what the button applies, everything below is separate machinery.
+   Draw the line and give it room. */
+#settings-form .settings-actions {
+  margin: 20px 0 28px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--line-2);
+}
