@@ -111,6 +111,10 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- The dashboard's publisher and consumer activity counts always read zero. The
+  queues page looked activity up under a per-partition key while the broker
+  reports it per topic and group, so the lookup never matched. Activity is now
+  keyed by topic and group, and queue rows show the aggregate.
 - A non-retryable connection close no longer triggers a reconnect storm in the
   clients.
 - A plaintext broker is named as such when a TLS client connects to it, rather
