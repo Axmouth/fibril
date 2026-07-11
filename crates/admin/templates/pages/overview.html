@@ -47,6 +47,8 @@
     <span class="overview-label">Disk</span>
     <strong id="disk">--</strong>
     <span class="overview-help">Approximate data directory usage, MB</span>
+    <div class="storage-bar" id="disk-bar" hidden></div>
+    <div class="storage-bar-legend" id="disk-legend" hidden></div>
   </article>
 </section>
 
@@ -204,6 +206,35 @@ function metric(value, digits = 1, suffix = "") {
   return Number.isFinite(value) ? `${value.toFixed(digits)}${suffix}` : "--";
 }
 
+// Segmented view of what the disk number is made of: the largest queues get
+// their own segment, the rest fold into "other". Hidden under 1 MB total so
+// an empty broker does not render a sliver bar.
+function renderStorageBar(breakdown, total) {
+  const bar = document.getElementById("disk-bar");
+  const legend = document.getElementById("disk-legend");
+  if (!total || total < 1024 * 1024 || breakdown.length === 0) {
+    bar.hidden = true;
+    legend.hidden = true;
+    return;
+  }
+  const top = breakdown.slice(0, 4);
+  const otherBytes = breakdown
+    .slice(4)
+    .reduce((acc, e) => acc + e.message_bytes + e.event_bytes, 0);
+  const segs = top.map((e, i) => ({
+    label: e.group ? `${e.topic} · ${e.group}` : e.topic,
+    bytes: e.message_bytes + e.event_bytes,
+    cls: `seg-${i}`,
+  }));
+  if (otherBytes > 0) segs.push({ label: "other", bytes: otherBytes, cls: "seg-other" });
+  bar.innerHTML = segs.map((s) =>
+    `<span class="${s.cls}" style="width:${(100 * s.bytes / total).toFixed(2)}%" title="${escapeHtml(s.label)} · ${bytes(s.bytes)}"></span>`).join("");
+  legend.innerHTML = segs.map((s) =>
+    `<span><i class="${s.cls}"></i>${escapeHtml(s.label)} ${bytes(s.bytes)}</span>`).join("");
+  bar.hidden = false;
+  legend.hidden = false;
+}
+
 function bytes(value) {
   if (!Number.isFinite(value)) return "--";
   if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(2)} MB`;
@@ -284,6 +315,7 @@ async function refresh() {
   document.getElementById("rss_mb").textContent = metric(d.sys.rss_mb / 1024, 2);
   document.getElementById("cpu").textContent = metric(d.sys.cpu, 2);
   document.getElementById("disk").textContent = metric(d.storage_used / (1024 * 1024), 2);
+  renderStorageBar(d.storage_breakdown || [], d.storage_used || 0);
   document.getElementById("stroma_event_append_ms").textContent = metric(stroma.log?.event_log?.avg_append_latency_ms, 2, " ms");
   document.getElementById("stroma_max_wait_ms").textContent = metric(maxLaneValue(stroma, "max_wait_ms"), 2, " ms");
   document.getElementById("stroma_max_process_ms").textContent = metric(maxLaneValue(stroma, "max_process_ms"), 2, " ms");

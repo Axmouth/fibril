@@ -27,6 +27,10 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   streams, connections, and subscriptions pages (and the hide-inactive toggle
   on queues) mirror into query parameters, so a filtered view survives reload
   and can be shared by copying the address.
+- Storage breakdown on the Overview disk stat: a segmented bar under the disk
+  number shows which queues the bytes belong to (largest first, split into
+  message-log and event-log bytes in the admin payload), so "disk is growing"
+  comes with "and this queue is why".
 - Per-partition consumer coverage on the queue detail page. When a queue is
   consumed by an exclusive cohort, each partition card names the member whose
   live subscription covers it and flags uncovered partitions, and the

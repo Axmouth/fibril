@@ -33,6 +33,9 @@ pub struct OverviewResponse {
     pub stroma: serde_json::Value,
     pub sys: SystemSnapshot,
     pub storage_used: u64,
+    /// Per-queue disk footprint (largest first), the segments behind
+    /// `storage_used`.
+    pub storage_breakdown: Vec<fibril_broker::queue_engine::DiskUsedBreakdownEntry>,
 }
 
 #[derive(Serialize)]
@@ -403,17 +406,25 @@ pub async fn overview(
 ) -> Result<Json<OverviewResponse>, StatusCode> {
     check_auth(&server, &headers).await?;
 
+    // One walk serves both the total and its per-queue segments.
+    let storage_breakdown = server
+        .storage
+        .estimate_disk_used_breakdown()
+        .await
+        .unwrap_or_default();
+    let storage_used = storage_breakdown
+        .iter()
+        .map(|entry| entry.message_bytes + entry.event_bytes)
+        .sum();
+
     Ok(Json(OverviewResponse {
         broker: server.metrics.broker().snapshot(),
         storage: server.metrics.storage().snapshot(),
         tcp: server.metrics.tcp().snapshot(),
         stroma: stroma_overview(&server),
         sys: server.metrics.system().snapshot(),
-        storage_used: server
-            .storage
-            .estimate_disk_used()
-            .await
-            .unwrap_or_default(),
+        storage_used,
+        storage_breakdown,
     }))
 }
 

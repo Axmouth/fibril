@@ -39,6 +39,8 @@ reading it, a certificate near expiry, a failed settings load, or a
 quarantined partition, each linking to where it is fixed - then live
 throughput and backlog-over-time charts, state-colored stat cards, process
 resource use, reconnect outcomes, and a small set of storage health signals.
+The disk card carries a segmented breakdown of which queues the bytes belong
+to, largest first, so growth points at its cause.
 Chart history is sampled in memory on the broker (the last 30 minutes) and
 resets on restart; Prometheus stays the durable history.
 

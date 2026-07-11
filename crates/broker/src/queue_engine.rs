@@ -10,7 +10,8 @@ use stroma_core::{
     StromaMetrics,
 };
 pub use stroma_core::{
-    AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, DestroyOutcome, EnqueuedStreamAppend,
+    AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, DestroyOutcome, DiskUsedBreakdownEntry,
+    EnqueuedStreamAppend,
     EvictOutcome, FollowerStateCheckpointInstall, FollowerStateCheckpointInstallOutcome, GlobalDLQ,
     GlobalDlqSnapshot, GlobalDlqUpdateOutcome, InspectMode, IoError, KDurability,
     KeratinAppendCompletion, KeratinConfig, Message, MessageContentType, MessageHeaders,
@@ -178,6 +179,13 @@ pub trait QueueEngine {
     async fn shutdown(&self) -> Result<(), StromaError>;
 
     async fn estimate_disk_used(&self) -> Result<u64, StromaError>;
+
+    /// Disk use per queue (topic + group), split into message-log and
+    /// event-log bytes. The same walk as `estimate_disk_used`, so callers
+    /// wanting both should take the breakdown and sum it.
+    async fn estimate_disk_used_breakdown(
+        &self,
+    ) -> Result<Vec<DiskUsedBreakdownEntry>, StromaError>;
 
     /// Every partition known on disk (topic, partition, group), materialized or
     /// not. Includes partitions indexed at open that no command has materialized,
@@ -1065,6 +1073,12 @@ impl QueueEngine for StromaEngine {
 
     async fn estimate_disk_used(&self) -> Result<u64, StromaError> {
         self.inner.estimate_disk_used().await
+    }
+
+    async fn estimate_disk_used_breakdown(
+        &self,
+    ) -> Result<Vec<DiskUsedBreakdownEntry>, StromaError> {
+        self.inner.estimate_disk_used_breakdown().await
     }
 
     async fn list_partitions(&self) -> Result<Vec<(String, u32, Option<String>)>, StromaError> {

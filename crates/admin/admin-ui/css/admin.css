@@ -2132,3 +2132,36 @@ html[data-theme="light"][data-flavor="iris"] {
 .chart-tip .tip-when {
   color: var(--muted);
 }
+
+/* ---- storage breakdown bar (Overview disk card) ---- */
+.storage-bar {
+  display: flex;
+  height: 8px;
+  border-radius: 4px;
+  overflow: hidden;
+  margin-top: 8px;
+  background: var(--line);
+}
+.storage-bar > span { display: block; min-width: 2px; }
+.storage-bar-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.storage-bar-legend i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  margin-right: 4px;
+}
+/* Segment hues stay off the semantic ok/warn/bad set: accent, active, and
+   panel-mixed variants keep the bar readable in every theme and flavor. */
+.seg-0 { background: var(--accent); }
+.seg-1 { background: var(--active); }
+.seg-2 { background: color-mix(in srgb, var(--accent) 55%, var(--panel)); }
+.seg-3 { background: color-mix(in srgb, var(--active) 55%, var(--panel)); }
+.seg-other { background: var(--dim); }

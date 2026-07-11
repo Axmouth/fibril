@@ -28,7 +28,8 @@ use fibril_broker::{
         QueueIdentity, StaticCoordination, StreamAssignment, StreamIdentity,
     },
     queue_engine::{
-        Deliverable, DestroyOutcome, EvictOutcome, FollowerStateCheckpointInstall, InspectMode,
+        Deliverable, DestroyOutcome, DiskUsedBreakdownEntry, EvictOutcome,
+        FollowerStateCheckpointInstall, InspectMode,
         IoError, KeratinAppendCompletion, Message, MessageHeaders, OwnerReplicationBatch,
         OwnerReplicationRead, OwnerStateCheckpoint, QueueEngine, QueuePromotionOutcome,
         ReplayDeadLetterOutcome, ReplayDeadLettersReport, SettleRequest as EngineSettleRequest,
@@ -263,6 +264,12 @@ impl QueueEngine for FailingPublishEngine {
 
     async fn estimate_disk_used(&self) -> Result<u64, StromaError> {
         Ok(0)
+    }
+
+    async fn estimate_disk_used_breakdown(
+        &self,
+    ) -> Result<Vec<DiskUsedBreakdownEntry>, StromaError> {
+        Ok(Vec::new())
     }
 
     async fn list_partitions(&self) -> Result<Vec<(String, u32, Option<String>)>, StromaError> {
