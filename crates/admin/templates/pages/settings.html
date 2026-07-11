@@ -267,10 +267,31 @@
     </section>
 
     <div class="settings-actions">
-      <button class="btn btn-primary" type="submit">Save settings</button>
+      <button class="btn btn-primary" type="submit">Save runtime settings</button>
       <button class="btn" type="button" id="reload-settings">Reload</button>
+      <span class="settings-actions-note">Applies the Broker Runtime Settings
+        above, live - no restart. Startup Config below is read-only and set
+        before the broker starts.</span>
     </div>
   </form>
+
+  <section class="settings-section" id="notify-section">
+    <div class="settings-section-heading">
+      <h5>Desktop Notifications</h5>
+      <p>Notify this browser when a new attention condition appears - a
+        quarantined partition, a backlog with no consumer, a certificate near
+        expiry. Stored in this browser only; the broker is not involved.</p>
+    </div>
+    <div class="settings-inline-form">
+      <label class="settings-label" for="notify.level">Notify on</label>
+      <select id="notify.level">
+        <option value="off">Off</option>
+        <option value="critical">Critical only</option>
+        <option value="warning">Critical and warning</option>
+      </select>
+      <span id="notify-status" class="settings-message"></span>
+    </div>
+  </section>
 
   <section class="settings-section" id="users-section" hidden>
     <div class="settings-section-heading">
@@ -324,6 +345,22 @@
       <div>
         <dt>Keratin fsync interval</dt>
         <dd id="startup.keratin_fsync_interval_ms"></dd>
+      </div>
+      <div>
+        <dt>Min fsync interval</dt>
+        <dd id="startup.keratin_min_fsync_interval_ms"></dd>
+      </div>
+      <div>
+        <dt>Segment preallocation</dt>
+        <dd id="startup.keratin_segment_preallocate_bytes"></dd>
+      </div>
+      <div>
+        <dt>Max in-flight fsyncs</dt>
+        <dd id="startup.keratin_max_inflight_fsyncs"></dd>
+      </div>
+      <div>
+        <dt>Fsync pipelining threshold</dt>
+        <dd id="startup.keratin_pipeline_commit_records"></dd>
       </div>
       <div>
         <dt>Message log segment size</dt>
@@ -613,6 +650,12 @@ function renderStartupConfig(data) {
   field("startup.admin_auth_enabled").textContent = data.admin_auth_enabled ? "enabled" : "disabled";
   field("startup.tls_status").textContent = data.tls_status || "unknown";
   field("startup.keratin_fsync_interval_ms").textContent = `${data.keratin_fsync_interval_ms} ms`;
+  field("startup.keratin_min_fsync_interval_ms").textContent = `${data.keratin_min_fsync_interval_ms} ms`;
+  field("startup.keratin_segment_preallocate_bytes").textContent =
+    data.keratin_segment_preallocate_bytes > 0 ? formatBytes(data.keratin_segment_preallocate_bytes) : "off";
+  field("startup.keratin_max_inflight_fsyncs").textContent = String(data.keratin_max_inflight_fsyncs);
+  field("startup.keratin_pipeline_commit_records").textContent =
+    `${data.keratin_pipeline_commit_records} records/commit`;
   field("startup.keratin_message_log_segment_max_bytes").textContent = formatBytes(data.keratin_message_log_segment_max_bytes);
   field("startup.keratin_event_log_segment_max_bytes").textContent = formatBytes(data.keratin_event_log_segment_max_bytes);
   field("startup.coordination_heartbeat_interval_ms").textContent = `${data.coordination_heartbeat_interval_ms} ms`;
@@ -941,5 +984,41 @@ loadUsers();
 field("user-form").addEventListener("submit", saveUser);
 loadGlobalDlq();
 setQueueDlqTargetFieldsEnabled(field("queue-dlq.policy").value === "custom");
+
+// Desktop notification preference: local to this browser. Turning it on asks
+// the browser for permission; a denial reverts to off with a note.
+(() => {
+  const level = document.getElementById("notify.level");
+  const status = document.getElementById("notify-status");
+  const stored = window.localStorage.getItem("fibril-admin-notify") || "off";
+  level.value = stored;
+  if (stored !== "off" && (!("Notification" in window) || Notification.permission !== "granted")) {
+    status.textContent = "Permission missing - re-select a level to grant it.";
+  }
+  level.addEventListener("change", async () => {
+    const choice = level.value;
+    if (choice === "off") {
+      window.localStorage.setItem("fibril-admin-notify", "off");
+      status.textContent = "Notifications off.";
+      return;
+    }
+    if (!("Notification" in window)) {
+      level.value = "off";
+      status.textContent = "This browser does not support notifications.";
+      return;
+    }
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted") {
+      level.value = "off";
+      window.localStorage.setItem("fibril-admin-notify", "off");
+      status.textContent = "Permission denied - notifications stay off.";
+      return;
+    }
+    window.localStorage.setItem("fibril-admin-notify", choice);
+    status.textContent = choice === "critical"
+      ? "Notifying on critical conditions."
+      : "Notifying on critical and warning conditions.";
+  });
+})();
 </script>
 {% endblock %}

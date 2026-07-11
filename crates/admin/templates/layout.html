@@ -214,6 +214,28 @@
     (() => {
       const badge = document.getElementById("attention-badge");
       if (!badge) return;
+      // Desktop notifications for NEW attention items, riding the same poll.
+      // Opt-in from the settings page: "off" (default), "critical", or
+      // "warning" (= critical + warning). First pass seeds silently so a page
+      // load never replays standing conditions as fresh alerts.
+      let notifySeen = null;
+      function notifyNew(items) {
+        const level = window.localStorage.getItem("fibril-admin-notify") || "off";
+        const current = new Set(items.map((item) => `${item.kind}\u0000${item.subject}`));
+        const previous = notifySeen;
+        notifySeen = current;
+        if (level === "off" || previous === null) return;
+        if (!("Notification" in window) || Notification.permission !== "granted") return;
+        for (const item of items) {
+          if (previous.has(`${item.kind}\u0000${item.subject}`)) continue;
+          if (item.severity !== "critical" && level !== "warning") continue;
+          new Notification(`Fibril: ${item.headline}`, {
+            body: item.subject,
+            tag: `fibril-${item.kind}-${item.subject}`,
+          });
+        }
+      }
+
       async function load() {
         let data;
         try {
@@ -224,6 +246,7 @@
           return;
         }
         const items = (data && data.items) || [];
+        notifyNew(items);
         if (!items.length) {
           badge.hidden = true;
           return;

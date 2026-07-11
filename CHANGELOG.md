@@ -27,6 +27,13 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   streams, connections, and subscriptions pages (and the hide-inactive toggle
   on queues) mirror into query parameters, so a filtered view survives reload
   and can be shared by copying the address.
+- Desktop notifications for new attention conditions, opt-in from the
+  settings page: critical only, or critical and warning. The browser is asked
+  for permission on enable, the choice lives in that browser alone, and a
+  page load never replays standing conditions as fresh alerts.
+- Optional resource graphs on Overview: a collapsed panel with memory, CPU,
+  and disk over the last 30 minutes (the history sampler now records them).
+  The open state sticks per browser.
 - An Activity page: a live control-plane feed of what happened on this broker
   - queue and stream declares, deletes, drains, operator test publishes,
   attention conditions raised and resolved, and cluster membership changes -
@@ -101,6 +108,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Changed
 
+- The settings page says what saves what: the save button is named "Save
+  runtime settings" with a note that it applies the runtime section live,
+  while Startup Config below is read-only. The startup summary gains the
+  newer storage knobs: min fsync interval, segment preallocation, max
+  in-flight fsyncs, and the fsync pipelining threshold.
 - Durable publish latency. Publishing overlaps the message-log and event-log
   fsyncs instead of serializing them, roughly halving single-node durable
   publish-to-confirm latency, and the storage layer coalesces small commits so

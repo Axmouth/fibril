@@ -50,6 +50,12 @@ once no matter how many pages watch it. An idle dashboard costs the broker
 nothing, and pages fall back to polling automatically if the stream is
 unavailable. The live pill in the top bar tracks the stream's health.
 
+The overview also carries a collapsed resources panel - memory, CPU, and
+disk over the last 30 minutes - for when a resource question needs a shape,
+not a number. The settings page can enable desktop notifications for new
+attention conditions (critical only, or critical and warning), a per-browser
+choice.
+
 The Activity page is the broker's own diary: operator actions (declares,
 deletes, drains, test publishes), attention conditions raised and resolved,
 and cluster membership changes, newest first with severity-colored entries
