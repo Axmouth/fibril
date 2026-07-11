@@ -3044,6 +3044,15 @@ deny_unknown_fields hardening on admin request DTOs (a typoed field name in a
 declare request is silently ignored today - guided-errors philosophy says name
 it).
 
+## Known intermittent: one fibril-admin test flakes under full-workspace runs
+
+Seen 2026-07-11, roughly 1 in 4 `cargo test --workspace` runs: the admin test
+binary reports 71 passed / 1 failed, but solo `-p fibril-admin` runs and rerun
+attempts stay green and the name was not captured. Next time it fires, grab
+the name (`cargo test --workspace --no-fail-fast 2>&1 | tee /tmp/suite.log`)
+and deflake properly - likely a timing-sensitive TCP-bound admin test under
+parallel load.
+
 ## Future: broker memory audit (filed 2026-07-11)
 
 User observation: RSS does not drop back to earlier levels after all active
