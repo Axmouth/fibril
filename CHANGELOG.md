@@ -27,6 +27,12 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   streams, connections, and subscriptions pages (and the hide-inactive toggle
   on queues) mirror into query parameters, so a filtered view survives reload
   and can be shared by copying the address.
+- Per-partition consumer coverage on the queue detail page. When a queue is
+  consumed by an exclusive cohort, each partition card names the member whose
+  live subscription covers it and flags uncovered partitions, and the
+  subscriptions page's cohort table lists each member's partitions. The
+  cohorts admin payload now carries live per-partition coverage alongside
+  membership.
 - Publish a test message from the dashboard. The queue detail page and each
   stream card gain a button that sends one text message through the broker's
   real publish path (`POST /admin/api/publish`) - partition pick, durable

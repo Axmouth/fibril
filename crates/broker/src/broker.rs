@@ -999,6 +999,27 @@ impl QueueLoopState {
 /// to all competing consumers.
 type GateUpdate = (Partition, Option<ConsumerId>);
 
+/// One cohort's live per-partition coverage on this broker, for the admin
+/// dashboard. Distinct from [`LocalCohortMembership`], which rides the
+/// heartbeat and must stay wire-stable.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LocalCohortCoverage {
+    pub topic: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    pub consumer_group: String,
+    pub members: Vec<CohortMemberCoverage>,
+}
+
+/// A cohort member and the partitions it holds live subscriptions on here.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CohortMemberCoverage {
+    pub member: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<usize>,
+    pub partitions: Vec<u32>,
+}
+
 /// A member's exclusive-cohort assignment change, pushed to that member's
 /// connection (informational; the gate enforces exclusivity regardless). The
 /// protocol layer turns this into an `AssignmentChanged` frame.
@@ -1181,6 +1202,39 @@ impl ExclusiveGroupRouter {
         } else {
             self.recompute(&key, &[partition])
         }
+    }
+
+    /// Snapshot this broker's live per-partition cohort coverage for the admin
+    /// dashboard. Unlike [`LocalCohortMembership`] (the heartbeat payload, which
+    /// stays wire-stable), each member here carries the partitions it holds a
+    /// live subscription on, so an unattended partition is visible.
+    fn local_coverage(&self) -> Vec<LocalCohortCoverage> {
+        self.subs
+            .iter()
+            .map(|(key, members)| {
+                let targets = self.targets.get(key);
+                let mut members: Vec<CohortMemberCoverage> = members
+                    .iter()
+                    .map(|(member, parts)| {
+                        let mut partitions: Vec<u32> =
+                            parts.keys().map(|p| p.id()).collect();
+                        partitions.sort_unstable();
+                        CohortMemberCoverage {
+                            member: member.clone(),
+                            target: targets.and_then(|targets| targets.get(member).copied()),
+                            partitions,
+                        }
+                    })
+                    .collect();
+                members.sort_by(|a, b| a.member.cmp(&b.member));
+                LocalCohortCoverage {
+                    topic: key.topic.clone(),
+                    group: key.group.clone(),
+                    consumer_group: key.consumer_group.clone(),
+                    members,
+                }
+            })
+            .collect()
     }
 
     /// Snapshot this broker's local cohort membership (cohort -> members+targets)
@@ -3172,6 +3226,12 @@ impl<
         self.lock_exclusive_groups().local_membership()
     }
 
+    /// This broker's live per-partition cohort coverage, for the admin
+    /// dashboard's queue detail view.
+    pub fn local_cohort_coverage(&self) -> Vec<LocalCohortCoverage> {
+        self.lock_exclusive_groups().local_coverage()
+    }
+
     /// Install the cross-broker coordinator's global assignment for a cohort: a
     /// `partition -> member id` plan covering the whole queue. This owner gates
     /// each partition it owns to the assigned member's local sub_id and, from now
@@ -4898,6 +4958,27 @@ mod exclusive_router_tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn local_coverage_reports_each_members_live_partitions() {
+        let mut router = ExclusiveGroupRouter::new(None);
+        let key = cohort();
+        router.join(key.clone(), Partition::new(1), "m1".into(), 101, None);
+        router.join(key.clone(), Partition::new(0), "m1".into(), 100, None);
+        router.join(key.clone(), Partition::new(2), "m2".into(), 200, Some(3));
+
+        let snapshot = router.local_coverage();
+        assert_eq!(snapshot.len(), 1);
+        let cohort = &snapshot[0];
+        assert_eq!(cohort.topic, "jobs");
+        assert_eq!(cohort.consumer_group, "default");
+        assert_eq!(cohort.members.len(), 2);
+        assert_eq!(cohort.members[0].member, "m1");
+        assert_eq!(cohort.members[0].partitions, vec![0, 1]);
+        assert_eq!(cohort.members[1].member, "m2");
+        assert_eq!(cohort.members[1].target, Some(3));
+        assert_eq!(cohort.members[1].partitions, vec![2]);
     }
 
     #[test]

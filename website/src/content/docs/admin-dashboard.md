@@ -187,8 +187,11 @@ restart.
 The subscriptions page lists active subscriptions. When exclusive consumer groups
 ([cohorts](/concepts/consumer-groups/)) are in use, it also shows this
 broker's view of each cohort: the topic, group, and the members with their
-per-consumer targets. Cohort assignment is broker-local runtime state, so this is
-a per-node view rather than a single cluster-wide table.
+per-consumer targets and the partitions each member's live subscription covers.
+The queue detail page uses the same data to name the covering member on every
+partition card and to flag a partition no cohort member covers. Cohort
+assignment is broker-local runtime state, so this is a per-node view rather
+than a single cluster-wide table.
 
 ## Topology
 

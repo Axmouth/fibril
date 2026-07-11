@@ -91,7 +91,10 @@ async function refreshCohorts() {
       <tbody>
       ${cohorts.map(c => {
         const members = (c.members || [])
-          .map(m => `<span class="chip-plain">${escapeHtml(m.member)}${m.target != null ? ` · target ${escapeHtml(String(m.target))}` : ""}</span>`)
+          .map(m => {
+            const parts = (m.partitions || []).map(p => `p${p}`).join(" ");
+            return `<span class="chip-plain">${escapeHtml(m.member)}${m.target != null ? ` · target ${escapeHtml(String(m.target))}` : ""}${parts ? ` · ${escapeHtml(parts)}` : ""}</span>`;
+          })
           .join(" ") || '<span class="v-dim">none</span>';
         return `<tr>
           <td class="mono">${escapeHtml(c.topic)}</td>

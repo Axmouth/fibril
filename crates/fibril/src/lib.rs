@@ -1886,10 +1886,11 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         engine: engine.clone(),
     }));
 
-    // Per-broker exclusive-cohort view (this node's local cohort membership).
+    // Per-broker exclusive-cohort view (this node's local cohort membership,
+    // with each member's live per-partition coverage for the queue detail page).
     let admin = admin.with_cohorts({
         let broker = broker.clone();
-        Arc::new(move || serde_json::to_value(broker.local_cohort_membership()).unwrap_or_default())
+        Arc::new(move || serde_json::to_value(broker.local_cohort_coverage()).unwrap_or_default())
     });
 
     // The coordination listener handle must outlive the server futures.

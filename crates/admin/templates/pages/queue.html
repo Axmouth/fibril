@@ -170,10 +170,11 @@ function statePillClass(item) {
 }
 
 async function refresh() {
-  const [data, history, subs] = await Promise.all([
+  const [data, history, subs, cohortData] = await Promise.all([
     api('/admin/api/queues_debug'),
     api('/admin/api/history').catch(() => ({ queues: [] })),
     api('/admin/api/subscriptions').catch(() => []),
+    api('/admin/api/cohorts').catch(() => ({ cohorts: [] })),
   ]);
 
   const parts = (data.queues || [])
@@ -215,15 +216,37 @@ async function refresh() {
   setCompact(document.getElementById("q-depth-now"), depth);
   document.getElementById("q-depth-trend").textContent = trendWord(depths);
 
+  // Exclusive-cohort coverage: which member holds a live subscription on each
+  // partition of this broker. A queue has at most one cohort, so the first
+  // match is the whole picture. Without a cohort, regular subscriptions fan in
+  // across all partitions and the queue-level consumer count is the coverage.
+  const cohort = (Array.isArray(cohortData.cohorts) ? cohortData.cohorts : [])
+    .find((c) => c.topic === topic && (c.group || "") === group);
+  const partMember = new Map();
+  if (cohort) {
+    for (const m of cohort.members || []) {
+      for (const part of m.partitions || []) partMember.set(part, m.member);
+    }
+  }
+
   document.getElementById("q-partitions").innerHTML = parts.map((p) => {
     const ready = p.materialized ? num(p.state.ready_count) : 0;
+    const member = partMember.get(p.partition ?? 0);
+    const uncovered = cohort && !member;
     const waitingUnread = p.materialized && ready > 0 && consumers.length === 0;
+    const coverageRow = cohort
+      ? (member
+        ? `<div class="part-row"><span>consumer</span><b class="mono" title="${escapeHtml(member)}">${escapeHtml(member.length > 14 ? member.slice(0, 13) + "…" : member)}</b></div>`
+        : '<div class="part-row"><span>consumer</span><b class="v-warn">none</b></div>')
+      : "";
     return `
-      <div class="part-card${waitingUnread ? " warn" : ""}">
+      <div class="part-card${waitingUnread || uncovered ? " warn" : ""}">
         <div class="part-id">p${p.partition ?? 0} <span class="${statePillClass(p)}">${escapeHtml(stateLabel(p))}</span></div>
         <div class="part-row"><span>ready</span><b>${p.materialized ? fmtCount(ready) : "-"}</b></div>
         <div class="part-row"><span>leased</span><b class="v-active">${p.materialized ? fmtCount(num(p.state.inflight_count)) : "-"}</b></div>
+        ${coverageRow}
         ${waitingUnread ? '<div class="part-warn">Holding messages with no consumer on the queue</div>' : ""}
+        ${uncovered ? '<div class="part-warn">No cohort member covers this partition</div>' : ""}
       </div>`;
   }).join("");
 
