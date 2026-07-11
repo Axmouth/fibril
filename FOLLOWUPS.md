@@ -3044,6 +3044,18 @@ deny_unknown_fields hardening on admin request DTOs (a typoed field name in a
 declare request is silently ignored today - guided-errors philosophy says name
 it).
 
+## Future: broker memory audit (filed 2026-07-11)
+
+User observation: RSS does not drop back to earlier levels after all active
+queues evict. Suspects to examine in a dedicated session: mimalloc arena
+retention (freed memory kept in arenas, not returned to the OS - check its
+purge/decommit options), keratin tail caches (64 MB budget per log - confirm
+they release on eviction), admin in-memory state (history rings, audit ring,
+metrics - all bounded, should be small), and plain heap fragmentation. Method:
+baseline RSS -> load N queues -> evict all -> compare against mimalloc stats
+(MIMALLOC_SHOW_STATS=1) and a heaptrack/dhat profile, so "held by allocator"
+and "genuinely leaked" separate cleanly. Trace before patching.
+
 ## Phase 3 SSE plan (SCOPED 2026-07-11)
 
 Goal: replace the dashboard's 2s polling with one server-sent-events stream
