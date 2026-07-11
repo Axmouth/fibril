@@ -2949,31 +2949,44 @@ data-dir marker? write back to config with consent?); and the plaintext-426
 guidance story during the switchover. Pairs well with the existing live
 rotation and the cert card already on the Security page.
 
-## Dashboard follow-up menu (post-redesign, user wants to work through these)
+## Dashboard + broker roadmap (AGREED 2026-07-11, work in this order)
 
-Frontend-only:
-- Filter state in the URL (?q=...) on queues/subscriptions/connections so a
-  filtered view survives refresh and can be shared.
-- Deeper Cluster diagram/list restyle (the redesign kept the internals as-is;
-  the diagram region is also the mascot's future home - see the mascot memory:
-  sprite rings per broker + procedural tendrils, staged S0-S4).
+Phase 0 - Land the redesign. Merge administrative-ascension -> main: user
+click-through sign-off, full workspace test suite + vocab-lint at the branch
+tip, keep the branch history (coherent steps, not noise).
 
-Small backend + UI:
-- Publish a test message from the queue detail page (admin publish endpoint +
-  button; the last "Control"-style gap vs the bunqueue reference).
-- Per-partition consumer coverage on queue detail via the cohorts endpoint
-  (queue-level activity cannot attribute consumers to partitions).
+Phase 1 - The publish-wedge hunt (dedicated instrumented session). Correctness
+outranks features; case file in the BUG REPORT section above (three
+occurrences, discriminating observations, fd-exhaustion check ready).
 
-Own mini-arcs:
-- SSE for live dashboard data replacing the 2s polling (autoRefresh already
-  centralizes the plumbing).
-- Control-plane audit feed page (declares, deletes, drains, settings changes,
-  quarantines, membership changes - never per-message traffic); needs a small
-  bounded in-memory event ring like the history sampler.
-- Desktop notifications + optional user-defined threshold rules layered on the
-  built-in attention feed.
-- Storage breakdown (messages vs events vs snapshots) behind the Overview disk
-  stat, as a segmented bar.
+Phase 2 - Quick feature wins, one sitting each, in order:
+  2.1 URL filter state (?q=...) on queues/subscriptions/connections.
+  2.2 Publish a test message (admin publish endpoint + queue-detail button;
+      deliberately early - it is also a debugging tool for later phases).
+  2.3 Per-partition consumer coverage on queue detail via the cohorts data.
+  2.4 Storage breakdown segmented bar behind the Overview disk stat.
 
-Merge checklist for administrative-ascension: full workspace test suite +
-vocab-lint at the branch tip, click-through sign-off, squash-vs-history call.
+Phase 3 - SSE for live dashboard data, replacing the 2s polling (autoRefresh
+centralizes the plumbing). Must land before Phase 4.
+
+Phase 4 - The feed layer:
+  4.1 Control-plane audit feed page (bounded in-memory event ring: declares,
+      deletes, drains, settings changes, quarantines, membership changes).
+  4.2 Desktop notifications + optional user threshold rules on attention.
+
+Phase 5 - The showpiece: Cluster diagram restyle TOGETHER with mascot stages
+S0-S2 (sprite rings per broker, procedural tendrils - see the mascot plan).
+Wakes when the cleaned ring art lands; one effort, not two.
+
+Phase 6 - Docs/changelog synchronization sweep (END of roadmap, before the
+next release cut). Scope: website admin-dashboard.md re-walk against the
+final surface (publish-test-message, SSE, audit feed, notifications,
+coverage, storage breakdown), deployment/monitoring.md cross-refs,
+implemented-surface.md admin rows (new endpoints: history, attention, tls,
+audit, publish), a screenshots pass if the site gains any, and a CHANGELOG
+read-through for coherence. NOTE: this sweep does not suspend the standing
+rule - every phase still adds its own CHANGELOG bullet and doc touch in the
+same change; Phase 6 is the final consistency pass over the accumulated
+surface, not a deferral of docs work.
+
+Floating (slot on mood): enable-TLS-from-UI (own design pass), flavor tuning.
