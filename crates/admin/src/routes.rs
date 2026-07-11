@@ -1509,7 +1509,7 @@ pub async fn delete_queue(
         ));
     }
 
-    if server.coordination.is_some() {
+    if server.cluster_mode {
         return Ok(admin_error(
             StatusCode::NOT_IMPLEMENTED,
             "cluster_delete_unsupported",

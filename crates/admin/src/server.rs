@@ -240,6 +240,11 @@ pub struct AdminServer {
     /// Whether this node is draining (set by the drain flow), for the
     /// attention rule that flags a parked drain.
     pub draining_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// True only under real cluster coordination (ganglion). The standalone
+    /// single-node coordination view (wired for the topology page and broker
+    /// switcher) must NOT trip cluster-only restrictions like the queue-delete
+    /// guard.
+    pub cluster_mode: bool,
 }
 
 fn render<T: Template>(tpl: T) -> Html<String> {
@@ -288,6 +293,7 @@ impl AdminServer {
             audit: crate::audit::AuditLog::default(),
             derived: crate::audit::DerivedConditions::default(),
             draining_flag: None,
+            cluster_mode: false,
         }
     }
 
@@ -306,6 +312,12 @@ impl AdminServer {
     /// Attach the test-message publisher for `POST /admin/api/publish`.
     pub fn with_test_publisher(mut self, publisher: Arc<dyn BrokerTestPublisher>) -> Self {
         self.test_publisher = Some(publisher);
+        self
+    }
+
+    /// Mark this broker as part of a real coordinated cluster.
+    pub fn with_cluster_mode(mut self) -> Self {
+        self.cluster_mode = true;
         self
     }
 
@@ -1746,6 +1758,35 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = response_json(response).await;
         assert_eq!(body["code"], "invalid_topic");
+    }
+
+    #[tokio::test]
+    async fn delete_queue_is_guarded_by_cluster_mode_not_the_coordination_view() {
+        // The standalone single-node coordination view must not trip the
+        // cluster-only delete guard; only real cluster mode does.
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let server = StdArc::new(
+            StdArc::try_unwrap(server)
+                .ok()
+                .expect("test server has a single handle")
+                .with_cluster_mode(),
+        );
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/api/queues/delete")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({ "topic": "orders" }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "cluster_delete_unsupported");
     }
 
     struct FakeTestPublisher {

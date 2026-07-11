@@ -1911,6 +1911,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
             let consensus_server = parts.consensus_server;
             let controller_status = parts.controller_status;
             admin
+                .with_cluster_mode()
                 .with_coordination(parts.coordination.clone())
                 .with_consensus_topology(Arc::new(move || {
                     let mut value =
