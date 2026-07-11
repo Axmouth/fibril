@@ -9,6 +9,7 @@ async function api(path) {
     }
     throw new Error(body || `API error: HTTP ${r.status}`);
   }
+  window.__fibrilLastOk = Date.now();
   return r.json();
 }
 

@@ -1,37 +1,77 @@
 {% extends "layout.html" %}
 {% block content %}
 <h4 class="metrics-header">Subscriptions</h4>
-<table class="table table-compact narrow metric-table" id="table"></table>
+<p class="page-desc">Every live subscription on this broker, and which
+  connection holds it. Click a topic to open its queue.</p>
 
-<h4 class="metrics-header" style="margin-top:1.5rem;">Exclusive cohorts (this broker)</h4>
-<p class="settings-note">
-  Exclusive consumer-group membership this node sees. Cohort assignment is broker-local runtime
-  state rather than committed cluster state, so this is a per-node view.
-</p>
+<div id="sub-strip" class="stat-strip"></div>
+
+<div class="queue-controls">
+  <input id="sub-search" type="search" placeholder="filter by topic or group" />
+</div>
+
+<div class="queue-table-wrap">
+  <table class="table table-compact metric-table">
+    <thead>
+      <tr>
+        <th>Topic</th>
+        <th>Group</th>
+        <th>Settlement</th>
+        <th>Held by</th>
+        <th class="text-right">Uptime</th>
+      </tr>
+    </thead>
+    <tbody id="sub-rows"></tbody>
+  </table>
+</div>
+<p class="queue-group-note" id="sub-empty" hidden>
+  No live subscriptions. A queue with messages and no subscription accumulates
+  until its TTL - the Overview attention panel flags those.</p>
+
+<h5 class="metrics-header queue-group-heading">Exclusive cohorts (this broker)</h5>
+<p class="page-desc">
+  Exclusive consumer-group membership this node sees. Cohort assignment is
+  broker-local runtime state rather than committed cluster state, so this is a
+  per-node view.</p>
 <div id="cohorts"></div>
 
 <script src="/static/js/api.js"></script>
 <script src="/static/js/admin.js"></script>
 <script>
-function esc(value) {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
+function queueHref(topic, group) {
+  const params = new URLSearchParams({ topic });
+  if (group) params.set("group", group);
+  return `/admin/queue?${params}`;
 }
 
 async function refresh() {
   const rows = await api('/admin/api/subscriptions');
-  const t = document.getElementById("table");
-  t.innerHTML = `<tr><th>Topic</th><th>Group</th><th>Uptime</th><th>Auto</th></tr>` +
-    rows.map(r=>`<tr>
-      <td>${esc(r.topic)}</td>
-      <td>${esc(r.group)}</td>
-      <td>${fmtUptime(r.uptime)}</td>
-      <td>${esc(r.auto_ack)}</td>
-    </tr>`).join('');
+  const list = Array.isArray(rows) ? rows : [];
+  const search = (document.getElementById("sub-search")?.value || "").trim().toLowerCase();
+  const visible = list.filter((r) =>
+    !search || `${r.topic || ""} ${r.group || ""}`.toLowerCase().includes(search));
+
+  const topics = new Set(list.map((r) => `${r.topic} ${r.group || ""}`));
+  const autoCount = list.filter((r) => r.auto_ack).length;
+  document.getElementById("sub-strip").innerHTML = `
+    <span><b class="v-active">${list.length}</b> subscriptions</span>
+    <span><b>${topics.size}</b> queues covered</span>
+    <span><b>${autoCount}</b> auto-complete</span>`;
+
+  document.getElementById("sub-empty").hidden = visible.length > 0;
+  document.getElementById("sub-rows").innerHTML = visible.map((r) => `
+    <tr>
+      <td><a class="mono" href="${queueHref(r.topic, r.group)}">${escapeHtml(r.topic)}</a></td>
+      <td>${r.group ? `<span class="chip-group">${escapeHtml(r.group)}</span>` : '<span class="v-dim">—</span>'}</td>
+      <td>${r.auto_ack
+        ? '<span class="chip-plain">completes on deliver</span>'
+        : '<span class="chip-plain">client completes</span>'}</td>
+      <td>
+        <div class="ident-name mono">${escapeHtml(r.sub_id)}</div>
+        <div class="ident-sub mono">conn ${escapeHtml(r.conn_id)}</div>
+      </td>
+      <td class="text-right">${escapeHtml(fmtUptime(r.uptime ?? 0))}</td>
+    </tr>`).join("");
 }
 
 async function refreshCohorts() {
@@ -43,28 +83,34 @@ async function refreshCohorts() {
     return;
   }
   container.innerHTML = `
-    <table class="table table-compact narrow metric-table">
+    <div class="queue-table-wrap">
+    <table class="table table-compact metric-table">
+      <thead>
       <tr><th>Topic</th><th>Group</th><th>Consumer group</th><th class="text-right">Members</th><th>Member (target)</th></tr>
+      </thead>
+      <tbody>
       ${cohorts.map(c => {
         const members = (c.members || [])
-          .map(m => esc(m.member) + (m.target != null ? ` (target ${m.target})` : ""))
-          .join(", ") || "none";
+          .map(m => `<span class="chip-plain">${escapeHtml(m.member)}${m.target != null ? ` · target ${escapeHtml(String(m.target))}` : ""}</span>`)
+          .join(" ") || '<span class="v-dim">none</span>';
         return `<tr>
-          <td>${esc(c.topic)}</td>
-          <td>${esc(c.group ?? "default")}</td>
-          <td>${esc(c.consumer_group)}</td>
+          <td class="mono">${escapeHtml(c.topic)}</td>
+          <td>${c.group ? `<span class="chip-group">${escapeHtml(c.group)}</span>` : '<span class="v-dim">—</span>'}</td>
+          <td class="mono">${escapeHtml(c.consumer_group)}</td>
           <td class="text-right">${(c.members || []).length}</td>
           <td>${members}</td>
         </tr>`;
       }).join("")}
-    </table>`;
+      </tbody>
+    </table>
+    </div>`;
 }
 
 function refreshAll() {
   refresh();
   refreshCohorts();
 }
-
+document.getElementById("sub-search").addEventListener("input", refresh);
 autoRefresh(refreshAll, 2000);
 refreshAll();
 </script>

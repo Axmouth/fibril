@@ -1,0 +1,142 @@
+{% extends "layout.html" %}
+{% block content %}
+<h4 class="metrics-header">Dead letters</h4>
+<p class="page-desc">Messages that exhausted their retries or expired land in a
+  dead-letter queue instead of vanishing. From here they are inspected and, once
+  the cause is fixed, replayed back to their source.</p>
+
+<div class="overview-two">
+  <section class="overview-panel" aria-label="Global dead-letter target">
+    <div class="overview-panel-heading">
+      <h5>Global dead-letter target</h5>
+      <p>Queues with the <span class="mono">global</span> policy dead-letter here.</p>
+    </div>
+    <div id="global-dlq"></div>
+    <div class="settings-actions">
+      <a class="btn btn-sm" href="/admin/settings">Change in Settings</a>
+      <a class="btn btn-sm" id="global-inspect" href="/admin/messages" hidden>Inspect dead letters</a>
+    </div>
+  </section>
+  <section class="overview-panel" aria-label="Dead-letter backlog">
+    <div class="overview-panel-heading">
+      <h5>Dead-letter backlog
+        <span class="chart-current"><b id="dlq-depth-now">--</b> <span id="dlq-depth-trend" class="trend-word"></span></span>
+      </h5>
+      <p>Ready messages sitting in the global target — 30 min.</p>
+    </div>
+    <svg id="dlq-chart" class="chart chart-short" width="340" height="110" role="img"
+      aria-label="Global dead-letter queue depth over the last 30 minutes"></svg>
+  </section>
+</div>
+
+<h5 class="metrics-header queue-group-heading">Queues with a dead-letter policy</h5>
+<div class="queue-table-wrap">
+  <table class="table table-compact metric-table">
+    <thead>
+      <tr>
+        <th>Topic</th>
+        <th>Group</th>
+        <th>Policy</th>
+        <th class="text-right">Max retries</th>
+        <th class="text-right">Depth</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody id="dlq-rows"></tbody>
+  </table>
+</div>
+<p class="queue-group-note" id="dlq-empty" hidden>
+  No queue declares a dead-letter policy. Failures on those queues drop after
+  their retries; declare a policy to keep them instead.</p>
+
+<script src="/static/js/api.js"></script>
+<script src="/static/js/admin.js"></script>
+<script>
+function queueHref(topic, group) {
+  const params = new URLSearchParams({ topic });
+  if (group) params.set("group", group);
+  return `/admin/queue?${params}`;
+}
+
+function inspectHref(topic, group) {
+  const params = new URLSearchParams({ topic });
+  if (group) params.set("group", group);
+  return `/admin/messages?${params}`;
+}
+
+async function refresh() {
+  const [global, debug, history] = await Promise.all([
+    api('/admin/api/global-dlq').catch(() => null),
+    api('/admin/api/queues_debug'),
+    api('/admin/api/history').catch(() => ({ queues: [] })),
+  ]);
+
+  // Global target card.
+  const target = global?.target;
+  const globalEl = document.getElementById("global-dlq");
+  const globalInspect = document.getElementById("global-inspect");
+  if (target) {
+    globalEl.innerHTML = `
+      <p><span class="chip-group">${escapeHtml(target.topic)}</span>
+        ${target.group ? `<span class="chip-plain">group ${escapeHtml(target.group)}</span>` : ""}
+        <span class="chip-plain">v${escapeHtml(String(global.version ?? 0))}</span></p>`;
+    globalInspect.hidden = false;
+    globalInspect.href = inspectHref(target.topic, target.group);
+  } else {
+    globalEl.innerHTML = `<p class="queue-group-note">No global target configured -
+      queues using the <span class="mono">global</span> policy discard instead.</p>`;
+    globalInspect.hidden = true;
+  }
+
+  // The global target's depth, current and over time.
+  const queues = debug.queues || [];
+  const num = (v) => (typeof v === "number" ? v : 0);
+  let targetDepth = null;
+  if (target) {
+    targetDepth = queues
+      .filter((q) => q.topic === target.topic && (q.group || "") === (target.group || ""))
+      .reduce((acc, q) => acc + (q.materialized ? num(q.state.ready_count) : 0), 0);
+  }
+  setCompact(document.getElementById("dlq-depth-now"), targetDepth === null ? NaN : targetDepth);
+  const series = target
+    ? (history.queues || []).find((entry) =>
+        entry.topic === target.topic && (entry.group || "") === (target.group || ""))
+    : null;
+  const depths = series ? series.samples.map((p) => p.depth) : [];
+  renderChart(document.getElementById("dlq-chart"), [
+    { values: depths, color: "var(--bad)", fill: true, label: "dead letters" },
+  ], { hover: true, times: series ? series.samples.map((p) => p.at) : undefined });
+  document.getElementById("dlq-depth-trend").textContent = trendWord(depths);
+
+  // Queues that declare a dead-letter policy, one row per (topic, group).
+  const byQueue = new Map();
+  for (const q of queues) {
+    if (!q.materialized) continue;
+    // Only queues that actually dead-letter somewhere; discard (the default)
+    // drops failures after retries, and the queues page flags it in amber.
+    const policy = dlqPolicyKind(q.state.dlq_policy);
+    if (policy !== "global" && policy !== "custom") continue;
+    const key = `${q.topic} ${q.group || ""}`;
+    const entry = byQueue.get(key) || {
+      topic: q.topic, group: q.group, policy,
+      retries: q.state.dlq_max_retries, depth: 0,
+    };
+    entry.depth += num(q.state.ready_count);
+    byQueue.set(key, entry);
+  }
+  const rows = [...byQueue.values()].sort((a, b) => a.topic.localeCompare(b.topic));
+  document.getElementById("dlq-empty").hidden = rows.length > 0;
+  document.getElementById("dlq-rows").innerHTML = rows.map((r) => `
+    <tr>
+      <td><a class="mono" href="${queueHref(r.topic, r.group)}">${escapeHtml(r.topic)}</a></td>
+      <td>${r.group ? `<span class="chip-group">${escapeHtml(r.group)}</span>` : '<span class="v-dim">—</span>'}</td>
+      <td><span class="${r.policy === "custom" ? "chip-group" : "chip-plain"}">${escapeHtml(String(r.policy))}</span></td>
+      <td class="text-right">${r.retries != null ? escapeHtml(String(r.retries)) : '<span class="v-dim">default</span>'}</td>
+      <td class="text-right">${fmtCount(r.depth)}</td>
+      <td><a class="queue-messages-link" href="${inspectHref(r.topic, r.group)}">Inspect</a></td>
+    </tr>`).join("");
+}
+autoRefresh(refresh, 2000);
+refresh();
+</script>
+{% endblock %}

@@ -1,0 +1,264 @@
+{% extends "layout.html" %}
+{% block content %}
+<p class="queue-detail-back"><a href="/admin/queues">← All queues</a></p>
+<h4 class="metrics-header queue-detail-head">
+  <span class="mono" id="q-topic">…</span>
+  <span class="chip-group" id="q-group" hidden></span>
+  <span class="chip-plain" id="q-parts"></span>
+</h4>
+
+<div id="q-missing" class="overview-panel" hidden>
+  <p class="message-empty">No queue with this topic on this broker - it may have been
+    deleted, or live under a different group. <a href="/admin/queues">Back to queues</a>.</p>
+</div>
+
+<div id="q-body" hidden>
+  <section class="overview-grid" aria-label="Queue summary">
+    <article class="overview-card">
+      <span class="overview-label">Depth</span>
+      <strong id="q-depth" class="v-accent">--</strong>
+      <span class="overview-help">Ready messages across partitions</span>
+    </article>
+    <article class="overview-card">
+      <span class="overview-label">Leased</span>
+      <strong id="q-leased" class="v-active">--</strong>
+      <span class="overview-help">Delivered, awaiting complete</span>
+    </article>
+    <article class="overview-card">
+      <span class="overview-label">Publishers</span>
+      <strong id="q-pubs">--</strong>
+      <span class="overview-help">Active this run</span>
+    </article>
+    <article class="overview-card">
+      <span class="overview-label">Consumers</span>
+      <strong id="q-subs">--</strong>
+      <span class="overview-help">Live subscriptions on this queue</span>
+    </article>
+    <article class="overview-card">
+      <span class="overview-label">Loaded</span>
+      <strong id="q-loaded">--</strong>
+      <span class="overview-help">Partitions materialized in memory</span>
+    </article>
+  </section>
+
+  <section class="overview-panel" aria-label="Depth over time">
+    <div class="overview-panel-heading">
+      <h5>Depth — last 30 min
+        <span class="chart-current"><b id="q-depth-now">--</b> <span id="q-depth-trend" class="trend-word"></span></span>
+      </h5>
+      <p>
+        <span class="legend-dot" style="background: var(--accent)"></span> depth
+        <span class="legend-dot" style="background: var(--active)"></span> leased
+        — falling depth means consumers are winning.
+      </p>
+    </div>
+    <svg id="q-chart" class="chart chart-short" width="720" height="110" role="img"
+      aria-label="Queue depth and leased work over the last 30 minutes"></svg>
+  </section>
+
+  <h5 class="metrics-header queue-group-heading">Partitions</h5>
+  <div class="part-grid" id="q-partitions"></div>
+
+  <h5 class="metrics-header queue-group-heading">Consumers</h5>
+  <div class="queue-table-wrap" id="q-consumers-wrap">
+    <table class="table table-compact metric-table">
+      <thead>
+        <tr>
+          <th>Subscription</th>
+          <th>Settlement</th>
+          <th class="text-right">Uptime</th>
+        </tr>
+      </thead>
+      <tbody id="q-consumers"></tbody>
+    </table>
+  </div>
+  <p class="queue-group-note" id="q-consumers-note" hidden>
+    No consumers - messages persist until their TTL.
+    Connect one: <span class="mono">client.subscribe("<span class="q-topic-echo"></span>")</span>.
+    The <a href="/admin/subscriptions">subscriptions page</a> lists every live subscription.
+  </p>
+
+  <h5 class="metrics-header queue-group-heading">Configuration</h5>
+  <section class="overview-panel">
+    <dl class="overview-latency-grid">
+      <div>
+        <dt>Group</dt>
+        <dd id="q-cfg-group">--</dd>
+      </div>
+      <div>
+        <dt>Partitions</dt>
+        <dd id="q-cfg-parts">--</dd>
+      </div>
+      <div>
+        <dt>Dead-letter policy</dt>
+        <dd id="q-cfg-dlq">--</dd>
+      </div>
+      <div>
+        <dt>Max retries</dt>
+        <dd id="q-cfg-retries">--</dd>
+      </div>
+      <div>
+        <dt>Idle for</dt>
+        <dd id="q-ops-idle">--</dd>
+      </div>
+      <div>
+        <dt>Last lease activity</dt>
+        <dd id="q-ops-lease">--</dd>
+      </div>
+      <div>
+        <dt>Last cleanup</dt>
+        <dd id="q-ops-cleanup">--</dd>
+      </div>
+    </dl>
+    <div class="settings-actions">
+      <a class="btn" id="q-inspect" href="/admin/messages">Inspect messages</a>
+    </div>
+  </section>
+</div>
+
+<script src="/static/js/api.js"></script>
+<script src="/static/js/admin.js"></script>
+<script>
+const params = new URLSearchParams(window.location.search);
+const topic = params.get("topic") || "";
+const group = params.get("group") || "";
+
+document.getElementById("q-topic").textContent = topic || "(no topic)";
+document.title = `Queue · ${topic}`;
+const crumbEl = document.querySelector(".crumb");
+if (crumbEl) crumbEl.textContent = `Queue · ${topic}`;
+if (group) {
+  const chip = document.getElementById("q-group");
+  chip.textContent = group;
+  chip.hidden = false;
+}
+document.querySelectorAll(".q-topic-echo").forEach((el) => { el.textContent = topic; });
+
+function stateLabel(item) {
+  if (item.evicting) return "Unloading";
+  if (item.materialized) return "Loaded";
+  if (item.exists_on_disk) return "On disk";
+  return "Not loaded";
+}
+
+function fmtMs(ms) {
+  if (ms === null || ms === undefined) return "not idle";
+  if (ms < 1000) return `${ms} ms`;
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds} s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} m`;
+  return `${Math.floor(minutes / 60)} h ${minutes % 60} m`;
+}
+
+function fmtAt(ms) {
+  if (!ms) return "not seen this run";
+  return new Intl.DateTimeFormat(undefined, {
+    month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+  }).format(new Date(ms));
+}
+
+function statePillClass(item) {
+  if (item.evicting) return "queue-state-pill queue-state-unloading";
+  if (item.materialized) return "queue-state-pill queue-state-loaded";
+  return "queue-state-pill queue-state-unloaded";
+}
+
+async function refresh() {
+  const [data, history, subs] = await Promise.all([
+    api('/admin/api/queues_debug'),
+    api('/admin/api/history').catch(() => ({ queues: [] })),
+    api('/admin/api/subscriptions').catch(() => []),
+  ]);
+
+  const parts = (data.queues || [])
+    .filter((q) => q.topic === topic && (q.group || "") === group)
+    .sort((a, b) => (a.partition ?? 0) - (b.partition ?? 0));
+  document.getElementById("q-missing").hidden = parts.length > 0;
+  document.getElementById("q-body").hidden = parts.length === 0;
+  if (parts.length === 0) return;
+
+  // Broker activity is tracked per queue (topic + group), not per partition.
+  const activity = (data.broker_activity || [])
+    .find((a) => a.topic === topic && (a.group || "") === group);
+  const consumers = (Array.isArray(subs) ? subs : [])
+    .filter((s) => s.topic === topic && (s.group || "") === group);
+
+  document.getElementById("q-parts").textContent =
+    `${parts.length} partition${parts.length === 1 ? "" : "s"}`;
+
+  const num = (v) => (typeof v === "number" ? v : 0);
+  const depth = parts.reduce((acc, p) => acc + (p.materialized ? num(p.state.ready_count) : 0), 0);
+  const leased = parts.reduce((acc, p) => acc + (p.materialized ? num(p.state.inflight_count) : 0), 0);
+  const pubs = num(activity?.active_publishers);
+  const loadedCount = parts.filter((p) => p.materialized).length;
+
+  setCompact(document.getElementById("q-depth"), depth);
+  setCompact(document.getElementById("q-leased"), leased);
+  document.getElementById("q-pubs").textContent = fmtCount(pubs);
+  document.getElementById("q-subs").textContent = fmtCount(consumers.length);
+  document.getElementById("q-loaded").textContent = `${loadedCount}/${parts.length}`;
+
+  const series = (history.queues || [])
+    .find((entry) => entry.topic === topic && (entry.group || "") === group);
+  const depths = series ? series.samples.map((p) => p.depth) : [];
+  const leasedSeries = series ? series.samples.map((p) => p.leased) : [];
+  renderChart(document.getElementById("q-chart"), [
+    { values: depths, color: "var(--accent)", fill: true, label: "depth" },
+    { values: leasedSeries, color: "var(--active)", label: "leased" },
+  ], { hover: true, times: series ? series.samples.map((p) => p.at) : undefined });
+  setCompact(document.getElementById("q-depth-now"), depth);
+  document.getElementById("q-depth-trend").textContent = trendWord(depths);
+
+  document.getElementById("q-partitions").innerHTML = parts.map((p) => {
+    const ready = p.materialized ? num(p.state.ready_count) : 0;
+    const waitingUnread = p.materialized && ready > 0 && consumers.length === 0;
+    return `
+      <div class="part-card${waitingUnread ? " warn" : ""}">
+        <div class="part-id">p${p.partition ?? 0} <span class="${statePillClass(p)}">${escapeHtml(stateLabel(p))}</span></div>
+        <div class="part-row"><span>ready</span><b>${p.materialized ? fmtCount(ready) : "-"}</b></div>
+        <div class="part-row"><span>leased</span><b class="v-active">${p.materialized ? fmtCount(num(p.state.inflight_count)) : "-"}</b></div>
+        ${waitingUnread ? '<div class="part-warn">Holding messages with no consumer on the queue</div>' : ""}
+      </div>`;
+  }).join("");
+
+  const consumersBody = document.getElementById("q-consumers");
+  document.getElementById("q-consumers-wrap").hidden = consumers.length === 0;
+  document.getElementById("q-consumers-note").hidden = consumers.length > 0;
+  consumersBody.innerHTML = consumers.map((s) => `
+    <tr>
+      <td>
+        <div class="ident-name mono">${escapeHtml(s.sub_id)}</div>
+        <div class="ident-sub mono">conn ${escapeHtml(s.conn_id)}</div>
+      </td>
+      <td>${s.auto_ack
+        ? '<span class="chip-plain">completes on deliver</span>'
+        : '<span class="chip-plain">client completes</span>'}</td>
+      <td class="text-right">${escapeHtml(fmtUptime(s.uptime ?? 0))}</td>
+    </tr>`).join("");
+
+  const configured = parts.find((p) => p.materialized);
+  document.getElementById("q-cfg-group").textContent = group || "none";
+  document.getElementById("q-cfg-parts").textContent = String(parts.length);
+  document.getElementById("q-cfg-dlq").textContent =
+    configured ? dlqPolicyKind(configured.state.dlq_policy) : "load a partition to read";
+  document.getElementById("q-cfg-retries").textContent =
+    configured && configured.state.dlq_max_retries != null
+      ? String(configured.state.dlq_max_retries)
+      : "default";
+
+  document.getElementById("q-ops-idle").textContent = fmtMs(activity?.idle_for_ms);
+  document.getElementById("q-ops-lease").textContent = fmtAt(activity?.last_active_ms);
+  const cleanup = activity?.last_eviction_attempt;
+  document.getElementById("q-ops-cleanup").textContent = cleanup
+    ? `${String(cleanup.kind || "")} · ${String(cleanup.outcome || "")}`
+    : "no cleanup yet";
+
+  const inspect = new URLSearchParams({ topic });
+  if (group) inspect.set("group", group);
+  document.getElementById("q-inspect").href = `/admin/messages?${inspect}`;
+}
+autoRefresh(refresh, 2000);
+refresh();
+</script>
+{% endblock %}

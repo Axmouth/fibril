@@ -10,6 +10,8 @@
       const stored = window.localStorage.getItem(storageKey);
       const prefersLight = window.matchMedia("(prefers-color-scheme: light)").matches;
       document.documentElement.dataset.theme = stored || (prefersLight ? "light" : "dark");
+      const flavor = window.localStorage.getItem("fibril-admin-flavor");
+      if (flavor) document.documentElement.dataset.flavor = flavor;
     })();
   </script>
   <script>
@@ -43,38 +45,100 @@
   <link rel="stylesheet" href="/static/css/admin.css">
 </head>
 <body class="admin-body">
+  <aside class="side-nav">
+    <a class="brand" href="/">
+      <svg width="22" height="22" viewBox="0 0 22 22" fill="none" aria-hidden="true">
+        <path d="M3 19C7 15 5.5 8 11 3" stroke="var(--accent)" stroke-width="1.7" stroke-linecap="round"/>
+        <path d="M6 19.5C9.5 16 9 9 14.5 4.5" stroke="var(--accent)" stroke-width="1.7" stroke-linecap="round" opacity=".62"/>
+        <path d="M9.5 20C12.5 17 12.5 10.5 18 6.5" stroke="var(--accent)" stroke-width="1.7" stroke-linecap="round" opacity=".3"/>
+      </svg>
+      <span class="word">fibril<em>·</em>admin</span>
+    </a>
+    <nav class="nav-links" aria-label="Admin navigation">
+      <a class="nav-link {% if page == "dashboard" %}active{% endif %}" href="/">
+        <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="9" y="1.5" width="5.5" height="5.5" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="1.5" y="9" width="5.5" height="5.5" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="9" y="9" width="5.5" height="5.5" rx="1" stroke="currentColor" stroke-width="1.3"/></svg>
+        <span>Overview</span>
+        <span class="nav-badge" id="attention-badge" hidden></span>
+      </a>
+      <div class="nav-section">Messaging</div>
+      <a class="nav-link {% if page == "queues" %}active{% endif %}" href="/admin/queues">
+        <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 4.5h12M2 8h12M2 11.5h8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+        <span>Queues</span>
+      </a>
+      <a class="nav-link {% if page == "streams" %}active{% endif %}" href="/admin/streams">
+        <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 4c2.5 0 2.5 2 5 2s2.5-2 5-2 2 1 2 1M2 8c2.5 0 2.5 2 5 2s2.5-2 5-2 2 1 2 1M2 12c2.5 0 2.5 2 5 2s2.5-2 5-2 2 1 2 1" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+        <span>Streams</span>
+      </a>
+      <a class="nav-link {% if page == "messages" %}active{% endif %}" href="/admin/messages">
+        <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.3"/><path d="M10.5 10.5 14 14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+        <span>Messages</span>
+      </a>
+      <a class="nav-link {% if page == "dlq" %}active{% endif %}" href="/admin/dlq">
+        <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="6.4" stroke="currentColor" stroke-width="1.3"/><path d="M8 4.5V9M8 11.5v.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        <span>Dead letters</span>
+      </a>
+      <div class="nav-section">Clients</div>
+      <a class="nav-link {% if page == "connections" %}active{% endif %}" href="/admin/connections">
+        <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M5 2v4M11 2v4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M3.5 6h9v2.5a4.5 4.5 0 0 1-9 0V6Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 13v1.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+        <span>Connections</span>
+      </a>
+      <a class="nav-link {% if page == "subscriptions" %}active{% endif %}" href="/admin/subscriptions">
+        <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 13a10 10 0 0 1 10-10M3 8.5A5.5 5.5 0 0 1 8.5 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="4" cy="12" r="1.4" fill="currentColor"/></svg>
+        <span>Subscriptions</span>
+      </a>
+      <div class="nav-section">Operate</div>
+      <a class="nav-link {% if page == "topology" %}active{% endif %}" href="/admin/topology">
+        <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="3.4" r="1.9" stroke="currentColor" stroke-width="1.3"/><circle cx="3.4" cy="11.6" r="1.9" stroke="currentColor" stroke-width="1.3"/><circle cx="12.6" cy="11.6" r="1.9" stroke="currentColor" stroke-width="1.3"/><path d="M6.8 4.9 4.3 9.9M9.2 4.9l2.5 5M5.3 11.6h5.4" stroke="currentColor" stroke-width="1.2"/></svg>
+        <span>Cluster</span>
+      </a>
+      <a class="nav-link {% if page == "diagnostics" %}active{% endif %}" href="/admin/diagnostics">
+        <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M1.5 8h3l1.5-4 3 8 1.5-4h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>Diagnostics</span>
+      </a>
+      <a class="nav-link {% if page == "security" %}active{% endif %}" href="/admin/security">
+        <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 1.8 13 3.6v4c0 3.4-2.2 5.6-5 6.8-2.8-1.2-5-3.4-5-6.8v-4L8 1.8Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+        <span>Security</span>
+      </a>
+      <a class="nav-link {% if page == "settings" %}active{% endif %}" href="/admin/settings">
+        <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 4.5h8M12.5 4.5H14M2 11.5h3M7.5 11.5H14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="10.7" cy="4.5" r="1.8" stroke="currentColor" stroke-width="1.3"/><circle cx="5.3" cy="11.5" r="1.8" stroke="currentColor" stroke-width="1.3"/></svg>
+        <span>Settings</span>
+      </a>
+    </nav>
+    <div class="side-foot">
+      <span>fast · deterministic · predictably boring</span>
+      <span class="foot-links">
+        <a href="https://github.com/axmouth/fibril" target="_blank">GitHub</a>
+        <a href="https://axmouth.dev" target="_blank">Author</a>
+      </span>
+    </div>
+  </aside>
   <div class="main-container">
     <header class="site-header">
-      <nav class="admin-nav" aria-label="Admin navigation">
-        <a class="brand" href="/">
-          <span class="mark" aria-hidden="true">
-            <span></span>
-            <span></span>
-          </span>
-          <span>fibril admin</span>
-        </a>
-        <div class="nav-links">
-          <a class="nav-link {% if page == "dashboard" %}active{% endif %}" href="/">Dashboard</a>
-          <a class="nav-link {% if page == "connections" %}active{% endif %}" href="/admin/connections">Connections</a>
-          <a class="nav-link {% if page == "subscriptions" %}active{% endif %}" href="/admin/subscriptions">Subscriptions</a>
-          <a class="nav-link {% if page == "queues" %}active{% endif %}" href="/admin/queues">Queues</a>
-          <a class="nav-link {% if page == "streams" %}active{% endif %}" href="/admin/streams">Streams</a>
-          <a class="nav-link {% if page == "diagnostics" %}active{% endif %}" href="/admin/diagnostics">Diagnostics</a>
-          <a class="nav-link {% if page == "topology" %}active{% endif %}" href="/admin/topology">Topology</a>
-          <a class="nav-link {% if page == "settings" %}active{% endif %}" href="/admin/settings">Settings</a>
+      <span class="crumb">{{ title }}</span>
+      <span class="live-pill live" id="live-pill" hidden><span class="dot"></span><span id="live-pill-text">live</span></span>
+      <div class="broker-switch" id="broker-switch" hidden>
+        <button class="broker-switch-btn mono" type="button" id="broker-switch-btn" aria-haspopup="listbox"></button>
+        <div class="broker-switch-menu" id="broker-switch-menu" hidden></div>
+      </div>
+      <div class="nav-actions">
+        <button class="searchbtn" type="button" data-palette-open>
+          <span class="searchlabel">Jump to a page…</span>
+          <kbd>⌘K</kbd>
+        </button>
+        {% if auth_enabled %}
+          <a href="/logout" class="icon-link" aria-label="Log out" title="Log out">
+            <span class="icon icon-logout" aria-hidden="true"></span>
+            <span>Logout</span>
+          </a>
+        {% else %}
+          <span class="admin-auth-pill">Auth disabled</span>
+        {% endif %}
+        <div class="flavor-pick" id="flavor-pick">
+          <button class="flavor-pick-btn" type="button" id="flavor-btn" aria-label="Choose a flavor" title="Flavor"><span class="flavor-dot"></span></button>
+          <div class="flavor-menu" id="flavor-menu" hidden></div>
         </div>
-        <div class="nav-actions">
-          {% if auth_enabled %}
-            <a href="/logout" class="icon-link" aria-label="Log out" title="Log out">
-              <span class="icon icon-logout" aria-hidden="true"></span>
-              <span>Logout</span>
-            </a>
-          {% else %}
-            <span class="admin-auth-pill">Auth disabled</span>
-          {% endif %}
-          <button class="theme-toggle" type="button" data-theme-toggle aria-label="Use light theme"></button>
-        </div>
-      </nav>
+        <button class="theme-toggle" type="button" data-theme-toggle aria-label="Use light theme"></button>
+      </div>
     </header>
     <div class="content-container">
       <div class="content-area">
@@ -84,20 +148,12 @@
         </main>
       </div>
     </div>
-    <footer class="footer">
-      <span class="copyright">
-        Fibril © 2025 - fast · deterministic · predictably boring
-      </span>
-      ·
-      <a href="https://github.com/axmouth/fibril" target="_blank">
-        <span class="icon icon-github" aria-hidden="true"></span> GitHub
-      </a>
-      ·
-      <a href="https://axmouth.dev" target="_blank">
-        <span class="icon icon-user" aria-hidden="true"></span> Author
-      </a>
-    </footer>
-
+  </div>
+  <div class="palette-overlay" id="palette-overlay" hidden>
+    <div class="palette">
+      <input id="palette-input" placeholder="Jump to a page…" autocomplete="off" aria-label="Jump to a page">
+      <div class="palette-list" id="palette-list"></div>
+    </div>
   </div>
   <script>
     (() => {
@@ -121,6 +177,296 @@
         root.classList.add("theme-transition");
         applyTheme(next);
         window.setTimeout(() => root.classList.remove("theme-transition"), 260);
+      });
+    })();
+  </script>
+  <script>
+    // Live pill: pages poll their data through api(), which stamps the last
+    // success. Green while fresh, amber "stale" once polls stop answering.
+    (() => {
+      const pill = document.getElementById("live-pill");
+      const text = document.getElementById("live-pill-text");
+      if (!pill || !text) return;
+      window.__nativeSetInterval(() => {
+        const last = window.__fibrilLastOk || 0;
+        if (!last) return;
+        const silence = Date.now() - last;
+        const state = silence > 30000 ? "dead" : silence > 10000 ? "stale" : "live";
+        pill.hidden = false;
+        pill.classList.toggle("live", state === "live");
+        pill.classList.toggle("stale", state === "stale");
+        pill.classList.toggle("dead", state === "dead");
+        text.textContent = state === "dead" ? "unreachable" : state;
+      }, 2000);
+    })();
+  </script>
+  <script>
+    // Attention badge on the Overview nav entry: how many conditions need an
+    // operator, red when any is critical.
+    (() => {
+      const badge = document.getElementById("attention-badge");
+      if (!badge) return;
+      async function load() {
+        let data;
+        try {
+          const r = await fetch("/admin/api/attention");
+          if (!r.ok) return;
+          data = await r.json();
+        } catch {
+          return;
+        }
+        const items = (data && data.items) || [];
+        if (!items.length) {
+          badge.hidden = true;
+          return;
+        }
+        badge.textContent = String(items.length);
+        const critical = items.some((item) => item.severity === "critical");
+        badge.classList.toggle("crit", critical);
+        badge.classList.toggle("warn", !critical);
+        badge.hidden = false;
+      }
+      load();
+      window.__nativeSetInterval(load, 15000);
+    })();
+  </script>
+  <script>
+    // Flavor picker: named accent-and-tint variants over the dark/light modes.
+    (() => {
+      const wrap = document.getElementById("flavor-pick");
+      const btn = document.getElementById("flavor-btn");
+      const menu = document.getElementById("flavor-menu");
+      if (!wrap || !btn || !menu) return;
+
+      const flavors = [
+        { id: "", label: "plain", swatch: "#e8907c" },
+        { id: "neuronic", label: "neuronic", swatch: "#e3b341" },
+        { id: "chlorophyll", label: "chlorophyll", swatch: "#5fbf6f" },
+        { id: "crimson", label: "crimson", swatch: "#e02e4d" },
+        { id: "eosin", label: "eosin", swatch: "#d95970" },
+        { id: "azure", label: "azure", swatch: "#5da9e8" },
+        { id: "iris", label: "iris", swatch: "#9a7ce0" },
+      ];
+
+      function current() {
+        return document.documentElement.dataset.flavor || "";
+      }
+
+      function apply(id) {
+        if (id) {
+          document.documentElement.dataset.flavor = id;
+          window.localStorage.setItem("fibril-admin-flavor", id);
+        } else {
+          delete document.documentElement.dataset.flavor;
+          window.localStorage.removeItem("fibril-admin-flavor");
+        }
+        render();
+      }
+
+      function render() {
+        const active = current();
+        menu.innerHTML = flavors.map((f) =>
+          `<button class="flavor-item${f.id === active ? " on" : ""}" type="button" data-flavor-id="${f.id}">` +
+          `<span class="swatch" style="background:${f.swatch}"></span>${f.label}</button>`)
+          .join("");
+      }
+
+      render();
+      btn.addEventListener("click", () => {
+        menu.hidden = !menu.hidden;
+      });
+      menu.addEventListener("click", (event) => {
+        const item = event.target.closest("[data-flavor-id]");
+        if (!item) return;
+        apply(item.dataset.flavorId);
+        menu.hidden = true;
+      });
+      document.addEventListener("click", (event) => {
+        if (!wrap.contains(event.target)) menu.hidden = true;
+      });
+    })();
+  </script>
+  <script>
+    // Broker switcher: in a cluster, jump to another broker's admin on the
+    // same page. Reads the committed topology; each broker registers its
+    // admin address there. Sessions are per broker, so the target may ask
+    // for a login. Hidden outside cluster mode.
+    (() => {
+      const wrap = document.getElementById("broker-switch");
+      const btn = document.getElementById("broker-switch-btn");
+      const menu = document.getElementById("broker-switch-menu");
+      if (!wrap || !btn || !menu) return;
+
+      function esc(s) {
+        return String(s).replace(/[&<>"']/g, (c) => ({
+          "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+        })[c]);
+      }
+
+      async function load() {
+        let data;
+        try {
+          const r = await fetch("/admin/api/topology");
+          if (!r.ok) return;
+          data = await r.json();
+        } catch {
+          return;
+        }
+        const coordination = data && data.coordination;
+        const nodes = (coordination && coordination.nodes) || [];
+        const selfId = coordination && coordination.node_id;
+        const reachable = nodes.filter((n) => n.admin_addr);
+        if (!selfId || nodes.length < 2 || reachable.length === 0) {
+          wrap.hidden = true;
+          return;
+        }
+        btn.textContent = `${selfId} ▾`;
+        menu.innerHTML = nodes.map((n) => {
+          const self = n.node_id === selfId;
+          if (self || !n.admin_addr) {
+            return `<span class="broker-switch-item is-self mono">${esc(n.node_id)}${self ? " · here" : " · no admin"}</span>`;
+          }
+          const href = `${window.location.protocol}//${esc(n.admin_addr)}${window.location.pathname}${window.location.search}`;
+          return `<a class="broker-switch-item mono" data-no-boost href="${href}">${esc(n.node_id)}</a>`;
+        }).join("");
+        wrap.hidden = false;
+      }
+
+      btn.addEventListener("click", () => {
+        menu.hidden = !menu.hidden;
+      });
+      document.addEventListener("click", (event) => {
+        if (!wrap.contains(event.target)) menu.hidden = true;
+      });
+
+      load();
+      // Layout-owned poller: native timer so boosted navigation keeps it.
+      window.__nativeSetInterval(load, 30000);
+    })();
+  </script>
+  <script>
+    // Command palette: layout-owned page jumper. Items are plain internal
+    // anchors, so boosted navigation below handles the actual page swap.
+    (() => {
+      const overlay = document.getElementById("palette-overlay");
+      const input = document.getElementById("palette-input");
+      const list = document.getElementById("palette-list");
+      if (!overlay || !input || !list) return;
+
+      const pages = [
+        { label: "Overview", href: "/" },
+        { label: "Queues", href: "/admin/queues" },
+        { label: "Streams", href: "/admin/streams" },
+        { label: "Messages", href: "/admin/messages" },
+        { label: "Dead letters", href: "/admin/dlq" },
+        { label: "Connections", href: "/admin/connections" },
+        { label: "Subscriptions", href: "/admin/subscriptions" },
+        { label: "Cluster", href: "/admin/topology" },
+        { label: "Diagnostics", href: "/admin/diagnostics" },
+        { label: "Security", href: "/admin/security" },
+        { label: "Settings", href: "/admin/settings" },
+      ];
+
+      function esc(v) {
+        return String(v).replace(/[&<>"']/g, (c) => ({
+          "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+        })[c]);
+      }
+
+      function render(query) {
+        const q = (query || "").trim().toLowerCase();
+        const pageHits = pages
+          .filter((p) => p.label.toLowerCase().includes(q))
+          .map((p) => ({ label: p.label, kind: "page", href: p.href }));
+        const liveHits = liveItems.filter((p) => p.label.toLowerCase().includes(q));
+        const hits = pageHits.concat(liveHits).slice(0, 14);
+        if (!hits.length) {
+          list.innerHTML = '<div class="palette-empty">No page, queue, or broker matches. Try a shorter word.</div>';
+          return;
+        }
+        list.innerHTML = hits
+          .map((p, i) =>
+            `<a class="palette-item${i === 0 ? " sel" : ""}" href="${esc(p.href)}">` +
+            `<span class="${p.kind === "queue" ? "mono" : ""}">${esc(p.label)}</span><span class="kind">${p.kind}</span></a>`)
+          .join("");
+      }
+
+      // Live entries: queues and brokers, fetched when the palette opens so
+      // jumping to a topic by name works without a standing poll.
+      let liveItems = [];
+      async function loadLive() {
+        const results = await Promise.allSettled([
+          fetch("/admin/api/queues_debug").then((r) => (r.ok ? r.json() : null)),
+          fetch("/admin/api/topology").then((r) => (r.ok ? r.json() : null)),
+        ]);
+        const items = [];
+        const debug = results[0].status === "fulfilled" ? results[0].value : null;
+        const seen = new Set();
+        for (const q of (debug && debug.queues) || []) {
+          const key = q.topic + "/" + (q.group || "");
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const params = new URLSearchParams({ topic: q.topic });
+          if (q.group) params.set("group", q.group);
+          items.push({
+            label: q.group ? q.topic + " · " + q.group : q.topic,
+            kind: "queue",
+            href: "/admin/queue?" + params,
+          });
+        }
+        const topo = results[1].status === "fulfilled" ? results[1].value : null;
+        for (const n of (topo && topo.coordination && topo.coordination.nodes) || []) {
+          items.push({ label: n.node_id, kind: "broker", href: "/admin/topology" });
+        }
+        liveItems = items;
+        render(input.value);
+      }
+
+      function open() {
+        overlay.hidden = false;
+        input.value = "";
+        render("");
+        input.focus();
+        loadLive();
+      }
+
+      function close() {
+        overlay.hidden = true;
+      }
+
+      function moveSelection(step) {
+        const items = [...list.querySelectorAll(".palette-item")];
+        if (!items.length) return;
+        let idx = items.findIndex((el) => el.classList.contains("sel"));
+        idx = (idx + step + items.length) % items.length;
+        items.forEach((el, i) => el.classList.toggle("sel", i === idx));
+        items[idx].scrollIntoView({ block: "nearest" });
+      }
+
+      input.addEventListener("input", () => render(input.value));
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.preventDefault();
+          moveSelection(event.key === "ArrowDown" ? 1 : -1);
+        }
+        if (event.key === "Enter") {
+          const selected = list.querySelector(".palette-item.sel") || list.querySelector(".palette-item");
+          if (selected) selected.click();
+        }
+      });
+      overlay.addEventListener("click", (event) => {
+        if (event.target === overlay) close();
+        if (event.target.closest(".palette-item")) close();
+      });
+      document.addEventListener("click", (event) => {
+        if (event.target.closest("[data-palette-open]")) open();
+      });
+      document.addEventListener("keydown", (event) => {
+        if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+          event.preventDefault();
+          overlay.hidden ? open() : close();
+        }
+        if (event.key === "Escape" && !overlay.hidden) close();
       });
     })();
   </script>
@@ -283,7 +629,12 @@
         }
         clearPageTimers();
         const title = doc.querySelector("title");
-        if (title) document.title = title.textContent;
+        if (title) {
+          document.title = title.textContent;
+          // The topbar crumb lives outside #page-root, so carry it over too.
+          const crumb = document.querySelector(".crumb");
+          if (crumb) crumb.textContent = title.textContent;
+        }
         current.innerHTML = next.innerHTML;
         await runScripts(current);
         current.classList.remove("swapping");

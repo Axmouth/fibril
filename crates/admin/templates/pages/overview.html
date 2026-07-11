@@ -3,20 +3,35 @@
 <h4 class="metrics-header">Overview</h4>
 
 <section class="overview-grid" aria-label="Broker overview">
-  <article class="overview-card overview-card-primary">
+  <article class="overview-card">
     <span class="overview-label">Published / s</span>
-    <strong id="published">--</strong>
+    <strong id="published" class="v-accent">--</strong>
     <span class="overview-help">Messages accepted by the broker</span>
   </article>
-  <article class="overview-card overview-card-primary">
+  <article class="overview-card">
     <span class="overview-label">Delivered / s</span>
     <strong id="delivered">--</strong>
     <span class="overview-help">Messages handed to subscribers</span>
   </article>
-  <article class="overview-card overview-card-primary">
-    <span class="overview-label">Acked / s</span>
-    <strong id="acked">--</strong>
+  <article class="overview-card">
+    <span class="overview-label">Completed / s</span>
+    <strong id="acked" class="v-ok">--</strong>
     <span class="overview-help">Messages settled by clients</span>
+  </article>
+  <article class="overview-card">
+    <span class="overview-label">Backlog</span>
+    <strong id="backlog">--</strong>
+    <span class="overview-help">Ready messages across all queues</span>
+  </article>
+  <article class="overview-card">
+    <span class="overview-label">In-flight</span>
+    <strong id="inflight" class="v-active">--</strong>
+    <span class="overview-help">Leased, awaiting complete</span>
+  </article>
+  <article class="overview-card">
+    <span class="overview-label">Clients</span>
+    <strong id="connections_count">--</strong>
+    <span class="overview-help">Connections · <span id="subscriptions_count">--</span> subscriptions</span>
   </article>
   <article class="overview-card">
     <span class="overview-label">Memory</span>
@@ -33,6 +48,41 @@
     <strong id="disk">--</strong>
     <span class="overview-help">Approximate data directory usage, MB</span>
   </article>
+</section>
+
+<div class="overview-two">
+  <section class="overview-panel" aria-label="Throughput">
+    <div class="overview-panel-heading">
+      <h5>Throughput — last 30 min</h5>
+      <p>
+        <span class="legend-dot" style="background: var(--accent)"></span> published / s
+        <span class="legend-dot" style="background: var(--muted)"></span> delivered / s
+      </p>
+    </div>
+    <svg id="chart-throughput" class="chart chart-tall" width="720" height="170" role="img"
+      aria-label="Publish and deliver rates over the last 30 minutes"></svg>
+    <p class="overview-help" id="history-note" hidden>
+      History lives in memory and starts with the broker - a few samples in, the lines appear.
+    </p>
+  </section>
+  <section class="overview-panel" aria-label="Needs attention">
+    <div class="overview-panel-heading">
+      <h5>Needs attention</h5>
+    </div>
+    <ul class="attention-list" id="attention-list"></ul>
+  </section>
+</div>
+
+<section class="overview-panel" aria-label="Backlog over time">
+  <div class="overview-panel-heading">
+    <h5>Backlog — last 30 min
+      <span class="chart-current"><b id="backlog-now">--</b> <span id="backlog-trend" class="trend-word"></span></span>
+    </h5>
+    <p>Ready messages across every queue. The trend says whether consumers are draining
+      or falling behind - more useful than any single gauge.</p>
+  </div>
+  <svg id="chart-backlog" class="chart chart-short" width="720" height="110" role="img"
+    aria-label="Total backlog over the last 30 minutes"></svg>
 </section>
 
 <section class="overview-panel" aria-label="Stroma timings">
@@ -176,8 +226,57 @@ function laneBacklog(stroma) {
     .reduce((sum, value) => sum + value, 0);
 }
 
+function renderAttention(items) {
+  const list = document.getElementById("attention-list");
+  if (!items.length) {
+    list.innerHTML = `<li class="attention-empty">Nothing needs attention.
+      Backlogs are being read, settings loaded, nothing quarantined.</li>`;
+    return;
+  }
+  list.innerHTML = items
+    .map((item) => `
+      <li class="attention-item">
+        <span class="attention-stripe ${item.severity === "critical" ? "crit" : "warn"}"></span>
+        <div class="attention-body">
+          <div class="attention-headline">${escapeHtml(item.headline)}</div>
+          <div class="attention-subject">${escapeHtml(item.subject)}</div>
+        </div>
+        <a class="btn btn-sm" href="${escapeHtml(item.action_href)}">Open</a>
+      </li>`)
+    .join("");
+}
+
+function renderHistory(history) {
+  const samples = history.samples ?? [];
+  document.getElementById("history-note").hidden = samples.length >= 3;
+  const times = samples.map((s) => s.at);
+  const published = samples.map((s) => s.published_per_sec);
+  const delivered = samples.map((s) => s.delivered_per_sec);
+  renderChart(document.getElementById("chart-throughput"), [
+    { values: published, color: "var(--accent)", fill: true, label: "published/s" },
+    { values: delivered, color: "var(--muted)", label: "delivered/s" },
+  ], { hover: true, times });
+
+  const backlog = samples.map((s) => s.backlog);
+  renderChart(document.getElementById("chart-backlog"), [
+    { values: backlog, color: "var(--active)", fill: true, label: "backlog" },
+  ], { hover: true, times });
+
+  const latest = samples[samples.length - 1];
+  setCompact(document.getElementById("backlog"), latest ? latest.backlog : NaN);
+  setCompact(document.getElementById("inflight"), latest ? latest.inflight : NaN);
+  setCompact(document.getElementById("connections_count"), latest ? latest.connections : NaN);
+  document.getElementById("subscriptions_count").textContent = latest ? fmtCompact(latest.subscriptions) : "--";
+  setCompact(document.getElementById("backlog-now"), latest ? latest.backlog : NaN);
+  document.getElementById("backlog-trend").textContent = trendWord(backlog);
+}
+
 async function refresh() {
-  const d = await api('/admin/api/overview');
+  const [d, history, attention] = await Promise.all([
+    api('/admin/api/overview'),
+    api('/admin/api/history'),
+    api('/admin/api/attention'),
+  ]);
   const stroma = d.stroma ?? {};
   document.getElementById("delivered").textContent = metric(d.broker.delivered_per_sec_1m);
   document.getElementById("acked").textContent = metric(d.broker.acked_per_sec_1m);
@@ -212,6 +311,8 @@ async function refresh() {
     + reconcileRestored
     + reconcileClientClosed
     + reconcileServerDropped;
+  renderHistory(history);
+  renderAttention(attention.items ?? []);
 }
 autoRefresh(refresh, 2000);
 refresh();

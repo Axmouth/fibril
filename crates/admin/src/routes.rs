@@ -1524,6 +1524,20 @@ pub struct RepairPartitionQuery {
 /// List partitions quarantined by recovery (a dangling event->message reference)
 /// plus the active policy, so the admin UI can show "X must be resolved before
 /// this queue continues" and offer a repair.
+/// `GET /admin/api/tls`: presentation metadata for the served certificate
+/// (fingerprint, validity window, subject), or null when TLS is not enabled.
+pub async fn tls_info(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    check_auth(&server, &headers).await?;
+    let info = match &server.cert_info {
+        Some(provider) => provider(),
+        None => serde_json::Value::Null,
+    };
+    Ok(Json(info))
+}
+
 pub async fn quarantine(
     State(server): State<Arc<AdminServer>>,
     headers: axum::http::HeaderMap,

@@ -23,7 +23,7 @@
   #broker-detail-body details, .broker-list-body details { margin-top: 6px; }
   #broker-detail-body summary, .broker-list-body summary { cursor: pointer; }
   .broker-list-item {
-    border: 1px solid #2a3344;
+    border: 1px solid var(--line);
     border-radius: 8px;
     padding: 8px 12px;
     margin-bottom: 8px;
@@ -31,11 +31,24 @@
   .broker-list-item > summary { cursor: pointer; font-size: 14px; }
   .broker-list-body { margin-top: 8px; }
 </style>
-<h4 class="metrics-header">Cluster Topology</h4>
-<p class="settings-note">
+<h4 class="metrics-header">Cluster</h4>
+<p class="page-desc">
   Committed coordination view: registered brokers, queue ownership with fencing epochs, and the
   embedded consensus group when one is active. Solid edges point from queue owners to followers.
 </p>
+
+<section class="overview-panel" aria-label="Drain this broker">
+  <div class="overview-panel-heading">
+    <h5>Drain this broker</h5>
+    <p>Announces a planned restart to connected clients and, in coordinated
+      mode, hands partition ownership to caught-up followers before returning.
+      Zero partitions remaining means stopping the process is gap-free.</p>
+  </div>
+  <div class="settings-actions" style="margin-top: 0">
+    <button class="btn btn-warning" id="drain-btn" type="button">Drain…</button>
+    <span id="drain-result" class="op-message"></span>
+  </div>
+</section>
 
 <section class="overview-panel" aria-label="Cluster summary">
   <div class="overview-panel-heading">
@@ -529,6 +542,26 @@ document.getElementById("topology-diagram").addEventListener("click", () => {
   renderBrokerDetail(null);
 });
 applyViewMode();
+
+document.getElementById("drain-btn").addEventListener("click", async () => {
+  if (!confirm("Drain this broker? Clients are told to move and, in a cluster, partition ownership hands off to followers. The process keeps running until you stop it.")) {
+    return;
+  }
+  const btn = document.getElementById("drain-btn");
+  const out = document.getElementById("drain-result");
+  btn.disabled = true;
+  out.textContent = "Draining - waiting for the handoff…";
+  const { ok, data } = await apiPost("/admin/api/drain", {});
+  btn.disabled = false;
+  if (!ok) {
+    out.textContent = `Drain failed: ${data?.message || data?.error || "request failed"}`;
+    return;
+  }
+  const remaining = data.owned_partitions_remaining ?? 0;
+  out.textContent = data.handoff_complete
+    ? `Handoff complete in ${data.handoff_waited_ms} ms - ${data.connections_notified} client(s) notified, 0 partitions remain. Stopping now is gap-free.`
+    : `${data.connections_notified} client(s) notified; ${remaining} partition(s) still owned after ${data.handoff_waited_ms} ms - reactive failover covers them if you stop now.`;
+});
 
 autoRefresh(refresh, 3000);
 refresh();

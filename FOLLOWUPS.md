@@ -2873,3 +2873,120 @@ Per-client resolution (each with AC1 adversarial + AC2/AC3/AC4 unit tests):
 Broker unchanged (crates/tls still prints the CA fp; its no-EKU cert validates under
 the lenient path check). CHANGELOG has the Security Fixed entry. Full design record
 was archive/SECURITY_CA_PIN_FIX.md.
+
+## BUG REPORT (open, 2026-07-10): publish wedged until restart under e2e_c load
+
+Reported while running `benches` e2e_c (writer -m 50000 -c 10 --size 1024, then
+reader): publishing stalled permanently mid-run; only a broker restart cleared
+it. Logs around the time show only routine reconnect-grace entries/expiries
+(all 20 conns dropping at once when the e2e processes exit is normal). Not
+reproduced on demand yet.
+
+Facts from the captured excerpt (note: excerpt is from a FRESH restart, uptime
+20s, over an inherited data dir - the wedge event itself is not in it):
+- ready=5,078,479 on topic1/0 with settled offset ~70.7M (data dir carries
+  many prior runs).
+- total_expired > 0 and climbing (a message TTL is in play); the expiry worker
+  drains expired messages in 8192-message iterations.
+- KERATIN IO fsync times ~0.9-1.2s per batch: the drive is saturated
+  (consistent with the consumer-NVMe fsync floor) under writer traffic +
+  truncate storms + snapshot writes.
+- Stroma command lane depths all 0 at snapshot time (no actor backlog then).
+
+Wedge candidates (unconfirmed - trace before patching):
+1. Publish confirm path stalled behind pathological storage IO (expiry storm
+   over a huge aged backlog + truncations), looking like a hang from the
+   client.
+2. State wedge in the connection/session layer (grace cleanup interacting
+   with resume sessions) blocking new publishes or new HELLOs.
+3. A leaked permit/backpressure cap on the publish path that a dropped
+   connection never returns.
+
+SECOND OCCURRENCE (same day, better evidence): with the broker wedged,
+- fresh writer runs each push ~20k msgs/connection then stall or die with
+  BrokenPipe - the TCP-backpressure shape of the broker no longer draining
+  its read sockets;
+- fresh READER runs receive 0 (subscribe succeeds, nothing delivered);
+- accept/HELLO/subscribe stay healthy throughout.
+Everything through the topic1 queue actor is stuck while the control plane
+lives => REFINED PRIME SUSPECT: a lost append/durability completion wedging
+the stroma queue actor, most plausibly in the new keratin parallel-fsync /
+fsync-fusion path under drive saturation (0.9-1.2s fsyncs, 300k-record fused
+batches) interleaved with truncation storms and the TTL-expiry worker
+(8192/iteration over an aged 5M backlog).
+Smoking-gun check at wedge time: the periodic Stroma debug report in the
+broker log (or the admin Diagnostics page) - a command lane pinned high with
+the queue frozen dirty confirms the actor wedge.
+THIRD occurrence: with the broker wedged, a fresh reader's connections are
+RESET (os error 104) at connect time - not accepted-then-silent like before.
+New candidate that fits active resets: RESOURCE EXHAUSTION, most plausibly
+file descriptors (leaked sockets from dormant/grace sessions + segment file
+churn under truncate storms). Capture next time: `ls /proc/$(pidof
+fibril*)/fd | wc -l` and `ulimit -n` while wedged, plus whether the admin
+port also resets.
+Hypothesis space stays OPEN: the wedge could equally live in the protocol
+handler / session layer (read loop stalled on something other than the actor
+lane, writer-task wedge, permit accounting) - the actor/fsync-fusion lead is
+the strongest single candidate, not a conclusion. The wedged-era data dir
+still exists (server restarted and published over it since, so it is
+polluted but may retain structure worth a look).
+Hunt plan: dedicated instrumented session - reproduce with an aged data dir +
+TTL + repeated 5M x 1KB writer runs under drive saturation; instrument
+keratin fsync-fusion completion-set accounting AND the handler read/publish
+path, and watch stroma lane depths. Trace before patching.
+
+## Future: enable TLS from the dashboard (no config edit)
+
+User idea (2026-07-10): first-run TLS setup from the Security page - e.g. a
+"Enable TLS" flow that triggers the auto-self-signed generation (the material
+machinery already exists) and switches the listeners over, without touching
+the config file. Precedent exists: setup.mode already does exactly this flow
+at FIRST boot (crates/admin/src/setup.rs); the idea extends it to a running
+broker. Design questions to settle: listeners currently build TLS at
+startup, so this needs live listener rebinding or a dual-listen window; how
+the choice persists across restarts without a config write (persist a
+data-dir marker? write back to config with consent?); and the plaintext-426
+guidance story during the switchover. Pairs well with the existing live
+rotation and the cert card already on the Security page.
+
+## Dashboard + broker roadmap (AGREED 2026-07-11, work in this order)
+
+Phase 0 - Land the redesign. Merge administrative-ascension -> main: user
+click-through sign-off, full workspace test suite + vocab-lint at the branch
+tip, keep the branch history (coherent steps, not noise).
+
+Phase 1 - The publish-wedge hunt (dedicated instrumented session). Correctness
+outranks features; case file in the BUG REPORT section above (three
+occurrences, discriminating observations, fd-exhaustion check ready).
+
+Phase 2 - Quick feature wins, one sitting each, in order:
+  2.1 URL filter state (?q=...) on queues/subscriptions/connections.
+  2.2 Publish a test message (admin publish endpoint + queue-detail button;
+      deliberately early - it is also a debugging tool for later phases).
+  2.3 Per-partition consumer coverage on queue detail via the cohorts data.
+  2.4 Storage breakdown segmented bar behind the Overview disk stat.
+
+Phase 3 - SSE for live dashboard data, replacing the 2s polling (autoRefresh
+centralizes the plumbing). Must land before Phase 4.
+
+Phase 4 - The feed layer:
+  4.1 Control-plane audit feed page (bounded in-memory event ring: declares,
+      deletes, drains, settings changes, quarantines, membership changes).
+  4.2 Desktop notifications + optional user threshold rules on attention.
+
+Phase 5 - The showpiece: Cluster diagram restyle TOGETHER with mascot stages
+S0-S2 (sprite rings per broker, procedural tendrils - see the mascot plan).
+Wakes when the cleaned ring art lands; one effort, not two.
+
+Phase 6 - Docs/changelog synchronization sweep (END of roadmap, before the
+next release cut). Scope: website admin-dashboard.md re-walk against the
+final surface (publish-test-message, SSE, audit feed, notifications,
+coverage, storage breakdown), deployment/monitoring.md cross-refs,
+implemented-surface.md admin rows (new endpoints: history, attention, tls,
+audit, publish), a screenshots pass if the site gains any, and a CHANGELOG
+read-through for coherence. NOTE: this sweep does not suspend the standing
+rule - every phase still adds its own CHANGELOG bullet and doc touch in the
+same change; Phase 6 is the final consistency pass over the accumulated
+surface, not a deferral of docs work.
+
+Floating (slot on mood): enable-TLS-from-UI (own design pass), flavor tuning.
