@@ -625,35 +625,71 @@ function drawTendrils() {
     return pts;
   };
 
-  // A link joins each ring's bundle from the side facing its peer - it
-  // lands among the fan tips instead of piercing the ring.
-  const joinPoint = (from, to, seed) => {
-    const dx = to.x - from.x, dy = to.y - from.y;
-    const len = Math.hypot(dx, dy) || 1;
-    const ux = dx / len, uy = dy / len;
+  const ringById = new Map(ringNodes.map((rn) => [rn.id, rn]));
+
+  // The exact tip position of one of a ring's batch strands, recomputed with
+  // the same seeds and sway the batch pass uses - so a link can land ON a
+  // fiber tip and fuse with the bundle instead of floating beside it.
+  const batchTipFor = (rn, side, pick) => {
+    const strandsN = rn.stems + 1;
+    const i = pick % strandsN;
+    const seed = hashStr(rn.id + "|cross|" + i) % 1000;
     const r = currentSpriteS / 2;
-    const reach = r * (1.05 + rnd(seed) * 0.35);
-    return [from.x + ux * reach - uy * (rnd(seed + 1) - 0.5) * r * 0.7,
-            from.y + uy * reach * 0.6 + ux * (rnd(seed + 2) - 0.5) * r * 0.5];
+    const wob = REDUCED_MOTION ? 0 : Math.sin(sway + seed) * 2.2;
+    const s2 = side < 0 ? seed + 10 : seed + 20;
+    const reach = r * (0.95 + rnd(s2) * 0.75);
+    const rise = (((i / (strandsN - 1)) - 0.5) * 2 + (rnd(s2 + 1) - 0.5)) * r * 0.85;
+    return [rn.x + side * (r * 0.75 + reach),
+            rn.y + rise + wob * (rnd(s2 + 2) > 0.5 ? 1 : -1)];
+  };
+
+  const joinAt = (id, from, to, seed) => {
+    const rn = ringById.get(id);
+    const side = to.x >= from.x ? 1 : -1;
+    if (rn && !rn.ghost) return batchTipFor(rn, side, hashStr("pick" + seed));
+    // No bundle to join (ghost or unknown): the ring's edge, facing the peer.
+    const r = currentSpriteS / 2;
+    return [from.x + side * r * 0.95, from.y + (rnd(seed) - 0.5) * r * 0.4];
   };
 
   const drawLinkJob = (a, b, from, to, seed, color, alpha, width, pulseColor) => {
-    const p1 = joinPoint(from, to, seed + 11);
-    const p2 = joinPoint(to, from, seed + 22);
+    const ghostA = !!ringById.get(a)?.ghost;
+    const ghostB = !!ringById.get(b)?.ghost;
+    const severed = ghostA || ghostB;
+    let p1 = joinAt(a, from, to, seed + 11);
+    let p2 = joinAt(b, to, from, seed + 22);
+    if (severed) {
+      // The strand hangs short of the dead ring and sags - visibly cut off.
+      const deadEndFirst = ghostA;
+      const live = deadEndFirst ? p2 : p1;
+      const dead = deadEndFirst ? p1 : p2;
+      const cut = [live[0] + (dead[0] - live[0]) * 0.62,
+                   live[1] + (dead[1] - live[1]) * 0.62 + 16];
+      if (deadEndFirst) p1 = cut; else p2 = cut;
+      alpha *= 0.4;
+      pulseColor = null;
+    }
     const pts = linkPts(p1[0], p1[1], p2[0], p2[1], seed);
-    // Branches first so the stem covers their roots.
-    for (let br = 0; br < 2; br++) {
-      const k = 3 + (hashStr("lk" + seed + br) % 5);
-      const side = (hashStr("ls" + seed + br) % 2) ? 1 : -1;
-      const at = pts[k];
-      const branchAngle = tangentAt(pts, k) + side * (0.55 + rnd(seed + 80 + br) * 0.45);
-      const branch = growPath(at[0], at[1], branchAngle,
-        20 + rnd(seed + 90 + br) * 16, seed + 200 + br * 11);
-      drawPathOn(ctxU, branch, color, alpha * 0.9, Math.max(1.6, width - 1.4));
-      drawTip(ctxU, branch[branch.length - 1][0], branch[branch.length - 1][1],
-        "#7df0b8", alpha * 0.85);
+    if (!severed) {
+      // Branches first so the stem covers their roots.
+      for (let br = 0; br < 2; br++) {
+        const k = 3 + (hashStr("lk" + seed + br) % 5);
+        const side = (hashStr("ls" + seed + br) % 2) ? 1 : -1;
+        const at = pts[k];
+        const branchAngle = tangentAt(pts, k) + side * (0.55 + rnd(seed + 80 + br) * 0.45);
+        const branch = growPath(at[0], at[1], branchAngle,
+          20 + rnd(seed + 90 + br) * 16, seed + 200 + br * 11);
+        drawPathOn(ctxU, branch, color, alpha * 0.9, Math.max(1.6, width - 1.4));
+        drawTip(ctxU, branch[branch.length - 1][0], branch[branch.length - 1][1],
+          "#7df0b8", alpha * 0.85);
+      }
     }
     drawPathOn(ctxU, pts, color, alpha, width);
+    if (severed) {
+      // A dim, unlit end where the fiber was cut.
+      const end = ghostA ? pts[0] : pts[pts.length - 1];
+      drawTip(ctxU, end[0], end[1], "#6a6f78", alpha * 1.6);
+    }
     if (pulseColor) drawPulse(pts, seed, pulseColor);
   };
 
