@@ -2,7 +2,7 @@
 {% block content %}
 <style>
   #diagram-stage { position: relative; }
-  #tendril-canvas {
+  #tendril-canvas, #tendril-canvas-over {
     position: absolute;
     inset: 0;
     width: 100%;
@@ -10,7 +10,8 @@
     image-rendering: pixelated;
     pointer-events: none;
   }
-  #topology-diagram { position: relative; }
+  #tendril-canvas-over { z-index: 2; }
+  #topology-diagram { position: relative; z-index: 1; }
   #topology-diagram image { image-rendering: pixelated; }
   #topology-diagram .node-card { cursor: pointer; transition: opacity 0.12s ease; }
   #topology-diagram.has-focus .node-card { opacity: 0.35; }
@@ -85,6 +86,7 @@
   <div id="diagram-view">
     <div id="diagram-stage">
     <canvas id="tendril-canvas" aria-hidden="true"></canvas>
+    <canvas id="tendril-canvas-over" aria-hidden="true"></canvas>
     <svg id="topology-diagram" viewBox="0 0 860 440" width="100%" height="440"
          preserveAspectRatio="xMidYMid meet"
          style="background: var(--panel-bg, transparent); border-radius: 8px;"></svg>
@@ -453,36 +455,42 @@ function renderDiagram(data) {
   drawTendrils();
 }
 
-// ---- tendril rendering: low-res buffer, nearest-neighbor upscale ----
+// ---- tendril rendering: two low-res buffers, nearest-neighbor upscale ----
+// The ring sprite sits in 3/4 perspective with its right side turned away,
+// so a strand threading it passes UNDER the band on the left and OVER it on
+// the right. The under canvas sits behind the svg, the over canvas above it;
+// each crossing strand splits at its ring's midline between the two.
 function drawTendrils() {
-  const canvas = document.getElementById("tendril-canvas");
+  const under = document.getElementById("tendril-canvas");
+  const over = document.getElementById("tendril-canvas-over");
   const svg = document.getElementById("topology-diagram");
-  if (!canvas || !svg) return;
+  if (!under || !over || !svg) return;
   const cw = svg.clientWidth, ch = svg.clientHeight;
   if (!cw || !ch) return;
-  const RES = 2;
+  const RES = 1.5;
   const bw = Math.max(1, Math.round(cw / RES));
   const bh = Math.max(1, Math.round(ch / RES));
-  if (canvas.width !== bw) canvas.width = bw;
-  if (canvas.height !== bh) canvas.height = bh;
-  const ctx = canvas.getContext("2d");
-  ctx.clearRect(0, 0, bw, bh);
+  for (const canvas of [under, over]) {
+    if (canvas.width !== bw) canvas.width = bw;
+    if (canvas.height !== bh) canvas.height = bh;
+  }
+  const ctxU = under.getContext("2d");
+  const ctxO = over.getContext("2d");
+  ctxU.clearRect(0, 0, bw, bh);
+  ctxO.clearRect(0, 0, bw, bh);
   const vb = svg.viewBox.baseVal;
   if (!vb || !vb.width) return;
-  // Same mapping the svg uses (preserveAspectRatio meet, centered).
   const scale = Math.min(cw / vb.width, ch / vb.height) / RES;
   const ox = (bw - vb.width * scale) / 2;
   const oy = (bh - vb.height * scale) / 2;
   const px = (x) => ox + x * scale;
   const py = (y) => oy + y * scale;
-  ctx.lineCap = "round";
-
-  // Tendrils are organic: a path walks segment by segment, its heading
-  // wobbling with seeded noise plus a slow, contained sway, and stems fork
-  // into shorter branches partway along - the brand art's dendrite look.
+  ctxU.lineCap = "round";
+  ctxO.lineCap = "round";
   const sway = REDUCED_MOTION ? 0 : swayT;
 
-  const drawPath = (pts, color, alpha, width, outline) => {
+  const drawPathOn = (ctx, pts, color, alpha, width, outline) => {
+    if (pts.length < 2) return;
     ctx.globalAlpha = alpha;
     const trace = () => {
       ctx.beginPath();
@@ -498,7 +506,7 @@ function drawTendrils() {
     };
     if (outline) {
       ctx.strokeStyle = "#0b0e14";
-      ctx.lineWidth = width + 2;
+      ctx.lineWidth = width + 2.4;
       trace();
     }
     ctx.strokeStyle = color;
@@ -506,13 +514,24 @@ function drawTendrils() {
     trace();
   };
 
-  // A free tendril: from (x,y) heading `angle`, length `len`, wandering.
+  // Glowing strand tip, the art's lit fiber ends.
+  const drawTip = (ctx, x, y, color, alpha) => {
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(px(x), py(y), 2.1, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = alpha * 0.35;
+    ctx.beginPath();
+    ctx.arc(px(x), py(y), 4, 0, Math.PI * 2);
+    ctx.fill();
+  };
+
   const growPath = (x, y, angle, len, seed) => {
     const steps = 7;
     const pts = [[x, y]];
     let a = angle;
     for (let k = 1; k <= steps; k++) {
-      const t = k / steps;
       const settle = Math.min(1, (k - 1) / 2);
       a += ((rnd(seed + k) - 0.5) * 0.55
         + Math.sin(sway * 0.8 + seed + k * 1.7) * 0.045) * settle;
@@ -529,16 +548,58 @@ function drawTendrils() {
     return Math.atan2(b[1] - a[1], b[0] - a[0]);
   };
 
-  // A connecting tendril between two rings: wavy point-to-point stem with a
-  // couple of organic forks along the way.
-  const drawLink = (x1, y1, x2, y2, seed, color, alpha, width, forked) => {
+  // Point at arc-length fraction t of a polyline.
+  const pathPoint = (pts, t) => {
+    const lens = [];
+    let total = 0;
+    for (let k = 1; k < pts.length; k++) {
+      const l = Math.hypot(pts[k][0] - pts[k - 1][0], pts[k][1] - pts[k - 1][1]);
+      lens.push(l); total += l;
+    }
+    let want = t * total;
+    for (let k = 0; k < lens.length; k++) {
+      if (want <= lens[k]) {
+        const f = lens[k] ? want / lens[k] : 0;
+        return [pts[k][0] + (pts[k + 1][0] - pts[k][0]) * f,
+                pts[k][1] + (pts[k + 1][1] - pts[k][1]) * f];
+      }
+      want -= lens[k];
+    }
+    return pts[pts.length - 1];
+  };
+
+  // A pulse hidden while it crosses a ring band's near (left) side.
+  const pulseHidden = (x, y) => {
+    for (const rn of ringNodes) {
+      const r = currentSpriteS / 2;
+      const d2 = (x - rn.x) * (x - rn.x) + (y - rn.y) * (y - rn.y);
+      if (x < rn.x && d2 > (r * 0.5) * (r * 0.5) && d2 < (r * 1.05) * (r * 1.05)) return true;
+    }
+    return false;
+  };
+
+  // Occasional pulses: each strand gets a seeded schedule; direction
+  // alternates by seed. Drawn on the over layer, ducking under left bands.
+  const drawPulse = (pts, seed, color) => {
+    if (REDUCED_MOTION) return;
+    const period = 6 + rnd(seed + 300) * 7;
+    const phase = ((swayT * 0.55 + rnd(seed + 301) * period) % period);
+    if (phase > 1.6) return;
+    let t = phase / 1.6;
+    if (hashStr("dir" + seed) % 2) t = 1 - t;
+    const [x, y] = pathPoint(pts, t);
+    if (pulseHidden(x, y)) return;
+    drawTip(ctxO, x, y, color, 0.95);
+  };
+
+  const linkPts = (x1, y1, x2, y2, seed) => {
     const dx = x2 - x1, dy = y2 - y1;
     const len = Math.hypot(dx, dy) || 1;
     const nx = -dy / len, ny = dx / len;
     const amp = Math.min(16, 6 + len * 0.035) * (0.7 + rnd(seed) * 0.5);
     const waves = 1.2 + rnd(seed + 4);
     const phase = rnd(seed + 5) * Math.PI * 2;
-    const SAMPLES = 9;
+    const SAMPLES = 11;
     const pts = [];
     for (let k = 0; k <= SAMPLES; k++) {
       const t = k / SAMPLES;
@@ -548,23 +609,25 @@ function drawTendrils() {
       const off = wob * amp * taper;
       pts.push([x1 + dx * t + nx * off, y1 + dy * t + ny * off]);
     }
-    drawPath(pts, color, alpha, width, true);
-    if (forked) {
-      for (let b = 0; b < 2; b++) {
-        const k = 3 + (hashStr("lk" + seed + b) % 4);
-        const side = (hashStr("ls" + seed + b) % 2) ? 1 : -1;
-        const at = pts[k];
-        const branchAngle = tangentAt(pts, k) + side * (0.55 + rnd(seed + 80 + b) * 0.45);
-        const branch = growPath(at[0], at[1], branchAngle,
-          22 + rnd(seed + 90 + b) * 18, seed + 200 + b * 11);
-        drawPath(branch, color, alpha * 0.9, Math.max(1, width - 0.6), true);
+    return pts;
+  };
+
+  // Re-draw the sub-path near a ring's turned-away (right) side on the over
+  // layer, so a strand passing that side reads in front of the band.
+  const overlayNearRings = (pts, color, alpha, width) => {
+    for (const rn of ringNodes) {
+      const r = currentSpriteS / 2;
+      const seg = [];
+      for (const pt of pts) {
+        const d = Math.hypot(pt[0] - rn.x, pt[1] - rn.y);
+        if (pt[0] >= rn.x && d < r * 1.12) seg.push(pt);
+        else if (seg.length > 1) break;
+        else seg.length = 0;
       }
+      if (seg.length > 1) drawPathOn(ctxO, seg, color, alpha, width, true);
     }
   };
 
-  // Endpoints threaded through the rings: pull each end past the ring
-  // center to its far side, so the strand crosses the transparent opening,
-  // hides under the band, and emerges outside.
   const threadEnds = (from, to, lane) => {
     const dx = to.x - from.x, dy = to.y - from.y;
     const len = Math.hypot(dx, dy) || 1;
@@ -578,31 +641,46 @@ function drawTendrils() {
     };
   };
 
-  // Consensus mesh: one organic gold strand leader <-> each voter, offset a
-  // lane from the data stem so the pair reads side by side.
+  // Consensus mesh: one organic gold strand leader <-> each voter.
   for (const link of consensusLinks) {
     const on = !focusId || link.a === focusId || link.b === focusId;
     const seed = hashStr("raft|" + link.a + "|" + link.b) % 1000;
     const e = threadEnds(link.from, link.to, 7);
-    drawLink(e.x1, e.y1, e.x2, e.y2, seed,
-      "#e8b65b", on ? 0.5 : 0.06, 1.7, false);
+    const pts = linkPts(e.x1, e.y1, e.x2, e.y2, seed);
+    const alpha = on ? 0.5 : 0.06;
+    drawPathOn(ctxU, pts, "#e8b65b", alpha, 2.2, false);
+    overlayNearRings(pts, "#e8b65b", alpha, 2.2);
   }
 
-  // Data links: ONE stem per owner->follower pair, thicker with more
-  // partitions, forking along the way.
+  // Data links: one branching stem per owner->follower pair.
   for (const e of tendrils) {
     const on = !focusId || e.owner === focusId || e.follower === focusId;
     const seed = hashStr(e.owner + "|" + e.follower) % 1000;
-    const width = e.count >= 5 ? 3.6 : e.count >= 2 ? 3.0 : 2.4;
+    const width = e.count >= 5 ? 4.6 : e.count >= 2 ? 3.9 : 3.2;
     const ends = threadEnds(e.from, e.to, -6);
-    drawLink(ends.x1, ends.y1, ends.x2, ends.y2, seed,
-      STRANDS_IN[seed % STRANDS_IN.length], on ? 0.85 : 0.07, width, true);
+    const pts = linkPts(ends.x1, ends.y1, ends.x2, ends.y2, seed);
+    const color = STRANDS_IN[seed % STRANDS_IN.length];
+    const alpha = on ? 0.85 : 0.07;
+    // Branches first so the stem covers their roots.
+    for (let b = 0; b < 2; b++) {
+      const k = 3 + (hashStr("lk" + seed + b) % 5);
+      const side = (hashStr("ls" + seed + b) % 2) ? 1 : -1;
+      const at = pts[k];
+      const branchAngle = tangentAt(pts, k) + side * (0.55 + rnd(seed + 80 + b) * 0.45);
+      const branch = growPath(at[0], at[1], branchAngle,
+        22 + rnd(seed + 90 + b) * 18, seed + 200 + b * 11);
+      drawPathOn(ctxU, branch, color, alpha * 0.9, 2.2, true);
+      drawTip(ctxU, branch[branch.length - 1][0], branch[branch.length - 1][1],
+        "#7df0b8", alpha * 0.9);
+    }
+    drawPathOn(ctxU, pts, color, alpha, width, true);
+    overlayNearRings(pts, color, alpha, width);
+    drawPulse(pts, seed, "#c8ecff");
   }
 
-  // Per-ring batches: continuous strands crossing the whole ring. Each one
-  // enters from its left fan tip, straightens into a horizontal lane through
-  // the transparent opening (parallel with its siblings, like the art), and
-  // exits into its right fan tip. Short branches fork off the outer thirds.
+  // Per-ring batches: continuous strands, tight through the opening and
+  // spreading outward. Left half rides the under layer, right half the over
+  // layer, so the strand threads the tilted ring.
   const BATCH = ["#6db5f2", "#6db5f2", "#3d7bf0", "#8a4be8"];
   for (const rn of ringNodes) {
     if (rn.ghost) continue;
@@ -612,41 +690,56 @@ function drawTendrils() {
     const strandsN = rn.stems + 1;
     for (let i = 0; i < strandsN; i++) {
       const seed = hashStr(rn.id + "|cross|" + i) % 1000;
-      // Horizontal lane inside the opening, spread across its height.
-      const laneY = ((i / (strandsN - 1)) - 0.5) * r * 0.55
-        + (rnd(seed) - 0.5) * 5;
+      // Tight lane in the opening, wide spread at the tips.
+      const laneY = ((i / (strandsN - 1)) - 0.5) * r * 0.34
+        + (rnd(seed) - 0.5) * 3;
       const wob = REDUCED_MOTION ? 0 : Math.sin(sway + seed) * 2.2;
       const tip = (side, s2) => {
-        const reach = r * (0.95 + rnd(s2) * 0.7);
-        const rise = (rnd(s2 + 1) - 0.5) * r * 1.5;
+        const reach = r * (0.95 + rnd(s2) * 0.75);
+        const rise = (((i / (strandsN - 1)) - 0.5) * 2 + (rnd(s2 + 1) - 0.5)) * r * 0.85;
         return [rn.x + side * (r * 0.75 + reach),
-                rn.y + laneY * 1.3 + rise + wob * (rnd(s2 + 2) > 0.5 ? 1 : -1)];
+                rn.y + rise + wob * (rnd(s2 + 2) > 0.5 ? 1 : -1)];
       };
       const lt = tip(-1, seed + 10), rt = tip(1, seed + 20);
       const pts = [
         lt,
-        [rn.x - r * 0.85, rn.y + laneY * 1.5 + wob * 0.5],
+        [rn.x - r * 0.85, rn.y + laneY * 2 + wob * 0.5],
         [rn.x - r * 0.3, rn.y + laneY],
         [rn.x + r * 0.3, rn.y + laneY],
-        [rn.x + r * 0.85, rn.y + laneY * 1.5 - wob * 0.5],
+        [rn.x + r * 0.85, rn.y + laneY * 2 - wob * 0.5],
         rt,
       ];
       const color = BATCH[hashStr("c" + seed) % BATCH.length];
-      drawPath(pts, color, alpha, 2.1, true);
-      // One short fork near each outer bend.
-      for (const [k, side] of [[1, -1], [4, 1]]) {
-        if (hashStr("fb" + seed + k) % 3 === 0) continue;
+      const split = 3; // midline: [0..3] left half, [3..5] right half
+      const leftPts = pts.slice(0, split + 1);
+      const rightPts = pts.slice(split);
+      // Branches under their halves first, so strand cores cover the roots.
+      const branchAt = (ctx, k, side) => {
+        if (hashStr("fb" + seed + k) % 3 === 0) return;
         const at = pts[k];
         const a = side > 0 ? 0 : Math.PI;
         const branchAngle = a + (rnd(seed + 30 + k) - 0.5) * 1.4;
         const branch = growPath(at[0], at[1], branchAngle,
           16 + rnd(seed + 40 + k) * 22, seed + 50 + k);
-        drawPath(branch, color, alpha * 0.9, 1.5, true);
-      }
+        drawPathOn(ctx, branch, color, alpha * 0.9, 2.0, true);
+        drawTip(ctx, branch[branch.length - 1][0], branch[branch.length - 1][1],
+          "#7df0b8", alpha * 0.85);
+      };
+      branchAt(ctxU, 1, -1);
+      branchAt(ctxO, 4, 1);
+      // Core: thicker through the middle, tapering into the tips.
+      drawPathOn(ctxU, leftPts.slice(1), color, alpha, 2.8, true);
+      drawPathOn(ctxU, leftPts.slice(0, 2), color, alpha, 2.0, true);
+      drawPathOn(ctxO, rightPts.slice(0, rightPts.length - 1), color, alpha, 2.8, true);
+      drawPathOn(ctxO, rightPts.slice(rightPts.length - 2), color, alpha, 2.0, true);
+      drawTip(ctxU, lt[0], lt[1], "#7df0b8", alpha);
+      drawTip(ctxO, rt[0], rt[1], "#7df0b8", alpha);
+      drawPulse(pts, seed, "#c8ecff");
     }
   }
 
-  ctx.globalAlpha = 1;
+  ctxU.globalAlpha = 1;
+  ctxO.globalAlpha = 1;
 }
 
 // ---- blink + lights engines (timers ride the SPA cleanup registry) ----
