@@ -185,6 +185,12 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- Light mode works with every flavor, not just plain. The dark flavor blocks
+  set their tinted grounds without a theme qualifier, so a flavored light
+  mode kept dark backgrounds under light text; the grounds are now scoped to
+  dark. Primary buttons also swap to white-on-accent in light mode - their
+  near-black text assumed the bright dark-theme accents and read muddy on the
+  darkened light-mode ones.
 - Zeros stopped shouting: stat values render dim at zero and take their state
   color only when the number does, so an idle broker's Overview no longer
   pulls the eye to five colored nothings.

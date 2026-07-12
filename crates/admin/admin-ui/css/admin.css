@@ -10,6 +10,9 @@
 
 :root {
   color-scheme: dark;
+  /* Text placed ON an accent-filled surface (primary buttons). Dark themes
+     use bright accents, so near-black; light themes override to white. */
+  --on-accent: #16110c;
   --bg: #0f1013;
   --panel: #16181d;
   --panel-2: #1c1f25;
@@ -38,6 +41,7 @@
 
 html[data-theme="light"] {
   color-scheme: light;
+  --on-accent: #ffffff;
   --bg: #e8e6e0;
   --panel: #f5f4f0;
   --panel-2: #fbfaf7;
@@ -473,7 +477,7 @@ h1, h2, h3, h4, h5, h6 {
 .btn-primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #16110c;
+  color: var(--on-accent);
   font-weight: 600;
 }
 
@@ -1780,7 +1784,7 @@ a.broker-switch-item:hover {
    colors stay put in every flavor: the accent lives on chrome, links, and
    chips, never on health. Names from the tissue-and-stain family. */
 
-html[data-flavor="neuronic"] {
+html[data-flavor="neuronic"]:not([data-theme="light"]) {
   --accent: #f2c230;
   --accent-soft: rgba(242, 194, 48, .17);
   --accent-line: rgba(242, 194, 48, .55);
@@ -1789,7 +1793,7 @@ html[data-flavor="neuronic"] {
   --panel-2: #201d14;
 }
 
-html[data-flavor="chlorophyll"] {
+html[data-flavor="chlorophyll"]:not([data-theme="light"]) {
   --accent: #41d066;
   --accent-soft: rgba(65, 208, 102, .17);
   --accent-line: rgba(65, 208, 102, .55);
@@ -1798,7 +1802,7 @@ html[data-flavor="chlorophyll"] {
   --panel-2: #1a211b;
 }
 
-html[data-flavor="crimson"] {
+html[data-flavor="crimson"]:not([data-theme="light"]) {
   --accent: #e02e4d;
   --accent-soft: rgba(224, 46, 77, .15);
   --accent-line: rgba(224, 46, 77, .48);
@@ -1807,7 +1811,7 @@ html[data-flavor="crimson"] {
   --panel-2: #211a1d;
 }
 
-html[data-flavor="eosin"] {
+html[data-flavor="eosin"]:not([data-theme="light"]) {
   --accent: #f0537e;
   --accent-soft: rgba(240, 83, 126, .17);
   --accent-line: rgba(240, 83, 126, .55);
@@ -1816,7 +1820,7 @@ html[data-flavor="eosin"] {
   --panel-2: #201a20;
 }
 
-html[data-flavor="azure"] {
+html[data-flavor="azure"]:not([data-theme="light"]) {
   --accent: #3ba4ff;
   --accent-soft: rgba(59, 164, 255, .17);
   --accent-line: rgba(59, 164, 255, .55);
@@ -1825,7 +1829,7 @@ html[data-flavor="azure"] {
   --panel-2: #1a1f26;
 }
 
-html[data-flavor="iris"] {
+html[data-flavor="iris"]:not([data-theme="light"]) {
   --accent: #a582f5;
   --accent-soft: rgba(165, 130, 245, .17);
   --accent-line: rgba(165, 130, 245, .55);
