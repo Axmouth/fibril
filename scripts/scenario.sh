@@ -135,7 +135,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
       post "/admin/api/queues" "{\"topic\":\"$topic\",\"partition_count\":${partitions:-1}}" ;;
     declare-stream)
       read -r topic partitions durability <<<"$rest"
-      post "/admin/api/streams" "{\"topic\":\"$topic\",\"partitions\":${partitions:-1},\"durability\":\"${durability:-durable}\"}" ;;
+      post "/admin/api/streams" "{\"topic\":\"$topic\",\"partition_count\":${partitions:-1},\"durability\":\"${durability:-durable}\"}" ;;
     test-publish)
       read -r topic text <<<"$rest"
       post "/admin/api/publish" "{\"topic\":\"$topic\",\"text\":\"${text:-scenario test message}\"}" ;;

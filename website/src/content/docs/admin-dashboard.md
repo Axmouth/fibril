@@ -125,8 +125,10 @@ active publisher/subscriber counts, idle time when known, last used time for the
 current process, and the most recent idle-cleanup result or skip reason.
 
 Partitioned queues are shown as one row per topic with their partition and
-loaded counts, a 30-minute depth trend sparkline, and the queue's dead-letter
-policy. Expand a topic to see each partition's own state, or open **Detail**
+loaded counts, a 30-minute depth trend sparkline, live in/s and out/s rates
+(derived in the page between refreshes), and the queue's dead-letter
+policy. Clicking the sparkline opens a drilldown with the depth chart, the
+rates, and the age of the oldest ready message. Expand a topic to see each partition's own state, or open **Detail**
 for the full picture of one queue: its depth and leased charts, per-partition
 cards, live consumers with their settlement mode, and its declared
 configuration. The detail page can also **publish a test message** through the

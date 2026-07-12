@@ -169,6 +169,20 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   approximation (the last visible seam inside the ring opening is gone),
   and the leader's glow paints last so strands on its turned-away side
   carry the gold cast too.
+- Queues and streams lists show flow, not just standing state. Queue topic
+  rows gain In /s and Out /s columns (derived in the page from the message
+  tail and settled floor between data ticks - no new broker state), the
+  depth-trend popover adds the same rates plus the age of the oldest ready
+  message (read on demand, one message header per partition), stream
+  cards gain an append-rate chip, and group sections breathe with the
+  mockup's spacing. Message inspection can finally target a partition
+  (`partition` query param + a field on the Messages page) - it silently
+  read partition 0 only before, and the per-partition Inspect links now
+  land on the right one.
+- The scenario runner's `declare-stream` verb sent `partitions` where the
+  API takes `partition_count` - silently ignored before the unknown-field
+  hardening (every scenario stream was 1-partition), a named error after
+  it, and now fixed.
 - Overview tightened toward the original mockup: the disk card's storage
   breakdown folds behind a small toggle by default (the stat cards return
   to one compact row), a Nodes panel appears in cluster mode - each broker

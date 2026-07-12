@@ -185,6 +185,10 @@ impl From<GlobalDlqSnapshot> for GlobalDlqView {
 pub struct InspectMessagesQuery {
     pub topic: String,
     pub group: Option<String>,
+    /// Which partition to read (offsets are per partition). Defaults to 0,
+    /// which was previously the only partition the endpoint could see.
+    #[serde(default)]
+    pub partition: u32,
     #[serde(default)]
     pub from: u64,
     pub limit: Option<usize>,
@@ -643,7 +647,7 @@ pub async fn inspect_messages(
         .storage
         .inspect_messages(
             &query.topic,
-            0,
+            query.partition,
             group.as_deref(),
             query.from,
             limit,

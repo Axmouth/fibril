@@ -43,6 +43,9 @@
   <div class="spark-pop-vals">
     <div>depth now<b id="spark-pop-depth">--</b></div>
     <div>leased now<b id="spark-pop-leased">--</b></div>
+    <div>in / s<b id="spark-pop-in">--</b></div>
+    <div>out / s<b id="spark-pop-out">--</b></div>
+    <div>oldest<b id="spark-pop-oldest">--</b></div>
   </div>
 </div>
 
@@ -53,6 +56,7 @@ function inspectHref(item) {
   const params = new URLSearchParams();
   params.set("topic", item.topic);
   if (item.group) params.set("group", item.group);
+  if (item.partition) params.set("partition", String(item.partition));
   params.set("from", String(item.state?.settled_until ?? 0));
   return `/admin/messages?${params}`;
 }
@@ -146,6 +150,53 @@ function stateClass(item, activity) {
 // "topic group" (raw group, empty when none). Feeds the row sparklines.
 let depthSeries = new Map();
 
+// In/s and out/s per queue, diffed between data ticks. The message tail is
+// max(max_ready, max_inflight) + 1 (falling back to the settled floor),
+// summed across materialized partitions - its delta is messages accepted,
+// and the settled floor's delta is messages fully done. When the set of
+// materialized partitions changes the baseline resets instead of lying.
+const queueRates = new Map();
+// The latest debug entries per queue key, for the popover's oldest lookup.
+let queuePartsByKey = new Map();
+function trackQueueRates(queues) {
+  const now = performance.now();
+  const agg = new Map();
+  queuePartsByKey = new Map();
+  for (const item of queues) {
+    const key = `${item.topic} ${item.group || ""}`;
+    (queuePartsByKey.get(key) || queuePartsByKey.set(key, []).get(key)).push(item);
+    const a = agg.get(key) || { tail: 0, settled: 0, mat: 0 };
+    if (item.materialized) {
+      const s = item.state || {};
+      a.tail += Math.max(
+        s.max_ready != null ? s.max_ready + 1 : 0,
+        s.max_inflight != null ? s.max_inflight + 1 : 0,
+        s.settled_until || 0);
+      a.settled += s.settled_until || 0;
+      a.mat += 1;
+    }
+    agg.set(key, a);
+  }
+  for (const [key, cur] of agg) {
+    const prev = queueRates.get(key);
+    if (!prev || prev.mat !== cur.mat) {
+      queueRates.set(key, { ...cur, at: now, inRate: 0, outRate: 0 });
+    } else if (now - prev.at > 500) {
+      const dt = (now - prev.at) / 1000;
+      prev.inRate = Math.max(0, (cur.tail - prev.tail) / dt);
+      prev.outRate = Math.max(0, (cur.settled - prev.settled) / dt);
+      prev.tail = cur.tail;
+      prev.settled = cur.settled;
+      prev.mat = cur.mat;
+      prev.at = now;
+    }
+  }
+  for (const key of [...queueRates.keys()]) if (!agg.has(key)) queueRates.delete(key);
+}
+const rateCell = (rate, cls) => rate > 0.5
+  ? `<span class="${cls}">${fmtCompact(Math.round(rate))}</span>`
+  : '<span class="v-dim">0</span>';
+
 // Broker activity is tracked per queue (topic + group), not per partition.
 function activityKey(topic, group) {
   return `${topic}\u0000${group || ""}`;
@@ -181,6 +232,7 @@ function render(bundle) {
   // /admin/api/queues_debug returns work queues only (the server filters streams,
   // which reuse the queue handle, into /admin/api/streams_debug).
   const queues = data.queues || [];
+  trackQueueRates(queues);
   const activitySummary = data.broker_activity_summary || {};
   const cleanupMetrics = data.broker_cleanup_metrics || {};
   const loaded = queues.filter(item => item.materialized).length;
@@ -308,6 +360,8 @@ function render(bundle) {
             <td><span class="chip-plain">${loaded}/${parts.length} loaded</span></td>
             <td class="text-right ${depthTone(depthSeries.get(`${topic} ${parts[0]?.group || ""}`), aggReady)}" title="${aggReady}">${fmtCompact(aggReady)}</td>
             <td class="queue-spark-cell"><svg class="queue-spark" data-key="${escapeHtml(`${topic} ${parts[0]?.group || ""}`)}" width="90" height="22" aria-label="Depth over the last 30 minutes"></svg></td>
+            <td class="text-right">${rateCell(queueRates.get(`${topic} ${parts[0]?.group || ""}`)?.inRate ?? 0, "v-accent")}</td>
+            <td class="text-right">${rateCell(queueRates.get(`${topic} ${parts[0]?.group || ""}`)?.outRate ?? 0, "v-ok")}</td>
             <td class="text-right v-active">${fmtCompact(sumState("inflight_count"))}</td>
             <td class="text-right ${num(act?.active_publishers) > 0 ? "v-active" : "v-dim"}">${num(act?.active_publishers)}</td>
             <td class="text-right ${subsClass}">${aggSubs}</td>
@@ -322,6 +376,8 @@ function render(bundle) {
             <td><span class="${stateClass(item, act)}">${escapeHtml(loadStateLabel(item, act))}</span></td>
             <td class="text-right">${formatQueueStateValue(item, item.state.ready_count)}</td>
             <td class="v-dim">—</td>
+            <td class="text-right v-dim">—</td>
+            <td class="text-right v-dim">—</td>
             <td class="text-right">${formatQueueStateValue(item, item.state.inflight_count)}</td>
             <td class="text-right v-dim">—</td>
             <td class="text-right v-dim">—</td>
@@ -347,6 +403,8 @@ function render(bundle) {
               <th>State</th>
               <th class="text-right">Depth</th>
               <th>Trend — 30 min</th>
+              <th class="text-right">In / s</th>
+              <th class="text-right">Out / s</th>
               <th class="text-right">Leased</th>
               <th class="text-right">Publishers</th>
               <th class="text-right">Consumers</th>
@@ -394,10 +452,53 @@ function openSparkPop(svg) {
     depths.length ? fmtCount(depths[depths.length - 1]) : "--";
   document.getElementById("spark-pop-leased").textContent =
     leased.length ? fmtCount(leased[leased.length - 1]) : "--";
+  const rates = queueRates.get(key);
+  document.getElementById("spark-pop-in").textContent =
+    rates ? fmtCount(Math.round(rates.inRate)) : "--";
+  document.getElementById("spark-pop-out").textContent =
+    rates ? fmtCount(Math.round(rates.outRate)) : "--";
+  fillOldest(key);
   const rect = svg.getBoundingClientRect();
   sparkPop.style.left = Math.max(8, Math.min(window.innerWidth - 346, rect.left - 60)) + "px";
   sparkPop.style.top = Math.min(window.innerHeight - 210, rect.bottom + 8) + "px";
   sparkPop.hidden = false;
+}
+
+// The age of the oldest ready message: one limit-1 inspect read per
+// materialized partition (offsets are per partition), taken only when the
+// popover opens, minimum across partitions. The token drops stale fills.
+let oldestToken = 0;
+async function fillOldest(key) {
+  const el = document.getElementById("spark-pop-oldest");
+  const token = ++oldestToken;
+  const parts = (queuePartsByKey.get(key) || [])
+    .filter((p) => p.materialized && p.state?.min_ready != null);
+  if (parts.length === 0) {
+    el.textContent = "—";
+    return;
+  }
+  el.textContent = "…";
+  const sep = key.lastIndexOf(" ");
+  const topic = key.slice(0, sep);
+  const group = key.slice(sep + 1);
+  const stamps = await Promise.all(parts.slice(0, 16).map(async (p) => {
+    const params = new URLSearchParams({
+      topic, from: String(p.state.min_ready), limit: "1", status: "ready",
+    });
+    if (group) params.set("group", group);
+    if (p.partition) params.set("partition", String(p.partition));
+    try {
+      const data = await api(`/admin/api/messages?${params}`);
+      return data?.items?.[0]?.headers?.published ?? null;
+    } catch {
+      return null;
+    }
+  }));
+  if (token !== oldestToken) return;
+  const known = stamps.filter((v) => v != null);
+  el.textContent = known.length
+    ? fmtUptime((Date.now() - Math.min(...known)) / 1000)
+    : "—";
 }
 
 document.getElementById("queues").addEventListener("click", (event) => {

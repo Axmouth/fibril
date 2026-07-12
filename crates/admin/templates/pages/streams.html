@@ -38,6 +38,8 @@
 <script src="/static/js/api.js"></script>
 <script src="/static/js/admin.js"></script>
 <script>
+// Append rates per stream topic, diffed between data ticks.
+const streamRates = new Map();
 function escapeHtml(value) {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -104,6 +106,23 @@ function render(bundle) {
     (byTopic[entry.topic] ||= []).push(entry);
   }
 
+  // Append rate per topic, diffed from the summed tail between data ticks.
+  const now = performance.now();
+  for (const [topic, parts] of Object.entries(byTopic)) {
+    const tail = parts.reduce((acc, p) => acc + (p.tail != null ? Number(p.tail) : 0), 0);
+    const prev = streamRates.get(topic);
+    if (!prev) {
+      streamRates.set(topic, { tail, at: now, rate: 0 });
+    } else if (now - prev.at > 500) {
+      prev.rate = Math.max(0, (tail - prev.tail) / ((now - prev.at) / 1000));
+      prev.tail = tail;
+      prev.at = now;
+    }
+  }
+  for (const topic of [...streamRates.keys()]) {
+    if (!byTopic[topic]) streamRates.delete(topic);
+  }
+
   let html = "";
   if (entries.length === 0) {
     html = `<p class="queue-group-note">No stream partitions on this broker.</p>`;
@@ -147,6 +166,8 @@ function render(bundle) {
               ${durabilityChip}
               <span class="chip-plain">retention ${escapeHtml(retention)}</span>
               <span class="${totalSubs > 0 ? "chip-ok" : "chip-plain"}">${totalSubs} live sub${totalSubs === 1 ? "" : "s"}</span>
+              ${(streamRates.get(topic)?.rate ?? 0) > 0.5
+                ? `<span class="chip-group">append ${fmtCompact(Math.round(streamRates.get(topic).rate))}/s</span>` : ""}
               <span class="queue-group-note">${parts.length} partition(s)</span>
               <button class="btn" type="button" data-test-publish="${escapeHtml(topic)}">Publish test record</button>
             </div>

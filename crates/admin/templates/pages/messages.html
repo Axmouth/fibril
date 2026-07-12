@@ -21,6 +21,12 @@
       </label>
 
       <label class="settings-field">
+        <span class="settings-label">Partition</span>
+        <span class="settings-help">Offsets are per partition.</span>
+        <input id="message-partition" type="number" min="0" step="1" value="0">
+      </label>
+
+      <label class="settings-field">
         <span class="settings-label">From offset</span>
         <span class="settings-help">First offset to inspect.</span>
         <input id="message-from" type="number" min="0" step="1" value="0">
@@ -160,6 +166,8 @@ function buildQuery(fromOverride = null) {
   params.set("topic", topic);
   const group = normalizedGroupValue("message-group");
   if (group) params.set("group", group);
+  const partition = optionalNumber("message-partition");
+  if (partition) params.set("partition", String(partition));
   params.set("from", String(fromOverride ?? optionalNumber("message-from") ?? 0));
 
   const limit = optionalNumber("message-limit");
@@ -463,6 +471,7 @@ function applyInitialQuery() {
   const params = new URLSearchParams(window.location.search);
   field("message-topic").value = params.get("topic") || "";
   field("message-group").value = params.get("group") || "";
+  field("message-partition").value = params.get("partition") || "0";
   field("message-from").value = params.get("from") || "0";
   field("message-limit").value = params.get("limit") || "50";
   field("message-include-settled").checked = params.get("include_settled") === "true";

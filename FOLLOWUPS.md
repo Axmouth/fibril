@@ -3442,6 +3442,16 @@ M1 - Queues + Streams list upgrade (no server change needed).
   4. The same treatment on streams rows where it applies.
 
 M2 - Streams durable cursor view + streams scenario.
+  BUG FOUND 2026-07-13 while verifying M1: a MULTI-partition stream
+  declared through the admin API in ganglion mode never gets its
+  partitions placed - the committed assignments stay empty for the topic
+  and every publish bounces with "not owner for queue events/1". All
+  prior scenarios masked this: scenario.sh sent `partitions` (dropped by
+  the permissive parser, so every stream was silently 1-partition) until
+  the deny_unknown_fields hardening exposed the typo and it was fixed to
+  `partition_count`. Reproduce: 3-node scenario, declare-stream events 2
+  durable, then admin publish -> 409. Investigate the stream declare ->
+  coordination placement path BEFORE building the cursor view on top.
   The mockup's per-stream SUBSCRIBERS table: subscriber, position
   (tail / catching up), behind, read/s, last activity. We surface live
   subscription counts and lag recoveries but NOT durable cursor positions.

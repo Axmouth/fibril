@@ -612,6 +612,9 @@ h5.metrics-header,
 }
 
 .overview-grid {
+  /* start-aligned so an expanded disk breakdown grows only its own card,
+     not the whole row */
+  align-items: start;
   display: grid;
   gap: 12px;
   grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
@@ -750,6 +753,11 @@ h5.metrics-header,
 .table-compact th,
 .table-compact td {
   padding: 5px 10px;
+}
+
+/* Breathing room between the group cards (mockup uses 14px). */
+.queue-table-wrap + .queue-table-wrap {
+  margin-top: 14px;
 }
 
 .queue-table-wrap {
