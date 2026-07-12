@@ -626,13 +626,14 @@ function drawTendrils() {
   };
 
   const ringById = new Map(ringNodes.map((rn) => [rn.id, rn]));
+  // Fiber tips a link has fused onto: the batch pass skips their glow, so a
+  // junction reads as a joint rather than two endpoints stacked.
+  const consumedTips = new Set();
 
-  // The exact tip position of one of a ring's batch strands, recomputed with
-  // the same seeds and sway the batch pass uses - so a link can land ON a
-  // fiber tip and fuse with the bundle instead of floating beside it.
-  const batchTipFor = (rn, side, pick) => {
+  // The exact tip position of a ring's batch strand i, recomputed with the
+  // same seeds and sway the batch pass uses.
+  const batchTip = (rn, side, i) => {
     const strandsN = rn.stems + 1;
-    const i = pick % strandsN;
     const seed = hashStr(rn.id + "|cross|" + i) % 1000;
     const r = currentSpriteS / 2;
     const wob = REDUCED_MOTION ? 0 : Math.sin(sway + seed) * 2.2;
@@ -643,33 +644,66 @@ function drawTendrils() {
             rn.y + rise + wob * (rnd(s2 + 2) > 0.5 ? 1 : -1)];
   };
 
+  // Fuse onto the fiber whose direction best matches the bearing to the
+  // peer (skipping tips another link already took), and return the tip plus
+  // an approach point beyond it along the fiber's own line - so the link
+  // flows INTO the fiber instead of meeting it at an angle.
   const joinAt = (id, from, to, seed) => {
     const rn = ringById.get(id);
     const side = to.x >= from.x ? 1 : -1;
-    if (rn && !rn.ghost) return batchTipFor(rn, side, hashStr("pick" + seed));
-    // No bundle to join (ghost or unknown): the ring's edge, facing the peer.
     const r = currentSpriteS / 2;
-    return [from.x + side * r * 0.95, from.y + (rnd(seed) - 0.5) * r * 0.4];
+    if (!rn || rn.ghost) {
+      const pt = [from.x + side * r * 0.95, from.y + (rnd(seed) - 0.5) * r * 0.4];
+      return { tip: pt, approach: pt, key: null };
+    }
+    const strandsN = rn.stems + 1;
+    const bearing = Math.atan2(to.y - from.y, to.x - from.x);
+    let best = null;
+    for (let i = 0; i < strandsN; i++) {
+      const key = rn.id + "|" + side + "|" + i;
+      if (consumedTips.has(key)) continue;
+      const pt = batchTip(rn, side, i);
+      const dir = Math.atan2(pt[1] - rn.y, pt[0] - rn.x);
+      let d = Math.abs(dir - bearing);
+      if (d > Math.PI) d = 2 * Math.PI - d;
+      if (!best || d < best.d) best = { d, pt, key };
+    }
+    if (!best) {
+      const pt = [from.x + side * r * 0.95, from.y + (rnd(seed) - 0.5) * r * 0.4];
+      return { tip: pt, approach: pt, key: null };
+    }
+    consumedTips.add(best.key);
+    const ux = best.pt[0] - rn.x, uy = best.pt[1] - rn.y;
+    const ulen = Math.hypot(ux, uy) || 1;
+    return {
+      tip: best.pt,
+      approach: [best.pt[0] + (ux / ulen) * 26, best.pt[1] + (uy / ulen) * 26],
+      key: best.key,
+    };
   };
 
-  const drawLinkJob = (a, b, from, to, seed, color, alpha, width, pulseColor) => {
+  const drawLinkJob = (a, b, from, to, seed, color, alpha, width, pulseColor, tipColor) => {
     const ghostA = !!ringById.get(a)?.ghost;
     const ghostB = !!ringById.get(b)?.ghost;
     const severed = ghostA || ghostB;
-    let p1 = joinAt(a, from, to, seed + 11);
-    let p2 = joinAt(b, to, from, seed + 22);
+    const j1 = joinAt(a, from, to, seed + 11);
+    const j2 = joinAt(b, to, from, seed + 22);
+    let core1 = j1.approach, core2 = j2.approach;
     if (severed) {
       // The strand hangs short of the dead ring and sags - visibly cut off.
-      const deadEndFirst = ghostA;
-      const live = deadEndFirst ? p2 : p1;
-      const dead = deadEndFirst ? p1 : p2;
+      const live = ghostA ? core2 : core1;
+      const dead = ghostA ? core1 : core2;
       const cut = [live[0] + (dead[0] - live[0]) * 0.62,
                    live[1] + (dead[1] - live[1]) * 0.62 + 16];
-      if (deadEndFirst) p1 = cut; else p2 = cut;
+      if (ghostA) core1 = cut; else core2 = cut;
       alpha *= 0.4;
       pulseColor = null;
     }
-    const pts = linkPts(p1[0], p1[1], p2[0], p2[1], seed);
+    // Core between the approach points, then a final glide along each
+    // fiber's own direction into its tip: no elbows at the junctions.
+    const pts = linkPts(core1[0], core1[1], core2[0], core2[1], seed);
+    if (!severed || !ghostA) pts.unshift(j1.tip);
+    if (!severed || !ghostB) pts.push(j2.tip);
     if (!severed) {
       // Branches first so the stem covers their roots.
       for (let br = 0; br < 2; br++) {
@@ -681,7 +715,7 @@ function drawTendrils() {
           20 + rnd(seed + 90 + br) * 16, seed + 200 + br * 11);
         drawPathOn(ctxU, branch, color, alpha * 0.9, Math.max(1.6, width - 1.4));
         drawTip(ctxU, branch[branch.length - 1][0], branch[branch.length - 1][1],
-          "#7df0b8", alpha * 0.85);
+          tipColor, alpha * 0.85);
       }
     }
     drawPathOn(ctxU, pts, color, alpha, width);
@@ -698,14 +732,14 @@ function drawTendrils() {
     const on = !focusId || link.a === focusId || link.b === focusId;
     const seed = hashStr("raft|" + link.a + "|" + link.b) % 1000;
     drawLinkJob(link.a, link.b, link.from, link.to, seed,
-      "#e8b65b", on ? 0.6 : 0.06, 2.4, "#ffe2a8");
+      "#e8b65b", on ? 0.6 : 0.06, 2.4, "#ffe2a8", "#f6d795");
   }
   for (const e of tendrils) {
     const on = !focusId || e.owner === focusId || e.follower === focusId;
     const seed = hashStr(e.owner + "|" + e.follower) % 1000;
     const width = e.count >= 5 ? 4.4 : e.count >= 2 ? 3.7 : 3.0;
     drawLinkJob(e.owner, e.follower, e.from, e.to, seed,
-      STRANDS_IN[seed % STRANDS_IN.length], on ? 0.85 : 0.07, width, "#c8ecff");
+      STRANDS_IN[seed % STRANDS_IN.length], on ? 0.85 : 0.07, width, "#c8ecff", "#7df0b8");
   }
 
   // Per-ring batches: continuous strands, tight through the opening,
@@ -759,8 +793,8 @@ function drawTendrils() {
       overSeg.unshift([rn.x + r * 0.45, pts[3][1] + (pts[4][1] - pts[3][1]) * 0.2]);
       branchAt(ctxO, 4, 1);
       drawPathOn(ctxO, overSeg, color, alpha, 2.7);
-      drawTip(ctxU, lt[0], lt[1], "#7df0b8", alpha);
-      drawTip(ctxO, rt[0], rt[1], "#7df0b8", alpha);
+      if (!consumedTips.has(rn.id + "|-1|" + i)) drawTip(ctxU, lt[0], lt[1], "#7df0b8", alpha);
+      if (!consumedTips.has(rn.id + "|1|" + i)) drawTip(ctxO, rt[0], rt[1], "#7df0b8", alpha);
       drawPulse(pts, seed, "#c8ecff");
     }
     // The leader's glow re-asserts itself above the over-layer strands, so
