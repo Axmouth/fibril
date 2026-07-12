@@ -169,6 +169,15 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   approximation (the last visible seam inside the ring opening is gone),
   and the leader's glow paints last so strands on its turned-away side
   carry the gold cast too.
+- Overview tightened toward the original mockup: the disk card's storage
+  breakdown folds behind a small toggle by default (the stat cards return
+  to one compact row), a Nodes panel appears in cluster mode - each broker
+  with its address, liveness, owned partitions, live publish and delivery
+  rates, and the consensus leader starred, headed by a coordination-health
+  chip - and the top bar gains a live/registered nodes chip, with the
+  stream-health pill and broker switcher moving beside it so status reads
+  in one place. A new ember flavor joins the set: the design mockup's
+  burnt-orange scheme, dark and light.
 - The Connections page grew a diagram view: the broker as the fibril ring
   with its clients plugged in. Publisher connections run blue strands into
   the ring's left side, subscribers violet strands out of the right, pulses

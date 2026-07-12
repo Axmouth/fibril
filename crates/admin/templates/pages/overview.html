@@ -47,8 +47,11 @@
     <span class="overview-label">Disk</span>
     <strong id="disk">--</strong>
     <span class="overview-help">Approximate data directory usage, MB</span>
-    <div class="storage-bar" id="disk-bar" hidden></div>
-    <div class="storage-bar-legend" id="disk-legend" hidden></div>
+    <details class="disk-details" id="disk-details" hidden>
+      <summary>breakdown</summary>
+      <div class="storage-bar" id="disk-bar"></div>
+      <div class="storage-bar-legend" id="disk-legend"></div>
+    </details>
   </article>
 </section>
 
@@ -85,6 +88,30 @@
   </div>
   <svg id="chart-backlog" class="chart chart-short" width="720" height="110" role="img"
     aria-label="Total backlog over the last 30 minutes"></svg>
+</section>
+
+<section class="overview-panel" aria-label="Cluster nodes" id="nodes-panel" hidden>
+  <div class="overview-panel-heading" style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px;">
+    <div>
+      <h5>Nodes</h5>
+      <p>Registered brokers with their live load. The
+        <a href="/admin/topology">cluster page</a> has the full picture.</p>
+    </div>
+    <span class="chip-ok" id="nodes-health" hidden>coordination healthy</span>
+  </div>
+  <table class="table table-compact metric-table">
+    <thead>
+      <tr>
+        <th>Node</th>
+        <th>Address</th>
+        <th>Status</th>
+        <th class="text-right">Owns</th>
+        <th class="text-right">Publish / s</th>
+        <th class="text-right">Delivered / s</th>
+      </tr>
+    </thead>
+    <tbody id="nodes-rows"></tbody>
+  </table>
 </section>
 
 <details class="overview-details overview-panel" id="resource-graphs">
@@ -231,13 +258,14 @@ function metric(value, digits = 1, suffix = "") {
 // their own segment, the rest fold into "other". Hidden under 1 MB total so
 // an empty broker does not render a sliver bar.
 function renderStorageBar(breakdown, total) {
+  const details = document.getElementById("disk-details");
   const bar = document.getElementById("disk-bar");
   const legend = document.getElementById("disk-legend");
   if (!total || total < 1024 * 1024 || breakdown.length === 0) {
-    bar.hidden = true;
-    legend.hidden = true;
+    details.hidden = true;
     return;
   }
+  details.hidden = false;
   const top = breakdown.slice(0, 4);
   const otherBytes = breakdown
     .slice(4)
@@ -252,8 +280,6 @@ function renderStorageBar(breakdown, total) {
     `<span class="${s.cls}" style="width:${(100 * s.bytes / total).toFixed(2)}%" title="${escapeHtml(s.label)} · ${bytes(s.bytes)}"></span>`).join("");
   legend.innerHTML = segs.map((s) =>
     `<span><i class="${s.cls}"></i>${escapeHtml(s.label)} ${bytes(s.bytes)}</span>`).join("");
-  bar.hidden = false;
-  legend.hidden = false;
 }
 
 function bytes(value) {
@@ -392,6 +418,70 @@ resourcePanel.open = window.localStorage.getItem("fibril-admin-resources") === "
 resourcePanel.addEventListener("toggle", () => {
   window.localStorage.setItem("fibril-admin-resources", resourcePanel.open ? "open" : "closed");
 });
+// And whether the disk breakdown was, the same way.
+const diskDetails = document.getElementById("disk-details");
+diskDetails.open = window.localStorage.getItem("fibril-admin-disk-breakdown") === "open";
+diskDetails.addEventListener("toggle", () => {
+  window.localStorage.setItem("fibril-admin-disk-breakdown", diskDetails.open ? "open" : "closed");
+});
+
+// Cluster nodes panel: registered brokers with liveness and heartbeat
+// rates. Topology has no SSE family, so this polls on its own gentle
+// cadence, like the layout's broker switcher.
+const rateText = (rate) => (rate >= 10000 ? Math.round(rate / 1000) + "k"
+  : rate >= 1000 ? (rate / 1000).toFixed(1) + "k" : String(rate));
+async function refreshNodes() {
+  let data;
+  try {
+    const r = await fetch("/admin/api/topology");
+    if (!r.ok) return;
+    data = await r.json();
+  } catch {
+    return;
+  }
+  const coordination = data && data.coordination;
+  const consensus = data && data.consensus;
+  const nodes = (coordination && coordination.nodes) || [];
+  const panel = document.getElementById("nodes-panel");
+  const cluster = !!consensus || nodes.length > 1;
+  panel.hidden = !cluster;
+  if (!cluster) return;
+
+  const owns = new Map();
+  for (const a of (coordination.assignments || [])) {
+    owns.set(a.owner, (owns.get(a.owner) || 0) + 1);
+  }
+  const leaderId = consensus && consensus.leader != null ? String(consensus.leader) : null;
+  const isLeader = (n) => leaderId != null && (
+    (n.raft_id != null && String(n.raft_id) === leaderId) || String(n.node_id) === leaderId);
+  document.getElementById("nodes-rows").innerHTML = nodes.map((n) => {
+    const live = n.live !== false;
+    const pub = n.rate_pub ?? 0, dlv = n.rate_dlv ?? 0;
+    return `<tr>
+      <td class="mono">${isLeader(n) ? "★ " : ""}${escapeHtml(n.node_id)}</td>
+      <td class="mono">${escapeHtml(n.broker_addr || "")}</td>
+      <td>${live ? '<span class="chip-ok">serving</span>'
+                 : '<span class="chip-bad">unreachable</span>'}</td>
+      <td class="text-right ${owns.get(n.node_id) ? "" : "v-dim"}">${owns.get(n.node_id) ?? 0}</td>
+      <td class="text-right ${pub > 0 ? "v-accent" : "v-dim"}">${rateText(pub)}</td>
+      <td class="text-right ${dlv > 0 ? "v-active" : "v-dim"}">${rateText(dlv)}</td>
+    </tr>`;
+  }).join("");
+  const health = document.getElementById("nodes-health");
+  if (consensus && consensus.healthy === false) {
+    health.textContent = "coordination unhealthy";
+    health.className = "chip-bad";
+    health.hidden = false;
+  } else if (consensus) {
+    health.textContent = "coordination healthy";
+    health.className = "chip-ok";
+    health.hidden = false;
+  } else {
+    health.hidden = true;
+  }
+}
+refreshNodes();
+autoRefresh(refreshNodes, 10000);
 
 liveData(["overview", "history", "attention"], render, refresh);
 </script>

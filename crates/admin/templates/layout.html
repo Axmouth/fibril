@@ -126,16 +126,17 @@
   <div class="main-container">
     <header class="site-header">
       <span class="crumb">{{ title }}</span>
-      <span class="live-pill live" id="live-pill" hidden><span class="dot"></span><span id="live-pill-text">live</span></span>
-      <div class="broker-switch" id="broker-switch" hidden>
-        <button class="broker-switch-btn mono" type="button" id="broker-switch-btn" aria-haspopup="listbox"></button>
-        <div class="broker-switch-menu" id="broker-switch-menu" hidden></div>
-      </div>
       <div class="nav-actions">
         <button class="searchbtn" type="button" data-palette-open>
           <span class="searchlabel">Jump to a page…</span>
           <kbd>⌘K</kbd>
         </button>
+        <span class="nodes-pill" id="nodes-pill" hidden></span>
+        <span class="live-pill live" id="live-pill" hidden><span class="dot"></span><span id="live-pill-text">live</span></span>
+        <div class="broker-switch" id="broker-switch" hidden>
+          <button class="broker-switch-btn mono" type="button" id="broker-switch-btn" aria-haspopup="listbox"></button>
+          <div class="broker-switch-menu" id="broker-switch-menu" hidden></div>
+        </div>
         {% if auth_enabled %}
           <a href="/logout" class="icon-link" aria-label="Log out" title="Log out">
             <span class="icon icon-logout" aria-hidden="true"></span>
@@ -286,6 +287,7 @@
         { id: "eosin", label: "eosin", swatch: "#d95970" },
         { id: "azure", label: "azure", swatch: "#5da9e8" },
         { id: "iris", label: "iris", swatch: "#9a7ce0" },
+        { id: "ember", label: "ember", swatch: "#d77e4d" },
       ];
 
       function current() {
@@ -365,6 +367,21 @@
         const nodes = (coordination && coordination.nodes) || [];
         const selfId = coordination && coordination.node_id;
         const reachable = nodes.filter((n) => n.admin_addr);
+        // Cluster membership chip: live/registered. Only meaningful under
+        // real coordination (a lone broker's topology view has no
+        // consensus block).
+        const nodesPill = document.getElementById("nodes-pill");
+        if (nodesPill) {
+          const cluster = !!(data && data.consensus) || nodes.length > 1;
+          if (cluster) {
+            const live = nodes.filter((n) => n.live !== false).length;
+            nodesPill.textContent = `${live}/${nodes.length} nodes`;
+            nodesPill.classList.toggle("short", live < nodes.length);
+            nodesPill.hidden = false;
+          } else {
+            nodesPill.hidden = true;
+          }
+        }
         if (!selfId || nodes.length < 2 || reachable.length === 0) {
           wrap.hidden = true;
           window.localStorage.removeItem("fibril-admin-switch-label");

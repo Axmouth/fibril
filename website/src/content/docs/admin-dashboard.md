@@ -8,7 +8,8 @@ queues, runtime settings, and message inspection tools.
 
 The UI is a sidebar shell with a command palette (Ctrl/Cmd-K jumps to any
 page), dark and light modes, and optional named flavors that re-key the accent
-(neuronic, chlorophyll, crimson, eosin, azure, iris). The fibril ring mascot
+(neuronic, chlorophyll, crimson, eosin, azure, iris, and ember - the
+original design mockup's burnt-orange scheme). The fibril ring mascot
 greets you on the login page, the 404 page, and the browser tab; it stays out
 of the data views. The UI vendors only the small icon set and mascot art it
 needs and makes no external requests. In cluster mode the
@@ -44,7 +45,13 @@ linking to where it is fixed - then live
 throughput and backlog-over-time charts, state-colored stat cards, process
 resource use, reconnect outcomes, and a small set of storage health signals.
 The disk card carries a segmented breakdown of which queues the bytes belong
-to, largest first, so growth points at its cause.
+to, largest first, so growth points at its cause - folded by default behind
+a small toggle so the stat row stays compact, and the choice sticks per
+browser. In cluster mode the overview also lists the nodes: each registered
+broker with its address, liveness, owned partitions, and live publish and
+delivery rates from the coordination heartbeat, with the consensus leader
+starred - and the top bar carries a live/registered nodes chip beside the
+stream-health pill and the broker switcher.
 Chart history is sampled in memory on the broker (the last 30 minutes) and
 resets on restart; Prometheus stays the durable history.
 

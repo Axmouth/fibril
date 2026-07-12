@@ -824,6 +824,38 @@ textarea:focus {
   outline: none;
 }
 
+/* The disk card's breakdown, folded by default so the stat row stays
+   compact. */
+.disk-details summary {
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 10.5px;
+  margin-top: 6px;
+  user-select: none;
+}
+
+.disk-details summary:hover {
+  color: var(--text);
+}
+
+/* Cluster membership at a glance in the top bar: live/registered nodes. */
+.nodes-pill {
+  align-items: center;
+  background: var(--ok-soft);
+  border-radius: 999px;
+  color: var(--ok);
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 600;
+  gap: 6px;
+  padding: 3px 10px;
+}
+
+.nodes-pill.short {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
 /* A table row spotlighted from the connections diagram. */
 .row-spot {
   background: var(--accent-soft);
@@ -1855,6 +1887,16 @@ html[data-flavor="iris"]:not([data-theme="light"]) {
   --panel-2: #1c1a23;
 }
 
+/* The original design mockup's burnt-orange scheme. */
+html[data-flavor="ember"]:not([data-theme="light"]) {
+  --accent: #e08a52;
+  --accent-soft: rgba(224, 138, 82, .16);
+  --accent-line: rgba(224, 138, 82, .52);
+  --bg: #12100d;
+  --panel: #191613;
+  --panel-2: #201c18;
+}
+
 /* Light mode keeps the boring paper grounds; a flavor only re-keys the
    accent, darkened for contrast. */
 html[data-theme="light"][data-flavor="neuronic"] {
@@ -1891,6 +1933,12 @@ html[data-theme="light"][data-flavor="iris"] {
   --accent: #6b4fb0;
   --accent-soft: rgba(107, 79, 176, .11);
   --accent-line: rgba(107, 79, 176, .45);
+}
+
+html[data-theme="light"][data-flavor="ember"] {
+  --accent: #a05a24;
+  --accent-soft: rgba(160, 90, 36, .11);
+  --accent-line: rgba(160, 90, 36, .45);
 }
 
 /* ---------------- flavor picker ---------------- */
