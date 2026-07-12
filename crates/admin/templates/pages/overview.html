@@ -343,7 +343,7 @@ function render(bundle) {
   setCompact(document.getElementById("delivered"), d.broker.delivered_per_sec_1m);
   setCompact(document.getElementById("acked"), d.broker.acked_per_sec_1m);
   setCompact(document.getElementById("published"), d.broker.published_per_sec_1m);
-  document.getElementById("rss_mb").textContent = metric(d.sys.rss_mb / 1024, 2);
+  document.getElementById("rss_mb").textContent = metric(d.sys.rss_mb, 2);
   document.getElementById("cpu").textContent = metric(d.sys.cpu, 2);
   document.getElementById("disk").textContent = metric(d.storage_used / (1024 * 1024), 2);
   renderStorageBar(d.storage_breakdown || [], d.storage_used || 0);

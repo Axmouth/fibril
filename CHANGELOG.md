@@ -180,6 +180,15 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- The memory stat reported kilobytes as "MB": the process-memory sampler
+  divided sysinfo's byte count by 1024 once instead of twice. The Overview
+  card silently compensated, but the new memory graph (and the history
+  samples feeding it) showed thousands-of-"MB" values. The sampler now
+  publishes true megabytes and the card reads it directly.
+- Saving runtime settings reports its outcome as a toast. The result message
+  lands in a div at the top of a long page while the save button sits at the
+  bottom, so a saved (or failed, or version-conflicted) outcome was invisible
+  without scrolling up.
 - Deleting a queue from the dashboard works again on standalone brokers. The
   cluster-only guard keyed off having a coordination handle, which every
   broker gained when the topology page's single-node view was wired, so a

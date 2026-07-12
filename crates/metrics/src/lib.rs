@@ -932,7 +932,8 @@ impl SystemStats {
         );
         let sys = self.sys.read();
         let (rss_mb, cpu) = if let Some(p) = sys.process(pid) {
-            (p.memory() as f64 / 1024.0, p.cpu_usage())
+            // sysinfo reports bytes; publish true megabytes.
+            (p.memory() as f64 / (1024.0 * 1024.0), p.cpu_usage())
         } else {
             (0., 0.)
         };
