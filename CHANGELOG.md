@@ -180,6 +180,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- Buttons no longer render bold on Windows. The stylesheet used fractional
+  font weights (550, 650), which interpolate on variable fonts but round UP
+  on static families like Segoe UI - a primary button asked for 650 and got
+  full Bold. All weights now sit on standard stops (500, 600) that map to
+  real cuts everywhere.
 - The memory stat reported kilobytes as "MB": the process-memory sampler
   divided sysinfo's byte count by 1024 once instead of twice. The Overview
   card silently compensated, but the new memory graph (and the history
