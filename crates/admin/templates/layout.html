@@ -198,17 +198,23 @@
       const pill = document.getElementById("live-pill");
       const text = document.getElementById("live-pill-text");
       if (!pill || !text) return;
-      window.__nativeSetInterval(() => {
+      const update = () => {
         const last = window.__fibrilLastOk || 0;
-        if (!last) return;
-        const silence = Date.now() - last;
-        const state = silence > 30000 ? "dead" : silence > 10000 ? "stale" : "live";
+        // Before the first successful fetch the state is simply unknown:
+        // show a neutral "connecting" pill instead of nothing, so the top
+        // bar does not pop in and out across broker switches.
+        const state = !last ? "connecting"
+          : Date.now() - last > 30000 ? "dead"
+          : Date.now() - last > 10000 ? "stale" : "live";
         pill.hidden = false;
-        pill.classList.toggle("live", state === "live");
-        pill.classList.toggle("stale", state === "stale");
-        pill.classList.toggle("dead", state === "dead");
-        text.textContent = state === "dead" ? "unreachable" : state;
-      }, 2000);
+        for (const s of ["live", "stale", "dead", "connecting"]) {
+          pill.classList.toggle(s, state === s);
+        }
+        text.textContent = state === "dead" ? "unreachable"
+          : state === "connecting" ? "connecting" : state;
+      };
+      update();
+      window.__nativeSetInterval(update, 2000);
     })();
   </script>
   <script>
@@ -331,6 +337,15 @@
       const menu = document.getElementById("broker-switch-menu");
       if (!wrap || !btn || !menu) return;
 
+      // Each broker's admin has its own origin (and so its own storage):
+      // remember this broker's label so the switcher paints instantly on the
+      // next load instead of popping in after the topology fetch.
+      const cachedLabel = window.localStorage.getItem("fibril-admin-switch-label");
+      if (cachedLabel) {
+        btn.textContent = cachedLabel + " \u25be";
+        wrap.hidden = false;
+      }
+
       function esc(s) {
         return String(s).replace(/[&<>"']/g, (c) => ({
           "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -352,9 +367,11 @@
         const reachable = nodes.filter((n) => n.admin_addr);
         if (!selfId || nodes.length < 2 || reachable.length === 0) {
           wrap.hidden = true;
+          window.localStorage.removeItem("fibril-admin-switch-label");
           return;
         }
-        btn.textContent = `${selfId} ▾`;
+        window.localStorage.setItem("fibril-admin-switch-label", selfId);
+        btn.textContent = `${selfId} \u25be`;
         menu.innerHTML = nodes.map((n) => {
           const self = n.node_id === selfId;
           if (self || !n.admin_addr) {

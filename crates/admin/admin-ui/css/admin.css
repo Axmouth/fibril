@@ -2207,3 +2207,18 @@ html[data-theme="light"][data-flavor="iris"] {
 .notfound-hero h2 {
   margin: 0 0 6px;
 }
+
+.live-pill.connecting {
+  background: color-mix(in srgb, var(--muted) 14%, transparent);
+  color: var(--muted);
+}
+
+.live-pill.connecting .dot {
+  background: var(--muted);
+}
+
+/* Reserve room so the label appearing after the topology fetch does not
+   shove the top bar around. */
+.broker-switch-btn {
+  min-width: 96px;
+}

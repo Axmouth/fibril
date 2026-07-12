@@ -127,6 +127,16 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Changed
 
+- Tendrils grew into the brand look (second live review): every live ring
+  carries a packed batch of organic stems threading through it and forking
+  into branches on both sides, links between brokers are one branching stem
+  per pair (thicker with more shared partitions) plus one brighter organic
+  consensus strand, and all movement is slower and more contained. The
+  broker switcher paints its label instantly from a per-broker cache and the
+  live pill shows a neutral "connecting" state before the first fetch, so
+  switching brokers no longer jolts the top bar. The queues page's follower
+  table moved below the queues under a clearer title ("Replication status -
+  copies this broker follows").
 - The consensus layer joined the diagram: the heartbeat now carries each
   node's raft id, so the leader marking finally correlates in real clusters
   (raft ids never matched broker node ids before) and faint gold strands

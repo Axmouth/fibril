@@ -255,8 +255,10 @@ function render(bundle) {
         </tr>`;
       }).join('');
     replicationHtml = `
-      <h5 class="metrics-header queue-group-heading">Replication (follower workers on this broker)</h5>
-      <p class="queue-group-note">Queues this broker is replicating from their owners, with how far each has pulled.</p>
+      <h5 class="metrics-header queue-group-heading" style="margin-top: 26px">Replication status - copies this broker follows</h5>
+      <p class="queue-group-note">This broker holds follower copies of these queues and pulls changes
+        from their owners. Status says how far each copy has caught up; it is
+        not a queue this broker serves.</p>
       ${repCards}
       <div class="queue-table-wrap">
         <table class="table table-compact narrow metric-table queue-table">
@@ -358,7 +360,7 @@ function render(bundle) {
       `;
     }).join('');
 
-  container.innerHTML = summary + replicationHtml + html;
+  container.innerHTML = summary + html + replicationHtml;
   container.querySelectorAll(".queue-spark").forEach((svg) => {
     renderSparkline(svg, depthSeries.get(svg.dataset.key)?.depths ?? [], "var(--accent)");
   });
