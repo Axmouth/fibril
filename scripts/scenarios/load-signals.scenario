@@ -1,0 +1,28 @@
+# The cluster diagram's load signals, end to end: idle shimmer, the
+# flat-out strained face, the cooling tail through the busy bucket, and
+# delivery-side load from a draining consumer.
+# Run: scripts/scenario.sh scripts/scenarios/load-signals.scenario --nodes 3 --ganglion
+# Watch: /admin/topology on node 1 (http://127.0.0.1:18081/admin/topology).
+# The publish rate rides the partition owner's ring - it may not be node 1.
+
+say Cluster warming up
+wait 10
+declare-queue orders 3
+declare-queue invoices 1
+wait 5
+
+say Idle - rings blink lazily, strands shimmer rarely, no rate labels
+wait 20
+
+say Flat out - the owner ring strains (chevron eyes), pulses fire constantly
+publish-burst orders 3000000 256
+
+say Burst done - watch the owner cool down through the busy bucket
+wait 25
+
+say Draining the backlog - delivery-side rates light the owner up again
+consume orders 30
+wait 40
+
+say Back to idle - labels drop off, the shimmer returns
+wait 120

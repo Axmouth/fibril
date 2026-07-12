@@ -178,7 +178,10 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   lights twice as fast, the broker label gains a live msg/s figure, and a
   flat-out broker wears a new strained face (effort-squint eyes, gritted
   mouth - same pixel pipeline as the blink frames). A standalone broker
-  reads its own counters for the same effect.
+  reads its own counters for the same effect. An example scenario
+  (`scripts/scenarios/load-signals.scenario`) walks the whole ladder:
+  idle shimmer, flat-out strain, the cooling tail, and a delivery-side
+  drain.
 - The Cluster diagram came alive, then got its first live-review polish:
   replication links draw as proper fiber bundles (three to five snaking,
   outlined strands with layered waves, tapered into their rings) instead of
