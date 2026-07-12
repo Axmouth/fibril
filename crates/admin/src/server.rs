@@ -118,6 +118,12 @@ pub type LivenessProvider =
 pub type RaftIdsProvider =
     dyn Fn() -> std::collections::HashMap<String, u64> + Send + Sync;
 
+/// Returns each registered broker's coarse throughput as (published/s,
+/// delivered/s), keyed by node id. Cluster mode reads heartbeat labels;
+/// a lone broker reads its own counters.
+pub type NodeRatesProvider =
+    dyn Fn() -> std::collections::HashMap<String, (u64, u64)> + Send + Sync;
+
 /// Returns presentation metadata for the certificate the broker currently
 /// serves, as JSON (fingerprint, validity window, subject). The broker wires
 /// one in when TLS is enabled; feeds the security view and the certificate
@@ -255,6 +261,9 @@ pub struct AdminServer {
     /// Optional node-id -> raft-id correlation (from heartbeat labels), so
     /// the topology view can mark consensus roles on broker nodes.
     pub node_raft_ids: Option<Arc<RaftIdsProvider>>,
+    /// Optional per-node throughput (from heartbeat labels or local
+    /// counters). Feeds the topology payload's per-node rate fields.
+    pub node_rates: Option<Arc<NodeRatesProvider>>,
     /// True only under real cluster coordination (ganglion). The standalone
     /// single-node coordination view (wired for the topology page and broker
     /// switcher) must NOT trip cluster-only restrictions like the queue-delete
@@ -310,6 +319,7 @@ impl AdminServer {
             draining_flag: None,
             liveness: None,
             node_raft_ids: None,
+            node_rates: None,
             cluster_mode: false,
         }
     }
@@ -341,6 +351,12 @@ impl AdminServer {
     /// Attach the node-id to raft-id correlation provider.
     pub fn with_node_raft_ids(mut self, provider: Arc<RaftIdsProvider>) -> Self {
         self.node_raft_ids = Some(provider);
+        self
+    }
+
+    /// Attach the per-node throughput provider.
+    pub fn with_node_rates(mut self, provider: Arc<NodeRatesProvider>) -> Self {
+        self.node_rates = Some(provider);
         self
     }
 
@@ -1639,6 +1655,67 @@ mod tests {
         assert_eq!(assignment["epoch"], 3);
         assert_eq!(assignment["followers"][0], "broker-b");
         assert_eq!(body["consensus"]["leader"], 1);
+    }
+
+    #[tokio::test]
+    async fn topology_nodes_carry_heartbeat_rates_when_wired() {
+        use fibril_broker::coordination::{CoordinationSnapshot, NodeInfo, StaticCoordination};
+
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert(
+            "broker-a".to_string(),
+            NodeInfo {
+                node_id: "broker-a".to_string(),
+                broker_addr: "127.0.0.1:9000".to_string(),
+                admin_addr: None,
+            },
+        );
+        let snapshot = CoordinationSnapshot {
+            nodes,
+            assignments: std::collections::HashMap::new(),
+            stream_assignments: std::collections::HashMap::new(),
+            generation: 1,
+        };
+
+        // Without a rates provider the fields are null; with one, each node
+        // reports its (published/s, delivered/s) pair.
+        let bare = test_server(RuntimeSettingsLocks::default()).await;
+        let bare = Arc::try_unwrap(bare).ok().expect("sole owner").with_coordination(Arc::new(
+            StaticCoordination::new("broker-a", snapshot.clone()),
+        ));
+        let response = AdminServer::router(Arc::new(bare))
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/topology")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = response_json(response).await;
+        assert!(body["coordination"]["nodes"][0]["rate_pub"].is_null());
+
+        let wired = test_server(RuntimeSettingsLocks::default()).await;
+        let wired = Arc::try_unwrap(wired)
+            .ok()
+            .expect("sole owner")
+            .with_coordination(Arc::new(StaticCoordination::new("broker-a", snapshot)))
+            .with_node_rates(Arc::new(|| {
+                std::iter::once(("broker-a".to_string(), (12500u64, 900u64))).collect()
+            }));
+        let response = AdminServer::router(Arc::new(wired))
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/topology")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = response_json(response).await;
+        let node = &body["coordination"]["nodes"][0];
+        assert_eq!(node["rate_pub"], 12500);
+        assert_eq!(node["rate_dlv"], 900);
     }
 
     #[tokio::test]

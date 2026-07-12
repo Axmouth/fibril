@@ -231,8 +231,15 @@ The diagram view renders each broker as the fibril ring: active brokers blink
 more often than idle ones, and one that drops out of the cluster lingers
 briefly as a dimmed X-eyed ghost so the gap is visible. Replication links
 draw as fiber strands whose density follows how many partitions ride the
-link, and a standalone broker sprouts a strand per declared queue. Honoring
-reduced-motion preferences stills all of it.
+link, and a standalone broker sprouts a strand per declared queue. The
+rings also show real load: each broker reports coarse publish and delivery
+rates on its coordination heartbeat, and the diagram turns them into signal
+pulses along the strands (an idle ring shimmers rarely, a busy one fires
+constantly), faster band-light cycling, a msg/s figure under the broker
+name, and - flat out - a strained face. The gold consensus mesh hides
+behind a Consensus toggle (membership already implies a leader connection),
+and a Fibers toggle turns the animated layer off entirely, defaulting off
+past twelve rings. Honoring reduced-motion preferences stills all of it.
 
 The page also exposes three operator actions, each with a confirmation:
 

@@ -60,6 +60,10 @@ pub const DRAINING_LABEL: &str = "fibril/draining";
 /// Advisory label carrying the node's raft id, so observability can correlate
 /// broker node ids with consensus membership.
 pub const RAFT_ID_LABEL: &str = "fibril/raft-id";
+/// Advisory labels carrying a broker's coarse throughput - messages per
+/// second since its previous heartbeat - for the admin topology view.
+pub const RATE_PUB_LABEL: &str = "fibril/rate-pub";
+pub const RATE_DLV_LABEL: &str = "fibril/rate-dlv";
 
 /// Serialize a broker's advertise list for its heartbeat label.
 pub fn encode_advertise(addrs: &[String]) -> String {
@@ -2346,6 +2350,26 @@ impl GanglionCoordination {
             .filter_map(|node| {
                 let raft_id = node.labels.get(RAFT_ID_LABEL)?.parse().ok()?;
                 Some((node.node_id.clone(), raft_id))
+            })
+            .collect()
+    }
+
+    /// Registered nodes' coarse throughput as (published/s, delivered/s),
+    /// from the advisory heartbeat labels. Nodes that never carried the
+    /// publish-rate label are absent.
+    pub fn node_rates(&self) -> HashMap<String, (u64, u64)> {
+        self.node
+            .committed_snapshot()
+            .nodes
+            .values()
+            .filter_map(|node| {
+                let published = node.labels.get(RATE_PUB_LABEL)?.parse().ok()?;
+                let delivered = node
+                    .labels
+                    .get(RATE_DLV_LABEL)
+                    .and_then(|raw| raw.parse().ok())
+                    .unwrap_or(0);
+                Some((node.node_id.clone(), (published, delivered)))
             })
             .collect()
     }

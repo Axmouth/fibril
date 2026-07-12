@@ -169,6 +169,16 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   approximation (the last visible seam inside the ring opening is gone),
   and the leader's glow paints last so strands on its turned-away side
   carry the gold cast too.
+- The cluster diagram shows real load. Each broker reports coarse publish
+  and delivery rates (messages per second since its previous beat) as
+  advisory labels on its coordination heartbeat, and the topology payload
+  carries them per node. The diagram turns them into life: signal pulses
+  along a ring's strands and its outgoing replication links fire at a
+  cadence matching the broker's load bucket, busy rings cycle their band
+  lights twice as fast, the broker label gains a live msg/s figure, and a
+  flat-out broker wears a new strained face (effort-squint eyes, gritted
+  mouth - same pixel pipeline as the blink frames). A standalone broker
+  reads its own counters for the same effect.
 - The Cluster diagram came alive, then got its first live-review polish:
   replication links draw as proper fiber bundles (three to five snaking,
   outlined strands with layered waves, tapered into their rings) instead of

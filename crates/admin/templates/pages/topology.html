@@ -242,7 +242,18 @@ let ringNodes = [];          // { id, x, y, ghost, stems } per rendered ring
 let consensusLinks = [];     // { a, b, from, to } leader <-> voter
 let currentSpriteS = 96;
 let focusId = null;
-let lightPhase = 0;
+let lightTick = 0;
+
+// Coarse load from the heartbeat rates: bucket 0 idle, 1 light, 2 busy,
+// 3 flat out (strained face). Thresholds in msgs/s.
+const nodeRate = (node) => Math.max(node.rate_pub ?? 0, node.rate_dlv ?? 0);
+const rateBucket = (rate) =>
+  (rate <= 0 ? 0 : rate < 1000 ? 1 : rate < 20000 ? 2 : 3);
+const fmtRate = (rate) => (rate >= 10000 ? Math.round(rate / 1000) + "k"
+  : rate >= 1000 ? (rate / 1000).toFixed(1) + "k" : String(rate)) + " msg/s";
+// Pulse cadence per bucket: idle rings shimmer rarely, flat-out ones fire
+// almost continuously.
+const PULSE_CADENCE = [3.5, 1.4, 0.7, 0.35];
 let swayT = 0;
 
 function hashStr(s) {
@@ -424,6 +435,7 @@ function renderDiagram(data) {
     ringNodes.push({
       id: node.node_id, x: pos.x, y: pos.y, ghost, stems,
       leader: !ghost && isLeaderNode(node),
+      bucket: ghost ? 0 : rateBucket(nodeRate(node)),
     });
   }
 
@@ -432,7 +444,9 @@ function renderDiagram(data) {
     const pos = positions.get(node.node_id);
     const ghost = !!node.__ghost || node.live === false;
     const owned = ownedCount.get(node.node_id) ?? 0;
-    const active = !ghost && owned > 0;
+    const rate = ghost ? 0 : nodeRate(node);
+    const bucket = rateBucket(rate);
+    const active = !ghost && (owned > 0 || bucket > 0);
     const isLeader = !ghost && isLeaderNode(node);
     const group = el("g", {
       class: "node-card" + (ghost ? " node-ghost" : ""),
@@ -447,7 +461,7 @@ function renderDiagram(data) {
     group.appendChild(el("circle", { class: "ring-halo", cx: pos.x, cy: pos.y, r: S / 2 + 7 }));
     const img = el("image", {
       x: pos.x - S / 2, y: pos.y - S / 2, width: S, height: S,
-      href: spriteUrl(ghost ? "dead" : "open-a", S),
+      href: spriteUrl(ghost ? "dead" : bucket >= 3 ? "strain-a" : "open-a", S),
     });
     group.appendChild(img);
     group.appendChild(el("text", {
@@ -459,14 +473,15 @@ function renderDiagram(data) {
       ? "last seen " + timeAgoShort(node.__lastSeen / 1000)
       : ghost
         ? "unreachable \u00b7 " + node.broker_addr
-        : node.broker_addr + (owned ? " \u00b7 owns " + owned : "");
+        : node.broker_addr + (owned ? " \u00b7 owns " + owned : "")
+          + (rate > 0 ? " \u00b7 " + fmtRate(rate) : "");
     group.appendChild(el("text", {
       x: pos.x, y: pos.y + S / 2 + 32, "text-anchor": "middle", "font-size": 11,
       style: ghost ? "fill: var(--bad)" : "fill: var(--muted)",
     }, sub));
     svg.appendChild(group);
     cards.set(node.node_id, group);
-    nodesCtx.set(node.node_id, { img, ghost, active, size: S, mid: false });
+    nodesCtx.set(node.node_id, { img, ghost, active, bucket, size: S, mid: false });
   });
 
   renderCtx = { cards, data };
@@ -633,10 +648,11 @@ function drawTendrils() {
     return false;
   };
 
-  // Frequent, quick pulses; direction is seeded per strand.
-  const drawPulse = (pts, seed, color) => {
+  // Frequent, quick pulses; direction is seeded per strand. The cadence
+  // multiplier scales the period, so loaded rings fire more often.
+  const drawPulse = (pts, seed, color, cadence) => {
     if (REDUCED_MOTION) return;
-    const period = 2.6 + rnd(seed + 300) * 3;
+    const period = (2.6 + rnd(seed + 300) * 3) * (cadence ?? 1);
     const phase = ((swayT * 2.4 + rnd(seed + 301) * period) % period);
     if (phase > 1.1) return;
     let t = phase / 1.1;
@@ -739,7 +755,7 @@ function drawTendrils() {
     };
   };
 
-  const drawLinkJob = (a, b, from, to, seed, color, alpha, width, pulseColor, tipColor) => {
+  const drawLinkJob = (a, b, from, to, seed, color, alpha, width, pulseColor, tipColor, cadence) => {
     const ghostA = !!ringById.get(a)?.ghost;
     const ghostB = !!ringById.get(b)?.ghost;
     const severed = ghostA || ghostB;
@@ -792,7 +808,7 @@ function drawTendrils() {
       const end = ghostA ? pts[0] : pts[pts.length - 1];
       drawTip(ctxU, end[0], end[1], "#6a6f78", alpha * 1.6);
     }
-    if (pulseColor) drawPulse(pts, seed, pulseColor);
+    if (pulseColor) drawPulse(pts, seed, pulseColor, cadence);
   };
 
   // Consensus first (under the data stems), same grammar, gold. Off by
@@ -808,7 +824,8 @@ function drawTendrils() {
     const seed = hashStr(e.owner + "|" + e.follower) % 1000;
     const width = e.count >= 5 ? 4.4 : e.count >= 2 ? 3.7 : 3.0;
     drawLinkJob(e.owner, e.follower, e.from, e.to, seed,
-      STRANDS_IN[seed % STRANDS_IN.length], on ? 0.85 : 0.07, width, "#c8ecff", "#7df0b8");
+      STRANDS_IN[seed % STRANDS_IN.length], on ? 0.85 : 0.07, width, "#c8ecff", "#7df0b8",
+      PULSE_CADENCE[ringById.get(e.owner)?.bucket ?? 0]);
   }
 
   // Per-ring batches: continuous strands, tight through the opening,
@@ -879,7 +896,7 @@ function drawTendrils() {
       branchAt(ctxO, 5, 1);
       if (!consumedTips.has(rn.id + "|-1|" + i)) drawTip(ctxU, lt[0], lt[1], "#7df0b8", alpha);
       if (!consumedTips.has(rn.id + "|1|" + i)) drawTip(ctxO, rt[0], rt[1], "#7df0b8", alpha);
-      drawPulse(pts, seed, "#c8ecff");
+      drawPulse(pts, seed, "#c8ecff", PULSE_CADENCE[rn.bucket ?? 0]);
     }
   }
 
@@ -922,7 +939,13 @@ function drawTendrils() {
 }
 
 // ---- blink + lights engines (timers ride the SPA cleanup registry) ----
-const openFrame = () => (lightPhase ? "open-b" : "open-a");
+// Busy rings cycle their band lights every tick, idle rings every other
+// tick, and a flat-out ring wears the strained face.
+const framePhase = (n) => {
+  const t = n && n.bucket >= 2 ? lightTick : Math.floor(lightTick / 2);
+  return t % 2 ? "b" : "a";
+};
+const openFrame = (n) => (n && n.bucket >= 3 ? "strain-" : "open-") + framePhase(n);
 
 function scheduleBlink(id) {
   const n = nodesCtx.get(id);
@@ -937,7 +960,7 @@ function scheduleBlink(id) {
 }
 
 function playBlink(n, done) {
-  const seq = ["half", "closed", "half", openFrame()];
+  const seq = ["half", "closed", "half", openFrame(n)];
   n.mid = true;
   let i = 0;
   const step = () => {
@@ -952,14 +975,14 @@ function playBlink(n, done) {
 
 if (!REDUCED_MOTION) {
   setInterval(() => {
-    lightPhase ^= 1;
+    lightTick += 1;
     if (document.hidden) return;
     for (const n of nodesCtx.values()) {
       if (!n.ghost && !n.mid && n.img.isConnected) {
-        n.img.setAttribute("href", spriteUrl(openFrame(), n.size));
+        n.img.setAttribute("href", spriteUrl(openFrame(n), n.size));
       }
     }
-  }, 1400);
+  }, 700);
 
   // Sway loop, self-terminating when boosted navigation removes the canvas.
   let lastFrame = 0;

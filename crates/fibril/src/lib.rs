@@ -896,20 +896,65 @@ pub fn repartition_adoption_satisfied(
     adopted || elapsed >= timeout
 }
 
+/// Turns the monotonic publish/deliver counters into per-second rates
+/// between heartbeat ticks, so the heartbeat can carry coarse load labels.
+/// The first tick has no baseline and reports zero.
+pub struct HeartbeatRateTracker {
+    prev: Option<(std::time::Instant, u64, u64)>,
+}
+
+impl HeartbeatRateTracker {
+    pub fn new() -> Self {
+        Self { prev: None }
+    }
+
+    pub fn tick(&mut self, published: u64, delivered: u64) -> (u64, u64) {
+        let now = std::time::Instant::now();
+        let rates = match self.prev {
+            Some((at, prev_pub, prev_dlv)) => {
+                let secs = now.duration_since(at).as_secs_f64().max(0.001);
+                (
+                    (published.saturating_sub(prev_pub) as f64 / secs).round() as u64,
+                    (delivered.saturating_sub(prev_dlv) as f64 / secs).round() as u64,
+                )
+            }
+            None => (0, 0),
+        };
+        self.prev = Some((now, published, delivered));
+        rates
+    }
+}
+
+impl Default for HeartbeatRateTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Build advisory heartbeat labels from local broker state. `topology_adoption`,
 /// when present, contributes the node's lowest acked topology generation so the
 /// repartition controller can fence a cutover on cluster-wide client adoption.
+/// `rates` is this node's (published/s, delivered/s) since its previous beat.
 pub fn broker_heartbeat_labels(
     broker: &Broker<StromaEngine>,
     topology_adoption: Option<&TopologyAdoptionTracker>,
     advertise: &[String],
     draining: bool,
     raft_node_id: u64,
+    rates: (u64, u64),
 ) -> BTreeMap<String, String> {
     let mut labels = BTreeMap::new();
     labels.insert(
         fibril_coordination_ganglion::RAFT_ID_LABEL.to_string(),
         raft_node_id.to_string(),
+    );
+    labels.insert(
+        fibril_coordination_ganglion::RATE_PUB_LABEL.to_string(),
+        rates.0.to_string(),
+    );
+    labels.insert(
+        fibril_coordination_ganglion::RATE_DLV_LABEL.to_string(),
+        rates.1.to_string(),
     );
     if draining {
         labels.insert(
@@ -990,6 +1035,7 @@ pub fn spawn_ganglion_broker_tasks(
     cluster_secret: &str,
     peer_tls: Option<fibril_tls::TlsConnector>,
     draining: Arc<std::sync::atomic::AtomicBool>,
+    broker_stats: Arc<fibril_metrics::BrokerStats>,
 ) -> GanglionBrokerTaskHandles {
     let mut resolver_cfg = fibril_protocol::v1::replication::ProtocolOwnerPeerResolverConfig::new(
         std::collections::HashMap::new(),
@@ -1034,6 +1080,9 @@ pub fn spawn_ganglion_broker_tasks(
         .unwrap_or_else(|| config.broker.listener.bind.to_string());
     let heartbeat_advertise = advertise_list.clone();
     let heartbeat_raft_id = config.coordination.ganglion.raft_node_id;
+    // Cold path (one lock per heartbeat), so a Mutex around the rate
+    // baseline is fine under the Fn bound.
+    let rate_tracker = std::sync::Mutex::new(HeartbeatRateTracker::new());
     let heartbeat = parts.coordination.spawn_heartbeat_with_labels(
         NodeInfo {
             node_id: config.coordination.node_id.clone(),
@@ -1042,12 +1091,26 @@ pub fn spawn_ganglion_broker_tasks(
         },
         Duration::from_millis(config.coordination.ganglion.heartbeat_interval_ms),
         move || {
+            let rates = match rate_tracker.lock() {
+                Ok(mut tracker) => tracker.tick(
+                    broker_stats
+                        .published
+                        .total
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    broker_stats
+                        .delivered
+                        .total
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                ),
+                Err(_) => (0, 0),
+            };
             broker_heartbeat_labels(
                 &tails_broker,
                 labels_adoption.as_deref(),
                 &heartbeat_advertise,
                 draining.load(std::sync::atomic::Ordering::Relaxed),
                 heartbeat_raft_id,
+                rates,
             )
         },
     );
@@ -1701,6 +1764,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
             secret,
             peer_tls,
             draining.clone(),
+            metrics.broker(),
         )),
         // The ganglion-requires-secret check above makes this unreachable,
         // stated here so a future reorder cannot silently spawn
@@ -1911,7 +1975,19 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     // The coordination listener handle must outlive the server futures.
     let mut _consensus_server = None;
     let admin = match ganglion_parts {
-        None => admin.with_coordination(single_node_admin_coordination(&config)),
+        None => admin
+            .with_coordination(single_node_admin_coordination(&config))
+            // The lone ring's load comes straight from local counters (a
+            // short recent window, so the diagram tracks bursts).
+            .with_node_rates({
+                let stats = metrics.broker();
+                let node_id = config.coordination.node_id.clone();
+                Arc::new(move || {
+                    let published = stats.published.ops.sum_last(5) / 5;
+                    let delivered = stats.delivered.ops.sum_last(5) / 5;
+                    std::iter::once((node_id.clone(), (published, delivered))).collect()
+                })
+            }),
         Some(parts) => {
             _consensus_server = Some(parts.consensus_server.clone());
             let topology_source = parts.coordination.clone();
@@ -1931,6 +2007,10 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
                 .with_node_raft_ids({
                     let source = parts.coordination.clone();
                     Arc::new(move || source.node_raft_ids())
+                })
+                .with_node_rates({
+                    let source = parts.coordination.clone();
+                    Arc::new(move || source.node_rates())
                 })
                 .with_coordination(parts.coordination.clone())
                 .with_consensus_topology(Arc::new(move || {
@@ -2378,6 +2458,25 @@ impl DeclareCoordinator for CoordinationDeclareCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heartbeat_rate_tracker_reports_deltas_per_second() {
+        let mut tracker = HeartbeatRateTracker::new();
+        // First tick has no baseline.
+        assert_eq!(tracker.tick(1000, 500), (0, 0));
+        // Deltas divide by the (tiny) elapsed time; force a known baseline
+        // by rewriting the stored instant one second into the past.
+        if let Some((at, published, delivered)) = tracker.prev.as_mut() {
+            *at -= Duration::from_secs(1);
+            assert_eq!((*published, *delivered), (1000, 500));
+        }
+        assert_eq!(tracker.tick(4000, 2500), (3000, 2000));
+        // A counter going backwards (restart) must not underflow.
+        if let Some((at, _, _)) = tracker.prev.as_mut() {
+            *at -= Duration::from_secs(1);
+        }
+        assert_eq!(tracker.tick(0, 0), (0, 0));
+    }
 
     #[test]
     fn repartition_finalize_gate_waits_for_adoption_then_times_out() {

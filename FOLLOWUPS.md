@@ -3053,7 +3053,13 @@ the name (`cargo test --workspace --no-fail-fast 2>&1 | tee /tmp/suite.log`)
 and deflake properly - likely a timing-sensitive TCP-bound admin test under
 parallel load.
 
-## Future: per-node rates on the coordination heartbeat (mascot load face)
+## Per-node rates on the coordination heartbeat - SHIPPED 2026-07-12 (S3)
+
+Shipped with the S3 load-signal arc: rate-pub/rate-dlv heartbeat labels,
+node_rates() on the coordination seam, admin NodeRatesProvider, topology
+rate_pub/rate_dlv, bucketed pulse cadence + light ticks + strained face +
+msg/s sub-label. Per-edge (per-partition) rates remain future - links use
+the owner's node rate as a proxy. Original notes:
 
 Deferred from the S1/S2 arc (agreed 2026-07-12): the cluster-diagram rings
 show idle/active (blink cadence) and dead (X-eyes ghost), but the "load"
