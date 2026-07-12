@@ -104,7 +104,7 @@ and gate 3 gains its drain half:
   [TLS across nodes](/deployment/cluster/#tls-across-nodes).
 - Mutual TLS: client certificates as credentials (`tls.client_auth`), with
   certificate identities mapping to store users, `fibrilctl cert issue`, and
-  client options plus a typed required-cert error in all three clients.
+  client options plus a typed required-cert error in the clients.
 
 ### Toward 1.0 (later 0.x minors)
 

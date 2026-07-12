@@ -3039,7 +3039,10 @@ rule - every phase still adds its own CHANGELOG bullet and doc touch in the
 same change; Phase 6 is the final consistency pass over the accumulated
 surface, not a deferral of docs work.
 
-Floating (slot on mood): enable-TLS-from-UI (own design pass), flavor tuning,
+Floating (slot on mood): enable-TLS-from-UI (own design pass), flavor tuning
+(user notes 2026-07-11: crimson is the favorite; plain dark is a fine default;
+the other flavors could be MORE VIBRANT; light mode feels a bit off and could
+be a TINY BIT LESS LIGHT - assess together over screenshots),
 deny_unknown_fields hardening on admin request DTOs (a typoed field name in a
 declare request is silently ignored today - guided-errors philosophy says name
 it).

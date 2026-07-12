@@ -10,8 +10,8 @@ auth, and when TLS covers the dashboard the scrape happens over HTTPS. There
 is nothing separate to enable.
 
 A scrape is cheap by design. It reads atomic counters and the same snapshot
-views the dashboard already polls, never a delivery hot path, so scraping
-every few seconds does not affect broker throughput.
+views the dashboard's live stream serializes, never a delivery hot path, so
+scraping every few seconds does not affect broker throughput.
 
 ## Naming and semantics
 

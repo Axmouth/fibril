@@ -60,8 +60,8 @@ choice.
 
 The Activity page is the broker's own diary: operator actions (declares,
 deletes, drains, test publishes), attention conditions raised and resolved,
-and cluster membership changes, newest first with severity-colored entries
-and a filter. It holds the newest 512 entries in memory and resets on
+cluster membership changes, and stream subscribers falling behind into lag
+recovery, newest first with severity-colored entries and a filter. It holds the newest 512 entries in memory and resets on
 restart - the broker log remains the durable trail.
 
 The diagnostics page shows lower-level storage and queue metrics, including
@@ -79,8 +79,9 @@ below.
 
 ## Users
 
-The security page manages users (the settings page retains its section): create or rotate a user (argon2-hashed,
-never shown), remove a user, and see the current list with timestamps. The
+The security page manages users (the settings page retains a copy of the
+section): create or rotate a user (argon2-hashed, never shown), remove a
+user, and see the current list with timestamps. The
 built-in `fibril`/`fibril` pair works from loopback only, so create a user for
 remote access. In cluster mode edits replicate to every node. The same
 operations are available from `fibrilctl user add/passwd/remove/list`.
@@ -152,7 +153,9 @@ queue (or the reverse) is refused.
 ## Message Inspection
 
 Message inspection reads queue state and persisted message data on demand. Use
-it for debugging and operations, not as a live polling view.
+it for debugging and operations, not as a live polling view. The topic and
+group fields suggest existing names as you type (as do the group and
+dead-letter fields when declaring a queue); typing a new name works as usual.
 
 Inspecting a queue can load it into memory. If idle queue cleanup is enabled and
 no publisher or subscriber keeps that queue active, cleanup can unload it again

@@ -174,7 +174,7 @@ See also: [Plexus streams](/concepts/plexus-streams/) and
 | Item | Status | Implemented surface |
 | --- | --- | --- |
 | Stream channel type (fan-out) | Implemented | Stroma StreamEngine (cursors/retention), broker fan-out actor, TCP protocol (`DeclarePlexus`/`SubscribeStream`, reuses Publish/Deliver/Ack), Rust + TypeScript + Python clients |
-| Declare plexus (partitions, durability, retention, replication factor) | Implemented | `declare_plexus`/`declarePlexus` + `StreamConfig` in all three clients, including a per-stream replication-factor override that beats the cluster default |
+| Declare plexus (partitions, durability, retention, replication factor) | Implemented | `declare_plexus`/`declarePlexus` + `StreamConfig` in the clients, including a per-stream replication-factor override that beats the cluster default |
 | Durable named cursor | Implemented | Broker-side cursor per (channel, partition, name), resuming on restart and advancing on ack |
 | Ephemeral start position | Implemented | latest / earliest / offset / n-back / by-time |
 | Header filter | Implemented | AND of `header == pattern` with `*` glob, stream-only |
@@ -208,8 +208,11 @@ See also: [reconnects](/reliability/reconnects/) and
 | Conservative subscription reconciliation | Implemented | Broker, Rust client, TypeScript client, Python client, Go client, C# client |
 | Restore-client-subscriptions policy | Implemented | Broker, Rust client, TypeScript client, Python client, Go client, C# client |
 | Reconnect observability | Implemented | Admin overview, TCP metrics log, structured reconciliation logs |
-| Planned restart drain | Implemented | `POST /admin/api/drain` broadcasts a `GoingAway` push (grace deadline + message) to connected clients, surfaced by all three clients as an app-observable event. In coordinated mode the node also marks itself draining: the controller hands each partition with a caught-up follower to it through the same fenced promotion as failover, the draining node receives no new placements, and the call returns with handoff progress once ownership has moved or `connection.drain_handoff_timeout_ms` (default 30s) elapses. Follower-less partitions stay put and fail over reactively as before |
-| Control-plane activity feed | Implemented | `GET /admin/api/audit` returns a bounded in-memory ring (newest 512 entries, reset on restart) of operator actions, attention transitions, and membership changes, rendered live on the dashboard's Activity page |
+| Planned restart drain | Implemented | `POST /admin/api/drain` broadcasts a `GoingAway` push (grace deadline + message) to connected clients, surfaced by the clients as an app-observable event. In coordinated mode the node also marks itself draining: the controller hands each partition with a caught-up follower to it through the same fenced promotion as failover, the draining node receives no new placements, and the call returns with handoff progress once ownership has moved or `connection.drain_handoff_timeout_ms` (default 30s) elapses. Follower-less partitions stay put and fail over reactively as before |
+| Control-plane activity feed | Implemented | `GET /admin/api/audit` returns a bounded in-memory ring (newest 512 entries, reset on restart) of operator actions, attention transitions, membership changes, and stream lag-recovery events, rendered live on the dashboard's Activity page |
+| Attention feed | Implemented | `GET /admin/api/attention` names conditions needing an operator, most severe first: quarantined partition, expired or expiring certificate, failed settings load, backlog with no consumer, backlog growing despite consumers, low disk on the data directory, stalled replication follower, queue state error, broker left draining. Drives the Overview panel, the sidebar badge, and opt-in desktop notifications |
+| Dashboard history series | Implemented | `GET /admin/api/history`: per-broker in-memory time series (5s samples, last 30 minutes, reset on restart) of throughput, backlog, connections, and process memory/CPU/disk, plus per-queue depth series. Feeds the Overview charts, queue sparklines, and the resources panel |
+| Served-certificate metadata | Implemented | `GET /admin/api/tls`: fingerprint, validity window, and subject of the leaf the broker currently serves. Feeds the Security page and the certificate-expiry attention rule |
 | Live dashboard updates | Implemented | `GET /admin/api/events?families=...` streams named data-family snapshots over server-sent events on a ~2s tick, one multiplexed stream per open dashboard page, serialized once per tick regardless of subscriber count and idle when nobody watches. Dashboard pages fall back to polling when the stream is unavailable |
 | Operator test publish | Implemented | `POST /admin/api/publish` sends one text message through the broker's real publish path (partition pick, durable confirm, delivery) to a queue or Plexus stream, stamped with a reserved `fibril.test: admin` header so consumers can recognize operator traffic. Surfaced as a button on the dashboard's queue detail page and stream cards |
 | Durable broker restart reconciliation | Planned | Design notes only |
@@ -415,7 +418,7 @@ See also: [admin dashboard](/admin-dashboard/).
 | Topology page | Implemented | Coordination nodes, per-partition ownership/epochs, consensus block |
 | Repartition control | Partial | `/admin/api/repartition` and a topology-page form (Ganglion mode) |
 | Coordination membership control | Partial | Add/remove a consensus voting member from the topology page and API |
-| Cohort visibility | Partial | Per-broker exclusive-cohort membership on the subscriptions page and `/admin/api/cohorts` |
+| Cohort visibility | Partial | Per-broker exclusive-cohort membership with live per-partition coverage on the subscriptions page, queue-detail partition cards, and `/admin/api/cohorts` |
 | Quarantine banner and repair | Implemented | Global banner, `/admin/api/quarantine`, repair endpoint, `/readyz` |
 | Prometheus metrics endpoint | Implemented | `GET /metrics` on the same listener and auth, see [Metrics Export](#metrics-export) |
 | Basic admin auth | Implemented | Login, logout, session cookie, auth-disabled mode |
@@ -638,7 +641,7 @@ See also: [clustering](/concepts/clustering/) and
 | Topology visibility | Partial | Admin API/page (with repartition + coordination-membership controls) and `fibrilctl topology`. Cross-broker lag aggregation is pending |
 | Live topology push | Partial | Broker pushes a `TopologyUpdate` to each connection when that connection's routing content changes (not on every coordination metadata bump); the Rust, TypeScript, Python, Go, and C# clients apply it to their routing cache and ack the generation |
 | Repartition cutover fencing | Partial | The controller fences a repartition's finalize (retiring shrunk-away partitions and clearing the marker) on cluster-wide client adoption of the new routing, derived from topology acks, bounded by `repartition_adoption_timeout_ms`. Publish version-fencing remains the correctness backstop. See [live routing and cutover](/development/live-routing-and-cutover/) |
-| Cohort visibility (admin) | Partial | Per-broker exclusive-cohort membership on the subscriptions page and `/admin/api/cohorts`; cluster-wide cohort assignment is broker-local, not centrally committed |
+| Cohort visibility (admin) | Partial | Per-broker exclusive-cohort membership with live per-partition coverage on the subscriptions page, queue-detail partition cards, and `/admin/api/cohorts`; cluster-wide cohort assignment is broker-local, not centrally committed |
 | Multi-node cohort coordinator test | Partial | Coordination-level e2e covers cross-broker membership aggregation and rebalance. Full broker/client scenario coverage is still growing |
 
 Conditions and limits:
