@@ -902,6 +902,12 @@ textarea:focus {
   padding: 8px 12px;
 }
 
+/* No message, no box: an empty outcome element must not render its chrome
+   (the hollow pill next to the notify picker, the empty bar over Users). */
+.settings-message:empty {
+  display: none;
+}
+
 .settings-message[data-kind="info"] {
   background: var(--accent-soft);
   border-color: color-mix(in srgb, var(--accent) 34%, transparent);
