@@ -8,8 +8,8 @@ queues, runtime settings, and message inspection tools.
 
 The UI is a sidebar shell with a command palette (Ctrl/Cmd-K jumps to any
 page), dark and light modes, and optional named flavors that re-key the accent
-(neuronic, chlorophyll, crimson, eosin, azure, iris, and ember - the
-original design mockup's burnt-orange scheme). The fibril ring mascot
+(neuronic, chlorophyll, crimson, eosin, azure, iris, and carotene - the
+original design mockup's burnt-orange scheme, named for the pigment). The fibril ring mascot
 greets you on the login page, the 404 page, and the browser tab; it stays out
 of the data views. The UI vendors only the small icon set and mascot art it
 needs and makes no external requests. In cluster mode the

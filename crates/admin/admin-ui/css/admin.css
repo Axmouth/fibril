@@ -1895,8 +1895,9 @@ html[data-flavor="iris"]:not([data-theme="light"]) {
   --panel-2: #1c1a23;
 }
 
-/* The original design mockup's burnt-orange scheme. */
-html[data-flavor="ember"]:not([data-theme="light"]) {
+/* The original design mockup's burnt-orange scheme - carotene, the
+   pigment, keeps the flavor family organic. */
+html[data-flavor="carotene"]:not([data-theme="light"]) {
   --accent: #e08a52;
   --accent-soft: rgba(224, 138, 82, .16);
   --accent-line: rgba(224, 138, 82, .52);
@@ -1943,7 +1944,7 @@ html[data-theme="light"][data-flavor="iris"] {
   --accent-line: rgba(107, 79, 176, .45);
 }
 
-html[data-theme="light"][data-flavor="ember"] {
+html[data-theme="light"][data-flavor="carotene"] {
   --accent: #a05a24;
   --accent-soft: rgba(160, 90, 36, .11);
   --accent-line: rgba(160, 90, 36, .45);

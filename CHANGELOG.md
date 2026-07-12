@@ -190,8 +190,9 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   rates, and the consensus leader starred, headed by a coordination-health
   chip - and the top bar gains a live/registered nodes chip, with the
   stream-health pill and broker switcher moving beside it so status reads
-  in one place. A new ember flavor joins the set: the design mockup's
-  burnt-orange scheme, dark and light.
+  in one place. A new carotene flavor joins the set: the design
+  mockup's burnt-orange scheme, dark and light, named for the pigment to
+  keep the flavor family organic.
 - The Connections page grew a diagram view: the broker as the fibril ring
   with its clients plugged in. Publisher connections run blue strands into
   the ring's left side, subscribers violet strands out of the right, pulses
