@@ -33,6 +33,7 @@ One step per line, `#` comments allowed:
 | `declare-stream <topic> [partitions] [durability]` | declare a stream |
 | `publish-burst <topic> <count> [size]` | real client load via `e2e_c` (runs at full speed, so a burst is seconds long) |
 | `consume <topic> <seconds>` | background reader draining the topic (caps at 1M messages) |
+| `stream-load <topic> <rate> <seconds> [readers] [partitions]` | rate-limited stream writers plus durable-cursor readers via `bench_stream`; cursor names are stable so a later run resumes the same cursors |
 | `test-publish <topic> [text...]` | one marked message via the admin API |
 | `delete-queue <topic>` | delete a queue |
 | `drain <grace_ms>` | announce a drain |
@@ -49,6 +50,10 @@ One step per line, `#` comments allowed:
 - `load-signals.scenario` - the cluster diagram's load ladder: idle shimmer,
   a flat-out burst (strained face), the cooling tail, a delivery-side drain.
   Run with `--nodes 3 --ganglion`.
+- `stream-tour.scenario` - the Streams page: a multi-partition durable
+  stream declared through the admin API, durable readers at tail, cursors
+  falling behind during a readerless append, then the same cursors
+  resuming and catching up. Run with `--nodes 3 --ganglion`.
 
 ## Extra load recipes
 

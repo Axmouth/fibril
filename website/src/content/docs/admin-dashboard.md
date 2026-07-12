@@ -151,7 +151,10 @@ The streams page lists the [Plexus](/concepts/plexus-streams/) stream
 channels this broker is currently hosting, grouped by topic. Each partition row
 shows its head and tail offsets, how many records are retained, its live
 subscription count, and how often a subscriber overflowed its live buffer and
-went through lag recovery. The topic heading shows the declared durability
+went through lag recovery. Streams with durable subscribers also list their
+cursors: each named cursor's partition, whether it sits at the tail or is
+catching up, how far behind it is, its read rate, and when it last advanced -
+a parked consumer is visible immediately. The topic heading shows the declared durability
 tier and retention bound, and a **publish test record** button that sends one
 marked record through the real publish path, the same end-to-end check the
 queue detail page offers.

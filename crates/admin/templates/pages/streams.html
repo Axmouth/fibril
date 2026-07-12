@@ -40,6 +40,9 @@
 <script>
 // Append rates per stream topic, diffed between data ticks.
 const streamRates = new Map();
+// Durable cursor tracking: "topic|partition|name" -> read rate and the last
+// time the position advanced, diffed between data ticks.
+const cursorTrack = new Map();
 function escapeHtml(value) {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -122,6 +125,28 @@ function render(bundle) {
   for (const topic of [...streamRates.keys()]) {
     if (!byTopic[topic]) streamRates.delete(topic);
   }
+  const seenCursors = new Set();
+  for (const [topic, parts] of Object.entries(byTopic)) {
+    for (const p of parts) {
+      for (const [name, off] of p.cursors || []) {
+        const key = `${topic}|${p.partition}|${name}`;
+        seenCursors.add(key);
+        const prev = cursorTrack.get(key);
+        if (!prev) {
+          cursorTrack.set(key, { off: Number(off), at: now, rate: 0, lastAdvance: null });
+        } else if (now - prev.at > 500) {
+          const delta = Number(off) - prev.off;
+          prev.rate = Math.max(0, delta / ((now - prev.at) / 1000));
+          if (delta > 0) prev.lastAdvance = Date.now();
+          prev.off = Number(off);
+          prev.at = now;
+        }
+      }
+    }
+  }
+  for (const key of [...cursorTrack.keys()]) {
+    if (!seenCursors.has(key)) cursorTrack.delete(key);
+  }
 
   let html = "";
   if (entries.length === 0) {
@@ -184,6 +209,47 @@ function render(bundle) {
               </tr>
               ${rows}
             </table>
+            ${(() => {
+              const cursorRows = [];
+              for (const p of parts) {
+                for (const [name, off] of p.cursors || []) {
+                  const tail = Number(p.tail ?? 0);
+                  const behind = Math.max(0, tail - Number(off));
+                  const t = cursorTrack.get(`${topic}|${p.partition}|${name}`);
+                  cursorRows.push({ name, partition: p.partition, behind,
+                    rate: t?.rate ?? 0, lastAdvance: t?.lastAdvance ?? null });
+                }
+              }
+              if (cursorRows.length === 0) return "";
+              cursorRows.sort((a, b) => a.name.localeCompare(b.name) || a.partition - b.partition);
+              return `
+            <div class="card-head">
+              <span class="micro">durable cursors</span>
+              <span class="queue-group-note">a durable subscriber resumes from its
+                cursor after reconnect - behind says how far the tail has run ahead</span>
+            </div>
+            <table class="table table-compact narrow metric-table queue-table">
+              <tr>
+                <th>Cursor</th>
+                <th class="text-right">Partition</th>
+                <th>Position</th>
+                <th class="text-right">Behind</th>
+                <th class="text-right">Read / s</th>
+                <th>Last advance</th>
+              </tr>
+              ${cursorRows.map((c) => `
+              <tr>
+                <td class="queue-topic-cell" title="${escapeHtml(c.name)}">${escapeHtml(c.name)}</td>
+                <td class="text-right">${c.partition}</td>
+                <td>${c.behind === 0
+                  ? '<span class="chip-ok">tail</span>'
+                  : '<span class="chip-warn">catching up</span>'}</td>
+                <td class="text-right ${c.behind > 0 ? "v-warn" : "v-dim"}">${fmtCompact(c.behind)}</td>
+                <td class="text-right ${c.rate > 0.5 ? "v-active" : "v-dim"}">${fmtCompact(Math.round(c.rate))}</td>
+                <td>${c.lastAdvance ? escapeHtml(fmtAgo(c.lastAdvance / 1000)) : "—"}</td>
+              </tr>`).join("")}
+            </table>`;
+            })()}
           </div>`;
       }).join("");
   }

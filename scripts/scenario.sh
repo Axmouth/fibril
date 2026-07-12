@@ -110,7 +110,7 @@ post() {
 }
 
 if [[ -z "$ADMIN_URL" ]]; then
-  cargo build --release --bin fibril-server --bin e2e_c >/dev/null 2>&1
+  cargo build --release --bin fibril-server --bin e2e_c --bin bench-stream >/dev/null 2>&1
   echo "Starting $NODES node(s) (dirs under $RUN_DIR)..."
   for ((i = 1; i <= NODES; i++)); do start_node "$i"; done
   wait_admin "$(admin_url)" "${PIDS[0]}"
@@ -144,6 +144,20 @@ while IFS= read -r line || [[ -n "$line" ]]; do
       target/release/e2e_c --addr "$(broker_addr)" -m "${count:-1000}" -c 1 --writer \
         --size "${size:-256}" --topic "$topic" >/dev/null 2>&1 || echo "  (burst failed)"
       echo "  published ${count:-1000} to $topic" ;;
+    stream-load)
+      # Rate-limited stream writers plus durable-cursor readers via
+      # bench_stream. Cursor names are stable (bench-reader-N), so a later
+      # stream-load on the same topic RESUMES the same cursors - the
+      # disconnect-and-resume story on the Streams page cursor table.
+      read -r topic rate seconds readers partitions <<<"$rest"
+      timeout $(( ${seconds:-30} + 30 )) target/release/bench-stream \
+        --broker-addr "$(broker_addr)" --topic "$topic" \
+        --partitions "${partitions:-1}" --durability durable \
+        --writers 1 --readers "${readers:-2}" --durable-readers \
+        --rate-per-sec "${rate:-200}" --warmup-secs 0 \
+        --duration-secs "${seconds:-30}" --size 256 >/dev/null 2>&1 &
+      CONSUMERS+=("$!")
+      echo "  stream load on $topic: ${rate:-200}/s for ${seconds:-30}s with ${readers:-2} durable readers" ;;
     consume)
       read -r topic seconds <<<"$rest"
       timeout "${seconds:-10}" target/release/e2e_c --addr "$(broker_addr)" -m 1000000 -c 1 --reader \

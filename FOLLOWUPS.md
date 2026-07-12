@@ -3441,7 +3441,9 @@ M1 - Queues + Streams list upgrade (no server change needed).
      means touching storage.
   4. The same treatment on streams rows where it applies.
 
-M2 - Streams durable cursor view + streams scenario.
+M2 - Streams durable cursor view + streams scenario. SHIPPED 2026-07-13
+  (cursor enumeration keratin-side, streams payload cursors, subscriber
+  table on the Streams page, stream-load verb + stream-tour scenario).
   BUG FOUND 2026-07-13 while verifying M1, FIXED same day: admin declares
   (queues AND streams) were local-only in cluster mode - coordination
   never learned the partition count, so the controller placed only

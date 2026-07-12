@@ -169,6 +169,15 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   approximation (the last visible seam inside the ring opening is gone),
   and the leader's glow paints last so strands on its turned-away side
   carry the gold cast too.
+- The Streams page shows durable cursors: each stream card gains a
+  subscriber table - cursor name, partition, a tail / catching-up position
+  chip, how far behind the tail, read rate, and when it last advanced - so
+  a durable consumer's progress is visible at a glance and a parked cursor
+  is obvious. Backed by cursor enumeration through the storage layer and
+  the streams payload. The scenario runner gains a `stream-load` verb
+  (rate-limited writers plus durable-cursor readers with stable names, so
+  a later run resumes the same cursors) and a `stream-tour` scenario
+  walking readers at tail, falling behind, and catching up.
 - Queues and streams lists show flow, not just standing state. Queue topic
   rows gain In /s and Out /s columns (derived in the page from the message
   tail and settled floor between data ticks - no new broker state), the

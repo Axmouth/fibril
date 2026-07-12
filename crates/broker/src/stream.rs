@@ -937,6 +937,11 @@ impl StreamChannel {
         self.engine.stream_head_tail(&self.tp, self.part).await
     }
 
+    /// Durable cursors as (name, offset), name-sorted.
+    pub async fn cursors(&self) -> Result<Vec<(String, Offset)>, StromaError> {
+        self.engine.stream_cursors(&self.tp, self.part).await
+    }
+
     /// Publish a record: persist it durably (which assigns the offset), then fan
     /// it out to live subscribers. Returns the assigned offset. Durable-tier
     /// behavior: persist before fan-out and confirm.

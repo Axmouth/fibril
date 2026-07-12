@@ -1,0 +1,30 @@
+# The Streams page end to end: durable stream declared from the admin API
+# (multi-partition placement in cluster mode), a steady append with durable
+# readers riding their cursors, the cursors going idle, then the SAME
+# cursors resuming and catching up after a gap.
+# Run: scripts/scenario.sh scripts/scenarios/stream-tour.scenario --nodes 3 --ganglion
+# Watch: /admin/streams on the broker hosting the partitions (check the
+# owner in the Cluster page - the smart clients follow ownership).
+
+say Cluster warming up
+wait 10
+declare-stream events 2 durable
+wait 5
+
+say Steady append with two durable readers - the cursor table shows them at tail
+stream-load events 300 45 2 2
+wait 60
+
+say Load done - cursors idle at their final positions
+wait 20
+
+say Appending WITHOUT the readers - the tail runs ahead, cursors fall behind
+stream-load events 400 20 0 2
+wait 35
+
+say The same readers return (stable cursor names) and catch up from behind
+stream-load events 200 30 2 2
+wait 50
+
+say Done - browse the cursor table, then Ctrl-C to tear down
+wait 240

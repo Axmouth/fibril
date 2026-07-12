@@ -394,6 +394,13 @@ pub trait StreamStore: Send + Sync {
 
     async fn stream_head_tail(&self, tp: &str, part: u32) -> Result<(Offset, Offset), StromaError>;
 
+    /// A stream's durable cursors as (name, offset), name-sorted.
+    async fn stream_cursors(
+        &self,
+        tp: &str,
+        part: u32,
+    ) -> Result<Vec<(String, Offset)>, StromaError>;
+
     async fn stream_offset_at_or_after_time(
         &self,
         tp: &str,
@@ -481,6 +488,14 @@ impl StreamStore for StromaEngine {
 
     async fn stream_head_tail(&self, tp: &str, part: u32) -> Result<(Offset, Offset), StromaError> {
         self.inner.stream_head_tail(tp, part).await
+    }
+
+    async fn stream_cursors(
+        &self,
+        tp: &str,
+        part: u32,
+    ) -> Result<Vec<(String, Offset)>, StromaError> {
+        self.inner.stream_cursors(tp, part).await
     }
 
     async fn stream_offset_at_or_after_time(

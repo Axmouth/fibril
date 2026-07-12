@@ -1549,6 +1549,9 @@ pub struct StreamStatsEntry {
     /// Times a subscriber overflowed its live buffer and went through lag
     /// recovery (the stream analog of a growing queue backlog).
     pub lag_evictions: u64,
+    /// Durable named cursors on this partition as (name, committed offset).
+    /// `behind` for a cursor is `tail - offset`.
+    pub cursors: Vec<(String, u64)>,
 }
 
 /// The stream observability and declare surface the admin server needs, kept as a
@@ -1794,6 +1797,7 @@ impl<
             let (head, tail) = ch.head_tail().await.unwrap_or((0, 0));
             let retention = ch.retention();
             let (_, live_subscriptions) = ch.idle_snapshot();
+            let cursors = ch.cursors().await.unwrap_or_default();
             out.push(StreamStatsEntry {
                 topic: ch.topic().to_string(),
                 partition: ch.partition(),
@@ -1805,6 +1809,7 @@ impl<
                 max_records: retention.and_then(|r| r.max_records),
                 live_subscriptions,
                 lag_evictions: ch.lag_evictions(),
+                cursors,
             });
         }
         out.sort_by(|a, b| a.topic.cmp(&b.topic).then(a.partition.cmp(&b.partition)));
