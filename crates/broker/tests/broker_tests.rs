@@ -482,6 +482,29 @@ async fn open_test_broker_with_metrics(
     (broker, dir)
 }
 
+async fn open_test_broker_with_ownerships(
+    ownership: Arc<dyn fibril_broker::broker::QueueOwnership>,
+    stream_ownership: Arc<dyn fibril_broker::broker::StreamOwnership>,
+) -> (Arc<Broker<StromaEngine>>, TempDir) {
+    let dir = test_dir!("broker_test");
+
+    let engine = StromaEngine::open(
+        &dir.root,
+        StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+        SnapshotConfig::default(),
+    )
+    .await
+    .unwrap();
+    let broker = Broker::new_with_ownerships(
+        engine,
+        BrokerConfig::default(),
+        None,
+        ownership,
+        stream_ownership,
+    );
+    (broker, dir)
+}
+
 async fn open_test_broker_with_ownership(
     ownership: Arc<dyn fibril_broker::broker::QueueOwnership>,
 ) -> (Arc<Broker<StromaEngine>>, TempDir) {
@@ -3241,6 +3264,72 @@ async fn exclusive_assignee_gate_delivers_only_to_assignee() {
         "new assignee should receive after reassignment"
     );
 
+    broker.shutdown().await;
+}
+
+/// A stream owner is a valid replication source. Queue and stream
+/// assignments ride separate tables, and the replication-read guard used to
+/// consult only the queue one - so a replicated durable stream's owner
+/// refused its own followers and replication never started (the followers
+/// sat idle and every replica-durable publish timed out).
+#[tokio::test]
+async fn owner_replication_read_serves_coordination_declared_stream() {
+    use fibril_broker::broker::{StreamOpenConfig, StreamOwnership};
+    use fibril_broker::stream::StreamDurability;
+
+    #[derive(Debug)]
+    struct OwnsEventsStream;
+    impl StreamOwnership for OwnsEventsStream {
+        fn owns_stream(&self, topic: &str, _partition: Partition) -> bool {
+            topic == "events"
+        }
+        fn stream_open_config(&self, topic: &str) -> Option<StreamOpenConfig> {
+            (topic == "events").then(|| StreamOpenConfig {
+                durability: StreamDurability::Durable,
+                retention: None,
+            })
+        }
+    }
+
+    // Queue ownership denies everything: only the stream arm of the guard
+    // can admit this read.
+    let (broker, _dir) = open_test_broker_with_ownerships(
+        Arc::new(StaticQueueOwnership::new(StdHashSet::new())),
+        Arc::new(OwnsEventsStream),
+    )
+    .await;
+
+    let channel = broker
+        .get_or_open_stream("events", 0, StreamDurability::Durable, None)
+        .await
+        .unwrap();
+    channel
+        .publish(
+            MessageHeaders {
+                published: unix_millis(),
+                publish_received: unix_millis(),
+                content_type: None,
+                extra: Default::default(),
+            },
+            b"record".to_vec(),
+        )
+        .await
+        .unwrap();
+
+    let records = broker
+        .read_owner_replication_records("events", Partition::new(0), None, 0, 0, 10, 10, usize::MAX, 0)
+        .await
+        .expect("stream owner must serve replication reads");
+    // Reaching here is the regression: the guard admitted the stream
+    // owner. The read itself returns the owner's batch/checkpoint view.
+    drop(records);
+
+    // The queue guard still rejects topics owned by neither table.
+    let err = broker
+        .read_owner_replication_records("plain", Partition::new(0), None, 0, 0, 10, 10, usize::MAX, 0)
+        .await
+        .expect_err("unowned topic unexpectedly served");
+    assert!(matches!(err, BrokerError::NotOwner { .. }));
     broker.shutdown().await;
 }
 
