@@ -196,7 +196,7 @@ function render(bundle) {
               <span class="queue-group-note">${parts.length} partition(s)</span>
               <button class="btn" type="button" data-test-publish="${escapeHtml(topic)}">Publish test record</button>
             </div>
-            <table class="table table-compact narrow metric-table queue-table">
+            <table class="table table-compact metric-table queue-table">
               <tr>
                 <th>Partition</th>
                 <th>Role</th>
@@ -228,7 +228,7 @@ function render(bundle) {
               <span class="queue-group-note">a durable subscriber resumes from its
                 cursor after reconnect - behind says how far the tail has run ahead</span>
             </div>
-            <table class="table table-compact narrow metric-table queue-table">
+            <table class="table table-compact metric-table queue-table">
               <tr>
                 <th>Cursor</th>
                 <th class="text-right">Partition</th>
@@ -286,7 +286,7 @@ function streamReplicationHtml(debug, streamKeys) {
     <h5 class="metrics-header queue-group-heading">Stream replication (follower workers on this broker)</h5>
     <p class="queue-group-note">Durable streams this broker is replicating from their owners, with how far each has pulled (records and cursor commits).</p>
     <div class="queue-table-wrap">
-      <table class="table table-compact narrow metric-table queue-table">
+      <table class="table table-compact metric-table queue-table">
         <tr>
           <th>Topic</th>
           <th class="text-right">Partition</th>
