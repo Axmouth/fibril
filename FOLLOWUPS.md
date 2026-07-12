@@ -3442,16 +3442,25 @@ M1 - Queues + Streams list upgrade (no server change needed).
   4. The same treatment on streams rows where it applies.
 
 M2 - Streams durable cursor view + streams scenario.
-  BUG FOUND 2026-07-13 while verifying M1: a MULTI-partition stream
-  declared through the admin API in ganglion mode never gets its
-  partitions placed - the committed assignments stay empty for the topic
-  and every publish bounces with "not owner for queue events/1". All
-  prior scenarios masked this: scenario.sh sent `partitions` (dropped by
-  the permissive parser, so every stream was silently 1-partition) until
-  the deny_unknown_fields hardening exposed the typo and it was fixed to
-  `partition_count`. Reproduce: 3-node scenario, declare-stream events 2
-  durable, then admin publish -> 409. Investigate the stream declare ->
-  coordination placement path BEFORE building the cursor view on top.
+  BUG FOUND 2026-07-13 while verifying M1, FIXED same day: admin declares
+  (queues AND streams) were local-only in cluster mode - coordination
+  never learned the partition count, so the controller placed only
+  partition 0 and publishes to the rest bounced with "not owner". Root
+  cause: the admin routes skipped the DeclareCoordinator two-step the
+  protocol declare ops do. Fix: QueueDeclareCoordinator +
+  StreamDeclareCoordinator seams on AdminServer, wired from ganglion
+  coordination, coordinator count authoritative, conflicts -> 409.
+  Verified live: orders 3/3 partitions placed, events 2/2 with followers,
+  stream publish lands. The topology payload now carries
+  stream_assignments too (M4's placement matrix wants them).
+  SECOND LAYER, also fixed: the owner refused to SERVE stream followers -
+  read_owner_replication_records gated on ensure_queue_owner only, so
+  stream follower workers exited NotOwner and sat idle, and every
+  replica-durable stream publish timed out. New guard
+  ensure_replication_source_owner accepts queue owners OR (group-less +
+  stream declared in coordination + stream owner). The e2e broker test
+  had bypassed this by driving pulls with own-all ownership. Verified:
+  follower caught_up, replica-durable confirm returns success.
   The mockup's per-stream SUBSCRIBERS table: subscriber, position
   (tail / catching up), behind, read/s, last activity. We surface live
   subscription counts and lag recoveries but NOT durable cursor positions.

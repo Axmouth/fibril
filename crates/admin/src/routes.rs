@@ -360,6 +360,30 @@ pub async fn create_stream(
     };
 
     let partition_count = request.partition_count.unwrap_or(1).max(1);
+    // Same two-step as queues: coordination first in cluster mode, so the
+    // stream's config and every partition land in the catalogue.
+    let partition_count = match &server.declare_stream_coordinator {
+        Some(coordinator) => {
+            match coordinator(
+                request.topic.clone(),
+                partition_count,
+                durability.as_u8(),
+                retention.clone(),
+            )
+            .await
+            {
+                Ok(count) => count,
+                Err(message) => {
+                    return Ok(admin_error(
+                        StatusCode::CONFLICT,
+                        "declare_conflict",
+                        message,
+                    ));
+                }
+            }
+        }
+        None => partition_count,
+    };
     match streams
         .declare_stream(&request.topic, partition_count, durability, retention)
         .await
@@ -763,11 +787,30 @@ pub async fn topology(
                     .cmp(&(b["topic"].as_str(), b["partition"].as_u64()))
             });
 
+            let mut stream_assignments: Vec<serde_json::Value> = snapshot
+                .stream_assignments
+                .values()
+                .map(|assignment| {
+                    serde_json::json!({
+                        "topic": assignment.stream.topic,
+                        "partition": assignment.stream.partition,
+                        "owner": assignment.owner,
+                        "followers": assignment.followers,
+                        "epoch": assignment.epoch,
+                    })
+                })
+                .collect();
+            stream_assignments.sort_by(|a, b| {
+                (a["topic"].as_str(), a["partition"].as_u64())
+                    .cmp(&(b["topic"].as_str(), b["partition"].as_u64()))
+            });
+
             serde_json::json!({
                 "node_id": coordination.node_id(),
                 "generation": snapshot.generation,
                 "nodes": nodes,
                 "assignments": assignments,
+                "stream_assignments": stream_assignments,
             })
         }
         None => serde_json::Value::Null,
@@ -1485,6 +1528,24 @@ pub async fn create_queue(
     };
 
     let group = normalize_group(request.group.clone());
+    // Cluster mode records the partitioning with coordination first - the
+    // returned count is authoritative and the controller places every
+    // partition. Standalone materializes the requested count directly.
+    let partition_count = match &server.declare_queue_coordinator {
+        Some(coordinator) => {
+            match coordinator(request.topic.clone(), group.clone(), partition_count).await {
+                Ok(count) => count,
+                Err(message) => {
+                    return Ok(admin_error(
+                        StatusCode::CONFLICT,
+                        "declare_conflict",
+                        message,
+                    ));
+                }
+            }
+        }
+        None => partition_count,
+    };
     for partition in 0..partition_count {
         match server
             .storage

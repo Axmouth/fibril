@@ -304,6 +304,22 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- Declaring a multi-partition queue or stream from the dashboard (or the
+  admin API) in cluster mode now registers the partitioning with
+  coordination first, exactly like client declares - the returned count is
+  authoritative and the controller places every partition. Before, admin
+  declares were local-only: the cluster never learned the partition count,
+  the controller placed only partition 0, and publishes to the rest
+  bounced with "not owner". The topology payload also reports stream
+  assignments now, alongside the queue ones.
+- A replicated durable stream's owner refused to serve its own followers:
+  the replication-read guard only recognized queue owners, so stream
+  follower workers sat idle forever and every replica-durable publish
+  timed out waiting for acknowledgements that could never come. The guard
+  now accepts the owner of a coordination-declared stream, and a
+  three-node cluster confirms replica-durable stream publishes end to
+  end.
+
 - Light mode works with every flavor, not just plain. The dark flavor blocks
   set their tinted grounds without a theme qualifier, so a flavored light
   mode kept dark backgrounds under light text; the grounds are now scoped to

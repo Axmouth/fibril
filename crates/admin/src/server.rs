@@ -124,6 +124,30 @@ pub type RaftIdsProvider =
 pub type NodeRatesProvider =
     dyn Fn() -> std::collections::HashMap<String, (u64, u64)> + Send + Sync;
 
+/// Coordinated queue declare for cluster mode: records the partitioning
+/// with coordination FIRST - the returned count is authoritative (an
+/// already-declared queue's count wins, a conflicting request errors) and
+/// the controller places every partition. Args: topic, group, requested
+/// partition count. Absent = standalone, the local declare is the truth.
+pub type QueueDeclareCoordinator = dyn Fn(
+        String,
+        Option<String>,
+        u32,
+    ) -> futures::future::BoxFuture<'static, Result<u32, String>>
+    + Send
+    + Sync;
+
+/// The stream equivalent. Args: topic, requested partition count, the wire
+/// durability tier byte, optional retention.
+pub type StreamDeclareCoordinator = dyn Fn(
+        String,
+        u32,
+        u8,
+        Option<fibril_broker::queue_engine::RetentionConfig>,
+    ) -> futures::future::BoxFuture<'static, Result<u32, String>>
+    + Send
+    + Sync;
+
 /// Returns presentation metadata for the certificate the broker currently
 /// serves, as JSON (fingerprint, validity window, subject). The broker wires
 /// one in when TLS is enabled; feeds the security view and the certificate
@@ -264,6 +288,10 @@ pub struct AdminServer {
     /// Optional per-node throughput (from heartbeat labels or local
     /// counters). Feeds the topology payload's per-node rate fields.
     pub node_rates: Option<Arc<NodeRatesProvider>>,
+    /// Cluster-mode coordinated declares. Without them an admin declare is
+    /// local-only and the controller never learns the partition count.
+    pub declare_queue_coordinator: Option<Arc<QueueDeclareCoordinator>>,
+    pub declare_stream_coordinator: Option<Arc<StreamDeclareCoordinator>>,
     /// True only under real cluster coordination (ganglion). The standalone
     /// single-node coordination view (wired for the topology page and broker
     /// switcher) must NOT trip cluster-only restrictions like the queue-delete
@@ -320,6 +348,8 @@ impl AdminServer {
             liveness: None,
             node_raft_ids: None,
             node_rates: None,
+            declare_queue_coordinator: None,
+            declare_stream_coordinator: None,
             cluster_mode: false,
         }
     }
@@ -357,6 +387,23 @@ impl AdminServer {
     /// Attach the per-node throughput provider.
     pub fn with_node_rates(mut self, provider: Arc<NodeRatesProvider>) -> Self {
         self.node_rates = Some(provider);
+        self
+    }
+
+    /// Attach the coordinated declare paths (cluster mode).
+    pub fn with_declare_queue_coordinator(
+        mut self,
+        coordinator: Arc<QueueDeclareCoordinator>,
+    ) -> Self {
+        self.declare_queue_coordinator = Some(coordinator);
+        self
+    }
+
+    pub fn with_declare_stream_coordinator(
+        mut self,
+        coordinator: Arc<StreamDeclareCoordinator>,
+    ) -> Self {
+        self.declare_stream_coordinator = Some(coordinator);
         self
     }
 
@@ -1683,6 +1730,73 @@ mod tests {
             .unwrap();
         let text = String::from_utf8_lossy(&bytes);
         assert!(text.contains("partion_count"), "error should name the field: {text}");
+    }
+
+    struct NoopStreamAdmin;
+    #[async_trait::async_trait]
+    impl fibril_broker::broker::StreamAdmin for NoopStreamAdmin {
+        async fn stream_stats(&self) -> Vec<fibril_broker::broker::StreamStatsEntry> {
+            Vec::new()
+        }
+        async fn declare_stream(
+            &self,
+            _topic: &str,
+            _partition_count: u32,
+            _durability: fibril_broker::stream::StreamDurability,
+            _retention: Option<fibril_broker::queue_engine::RetentionConfig>,
+        ) -> Result<(), fibril_broker::queue_engine::StromaError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_declares_take_the_coordinated_count() {
+        // The coordinator's count is authoritative: an admin declare asking
+        // for 3 partitions materializes 5 when the cluster already knows
+        // the queue as 5, and a coordination conflict surfaces as 409.
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let server = Arc::try_unwrap(server)
+            .ok()
+            .expect("sole owner")
+            .with_declare_queue_coordinator(Arc::new(|_topic, _group, requested| {
+                Box::pin(async move { Ok(requested + 2) })
+            }))
+            .with_declare_stream_coordinator(Arc::new(|_topic, _count, _tier, _retention| {
+                Box::pin(async move { Err("stream partition count conflict".to_string()) })
+            }))
+            .with_streams(Arc::new(NoopStreamAdmin));
+        let app = AdminServer::router(Arc::new(server));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/api/queues")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"topic":"orders","partition_count":3}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await;
+        assert_eq!(body["partition_count"], 5);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/api/streams")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"topic":"events","partition_count":2}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "declare_conflict");
     }
 
     #[tokio::test]

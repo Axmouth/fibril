@@ -1458,7 +1458,7 @@ impl Broker<StromaEngine> {
         max_events: usize,
         max_bytes: usize,
     ) -> Result<BrokerOwnerReplicationRecords, BrokerError> {
-        self.ensure_queue_owner(topic, partition, group)?;
+        self.ensure_replication_source_owner(topic, partition, group)?;
         let _owner_read_timer = self.replication_timing.owner_read.timer();
         let messages = self
             .engine
@@ -1522,7 +1522,7 @@ impl Broker<StromaEngine> {
         partition: Partition,
         group: Option<&str>,
     ) -> Result<OwnerStateCheckpoint, BrokerError> {
-        self.ensure_queue_owner(topic, partition, group)?;
+        self.ensure_replication_source_owner(topic, partition, group)?;
         Ok(self
             .engine
             .export_owner_state_checkpoint(topic, partition.id(), group)

@@ -2012,6 +2012,65 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
                     let source = parts.coordination.clone();
                     Arc::new(move || source.node_rates())
                 })
+                // Admin declares take the same coordinated two-step as
+                // client declares, so the controller places every
+                // partition of a multi-partition queue or stream.
+                .with_declare_queue_coordinator({
+                    let source = parts.coordination.clone();
+                    Arc::new(move |topic, group, count| {
+                        let coordination = source.clone();
+                        Box::pin(async move {
+                            let partitioning = coordination
+                                .declare_queue_partitioning(&topic, group.as_deref(), count)
+                                .await
+                                .map_err(|error| error.to_string())?;
+                            for partition in 0..partitioning.partition_count {
+                                let queue = QueueIdentity::new(
+                                    topic.clone(),
+                                    Partition::new(partition),
+                                    group.as_deref(),
+                                );
+                                coordination
+                                    .register_queue(&queue)
+                                    .await
+                                    .map_err(|error| error.to_string())?;
+                            }
+                            Ok(partitioning.partition_count)
+                        })
+                    })
+                })
+                .with_declare_stream_coordinator({
+                    let source = parts.coordination.clone();
+                    Arc::new(move |topic, count, durability, retention| {
+                        let coordination = source.clone();
+                        Box::pin(async move {
+                            let retention = retention
+                                .map(|r| {
+                                    fibril_coordination_ganglion::StreamRetentionConfig {
+                                        max_age_ms: r.max_age_ms,
+                                        max_bytes: r.max_bytes,
+                                        max_records: r.max_records,
+                                    }
+                                })
+                                .unwrap_or_default();
+                            let config = coordination
+                                .declare_stream(&topic, count, durability, retention, None)
+                                .await
+                                .map_err(|error| error.to_string())?;
+                            for partition in 0..config.partition_count {
+                                let stream = StreamIdentity::new(
+                                    topic.clone(),
+                                    Partition::new(partition),
+                                );
+                                coordination
+                                    .register_stream(&stream)
+                                    .await
+                                    .map_err(|error| error.to_string())?;
+                            }
+                            Ok(config.partition_count)
+                        })
+                    })
+                })
                 .with_coordination(parts.coordination.clone())
                 .with_consensus_topology(Arc::new(move || {
                     let mut value =

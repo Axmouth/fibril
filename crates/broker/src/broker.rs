@@ -1989,6 +1989,33 @@ impl<
         })
     }
 
+    /// Gate serving replication reads. Streams reuse the queue replication
+    /// machinery end to end, so the source may be the owner of either kind:
+    /// a queue owner per the queue assignments, or - for group-less topics -
+    /// a stream owner per the stream assignments. Without the second arm a
+    /// stream owner refuses its own followers and replication never starts.
+    pub(crate) fn ensure_replication_source_owner(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+    ) -> Result<(), BrokerError> {
+        if self.ownership.owns_queue(topic, partition, group) {
+            return Ok(());
+        }
+        if group.is_none()
+            && self.stream_declared_in_coordination(topic)
+            && self.owns_stream(topic, partition.id())
+        {
+            return Ok(());
+        }
+        Err(BrokerError::NotOwner {
+            topic: topic.to_string(),
+            partition,
+            group: group.map(str::to_string),
+        })
+    }
+
     async fn materialize_owned_queue(
         &self,
         topic: &str,
