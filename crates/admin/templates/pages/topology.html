@@ -529,22 +529,6 @@ function drawTendrils() {
     return Math.atan2(b[1] - a[1], b[0] - a[0]);
   };
 
-  // Stem + forks. Branches are shorter, thinner, and may fork once more.
-  const drawTendril = (x, y, angle, len, seed, color, alpha, width) => {
-    const pts = growPath(x, y, angle, len, seed);
-    drawPath(pts, color, alpha, width, true);
-    const forks = 1 + (hashStr("f" + seed) % 2);
-    for (let b = 0; b < forks; b++) {
-      const k = 3 + (hashStr("k" + seed + b) % 3);
-      const side = (hashStr("s" + seed + b) % 2) ? 1 : -1;
-      const at = pts[Math.min(k, pts.length - 1)];
-      const branchAngle = tangentAt(pts, k) + side * (0.5 + rnd(seed + 60 + b) * 0.5);
-      const branch = growPath(at[0], at[1], branchAngle,
-        len * (0.35 + rnd(seed + 70 + b) * 0.2), seed + 100 + b * 7);
-      drawPath(branch, color, alpha, Math.max(1, width - 0.5), true);
-    }
-  };
-
   // A connecting tendril between two rings: wavy point-to-point stem with a
   // couple of organic forks along the way.
   const drawLink = (x1, y1, x2, y2, seed, color, alpha, width, forked) => {
@@ -615,29 +599,49 @@ function drawTendrils() {
       STRANDS_IN[seed % STRANDS_IN.length], on ? 0.85 : 0.07, width, true);
   }
 
-  // Per-ring batches: packed stems threading through each live ring, fanned
-  // to both sides, mostly light blue with the occasional violet.
+  // Per-ring batches: continuous strands crossing the whole ring. Each one
+  // enters from its left fan tip, straightens into a horizontal lane through
+  // the transparent opening (parallel with its siblings, like the art), and
+  // exits into its right fan tip. Short branches fork off the outer thirds.
   const BATCH = ["#6db5f2", "#6db5f2", "#3d7bf0", "#8a4be8"];
   for (const rn of ringNodes) {
     if (rn.ghost) continue;
     const on = !focusId || rn.id === focusId;
     const alpha = on ? 0.8 : 0.07;
     const r = currentSpriteS / 2;
-    for (let side = -1; side <= 1; side += 2) {
-      for (let i = 0; i < rn.stems; i++) {
-        const seed = hashStr(rn.id + "|batch|" + side + "|" + i) % 1000;
-        const fan = (i - (rn.stems - 1) / 2) * 0.42 + (rnd(seed + 9) - 0.5) * 0.2;
-        const angle = (side < 0 ? Math.PI : 0) + fan;
-        // Start behind the ring's far side so the stem crosses the opening
-        // (visible through the sprite's transparent hole), slips under the
-        // band, and emerges - the through-the-ring look.
-        const back = r * 0.45;
-        const len = 42 + back + rnd(seed + 3) * 30;
-        drawTendril(
-          rn.x - Math.cos(angle) * back + (rnd(seed + 11) - 0.5) * 10,
-          rn.y - Math.sin(angle) * back * 0.5 + (rnd(seed + 12) - 0.5) * 12,
-          angle, len, seed,
-          BATCH[hashStr("c" + seed) % BATCH.length], alpha, 2.1);
+    const strandsN = rn.stems + 1;
+    for (let i = 0; i < strandsN; i++) {
+      const seed = hashStr(rn.id + "|cross|" + i) % 1000;
+      // Horizontal lane inside the opening, spread across its height.
+      const laneY = ((i / (strandsN - 1)) - 0.5) * r * 0.55
+        + (rnd(seed) - 0.5) * 5;
+      const wob = REDUCED_MOTION ? 0 : Math.sin(sway + seed) * 2.2;
+      const tip = (side, s2) => {
+        const reach = r * (0.95 + rnd(s2) * 0.7);
+        const rise = (rnd(s2 + 1) - 0.5) * r * 1.5;
+        return [rn.x + side * (r * 0.75 + reach),
+                rn.y + laneY * 1.3 + rise + wob * (rnd(s2 + 2) > 0.5 ? 1 : -1)];
+      };
+      const lt = tip(-1, seed + 10), rt = tip(1, seed + 20);
+      const pts = [
+        lt,
+        [rn.x - r * 0.85, rn.y + laneY * 1.5 + wob * 0.5],
+        [rn.x - r * 0.3, rn.y + laneY],
+        [rn.x + r * 0.3, rn.y + laneY],
+        [rn.x + r * 0.85, rn.y + laneY * 1.5 - wob * 0.5],
+        rt,
+      ];
+      const color = BATCH[hashStr("c" + seed) % BATCH.length];
+      drawPath(pts, color, alpha, 2.1, true);
+      // One short fork near each outer bend.
+      for (const [k, side] of [[1, -1], [4, 1]]) {
+        if (hashStr("fb" + seed + k) % 3 === 0) continue;
+        const at = pts[k];
+        const a = side > 0 ? 0 : Math.PI;
+        const branchAngle = a + (rnd(seed + 30 + k) - 0.5) * 1.4;
+        const branch = growPath(at[0], at[1], branchAngle,
+          16 + rnd(seed + 40 + k) * 22, seed + 50 + k);
+        drawPath(branch, color, alpha * 0.9, 1.5, true);
       }
     }
   }
