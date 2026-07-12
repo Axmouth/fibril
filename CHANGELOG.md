@@ -150,7 +150,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   clusters extend instead of shrinking: rings keep their full size up to 24
   brokers with the grid growing downward, and a Fibers toggle turns the
   animated layer off (it defaults off past 12 rings, and either choice
-  sticks).
+  sticks). Fuse points are welded - every strand strokes a dark outline
+  under its color, so whichever path drew second used to bite a dark seam
+  across the other. And the gold consensus mesh moved behind a Consensus
+  toggle, off by default: membership already implies a connection to the
+  leader, and hiding it lets the data links breathe.
 - The Cluster diagram came alive, then got its first live-review polish:
   replication links draw as proper fiber bundles (three to five snaking,
   outlined strands with layered waves, tapered into their rings) instead of
