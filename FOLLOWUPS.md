@@ -2998,6 +2998,35 @@ data-dir marker? write back to config with consent?); and the plaintext-426
 guidance story during the switchover. Pairs well with the existing live
 rotation and the cert card already on the Security page.
 
+PLAN SKELETON (2026-07-12 - settle the two design forks WITH THE USER before
+coding):
+1. Inventory pass: where the broker and admin listeners construct their TLS
+   acceptors at startup (crates/fibril/src/lib.rs listener setup + the tls
+   crate), and what the live-rotation path already swaps (cert material
+   swaps inside an existing acceptor - this feature must swap
+   plaintext -> acceptor-present, which is one level up).
+2. Fork A (switchover): hard switch on an ArcSwap<Option<Acceptor>> checked
+   per-accept vs a dual-listen grace window. Recommendation to bring to the
+   user: per-accept swap with a drain-style notice to connected plaintext
+   clients, no second port.
+3. Fork B (persistence): reuse the first-boot setup overlay
+   (apply_setup_overlay in config already loads a data-dir overlay at boot)
+   so enabling TLS writes the same overlay with explicit UI consent, config
+   file untouched.
+4. Flow: Security page "Enable TLS" button -> modal (what happens, client
+   migration note, consent checkbox for persistence) ->
+   POST /admin/api/tls/enable -> generate self-signed via the existing
+   setup machinery -> swap acceptors -> respond with fingerprint ->
+   Security card flips to the served-cert view with a copy-paste client
+   snippet.
+5. Tests: route test (enable on a plaintext test server, assert acceptor
+   present + fingerprint returned + overlay written), an e2e that connects
+   a TLS client after enabling, and a plaintext-client-during-switch test
+   pinning whatever guidance behavior fork A settles on.
+6. Docs: security.md + configuration.md + admin-dashboard.md + CHANGELOG in
+   the same change. FEATURE_MATRIX row only if the client surface changes
+   (it should not).
+
 ## Dashboard + broker roadmap (AGREED 2026-07-11, work in this order)
 
 Phase 0 - Land the redesign. Merge administrative-ascension -> main: user
@@ -3050,10 +3079,29 @@ JS, CLI mirrors, and scenario.sh bodies audited against every struct first.
 
 Seen 2026-07-11, roughly 1 in 4 `cargo test --workspace` runs: the admin test
 binary reports 71 passed / 1 failed, but solo `-p fibril-admin` runs and rerun
-attempts stay green and the name was not captured. Next time it fires, grab
-the name (`cargo test --workspace --no-fail-fast 2>&1 | tee /tmp/suite.log`)
-and deflake properly - likely a timing-sensitive TCP-bound admin test under
-parallel load.
+attempts stay green and the name was not captured. Likely a timing-sensitive
+TCP-bound admin test under parallel load.
+
+DEFLAKE PROTOCOL (execution-ready):
+1. Capture the name. Loop until it fires:
+   `for i in $(seq 1 20); do cargo test --workspace --no-fail-fast 2>&1 \
+      | tee /tmp/suite-$i.log | grep -E "FAILED|test result: FAILED. " ; done`
+   then `grep -B2 "FAILED" /tmp/suite-N.log` for the test name.
+2. Reproduce it solo under contention. Run the single test in a loop while a
+   parallel `cargo build --workspace` churns CPU and file handles:
+   `while cargo test -p fibril-admin <name>; do :; done` in one shell,
+   `cargo clean -p fibril && cargo build --workspace` in another.
+3. Classify before patching (trace-first rule):
+   - wall-clock assertion (sleeps, elapsed comparisons) -> convert the test
+     to tokio paused time (`#[tokio::test(start_paused = true)]`) or await
+     the state change explicitly instead of sleeping.
+   - TCP bind/accept race (tests bind 127.0.0.1:0) -> check for hardcoded
+     ports or reuse of a just-closed listener, await readiness not sleep.
+   - SSE/tick timing (events.rs families) -> subscribe first, then trigger,
+     then read with a generous timeout, never assert tick counts.
+4. Acceptance: 30 consecutive `cargo test --workspace` runs green, and the
+   fixed test documents WHY it was flaky in a comment.
+
 
 ## Per-node rates on the coordination heartbeat - SHIPPED 2026-07-12 (S3)
 
@@ -3072,27 +3120,94 @@ buckets to a load face variant + faster light cycling. Also unlocks honest
 S3 signal speeds along tendrils (per-edge rate needs per-partition rates -
 assess cost then).
 
-## Future: connections page tendril view (user vision 2026-07-12)
+## S4 arc: connections page tendril view + pub/sub plugging (user vision 2026-07-12)
 
-An optional Connections-page view modeled on the "tendrils plugged both
-sides" art: the fibril ring center, publisher connections plugging strands
-into one side, subscriber connections the other, with pulses traveling along
-the tendrils from pubs to subs (rate-proportional). Builds directly on the
-cluster-diagram tendril renderer (S3 signal particles + S4 plugging in the
-mascot plan). Needs per-connection pub/sub role data (the connections
-snapshot already carries subs counts; publisher role needs a look).
+An optional Connections-page diagram modeled on the "tendrils plugged both
+sides" art: the fibril ring center = this broker, publisher connections plug
+strands into the left, subscriber connections into the right, pulses travel
+pub -> ring -> sub at a cadence following each connection's rate.
 
-## Future: broker memory audit (filed 2026-07-11)
+FACTS CHECKED 2026-07-12: per-connection state (crates/metrics
+ConnectionStats, DashMap of entries) tracks subs per connection but has NO
+publish counter. The protocol handler increments the global publish counter
+at crates/protocol/src/v1/handler.rs ~line 1541 (`stats.published()`).
+
+PLAN:
+1. Metrics: add `published: AtomicU64` to the per-connection entry. Bump it
+   at the handler's publish site (verify the connection id is reachable
+   there - the session owns it; if not, thread it the way subs updates do).
+   Expose `published_total` in `ConnectionStats::snapshot()` next to `subs`.
+   NO new rolling counters: the dashboard receives the connections family
+   on every SSE tick, so the JS derives rates by diffing totals between
+   ticks (keyed by connection id, which is a stable Uuid).
+2. Roles in JS: publisher = published_total grew recently, subscriber =
+   subs > 0, both = both sides. Connections that are neither sit in a dim
+   idle bundle at the bottom.
+3. Shared renderer: extract the topology template's generic tendril helpers
+   (hashStr, rnd, tracePath/drawPathOn, growPath, linkPts, drawTip,
+   drawPulse, sprite url helper) into `admin-ui/js/tendrils.js`, loaded by
+   both pages. Keep the topology-specific engine (layout, joinAt, batches,
+   welds) in topology.html. Run scripts/check-template-js.sh after - it
+   checks inline template scripts, admin-ui js is plain lint.
+4. Connections page view: a Diagram/List toggle like topology's (persisted
+   in localStorage "connections.view"). Diagram = one 96px ring center,
+   left endpoints one strand per publisher (cap at ~14 strands, overflow
+   as one thicker strand labeled "+K more"), right likewise for
+   subscribers. Strands fuse into the ring bundle with the tip-alignment
+   grammar from the cluster diagram. Pulses: left strands travel inward,
+   right strands outward, cadence via the existing PULSE_CADENCE buckets
+   applied to per-connection rates (connection rates are smaller than node
+   rates - use thresholds 0 / 50 / 1k / 10k msgs/s).
+5. Labels + interaction: identity (user or addr, truncated middle) under
+   each endpoint. Hover spotlights that connection's strand and its row in
+   the table below (same focus grammar as topology).
+6. Empty state: the S0 mascot placement with "no clients connected".
+7. Reduced motion: static strands, no pulses (same guard as topology).
+VERIFY: scenario with e2e_c writer + reader attached (load-signals works),
+headless chromium screenshots at each iteration (snap chromium writes only
+under ~/snap/chromium/common/). Expect several user screenshot rounds - the
+cluster diagram took 12.
+ACCEPTANCE: publishers left / subscribers right with live pulses, rates
+diffed client-side, idle bundle, hover focus, empty state, reduced-motion
+still, template JS check green, admin suite green, CHANGELOG +
+admin-dashboard.md in the same change.
+
+## Future: broker memory audit (filed 2026-07-11, procedure detailed 2026-07-12)
 
 User observation: RSS does not drop back to earlier levels after all active
-queues evict. Suspects to examine in a dedicated session: mimalloc arena
-retention (freed memory kept in arenas, not returned to the OS - check its
-purge/decommit options), keratin tail caches (64 MB budget per log - confirm
-they release on eviction), admin in-memory state (history rings, audit ring,
-metrics - all bounded, should be small), and plain heap fragmentation. Method:
-baseline RSS -> load N queues -> evict all -> compare against mimalloc stats
-(MIMALLOC_SHOW_STATS=1) and a heaptrack/dhat profile, so "held by allocator"
-and "genuinely leaked" separate cleanly. Trace before patching.
+queues evict. Suspects: mimalloc arena retention (freed memory kept in
+arenas, not returned to the OS), keratin tail caches (64 MB budget per log -
+confirm they release on eviction), admin in-memory state (history rings,
+audit ring, metrics - all bounded, should be small), and heap fragmentation.
+Trace before patching.
+
+PROCEDURE (dedicated session, single box, tmpfs data dir to keep IO out):
+1. Baseline. Start one release broker, wait 30s, record RSS:
+   `ps -o rss= -p $(pgrep -x fibril-server)` (KB). Snapshot /metrics too.
+2. Load. Declare 32 queues, publish ~200k x 256B to each (e2e_c loop with
+   --topic), then drain them all with readers. Record RSS every 10s into a
+   CSV throughout (a while loop with date + ps is fine).
+3. Evict. Stop clients, wait past the idle-eviction window, confirm via
+   queues_debug that the queues left memory (materialized flags), record
+   RSS for another 5 minutes.
+4. Verdict fork on the RSS delta vs baseline:
+   a. Allocator retention test: repeat the whole run with
+      MIMALLOC_PURGE_DELAY=0 (eager decommit). If RSS now returns, the
+      memory was held by mimalloc arenas - decide between shipping purge
+      config, calling mi_collect after eviction, or documenting it as
+      by-design warm cache.
+   b. Tail-cache release test: instrument (debug log on drop) the keratin
+      tail cache / QueueHandle drop path, rerun, confirm drops fire at
+      eviction. If they do not, that is the leak - fix in keratin.
+   c. If neither: heaptrack the load->evict cycle
+      (`heaptrack target/release/fibril-server ...`, analyze leaked-at-exit
+      and peak contributors by callstack) or a dhat-feature build.
+5. Deliverable: a table (baseline / loaded / evicted / evicted+purge RSS),
+   the verdict (held-by-allocator vs genuinely-referenced vs leaked), the
+   fix, and a repeatable regression check (RSS within ~15% of baseline
+   after full eviction).
+GOTCHA: sysinfo memory() returns BYTES (the KB-as-MB dashboard bug is fixed
+at the sampler). MIMALLOC_SHOW_STATS=1 prints only at clean exit.
 
 ## Phase 3 SSE plan (SCOPED 2026-07-11)
 
@@ -3163,3 +3278,139 @@ transform), swap the under/over side logic in the batch pass and joinAt's
 `over` field, mirror the cut to the left band, and flip pulseHidden's
 which-side test. Would let facing direction vary per ring (or alternate by
 grid column) so big grids read less uniform.
+
+
+## Future: notification threshold rules (brief 2026-07-12)
+
+User-configurable rules layered on the attention system, e.g. "warn when
+backlog on topic X exceeds N" or "warn when disk free drops under Y%".
+
+DESIGN DECISIONS (made): rules evaluate SERVER-side in
+crates/admin/src/attention.rs so the panel, the Activity feed, the SSE
+stream, and desktop notifications all inherit them for free. Rules are
+broker state, not per-operator preference, so they live in the
+runtime-settings document (cluster-replicated, versioned, lock-aware) as a
+new OPTIONAL section - old settings documents must keep loading, so the
+field is Option<Vec<Rule>> with a permissive default, and the settings body
+deliberately does NOT take deny_unknown_fields (see the admin DTO
+hardening note).
+
+Rule schema v1 (consult the user on the kind set before building):
+  { id: string (user-chosen, unique), kind: backlog | disk_free_pct |
+    delivery_stall, scope: { topic, group } with glob support for backlog
+    kinds, threshold: number, severity: warning | critical, enabled: bool }
+
+PLAN:
+1. Settings: add the section to RuntimeSettings (broker crate) + locks
+   entry + validation (unique ids, sane thresholds, known kinds).
+2. Attention: each tick, evaluate enabled rules against the same snapshots
+   the built-in rules already read (queue depths, disk stats, follower
+   progress). Emit conditions keyed `rule:<id>:<scope-instance>` so
+   raise/resolve dedup and notification keying work unchanged.
+3. UI: a Settings-page card listing rules as editable rows (add/remove,
+   kind dropdown, scope fields, threshold, severity, enable toggle),
+   saving through the normal runtime-settings PUT with expected_version.
+4. Tests: rule triggers and resolves through the attention payload, a
+   settings roundtrip with rules present, an OLD document without the
+   section still loads, invalid rule rejected with a guided error.
+5. Docs: admin-dashboard.md attention section + CHANGELOG same change.
+
+## Future: dashboard live metrics drilldown (brief 2026-07-12)
+
+Semi-live per-queue and per-stream throughput on the list views, plus a
+click-through detail popup. Prior decision (memory): build on existing
+debug endpoints, no new broker-side per-queue rate state.
+
+PLAN:
+1. Verify what queues_debug and streams_debug already carry per queue
+   (message counts / positions). The dashboard receives them on every SSE
+   tick, so successive ticks give rates by client-side delta - same
+   pattern as the S4 connections view.
+2. List views: a rate column (published/s, delivered/s for queues,
+   append/s for streams) computed in JS from the last two ticks, with the
+   existing trend-tint grammar (growing backlog warns).
+3. Popup: clicking a row name opens a modal with mini 5-minute charts
+   built from a client-side ring of recent ticks (per open page, resets on
+   reload - acceptable and stated in the UI as "since this page opened").
+   Reuse the Overview chart drawing helpers.
+4. Tests: none server-side (no server change expected). Template JS check
+   + screenshots. CHANGELOG + admin-dashboard.md.
+
+## Future: Python msgpack fallback to JSON (brief 2026-07-12)
+
+Today a dict/list payload without the optional msgpack extra hard-errors
+(why the Python CI needs --extra msgpack). Wanted: default structured
+payloads to JSON when msgpack is absent, mirroring what the payload was
+going to be anyway for JSON-first users. Explicitly requested msgpack
+(content_type msgpack or an explicit encode call) still errors, with a
+guided message naming the missing extra.
+
+PLAN:
+1. Locate the encode fork in clients/python (the payload-encoding helper
+   that raises on missing msgpack import).
+2. Absent extra + structured payload -> JSON encode + the JSON content
+   type. Absent extra + explicit msgpack request -> the current guided
+   error. Present extra -> unchanged.
+3. Check the Rust reference client's default first and mirror it (the
+   matrix rule: verify the support set before widening). If Rust defaults
+   structured payloads to msgpack, note the cross-client divergence in
+   FEATURE_MATRIX explicitly.
+4. Tests: a no-extra job leg (uv run without --extra msgpack) covering
+   dict publish -> JSON on the wire, plus the guided error for explicit
+   msgpack. Keep the with-extra leg green.
+5. FEATURE_MATRIX + client docs pages + CHANGELOG (clients intro list
+   stays current).
+
+## Future: client perf round 2 (brief 2026-07-12)
+
+Three sittings, each bench-driven on the reference box (Ryzen 9 5950X,
+970 EVO Plus, single box - cite hardware per the benchmarking rule), with
+an A/B microbench before any optimization lands (validate-hotspots rule).
+
+1. Coalesce params public + self-adapting. The client write-coalescing
+   windows are internal constants today. Make them public client options,
+   then derive defaults from measured behavior (adaptive-tunables
+   direction: bounds as config, hysteresis, derived values observable).
+2. Ack/deliver coalescing. The server->client delivery path and the
+   client->server ack path both send small frames; batch them under load
+   the way publish coalescing batches writes. Wire-visible only as fewer
+   syscalls - byte format unchanged.
+3. The encoding wall. Past coalescing, encode cost dominates the client
+   CPU profile. Investigate buffer reuse / zero-copy paths in the Rust
+   client first, then port wins to TS/Python if they replicate.
+Each sitting: strace/flamegraph proof, FEATURE_MATRIX row when a public
+option lands, BENCHMARKING.md numbers refresh, CHANGELOG.
+
+## Future: fibrilctl + admin API cookbooks (brief 2026-07-12)
+
+Two website pages in the BENCHMARKING.md copy-paste-recipe style: common
+operator tasks, each as one runnable block with expected output. Candidate
+recipes: declare/inspect/delete a queue, publish a test message, inspect
+messages with filters, replay dead letters, drain a broker, repartition,
+manage admin users, issue certs, check cluster membership and topology.
+METHOD: launch a scenario.sh sandbox broker, run every recipe against it
+verbatim, paste real output. A recipe that was not executed does not ship.
+Home: website/src/content/docs/operations/ (new pages), linked from
+admin-dashboard.md and the CLI section. CHANGELOG.
+
+## Future: TUI demo rework - remaining milestones (brief 2026-07-12)
+
+The tui-example rework was mid-flight when parked. Remaining milestones:
+1. Cohort partition ownership display: show which consumer in the cohort
+   owns which partitions, live, as the churn scenario reassigns them.
+2. Website single-command tryout: one copy-paste command that launches
+   the TUI demo against a fresh broker (decide cargo-run vs container).
+3. Live repartition keys: a keybinding that triggers a repartition so the
+   ownership display visibly rebalances during a demo.
+Session cursor with the exact mid-edit state lives in assistant memory
+(tui-demo-cursor) - read it before resuming.
+
+## Future: per-partition edge rates for the diagram (brief 2026-07-12)
+
+S3 links pulse by the OWNER's node rate (proxy). Honest per-edge rates need
+per-partition throughput on the heartbeat. Before building, assess cost:
+one label per owned partition doubles label churn on wide brokers - prefer
+a single JSON label mapping partition -> bucketed rate (buckets, not raw,
+to keep the committed snapshot quiet). Then drawLinkJob takes the summed
+buckets of the partitions riding each edge instead of the owner bucket.
+Gate on actually noticing the proxy being wrong in real use.
