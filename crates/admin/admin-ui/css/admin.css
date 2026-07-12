@@ -864,6 +864,14 @@ textarea:focus {
   color: var(--warn);
 }
 
+/* The chip's data source stopped answering: last-known numbers, visibly
+   untrusted. */
+.nodes-pill.stale {
+  background: transparent;
+  border: 1px dashed var(--line-2);
+  color: var(--dim);
+}
+
 /* A table row spotlighted from the connections diagram. */
 .row-spot {
   background: var(--accent-soft);

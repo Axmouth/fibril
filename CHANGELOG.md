@@ -199,7 +199,10 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   rates, and the consensus leader starred, headed by a coordination-health
   chip - and the top bar gains a live/registered nodes chip, with the
   stream-health pill and broker switcher moving beside it so status reads
-  in one place. A new carotene flavor joins the set: the design
+  in one place. The chip never lies: it turns amber when registered nodes
+  outnumber live ones, and fades to a dashed gray - last-known numbers,
+  visibly untrusted, with an "as of" tooltip - when its own data source
+  stops answering. A new carotene flavor joins the set: the design
   mockup's burnt-orange scheme, dark and light, named for the pigment to
   keep the flavor family organic.
 - The Connections page grew a diagram view: the broker as the fibril ring

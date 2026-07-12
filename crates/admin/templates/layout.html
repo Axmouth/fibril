@@ -354,13 +354,31 @@
         })[c]);
       }
 
+      // The nodes chip must never lie: it grays out when its data source
+      // stops answering (fetch failures or a stale last success), keeping
+      // the last-known count visible but visibly untrusted.
+      let nodesPillOkAt = 0;
+      function markNodesPillStale() {
+        const nodesPill = document.getElementById("nodes-pill");
+        if (nodesPill && !nodesPill.hidden) {
+          nodesPill.classList.add("stale");
+          nodesPill.title = nodesPillOkAt
+            ? "unreachable - as of " + Math.round((Date.now() - nodesPillOkAt) / 1000) + "s ago"
+            : "unreachable";
+        }
+      }
+
       async function load() {
         let data;
         try {
           const r = await fetch("/admin/api/topology");
-          if (!r.ok) return;
+          if (!r.ok) {
+            markNodesPillStale();
+            return;
+          }
           data = await r.json();
         } catch {
+          markNodesPillStale();
           return;
         }
         const coordination = data && data.coordination;
@@ -377,7 +395,10 @@
             const live = nodes.filter((n) => n.live !== false).length;
             nodesPill.textContent = `${live}/${nodes.length} nodes`;
             nodesPill.classList.toggle("short", live < nodes.length);
+            nodesPill.classList.remove("stale");
+            nodesPill.title = "";
             nodesPill.hidden = false;
+            nodesPillOkAt = Date.now();
           } else {
             nodesPill.hidden = true;
           }
@@ -410,6 +431,12 @@
       load();
       // Layout-owned poller: native timer so boosted navigation keeps it.
       window.__nativeSetInterval(load, 30000);
+      // Staleness sweep between polls, so an unreachable broker grays the
+      // chip within seconds of the age threshold rather than at the next
+      // 30s tick.
+      window.__nativeSetInterval(() => {
+        if (nodesPillOkAt && Date.now() - nodesPillOkAt > 45000) markNodesPillStale();
+      }, 5000);
     })();
   </script>
   <script>
