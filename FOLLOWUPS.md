@@ -3039,10 +3039,12 @@ rule - every phase still adds its own CHANGELOG bullet and doc touch in the
 same change; Phase 6 is the final consistency pass over the accumulated
 surface, not a deferral of docs work.
 
-Floating (slot on mood): enable-TLS-from-UI (own design pass),
-deny_unknown_fields hardening on admin request DTOs (a typoed field name in a
-declare request is silently ignored today - guided-errors philosophy says name
-it).
+Floating (slot on mood): enable-TLS-from-UI (own design pass).
+deny_unknown_fields on admin request DTOs SHIPPED 2026-07-12: all 16 request
+structs reject unknown fields (serde names the offender), regression test in
+the admin suite. The runtime-settings document body deliberately stays
+permissive (cluster-replicated, must tolerate newer-version fields); dashboard
+JS, CLI mirrors, and scenario.sh bodies audited against every struct first.
 
 ## Known intermittent: one fibril-admin test flakes under full-workspace runs
 

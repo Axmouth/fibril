@@ -46,13 +46,19 @@ pub struct RuntimeSettingsResponse {
     pub load_issue: Option<RuntimeSettingsLoadIssue>,
 }
 
+/// Unknown fields in the ENVELOPE are rejected (a typo should be named, not
+/// ignored), but the inner RuntimeSettings stays permissive on purpose: the
+/// settings document is cluster-replicated and must tolerate fields written
+/// by newer broker versions.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateRuntimeSettingsRequest {
     pub expected_version: u64,
     pub settings: RuntimeSettings,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateGlobalDlqRequest {
     pub expected_version: u64,
     pub target: Option<QueueDlqTargetRequest>,
@@ -67,12 +73,14 @@ pub enum QueueDlqPolicyRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QueueDlqTargetRequest {
     pub topic: String,
     pub group: Option<String>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateQueueDlqRequest {
     pub topic: String,
     pub group: Option<String>,
@@ -82,6 +90,7 @@ pub struct UpdateQueueDlqRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateQueueRequest {
     pub topic: String,
     pub group: Option<String>,
@@ -97,6 +106,7 @@ pub struct CreateQueueRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeleteQueueRequest {
     pub topic: String,
     pub group: Option<String>,
@@ -106,6 +116,7 @@ pub struct DeleteQueueRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReplayDeadLettersRequest {
     pub dlq_topic: String,
     pub dlq_group: Option<String>,
@@ -113,17 +124,20 @@ pub struct ReplayDeadLettersRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AddCoordinationVotingMemberRequest {
     pub id: u64,
     pub addr: String,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemoveCoordinationVotingMemberRequest {
     pub id: u64,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RepartitionQueueRequest {
     pub topic: String,
     #[serde(default)]
@@ -167,6 +181,7 @@ impl From<GlobalDlqSnapshot> for GlobalDlqView {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InspectMessagesQuery {
     pub topic: String,
     pub group: Option<String>,
@@ -264,6 +279,7 @@ impl RuntimeSettingsResponse {
 
 /// Request body for declaring a Plexus stream from the admin UI.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateStreamRequest {
     pub topic: String,
     pub partition_count: Option<u32>,
@@ -885,6 +901,7 @@ pub async fn repartition_queue(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DrainRequest {
     /// How long the broker will hold sessions before it stops serving, so
     /// clients know their window to settle and reconnect. Defaults to 30s.
@@ -936,6 +953,7 @@ pub async fn reload_tls(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TestPublishRequest {
     pub topic: String,
     #[serde(default)]
@@ -1190,6 +1208,7 @@ pub async fn update_runtime_settings(
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpsertUserRequest {
     pub username: String,
     pub password: String,
@@ -1636,6 +1655,7 @@ pub async fn replay_dead_letters(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RepairPartitionQuery {
     pub topic: String,
     #[serde(default)]

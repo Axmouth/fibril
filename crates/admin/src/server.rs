@@ -1658,6 +1658,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_requests_name_unknown_fields_instead_of_ignoring_them() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        // A typoed field must produce an error that names it, not a queue
+        // silently created with the default partition count.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/api/queues")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"topic":"orders","partion_count":3}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_client_error());
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("partion_count"), "error should name the field: {text}");
+    }
+
+    #[tokio::test]
     async fn topology_nodes_carry_heartbeat_rates_when_wired() {
         use fibril_broker::coordination::{CoordinationSnapshot, NodeInfo, StaticCoordination};
 

@@ -169,6 +169,12 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   approximation (the last visible seam inside the ring opening is gone),
   and the leader's glow paints last so strands on its turned-away side
   carry the gold cast too.
+- Admin API requests reject unknown fields with an error that names the
+  offender. A typoed `partion_count` in a declare request used to be
+  silently ignored (the queue landed with the default), now the response
+  says exactly which field is not recognized. The runtime-settings
+  document itself stays permissive on purpose: it is cluster-replicated
+  and must tolerate fields written by newer broker versions.
 - The cluster diagram shows real load. Each broker reports coarse publish
   and delivery rates (messages per second since its previous beat) as
   advisory labels on its coordination heartbeat, and the topology payload
