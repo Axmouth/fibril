@@ -3144,3 +3144,14 @@ Overview as proof -> migrate the remaining pages, extending families
 (subscriptions, cohorts, connections, streams debug) -> live pill + fallback
 -> leak/regression verification incl. a dashboard-open-during-bench sanity ->
 docs/changelog sweep for the phase.
+
+## Future: mirrored ring orientation flag (user idea 2026-07-12)
+
+The cluster diagram's tendril renderer is fully parametrized around one ring
+orientation (3/4 view, right side turned away: strands under the band left,
+over the band right, cut at 0.38r). Add a per-ring flag that renders the
+opposite orientation seamlessly: flip the sprite horizontally (SVG image
+transform), swap the under/over side logic in the batch pass and joinAt's
+`over` field, mirror the cut to the left band, and flip pulseHidden's
+which-side test. Would let facing direction vary per ring (or alternate by
+grid column) so big grids read less uniform.

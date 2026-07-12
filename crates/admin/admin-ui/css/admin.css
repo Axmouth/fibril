@@ -824,6 +824,12 @@ textarea:focus {
   outline: none;
 }
 
+/* Checks and radios pick up the flavor accent instead of the OS default. */
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--accent);
+}
+
 .settings-grid {
   display: grid;
   gap: 12px 18px;

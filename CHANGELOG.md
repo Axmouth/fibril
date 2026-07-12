@@ -154,7 +154,13 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   under its color, so whichever path drew second used to bite a dark seam
   across the other. And the gold consensus mesh moved behind a Consensus
   toggle, off by default: membership already implies a connection to the
-  leader, and hiding it lets the data links breathe.
+  leader, and hiding it lets the data links breathe. Grid rows gained air
+  (cells wide enough that neighbouring fans clear each other), strands
+  emerge from behind the ring band with no hidden stretch (the over-layer
+  cut now sits on the band's measured inner edge), and links between close
+  neighbours draw one gentle curve instead of folding into hairpins.
+- Checkboxes and radios follow the flavor accent instead of the OS default
+  color.
 - The Cluster diagram came alive, then got its first live-review polish:
   replication links draw as proper fiber bundles (three to five snaking,
   outlined strands with layered waves, tapered into their rings) instead of

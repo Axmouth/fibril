@@ -279,9 +279,11 @@ function computeLayout(nodes, S) {
   }
 
   // Fixed viewBox width, rows grow downward: rings keep their size and the
-  // diagram extends instead of shrinking to fit.
-  const gapX = 40, gapY = 22;
-  const cellW = Math.max(160, S + 76);
+  // diagram extends instead of shrinking to fit. Full-size cells are wide
+  // enough that neighbouring fans clear each other - a fan tip reaches
+  // about 1.2 * S from its ring's center.
+  const gapX = 40, gapY = 34;
+  const cellW = S >= 96 ? S + 140 : Math.max(160, S + 76);
   const stagger = cellW / 2;
   const targetW = S >= 96 ? 860 : 1200;
   const cols = Math.max(2,
@@ -289,7 +291,7 @@ function computeLayout(nodes, S) {
   const rows = Math.ceil(n / cols);
   const rowPitch = S + LABEL_H + gapY;
   const blockWidth = (cols - 1) * cellW + S + stagger;
-  const width = blockWidth + 2 * gapX;
+  const width = Math.max(targetW, blockWidth + 2 * gapX);
   const height = bannerTop + rows * rowPitch + gapY;
   const originX = (width - blockWidth) / 2 + S / 2;
   nodes.forEach((node, i) => {
@@ -647,10 +649,13 @@ function drawTendrils() {
     const dx = x2 - x1, dy = y2 - y1;
     const len = Math.hypot(dx, dy) || 1;
     const nx = -dy / len, ny = dx / len;
-    const amp = Math.min(16, 6 + len * 0.035) * (0.7 + rnd(seed) * 0.5);
+    const amp = Math.min(16, 6 + len * 0.035) * (0.7 + rnd(seed) * 0.5)
+      * Math.min(1, len / 180);
     const waves = 1.2 + rnd(seed + 4);
     const phase = rnd(seed + 5) * Math.PI * 2;
-    const SAMPLES = 11;
+    // Fewer samples on short spans: a close neighbour link gets one long
+    // gentle curve instead of a stair-step of tight wiggles.
+    const SAMPLES = Math.max(4, Math.min(11, Math.round(len / 24)));
     const pts = [];
     for (let k = 0; k <= SAMPLES; k++) {
       const t = k / SAMPLES;
@@ -739,7 +744,11 @@ function drawTendrils() {
     const severed = ghostA || ghostB;
     const j1 = joinAt(a, from, to, seed + 11);
     const j2 = joinAt(b, to, from, seed + 22);
-    let core1 = j1.approach, core2 = j2.approach;
+    const span = Math.hypot(j2.tip[0] - j1.tip[0], j2.tip[1] - j1.tip[1]);
+    const glide = Math.min(26, Math.max(8, span * 0.18));
+    const out = (j) => j.u
+      ? [j.tip[0] + j.u[0] * glide, j.tip[1] + j.u[1] * glide] : j.approach;
+    let core1 = out(j1), core2 = out(j2);
     if (severed) {
       // The strand hangs short of the dead ring and sags - visibly cut off.
       const live = ghostA ? core2 : core1;
@@ -756,9 +765,10 @@ function drawTendrils() {
     if (!severed || !ghostA) pts.unshift(j1.tip);
     if (!severed || !ghostB) pts.push(j2.tip);
     if (!severed) {
-      // Branches first so the stem covers their roots.
-      for (let br = 0; br < 2; br++) {
-        const k = 3 + (hashStr("lk" + seed + br) % 5);
+      // Branches first so the stem covers their roots. Short links skip
+      // them - there is no room, and the anchor index must stay in range.
+      for (let br = 0; br < 2 && pts.length >= 9; br++) {
+        const k = Math.min(pts.length - 3, 3 + (hashStr("lk" + seed + br) % 5));
         const side = (hashStr("ls" + seed + br) % 2) ? 1 : -1;
         const at = pts[k];
         const branchAngle = tangentAt(pts, k) + side * (0.55 + rnd(seed + 80 + br) * 0.45);
@@ -774,7 +784,7 @@ function drawTendrils() {
       ? [[0, c1], [0.3, color], [0.7, color], [1, c2]] : null;
     drawPathOn(ctxU, pts, color, alpha, width, stops);
     for (const j of [j1, j2]) {
-      if (j.color && j.u) welds.push({ j, alpha, width });
+      if (j.color && j.u) welds.push({ j, alpha, width, glide });
     }
     if (severed) {
       // A dim, unlit end where the fiber was cut.
@@ -853,8 +863,13 @@ function drawTendrils() {
       // Full seamless strand below everything.
       drawPathOn(ctxU, pts, color, alpha, 2.7);
       // Right-of-opening portion above the sprite; the cut sits on the band.
-      const overSeg = pts.filter((pt) => pt[0] >= rn.x + r * 0.45);
-      overSeg.unshift([rn.x + r * 0.45, pts[4][1] + (pts[5][1] - pts[4][1]) * 0.27]);
+      // Measured from the sprite: the opening's right inner edge sits at
+      // ~0.34r and the band is opaque from ~0.36r to ~0.79r. Cutting just
+      // past the edge means the strand emerges from behind the band with
+      // no hidden stretch, and the stub's y stays on the strand's chord.
+      const cutX = rn.x + r * 0.38;
+      const overSeg = pts.filter((pt) => pt[0] >= cutX);
+      overSeg.unshift([cutX, pts[4][1] + (pts[5][1] - pts[4][1]) * 0.145]);
       branchAt(ctxO, 5, 1);
       drawPathOn(ctxO, overSeg, color, alpha, 2.7);
       if (!consumedTips.has(rn.id + "|-1|" + i)) drawTip(ctxU, lt[0], lt[1], "#7df0b8", alpha);
@@ -890,7 +905,7 @@ function drawTendrils() {
     };
     ctx.globalAlpha = w.alpha;
     ctx.strokeStyle = w.j.color;
-    seg(16, 0, w.width);
+    seg(Math.min(16, w.glide + 4), 0, w.width);
     seg(2, -8, 2.7);
   }
 
