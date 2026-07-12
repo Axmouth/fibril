@@ -127,6 +127,16 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Changed
 
+- The Cluster diagram came alive. Each broker renders as the fibril ring
+  itself: active nodes blink more often than idle ones, the band lights
+  breathe, and a broker that vanishes from the cluster lingers for ten
+  minutes as a dimmed X-eyed ghost so the hole has a face. Replication
+  links draw as procedural pixel tendrils (strand count follows how many
+  partitions ride the link, gently swaying), a lone broker sprouts a stub
+  strand per declared queue, and hover still spotlights a broker's links.
+  The diagram finally follows the theme tokens, so it renders correctly in
+  light mode and every flavor. Reduced-motion preferences get still frames
+  and still strands.
 - The fibril mascot arrives (stage one): the pixel-art ring with the teal
   face appears on the login page and the 404 page, and its face - the little
   screen from the ring's band - is the dashboard favicon. Placements stay

@@ -1,24 +1,31 @@
 {% extends "layout.html" %}
 {% block content %}
 <style>
-  #topology-diagram .edge {
-    stroke: #5b8def;
-    stroke-width: 1.5;
-    stroke-dasharray: 6 4;
-    opacity: 0.4;
-    transition: opacity 0.12s ease, stroke-width 0.12s ease;
+  #diagram-stage { position: relative; }
+  #tendril-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    image-rendering: pixelated;
+    pointer-events: none;
   }
-  #topology-diagram.has-focus .edge { opacity: 0.06; }
-  #topology-diagram.has-focus .edge.edge-active {
-    opacity: 0.95;
-    stroke-width: 2.25;
-  }
+  #topology-diagram { position: relative; }
+  #topology-diagram image { image-rendering: pixelated; }
   #topology-diagram .node-card { cursor: pointer; transition: opacity 0.12s ease; }
   #topology-diagram.has-focus .node-card { opacity: 0.35; }
   #topology-diagram.has-focus .node-card.node-active { opacity: 1; }
-  #topology-diagram .node-card.node-selected rect { stroke: #5b8def; stroke-width: 2.5; }
+  #topology-diagram .node-ghost { opacity: 0.5; }
+  #topology-diagram .ring-halo {
+    fill: none;
+    stroke: var(--active);
+    stroke-width: 2;
+    opacity: 0;
+    transition: opacity 0.12s ease;
+  }
+  #topology-diagram .node-card.node-selected .ring-halo { opacity: 1; }
   .view-toggle { display: inline-flex; gap: 4px; flex: none; }
-  .view-toggle .btn.active { background: #2b3650; color: #e8ecf4; }
+  .view-toggle .btn.active { background: var(--accent-soft); color: var(--text); }
   #broker-detail-panel { margin-top: 12px; }
   #broker-detail-body details, .broker-list-body details { margin-top: 6px; }
   #broker-detail-body summary, .broker-list-body summary { cursor: pointer; }
@@ -69,9 +76,12 @@
     </div>
   </div>
   <div id="diagram-view">
+    <div id="diagram-stage">
+    <canvas id="tendril-canvas" aria-hidden="true"></canvas>
     <svg id="topology-diagram" viewBox="0 0 860 440" width="100%" height="440"
          preserveAspectRatio="xMidYMid meet"
          style="background: var(--panel-bg, transparent); border-radius: 8px;"></svg>
+    </div>
     <div id="broker-detail-panel">
       <p id="broker-detail-sub" class="settings-note">Click a broker to inspect its assignments.</p>
       <div id="broker-detail-body"></div>
@@ -178,21 +188,57 @@ function renderSummary(data) {
   document.getElementById("topology-summary").innerHTML = parts.join(" · ");
 }
 
-const CARD_W = 180, CARD_H = 64;
+// ---- the living diagram: ring sprites + procedural tendrils ----
+// Each broker renders as the fibril ring sprite (blink cadence says idle vs
+// active, X-eyes says gone), and replication edges render as pixel tendrils
+// on a low-res canvas upscaled nearest-neighbor so smooth beziers read as
+// coherent pixel art. Reduced motion gets static frames and still strands.
 
-// Small clusters read best on an ellipse. Past a handful of brokers the ring
-// crowds and the follower edges become a hairball, so switch to a centered grid
-// that grows with the cluster. Both layouts return absolute card centers plus
-// the viewBox the canvas should adopt.
-function computeLayout(nodes) {
+const SPRITE_FRAMES = ["open-a", "open-b", "half", "closed", "dead"];
+const spriteUrl = (frame, size) => `/static/img/sprites/ring-${frame}-${size}.png`;
+for (const f of SPRITE_FRAMES) for (const s of [64, 96, 128]) {
+  const im = new Image(); im.src = spriteUrl(f, s);
+}
+const REDUCED_MOTION = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+// Strand palette from the mascot art: replication runs blue/violet (inbound
+// family), standalone stubs add magenta/green on the outbound side.
+const STRANDS_IN = ["#3d7bf0", "#8a4be8"];
+const STRANDS_OUT = ["#e23fb4", "#46e06b"];
+const GHOST_TTL_MS = 10 * 60 * 1000;
+
+const seenNodes = new Map(); // node_id -> { node, lastSeen }
+const nodesCtx = new Map();  // node_id -> { img, ghost, active, size, mid }
+let tendrils = [];           // { owner, follower, from, to, count }
+let stubs = [];              // { from, dir, idx, ringR }
+let focusId = null;
+let lightPhase = 0;
+let swayT = 0;
+
+function hashStr(s) {
+  let h = 2166136261;
+  for (const c of String(s)) { h ^= c.charCodeAt(0); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+const rnd = (seed) => { const x = Math.sin(seed) * 43758.5453; return x - Math.floor(x); };
+
+// Sprite size by cluster shape: lone hero ring, ellipse rings, dense grid.
+function spriteSize(n) { return n <= 1 ? 128 : n <= 6 ? 96 : 64; }
+
+const LABEL_H = 40;
+
+function computeLayout(nodes, S) {
   const n = nodes.length;
   const positions = new Map();
-  const bannerTop = 52;
+  const bannerTop = 56;
 
   if (n <= 6) {
-    const width = 860, height = 440;
-    const cx = width / 2, cy = (height + bannerTop) / 2 + 8;
-    const rx = n <= 1 ? 0 : 320, ry = n <= 1 ? 0 : 132;
+    const width = 860;
+    const rx = n <= 1 ? 0 : 300;
+    const ry = n <= 1 ? 0 : 126;
+    const height = n <= 1 ? 360 : bannerTop + 2 * ry + S + LABEL_H + 44;
+    const cx = width / 2;
+    const cy = n <= 1 ? bannerTop + (height - bannerTop) / 2 - 14
+                      : bannerTop + ry + S / 2 + 14;
     nodes.forEach((node, i) => {
       const angle = n === 1 ? -Math.PI / 2 : (2 * Math.PI * i) / n - Math.PI / 2;
       positions.set(node.node_id, { x: cx + rx * Math.cos(angle), y: cy + ry * Math.sin(angle) });
@@ -200,25 +246,21 @@ function computeLayout(nodes) {
     return { positions, width, height };
   }
 
-  const gapX = 34, gapY = 26;
+  const gapX = 40, gapY = 22;
+  const cellW = Math.max(160, S + 76);
   const cols = Math.min(5, Math.ceil(Math.sqrt(n)));
   const rows = Math.ceil(n / cols);
-  const pitchX = CARD_W + gapX;
-  const rowPitch = CARD_H + gapY;
-  // Stagger alternate rows by half a column so cards meet at the corners
-  // (brick / hex packing) rather than lining up side to side. Each card nestles
-  // into the pocket between two cards in the row above, which also keeps owner
-  // to follower edges from running collinear straight through a whole row.
-  const stagger = pitchX / 2;
-  const blockWidth = (cols - 1) * pitchX + CARD_W + stagger;
+  const rowPitch = S + LABEL_H + gapY;
+  const stagger = cellW / 2;
+  const blockWidth = (cols - 1) * cellW + S + stagger;
   const width = blockWidth + 2 * gapX;
   const height = bannerTop + rows * rowPitch + gapY;
-  const originX = (width - blockWidth) / 2 + CARD_W / 2;
+  const originX = (width - blockWidth) / 2 + S / 2;
   nodes.forEach((node, i) => {
     const r = Math.floor(i / cols), c = i % cols;
     positions.set(node.node_id, {
-      x: originX + c * pitchX + (r % 2) * stagger,
-      y: bannerTop + gapY + CARD_H / 2 + r * rowPitch,
+      x: originX + c * cellW + (r % 2) * stagger,
+      y: bannerTop + gapY + S / 2 + r * rowPitch,
     });
   });
   return { positions, width, height };
@@ -228,86 +270,121 @@ function renderDiagram(data) {
   const svg = document.getElementById("topology-diagram");
   svg.replaceChildren();
   svg.classList.remove("has-focus");
+  nodesCtx.clear();
   const coordination = data.coordination;
-  if (!coordination || coordination.nodes.length === 0) {
-    svg.setAttribute("viewBox", "0 0 860 440");
-    svg.setAttribute("height", 440);
-    svg.appendChild(el("text", { x: 430, y: 220, "text-anchor": "middle",
-      fill: "#8a93a6", "font-size": 15 }, "no registered brokers yet"));
-    renderCtx = { cards: new Map(), edges: [], data };
+  const now = Date.now();
+  const liveNodes = coordination?.nodes ?? [];
+  for (const n of liveNodes) seenNodes.set(n.node_id, { node: n, lastSeen: now });
+
+  // Ghosts: brokers this page saw this session that vanished from the
+  // committed view. They linger with X-eyes so the hole has a face.
+  const ghosts = [];
+  for (const [id, entry] of seenNodes) {
+    if (liveNodes.some((n) => n.node_id === id)) continue;
+    if (now - entry.lastSeen > GHOST_TTL_MS) { seenNodes.delete(id); continue; }
+    ghosts.push({ ...entry.node, __ghost: true, __lastSeen: entry.lastSeen });
+  }
+  const nodes = [...liveNodes, ...ghosts];
+
+  if (!coordination || nodes.length === 0) {
+    svg.setAttribute("viewBox", "0 0 860 300");
+    svg.setAttribute("height", 300);
+    svg.appendChild(el("text", { x: 430, y: 150, "text-anchor": "middle",
+      style: "fill: var(--muted)", "font-size": 15 }, "no registered brokers yet"));
+    renderCtx = { cards: new Map(), data };
+    tendrils = []; stubs = [];
     selectedNode = null;
     renderBrokerDetail(null);
+    drawTendrils();
     return;
   }
 
   const raft = data.consensus ?? {};
-  // Raft id -> broker correlation is best effort and display only: a card is
-  // marked as leader only when its node_id matches the reported raft leader.
   const leaderId = raft.leader != null ? String(raft.leader) : null;
-  const nodes = coordination.nodes;
-  const { positions, width, height } = computeLayout(nodes);
+  const S = spriteSize(nodes.length);
+  const { positions, width, height } = computeLayout(nodes, S);
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svg.setAttribute("height", height);
 
-  // Consensus banner across the top, present for either layout.
   if (data.consensus) {
     svg.appendChild(el("text", {
       x: width / 2, y: 24, "text-anchor": "middle",
-      fill: "#e8b65b", "font-size": 14, "font-weight": 600,
+      style: "fill: var(--warn)", "font-size": 14, "font-weight": 600,
     }, `consensus leader: ${data.consensus.leader ?? "none"}`));
     svg.appendChild(el("text", {
-      x: width / 2, y: 44, "text-anchor": "middle", fill: "#8a93a6", "font-size": 11,
+      x: width / 2, y: 44, "text-anchor": "middle", style: "fill: var(--muted)", "font-size": 11,
     }, `voters [${(data.consensus.voters ?? []).join(", ")}] · applied ${data.consensus.last_applied_index ?? "-"}`));
   }
 
-  // Owner -> follower edges first (drawn under the opaque cards). Track each
-  // edge with its endpoints so hovering a broker can highlight just its links.
-  const edges = [];
-  for (const assignment of coordination.assignments) {
-    const from = positions.get(assignment.owner);
-    if (!from) continue;
-    for (const follower of assignment.followers) {
-      const to = positions.get(follower);
-      if (!to) continue;
-      const line = el("line", { class: "edge", x1: from.x, y1: from.y, x2: to.x, y2: to.y });
-      svg.appendChild(line);
-      edges.push({ line, owner: assignment.owner, follower });
+  const assignments = coordination.assignments ?? [];
+  const ownedCount = new Map();
+  for (const a of assignments) ownedCount.set(a.owner, (ownedCount.get(a.owner) ?? 0) + 1);
+
+  // Replication edges collapse to one tendril bundle per owner->follower
+  // pair; the pair's partition count picks the strand density bucket.
+  const pairCount = new Map();
+  for (const a of assignments) {
+    for (const f of a.followers ?? []) {
+      const key = a.owner + "\u0000" + f;
+      pairCount.set(key, (pairCount.get(key) ?? 0) + 1);
     }
   }
+  tendrils = [];
+  for (const [key, count] of pairCount) {
+    const [owner, follower] = key.split("\u0000");
+    const from = positions.get(owner), to = positions.get(follower);
+    if (from && to) tendrils.push({ owner, follower, from, to, count });
+  }
 
-  const ownedCount = new Map();
-  for (const assignment of coordination.assignments) {
-    ownedCount.set(assignment.owner, (ownedCount.get(assignment.owner) ?? 0) + 1);
+  // A lone broker gets queue stubs instead: strands sprouting per declared
+  // queue (bucketed at 8), inbound palette left, outbound right.
+  stubs = [];
+  if (liveNodes.length === 1 && tendrils.length === 0) {
+    const id = liveNodes[0].node_id;
+    const owned = assignments.filter((a) => a.owner === id).length;
+    const queueCount = Math.max(owned, data.__queueCount ?? 0);
+    const c = positions.get(id);
+    const n = Math.min(queueCount, 8);
+    for (let i = 0; i < n; i++) {
+      stubs.push({ from: c, dir: i % 2 ? 1 : -1, idx: i, ringR: S / 2 });
+    }
   }
 
   const cards = new Map();
   nodes.forEach((node) => {
     const pos = positions.get(node.node_id);
+    const ghost = !!node.__ghost;
     const owned = ownedCount.get(node.node_id) ?? 0;
-    const isLeader = leaderId != null && String(node.node_id) === leaderId;
-    const group = el("g", { class: "node-card", "data-node": node.node_id });
-    group.appendChild(el("rect", {
-      x: pos.x - CARD_W / 2, y: pos.y - CARD_H / 2, width: CARD_W, height: CARD_H,
-      rx: 10, fill: "#1d2433",
-      stroke: isLeader ? "#e8b65b" : "#3a4761", "stroke-width": isLeader ? 2.25 : 1.5,
-    }));
+    const active = owned > 0;
+    const isLeader = !ghost && leaderId != null && String(node.node_id) === leaderId;
+    const group = el("g", {
+      class: "node-card" + (ghost ? " node-ghost" : ""),
+      "data-node": node.node_id,
+    });
+    group.appendChild(el("circle", { class: "ring-halo", cx: pos.x, cy: pos.y, r: S / 2 + 7 }));
+    const img = el("image", {
+      x: pos.x - S / 2, y: pos.y - S / 2, width: S, height: S,
+      href: spriteUrl(ghost ? "dead" : "open-a", S),
+    });
+    group.appendChild(img);
     group.appendChild(el("text", {
-      x: pos.x, y: pos.y - 10, "text-anchor": "middle",
-      fill: "#e8ecf4", "font-size": 15, "font-weight": 600,
-    }, isLeader ? `${node.node_id} ★` : node.node_id));
+      x: pos.x, y: pos.y + S / 2 + 17, "text-anchor": "middle",
+      "font-size": 14, "font-weight": 600,
+      style: isLeader ? "fill: var(--warn)" : "fill: var(--text)",
+    }, isLeader ? "★ " + node.node_id : node.node_id));
+    const sub = ghost
+      ? "last seen " + timeAgoShort(node.__lastSeen / 1000)
+      : node.broker_addr + (owned ? " · owns " + owned : "");
     group.appendChild(el("text", {
-      x: pos.x, y: pos.y + 10, "text-anchor": "middle", fill: "#8a93a6", "font-size": 12,
-    }, node.broker_addr));
-    group.appendChild(el("text", {
-      x: pos.x, y: pos.y + 26, "text-anchor": "middle", fill: "#5b8def", "font-size": 11,
-    }, owned ? `owns ${owned} partition(s)` : "no owned partitions"));
+      x: pos.x, y: pos.y + S / 2 + 32, "text-anchor": "middle", "font-size": 11,
+      style: ghost ? "fill: var(--bad)" : "fill: var(--muted)",
+    }, sub));
     svg.appendChild(group);
     cards.set(node.node_id, group);
+    nodesCtx.set(node.node_id, { img, ghost, active, size: S, mid: false });
   });
 
-  // Stash the rendered cards and edges so hover and selection can re-apply
-  // highlighting across the periodic refresh, then wire the interactions.
-  renderCtx = { cards, edges, data };
+  renderCtx = { cards, data };
   for (const [nodeId, group] of cards) {
     group.addEventListener("mouseenter", () => highlight(nodeId));
     group.addEventListener("mouseleave", () => highlight(selectedNode));
@@ -320,28 +397,153 @@ function renderDiagram(data) {
   markSelected();
   highlight(selectedNode);
   renderBrokerDetail(selectedNode);
+  for (const id of nodesCtx.keys()) scheduleBlink(id);
+  drawTendrils();
 }
 
-// Spotlight the edges a broker participates in (as owner or follower) and the
-// brokers on the other end, dimming everything else. A null id clears.
+// ---- tendril rendering: low-res buffer, nearest-neighbor upscale ----
+function drawTendrils() {
+  const canvas = document.getElementById("tendril-canvas");
+  const svg = document.getElementById("topology-diagram");
+  if (!canvas || !svg) return;
+  const cw = svg.clientWidth, ch = svg.clientHeight;
+  if (!cw || !ch) return;
+  const RES = 3;
+  const bw = Math.max(1, Math.round(cw / RES));
+  const bh = Math.max(1, Math.round(ch / RES));
+  if (canvas.width !== bw) canvas.width = bw;
+  if (canvas.height !== bh) canvas.height = bh;
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, bw, bh);
+  const vb = svg.viewBox.baseVal;
+  if (!vb || !vb.width) return;
+  // Same mapping the svg uses (preserveAspectRatio meet, centered).
+  const scale = Math.min(cw / vb.width, ch / vb.height) / RES;
+  const ox = (bw - vb.width * scale) / 2;
+  const oy = (bh - vb.height * scale) / 2;
+  const px = (x) => ox + x * scale;
+  const py = (y) => oy + y * scale;
+  ctx.lineCap = "round";
+
+  const strand = (x1, y1, x2, y2, seed, color, alpha) => {
+    const dx = x2 - x1, dy = y2 - y1;
+    const len = Math.hypot(dx, dy) || 1;
+    const nx = -dy / len, ny = dx / len;
+    const amp = 10 + rnd(seed) * 16;
+    const sway = REDUCED_MOTION ? 0 : Math.sin(swayT + seed) * 4;
+    const o1 = (rnd(seed + 1) - 0.5) * 2 * amp + sway;
+    const o2 = (rnd(seed + 2) - 0.5) * 2 * amp - sway;
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(px(x1), py(y1));
+    ctx.bezierCurveTo(
+      px(x1 + dx * 0.33 + nx * o1), py(y1 + dy * 0.33 + ny * o1),
+      px(x1 + dx * 0.66 + nx * o2), py(y1 + dy * 0.66 + ny * o2),
+      px(x2), py(y2));
+    ctx.stroke();
+  };
+
+  for (const e of tendrils) {
+    const count = e.count >= 5 ? 3 : e.count >= 2 ? 2 : 1;
+    const on = !focusId || e.owner === focusId || e.follower === focusId;
+    for (let s = 0; s < count; s++) {
+      const seed = hashStr(e.owner + "|" + e.follower + "|" + s) % 1000;
+      strand(e.from.x, e.from.y, e.to.x, e.to.y, seed,
+        STRANDS_IN[seed % STRANDS_IN.length], on ? 0.8 : 0.07);
+    }
+  }
+  for (const st of stubs) {
+    const seed = hashStr("stub|" + st.idx) % 1000;
+    const reach = 110 + rnd(seed) * 70;
+    const x1 = st.from.x + st.dir * (st.ringR - 8);
+    const x2 = st.from.x + st.dir * (st.ringR + reach);
+    const y2 = st.from.y + (rnd(seed + 3) - 0.5) * 170;
+    const palette = st.dir < 0 ? STRANDS_IN : STRANDS_OUT;
+    strand(x1, st.from.y, x2, y2, seed, palette[seed % palette.length], 0.8);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ---- blink + lights engines (timers ride the SPA cleanup registry) ----
+const openFrame = () => (lightPhase ? "open-b" : "open-a");
+
+function scheduleBlink(id) {
+  const n = nodesCtx.get(id);
+  if (!n || n.ghost || REDUCED_MOTION) return;
+  const delay = n.active ? 2800 + Math.random() * 3500 : 11000 + Math.random() * 9000;
+  setTimeout(() => {
+    const cur = nodesCtx.get(id);
+    if (!cur || !cur.img.isConnected || document.hidden) {
+      if (cur && cur.img.isConnected) scheduleBlink(id);
+      return;
+    }
+    playBlink(cur, () => scheduleBlink(id));
+  }, delay);
+}
+
+function playBlink(n, done) {
+  const seq = ["half", "closed", "half", openFrame()];
+  n.mid = true;
+  let i = 0;
+  const step = () => {
+    if (!n.img.isConnected) return;
+    n.img.setAttribute("href", spriteUrl(seq[i], n.size));
+    i += 1;
+    if (i < seq.length) setTimeout(step, 75);
+    else { n.mid = false; done(); }
+  };
+  step();
+}
+
+if (!REDUCED_MOTION) {
+  setInterval(() => {
+    lightPhase ^= 1;
+    if (document.hidden) return;
+    for (const n of nodesCtx.values()) {
+      if (!n.ghost && !n.mid && n.img.isConnected) {
+        n.img.setAttribute("href", spriteUrl(openFrame(), n.size));
+      }
+    }
+  }, 1400);
+
+  // Sway loop, self-terminating when boosted navigation removes the canvas.
+  let lastFrame = 0;
+  const loop = (ts) => {
+    const canvas = document.getElementById("tendril-canvas");
+    if (!canvas || !canvas.isConnected) return;
+    window.requestAnimationFrame(loop);
+    if (document.hidden || viewMode === "list") return;
+    if (ts - lastFrame < 80) return;
+    lastFrame = ts;
+    swayT += 0.09;
+    drawTendrils();
+  };
+  window.requestAnimationFrame(loop);
+}
+
+// Spotlight the tendrils a broker participates in and the brokers on the
+// other end, dimming everything else. A null id clears.
 function highlight(id) {
+  focusId = id;
   const svg = document.getElementById("topology-diagram");
   if (!id) {
     svg.classList.remove("has-focus");
-    for (const e of renderCtx.edges) e.line.classList.remove("edge-active");
     for (const [, group] of renderCtx.cards) group.classList.remove("node-active");
+    drawTendrils();
     return;
   }
   svg.classList.add("has-focus");
   const active = new Set([id]);
-  for (const e of renderCtx.edges) {
-    const on = e.owner === id || e.follower === id;
-    e.line.classList.toggle("edge-active", on);
-    if (on) active.add(e.owner === id ? e.follower : e.owner);
+  for (const e of tendrils) {
+    if (e.owner === id) active.add(e.follower);
+    if (e.follower === id) active.add(e.owner);
   }
   for (const [nodeId, group] of renderCtx.cards) {
     group.classList.toggle("node-active", active.has(nodeId));
   }
+  drawTendrils();
 }
 
 function markSelected() {
@@ -461,11 +663,18 @@ function renderAssignments(data) {
       <td>${escapeHtml(assignment.owner)}</td>
       <td>${escapeHtml(assignment.followers.join(", ") || "-")}</td>
       <td class="text-right">${escapeHtml(assignment.epoch)}</td>
-    </tr>`).join("") || `<tr><td colspan="6" style="color:#8a93a6">no assignments yet</td></tr>`;
+    </tr>`).join("") || `<tr><td colspan="6" style="color:var(--muted)">no assignments yet</td></tr>`;
 }
 
 async function refresh() {
   const data = await api("/admin/api/topology");
+  // A lone broker's stub tendrils need the declared-queue count.
+  if ((data.coordination?.nodes ?? []).length <= 1) {
+    try {
+      const q = await api("/admin/api/queues");
+      data.__queueCount = Object.keys(q.queues ?? {}).length;
+    } catch (_err) { /* stubs simply stay absent */ }
+  }
   renderSummary(data);
   renderDiagram(data);
   renderList(data);

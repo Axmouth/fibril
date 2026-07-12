@@ -3053,6 +3053,17 @@ the name (`cargo test --workspace --no-fail-fast 2>&1 | tee /tmp/suite.log`)
 and deflake properly - likely a timing-sensitive TCP-bound admin test under
 parallel load.
 
+## Future: per-node rates on the coordination heartbeat (mascot load face)
+
+Deferred from the S1/S2 arc (agreed 2026-07-12): the cluster-diagram rings
+show idle/active (blink cadence) and dead (X-eyes ghost), but the "load"
+face needs per-node throughput, which does not ride the coordination
+heartbeat. Follow-up: carry a coarse published-per-sec (and maybe RSS) on
+the heartbeat labels, surface it in the topology payload per node, then map
+buckets to a load face variant + faster light cycling. Also unlocks honest
+S3 signal speeds along tendrils (per-edge rate needs per-partition rates -
+assess cost then).
+
 ## Future: broker memory audit (filed 2026-07-11)
 
 User observation: RSS does not drop back to earlier levels after all active

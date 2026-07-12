@@ -227,6 +227,13 @@ cluster: registered brokers, per-partition ownership with fencing epochs and
 followers, and the consensus block (leader and voters). See
 [clustering](/concepts/clustering/).
 
+The diagram view renders each broker as the fibril ring: active brokers blink
+more often than idle ones, and one that drops out of the cluster lingers
+briefly as a dimmed X-eyed ghost so the gap is visible. Replication links
+draw as fiber strands whose density follows how many partitions ride the
+link, and a standalone broker sprouts a strand per declared queue. Honoring
+reduced-motion preferences stills all of it.
+
 The page also exposes three operator actions, each with a confirmation:
 
 - **Drain this broker**: clients are told to move and, in coordinated mode,
