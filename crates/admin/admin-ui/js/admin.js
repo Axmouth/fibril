@@ -225,6 +225,9 @@ function fmtCompact(n) {
 function setCompact(el, n) {
   el.textContent = fmtCompact(n);
   el.title = Number.isFinite(n) ? Number(n).toLocaleString("en-US") : "";
+  // A colored zero shouts about nothing: state color engages only when the
+  // number does. The doubled class out-specifies the v-* color classes.
+  el.classList.toggle("is-zero", n === 0);
 }
 
 function timeAgoShort(unixSec) {

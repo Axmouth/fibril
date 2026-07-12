@@ -127,6 +127,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Changed
 
+- Flavor and light-mode tuning from real-use screens: the non-crimson flavor
+  accents gained saturation and brightness (chlorophyll and azure had drifted
+  gray-adjacent), light mode sits on a toned paper ground a step less light
+  with firmer panel edges, and the identical ground declarations duplicated
+  across every light flavor collapsed into the base light theme.
 - Clearer sidebar icons: Messages is an envelope, Dead letters an
   undeliverable (struck-through) envelope, and Activity takes the alert badge,
   leaving the pulse line to Diagnostics alone.
@@ -180,6 +185,9 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- Zeros stopped shouting: stat values render dim at zero and take their state
+  color only when the number does, so an idle broker's Overview no longer
+  pulls the eye to five colored nothings.
 - Buttons no longer render bold on Windows. The stylesheet used fractional
   font weights (550, 650), which interpolate on variable fonts but round UP
   on static families like Segoe UI - a primary button asked for 650 and got

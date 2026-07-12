@@ -277,7 +277,7 @@ function render(bundle) {
   document.getElementById("q-ops-lease").textContent = fmtAt(activity?.last_active_ms);
   const cleanup = activity?.last_eviction_attempt;
   document.getElementById("q-ops-cleanup").textContent = cleanup
-    ? `${String(cleanup.kind || "")} · ${String(cleanup.outcome || "")}`
+    ? `${String(cleanup.kind || "").replace(/_/g, " ")} · ${String(cleanup.outcome || "").replace(/_/g, " ")}`
     : "no cleanup yet";
 
   const inspect = new URLSearchParams({ topic });

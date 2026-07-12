@@ -38,14 +38,14 @@
 
 html[data-theme="light"] {
   color-scheme: light;
-  --bg: #f2f1ed;
-  --panel: #fbfaf8;
-  --panel-2: #ffffff;
+  --bg: #e8e6e0;
+  --panel: #f5f4f0;
+  --panel-2: #fbfaf7;
   --text: #292723;
-  --muted: #6e6c66;
-  --dim: #a3a09a;
-  --line: #dcd8d0;
-  --line-2: #cfcac0;
+  --muted: #68665f;
+  --dim: #9c9992;
+  --line: #d2cec5;
+  --line-2: #c2bdb1;
   --accent: #ae5644;
   --accent-soft: rgba(174, 86, 68, .10);
   --accent-line: rgba(174, 86, 68, .45);
@@ -1781,18 +1781,18 @@ a.broker-switch-item:hover {
    chips, never on health. Names from the tissue-and-stain family. */
 
 html[data-flavor="neuronic"] {
-  --accent: #e3b341;
-  --accent-soft: rgba(227, 179, 65, .15);
-  --accent-line: rgba(227, 179, 65, .48);
+  --accent: #f2c230;
+  --accent-soft: rgba(242, 194, 48, .17);
+  --accent-line: rgba(242, 194, 48, .55);
   --bg: #121108;
   --panel: #191710;
   --panel-2: #201d14;
 }
 
 html[data-flavor="chlorophyll"] {
-  --accent: #5fbf6f;
-  --accent-soft: rgba(95, 191, 111, .15);
-  --accent-line: rgba(95, 191, 111, .48);
+  --accent: #41d066;
+  --accent-soft: rgba(65, 208, 102, .17);
+  --accent-line: rgba(65, 208, 102, .55);
   --bg: #0d120e;
   --panel: #141a15;
   --panel-2: #1a211b;
@@ -1808,27 +1808,27 @@ html[data-flavor="crimson"] {
 }
 
 html[data-flavor="eosin"] {
-  --accent: #d95970;
-  --accent-soft: rgba(217, 89, 112, .15);
-  --accent-line: rgba(217, 89, 112, .48);
+  --accent: #f0537e;
+  --accent-soft: rgba(240, 83, 126, .17);
+  --accent-line: rgba(240, 83, 126, .55);
   --bg: #120e12;
   --panel: #191419;
   --panel-2: #201a20;
 }
 
 html[data-flavor="azure"] {
-  --accent: #5da9e8;
-  --accent-soft: rgba(93, 169, 232, .15);
-  --accent-line: rgba(93, 169, 232, .48);
+  --accent: #3ba4ff;
+  --accent-soft: rgba(59, 164, 255, .17);
+  --accent-line: rgba(59, 164, 255, .55);
   --bg: #0e1014;
   --panel: #14181e;
   --panel-2: #1a1f26;
 }
 
 html[data-flavor="iris"] {
-  --accent: #9a7ce0;
-  --accent-soft: rgba(154, 124, 224, .15);
-  --accent-line: rgba(154, 124, 224, .48);
+  --accent: #a582f5;
+  --accent-soft: rgba(165, 130, 245, .17);
+  --accent-line: rgba(165, 130, 245, .55);
   --bg: #100f14;
   --panel: #16141c;
   --panel-2: #1c1a23;
@@ -1840,54 +1840,36 @@ html[data-theme="light"][data-flavor="neuronic"] {
   --accent: #97731a;
   --accent-soft: rgba(151, 115, 26, .12);
   --accent-line: rgba(151, 115, 26, .45);
-  --bg: #f2f1ed;
-  --panel: #fbfaf8;
-  --panel-2: #ffffff;
 }
 
 html[data-theme="light"][data-flavor="chlorophyll"] {
   --accent: #2f7d3c;
   --accent-soft: rgba(47, 125, 60, .11);
   --accent-line: rgba(47, 125, 60, .45);
-  --bg: #f2f1ed;
-  --panel: #fbfaf8;
-  --panel-2: #ffffff;
 }
 
 html[data-theme="light"][data-flavor="crimson"] {
   --accent: #a81e38;
   --accent-soft: rgba(168, 30, 56, .11);
   --accent-line: rgba(168, 30, 56, .45);
-  --bg: #f2f1ed;
-  --panel: #fbfaf8;
-  --panel-2: #ffffff;
 }
 
 html[data-theme="light"][data-flavor="eosin"] {
   --accent: #a83349;
   --accent-soft: rgba(168, 51, 73, .11);
   --accent-line: rgba(168, 51, 73, .45);
-  --bg: #f2f1ed;
-  --panel: #fbfaf8;
-  --panel-2: #ffffff;
 }
 
 html[data-theme="light"][data-flavor="azure"] {
   --accent: #2f6ea8;
   --accent-soft: rgba(47, 110, 168, .11);
   --accent-line: rgba(47, 110, 168, .45);
-  --bg: #f2f1ed;
-  --panel: #fbfaf8;
-  --panel-2: #ffffff;
 }
 
 html[data-theme="light"][data-flavor="iris"] {
   --accent: #6b4fb0;
   --accent-soft: rgba(107, 79, 176, .11);
   --accent-line: rgba(107, 79, 176, .45);
-  --bg: #f2f1ed;
-  --panel: #fbfaf8;
-  --panel-2: #ffffff;
 }
 
 /* ---------------- flavor picker ---------------- */
@@ -2189,3 +2171,6 @@ html[data-theme="light"][data-flavor="iris"] {
   padding-bottom: 24px;
   border-bottom: 1px solid var(--line-2);
 }
+
+/* Zero values sit quiet; state color engages only when the number does. */
+.is-zero.is-zero { color: var(--dim); }

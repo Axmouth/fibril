@@ -281,8 +281,8 @@ function laneBacklog(stroma) {
 function renderAttention(items) {
   const list = document.getElementById("attention-list");
   if (!items.length) {
-    list.innerHTML = `<li class="attention-empty">Nothing needs attention.
-      Backlogs are being read, settings loaded, nothing quarantined.</li>`;
+    list.innerHTML = `<li class="attention-empty">Nothing needs attention -
+      every condition the broker checks is quiet.</li>`;
     return;
   }
   list.innerHTML = items
