@@ -3414,3 +3414,102 @@ a single JSON label mapping partition -> bucketed rate (buckets, not raw,
 to keep the committed snapshot quiet). Then drawLinkJob takes the summed
 buckets of the partitions riding each edge instead of the owner bucket.
 Gate on actually noticing the proxy being wrong in real use.
+
+## Mockup-parity pass 2 (PLANNED 2026-07-13, user feedback batch over queues/streams/cluster/security/settings)
+
+The original mockup's full HTML/CSS is archived at
+archive/admin-mockup-reference.html - lift class structures, spacing, and
+layout approaches from it directly. Work in this order unless redirected.
+
+M1 - Queues + Streams list upgrade (no server change needed).
+  FACTS CHECKED: per-queue depth history rings already feed the sparklines,
+  and queues_debug state carries applied_upto (publish tail) and
+  settled_until (settled floor) per queue - so in/s and out/s are
+  client-side tick diffs, the same pattern as the connections view rates.
+  1. In /s and Out /s columns on queue rows (and append/s on stream rows,
+     from stream positions), tick-diffed, dim when zero.
+  2. Group section spacing: the mockup separates group cards with 14px
+     (.mt); ours abut. Keep OUR group chip on the left (user leans ours,
+     confirmed by assessment - the mockup's right-floating chip separates
+     the label from what it labels).
+  3. Sparkline click -> drilldown popover (mockup .pop: 340px, fixed
+     position near the click): big depth number, in/s, out/s, and the
+     15-min depth chart from the history series already on the page.
+     "oldest ready message age" from the mockup needs broker support that
+     does not exist (only next_expiry_hint is tracked) - INVESTIGATE a
+     cheap head-timestamp expose during this phase, drop from v1 if it
+     means touching storage.
+  4. The same treatment on streams rows where it applies.
+
+M2 - Streams durable cursor view + streams scenario.
+  The mockup's per-stream SUBSCRIBERS table: subscriber, position
+  (tail / catching up), behind, read/s, last activity. We surface live
+  subscription counts and lag recoveries but NOT durable cursor positions.
+  1. Plumbing: expose the stream durable cursors per topic/partition in
+     the admin payload (streams_debug or a dedicated field): cursor name,
+     position, tail at sample time (behind = tail - position), last
+     advance time if tracked.
+  2. UI: expandable per-stream cursor table in the streams page, chips for
+     tail (ok) vs catching up (warn as the gap grows).
+  3. scripts/scenarios/stream-tour.scenario: declare streams of each
+     durability, publish, attach a fast and a slow reader, a durable
+     cursor that disconnects and resumes, lag recovery visible. Document
+     in scripts/scenarios/README.md (standing rule).
+
+M3 - DLQ scenario.
+  scripts/scenarios/dlq-tour.scenario: queue with max_retries + DLQ
+  policy, messages that dead-letter, then replay-to-source from the
+  Messages page. BLOCKER TO ASSESS FIRST: driving retries-exhausted needs
+  a consumer that fails messages - e2e_c has no nack mode. Either add a
+  --nack-every N flag to e2e_c (small), or dead-letter via TTL expiry
+  under a ttl-routing policy if that path exists. Whichever is honest and
+  small wins.
+
+M4 - Cluster page: adopt the mockup's non-diagram view.
+  Replace the current dense list view with the mockup's layout (diagram
+  view untouched): per-broker cards (.node: header dot + name + chips,
+  kv body rows, footer action) + the PLACEMENT matrix (topics x brokers,
+  partition counts per cell).
+  1. New heartbeat labels (same mechanism as the S3 rates): broker
+     version, process start time (-> uptime), and TLS state
+     ("off" | "tls" | "mtls" + days until leaf expiry, computed
+     broker-side where the cert is already parsed). Surface per node in
+     the topology payload like rate_pub.
+  2. Cards: address, partitions owned, version + uptime, TLS chip (warn
+     when expiry near). Drain button on THIS node only - the mockup note
+     has it right: other nodes' cards link to that broker's own admin
+     (switcher-style href) instead of pretending we can drain remotely.
+  3. Placement matrix from assignments (data already in the payload).
+  4. "Cluster" naming already done; the diagram/list toggle stays.
+
+M5 - Settings layout pass.
+  The current form is ragged (mixed control widths, full-width strays,
+  two-column jumble - user screenshots 43/44). Phase 1 is CSS-first:
+  a consistent field grid (label + control columns aligned, uniform
+  control widths, number+unit pairs as one aligned unit), section cards
+  with even padding. Phase 2 (bank until phase 1 lands): mockup-style
+  extras - serialize the DEFAULTS alongside current values in the
+  runtime-settings GET so changed-from-default values highlight with
+  "default X" ghosts, and a "recently changed" strip fed from the audit
+  ring's settings entries.
+
+M6 - Security page: cert testing scenario.
+  A TLS-enabled scenario mode (scenario.sh flag that generates
+  self-signed material via the existing setup machinery before boot), so
+  the Security page shows a real cert, rotation can be exercised, and
+  fibrilctl cert issue gets a documented walkthrough. Mockup extras
+  (client identities with active connection counts - verified_identity is
+  known per connection; user last-seen) BANKED as a follow-on, roles need
+  the shelved authz work and stay shelved.
+
+M7 - Favicon: mascot eyes + state (user idea 2026-07-13).
+  1. Redraw the favicon face tiles with the mascot's elongated capsule
+     eyes (current extraction reads as square dots at 16px), regenerated
+     from mascot-master with the established pixel pipeline.
+  2. Dynamic favicon by state - this IS doable: swapping the <link
+     rel="icon"> href updates the tab icon in all modern browsers. States:
+     normal face; X-eyes when the event stream is down/broker unreachable
+     (the live pill already knows); strained face when this broker sits in
+     the top load bucket (overview data already on hand). Generate the two
+     extra 16/32px face tiles, swap in layout.js where the live pill state
+     changes. Throttle swaps (no flicker on reconnect blips).
