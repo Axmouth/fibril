@@ -2184,3 +2184,26 @@ html[data-theme="light"][data-flavor="iris"] {
 
 /* Zero values sit quiet; state color engages only when the number does. */
 .is-zero.is-zero { color: var(--dim); }
+
+/* ---- mascot placements (S0: login, 404, favicon - never data views) ---- */
+.login-mascot {
+  display: block;
+  height: auto;
+  margin: 2px auto 14px;
+  width: 106px;
+}
+
+.notfound-hero {
+  padding: 56px 0;
+  text-align: center;
+}
+
+.notfound-hero img {
+  height: auto;
+  margin-bottom: 20px;
+  width: 128px;
+}
+
+.notfound-hero h2 {
+  margin: 0 0 6px;
+}

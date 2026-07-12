@@ -127,6 +127,10 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Changed
 
+- The fibril mascot arrives (stage one): the pixel-art ring with the teal
+  face appears on the login page and the 404 page, and its face - the little
+  screen from the ring's band - is the dashboard favicon. Placements stay
+  out of data-dense views by design.
 - Flavor and light-mode tuning from real-use screens: the non-crimson flavor
   accents gained saturation and brightness (chlorophyll and azure had drifted
   gray-adjacent), light mode sits on a toned paper ground a step less light
