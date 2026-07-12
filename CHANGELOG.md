@@ -169,6 +169,18 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   approximation (the last visible seam inside the ring opening is gone),
   and the leader's glow paints last so strands on its turned-away side
   carry the gold cast too.
+- The Connections page grew a diagram view: the broker as the fibril ring
+  with its clients plugged in. Publisher connections run blue strands into
+  the ring's left side, subscribers violet strands out of the right, pulses
+  travel each strand at a cadence following that connection's live message
+  rate, and idle connections gather as a dim bundle under the ring. Hover
+  an endpoint to spotlight its strand and table row. Behind it, each
+  connection now counts the messages it publishes (a per-connection counter
+  on the wire handler's hot path, one atomic increment per publish frame)
+  and the connections API reports it, which also gives the list view a
+  Published column. The fiber renderer that powers this and the cluster
+  diagram now lives in one shared file. Scenario tooling docs landed in
+  scripts/scenarios/README.md (verbs, included scenarios, load recipes).
 - Admin API requests reject unknown fields with an error that names the
   offender. A typoed `partion_count` in a declare request used to be
   silently ignored (the queue landed with the default), now the response

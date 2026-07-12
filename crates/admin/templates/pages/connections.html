@@ -7,15 +7,36 @@
 
 <div id="conn-strip" class="stat-strip"></div>
 
-<div class="queue-controls">
+<div class="queue-controls" style="display:flex; align-items:center; gap:12px;">
   <input id="conn-search" type="search" placeholder="filter by peer or id" />
+  <div class="view-toggle" role="group" aria-label="View mode" style="margin-left:auto;">
+    <button type="button" id="conn-view-diagram" class="btn">Diagram</button>
+    <button type="button" id="conn-view-list" class="btn">List</button>
+  </div>
 </div>
 
+<div id="conn-diagram-view">
+  <div id="conn-stage" style="position:relative;">
+    <canvas id="conn-tendril-canvas" aria-hidden="true"
+      style="position:absolute; inset:0; width:100%; height:100%; image-rendering:pixelated; pointer-events:none;"></canvas>
+    <svg id="conn-diagram" viewBox="0 0 860 380" width="100%" height="380"
+         preserveAspectRatio="xMidYMid meet"
+         style="position:relative; z-index:1; background: var(--panel-bg, transparent); border-radius: 8px;"></svg>
+    <canvas id="conn-tendril-canvas-over" aria-hidden="true"
+      style="position:absolute; inset:0; width:100%; height:100%; image-rendering:pixelated; pointer-events:none; z-index:2;"></canvas>
+  </div>
+  <p class="queue-group-note">Publishers plug in on the left, subscribers on the
+    right. Pulses follow each connection's traffic. Hover an endpoint to spotlight
+    its connection.</p>
+</div>
+
+<div id="conn-list-view">
 <div class="queue-table-wrap">
   <table class="table table-compact metric-table">
     <thead>
       <tr>
         <th>Connection</th>
+        <th class="text-right">Published</th>
         <th class="text-right">Subscriptions</th>
         <th>Auth</th>
         <th class="text-right">Uptime</th>
@@ -26,38 +47,410 @@
 </div>
 <p class="queue-group-note" id="conn-empty" hidden>
   No client connections. Clients connect to the broker port (default 9876).</p>
+</div>
 
 <script src="/static/js/api.js"></script>
 <script src="/static/js/admin.js"></script>
+<script src="/static/js/tendrils.js"></script>
 <script>
+const { hashStr, rnd, spriteUrl, PULSE_CADENCE, fmtRate } = FibrilTendrils;
+const REDUCED_MOTION = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+let swayT = 0;
+let lastConns = [];
+let focusConn = null;
+let connView = localStorage.getItem("connections.view") === "list" ? "list" : "diagram";
+// Endpoint layout computed per data tick, consumed by the canvas pass.
+let model = null;
+
+// Connection-level rates, derived by diffing published totals between data
+// ticks (the id is a stable uuid for the connection's lifetime).
+const rates = new Map();
+function trackRates(list) {
+  const now = performance.now();
+  const seen = new Set();
+  for (const c of list) {
+    seen.add(c.id);
+    const total = c.published ?? 0;
+    const prev = rates.get(c.id);
+    if (!prev) {
+      rates.set(c.id, { total, at: now, rate: 0 });
+    } else if (now - prev.at > 500) {
+      prev.rate = Math.max(0, (total - prev.total) / ((now - prev.at) / 1000));
+      prev.total = total;
+      prev.at = now;
+    }
+  }
+  for (const id of [...rates.keys()]) if (!seen.has(id)) rates.delete(id);
+}
+const connRate = (c) => rates.get(c.id)?.rate ?? 0;
+// Connection-level buckets sit lower than broker-level ones.
+const rateBucket = (rate) => (rate <= 0 ? 0 : rate < 50 ? 1 : rate < 1000 ? 2 : 3);
+
+const CAP = 13;
+function el(name, attrs, text) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", name);
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+  if (text != null) node.textContent = text;
+  return node;
+}
+
+const midTrunc = (s, max) => (s.length <= max ? s
+  : s.slice(0, Math.ceil(max / 2) - 1) + "…" + s.slice(s.length - Math.floor(max / 2)));
+
+// Lay out endpoints and rebuild the svg (ring, labels, hover targets). The
+// strands themselves are drawn on the canvases by drawConnTendrils.
+function buildDiagram(list) {
+  const svg = document.getElementById("conn-diagram");
+  if (!svg) return;
+  const pubsAll = list.filter((c) => (c.published ?? 0) > 0)
+    .sort((a, b) => connRate(b) - connRate(a));
+  const subsAll = list.filter((c) => (c.subs ?? 0) > 0)
+    .sort((a, b) => (b.subs ?? 0) - (a.subs ?? 0));
+  const idle = list.filter((c) => !(c.published ?? 0) && !(c.subs ?? 0));
+
+  const side = (all) => {
+    const shown = all.slice(0, all.length <= CAP + 1 ? all.length : CAP);
+    const more = all.length - shown.length;
+    return { shown, more };
+  };
+  const left = side(pubsAll), right = side(subsAll);
+  const rows = Math.max(left.shown.length + (left.more ? 1 : 0),
+    right.shown.length + (right.more ? 1 : 0), 1);
+  const H = Math.max(380, 120 + rows * 42);
+  svg.setAttribute("viewBox", `0 0 860 ${H}`);
+  svg.setAttribute("height", H);
+  const cy = H / 2 - 8;
+
+  const place = (entries, more, x) => {
+    const n = entries.length + (more ? 1 : 0);
+    const out = entries.map((c, i) => ({
+      id: c.id,
+      x, y: cy + (i - (n - 1) / 2) * 42,
+      label: midTrunc(c.peer || c.id, 17),
+      sub: x < 430
+        ? (connRate(c) > 0 ? fmtRate(connRate(c)) : "publisher")
+        : `${c.subs} sub${c.subs === 1 ? "" : "s"}`,
+      rate: connRate(c), subs: c.subs ?? 0,
+    }));
+    if (more) {
+      out.push({ id: null, x, y: cy + (n - 1 - (n - 1) / 2) * 42,
+        label: `+${more} more`, sub: "", rate: 0, subs: 0, agg: true });
+    }
+    return out;
+  };
+  model = {
+    ring: { x: 430, y: cy },
+    pubs: place(left.shown, left.more, 120),
+    subs: place(right.shown, right.more, 740),
+    idle: idle.length,
+    total: list.length,
+    H,
+  };
+
+  svg.replaceChildren();
+  if (list.length === 0) {
+    svg.appendChild(el("image", {
+      x: 430 - 64, y: cy - 76, width: 128, height: 128,
+      href: spriteUrl("open-a", 128), style: "image-rendering: pixelated",
+    }));
+    svg.appendChild(el("text", {
+      x: 430, y: cy + 84, "text-anchor": "middle", "font-size": 13,
+      style: "fill: var(--muted)",
+    }, "no clients connected"));
+    model = null;
+    return;
+  }
+  svg.appendChild(el("image", {
+    x: 430 - 48, y: cy - 48, width: 96, height: 96,
+    href: spriteUrl("open-a", 96), style: "image-rendering: pixelated",
+  }));
+  for (const ep of [...model.pubs, ...model.subs]) {
+    const anchor = ep.x < 430 ? "end" : "start";
+    const tx = ep.x < 430 ? ep.x - 10 : ep.x + 10;
+    svg.appendChild(el("text", {
+      x: tx, y: ep.y - 1, "text-anchor": anchor, "font-size": 10.5,
+      class: "mono", style: "fill: var(--text)",
+    }, ep.label));
+    if (ep.sub) {
+      svg.appendChild(el("text", {
+        x: tx, y: ep.y + 11, "text-anchor": anchor, "font-size": 9.5,
+        style: "fill: var(--muted)",
+      }, ep.sub));
+    }
+    if (ep.id) {
+      const hit = el("circle", {
+        cx: ep.x, cy: ep.y, r: 24, fill: "transparent", "data-conn": ep.id,
+        style: "cursor: pointer",
+      });
+      hit.addEventListener("mouseenter", () => setFocus(ep.id));
+      hit.addEventListener("mouseleave", () => setFocus(null));
+      svg.appendChild(hit);
+    }
+  }
+  if (idle.length) {
+    svg.appendChild(el("text", {
+      x: 430, y: H - 14, "text-anchor": "middle", "font-size": 10.5,
+      style: "fill: var(--dim)",
+    }, `${idle.length} idle connection${idle.length === 1 ? "" : "s"}`));
+  }
+}
+
+function setFocus(id) {
+  focusConn = id;
+  for (const row of document.querySelectorAll("#conn-rows tr[data-conn]")) {
+    row.classList.toggle("row-spot", !!id && row.dataset.conn === id);
+  }
+  drawConnTendrils();
+}
+
+// The canvas pass: the ring's own crossing bundle plus one strand per
+// endpoint, fused onto the fan tips with the same grammar as the cluster
+// diagram (alignment, color melt, welds). Publishers run the blue family
+// into the ring, subscribers the violet family out of it.
+function drawConnTendrils() {
+  const under = document.getElementById("conn-tendril-canvas");
+  const over = document.getElementById("conn-tendril-canvas-over");
+  const svg = document.getElementById("conn-diagram");
+  if (!under || !over || !svg) return;
+  const cw = svg.clientWidth, ch = svg.clientHeight;
+  if (!cw || !ch) return;
+  const RES = 1.5;
+  const bw = Math.max(1, Math.round(cw / RES));
+  const bh = Math.max(1, Math.round(ch / RES));
+  for (const canvas of [under, over]) {
+    if (canvas.width !== bw) canvas.width = bw;
+    if (canvas.height !== bh) canvas.height = bh;
+  }
+  const ctxU = under.getContext("2d");
+  const ctxO = over.getContext("2d");
+  ctxU.clearRect(0, 0, bw, bh);
+  ctxO.clearRect(0, 0, bw, bh);
+  if (!model || connView === "list") return;
+  const vb = svg.viewBox.baseVal;
+  if (!vb || !vb.width) return;
+  const scale = Math.min(cw / vb.width, ch / vb.height) / RES;
+  const ox = (bw - vb.width * scale) / 2;
+  const oy = (bh - vb.height * scale) / 2;
+  const px = (x) => ox + x * scale;
+  const py = (y) => oy + y * scale;
+  ctxU.lineCap = "round";
+  ctxO.lineCap = "round";
+  const sway = REDUCED_MOTION ? 0 : swayT;
+  const ring = model.ring;
+  const r = 48;
+
+  const pulseHidden = (x, y) => {
+    const d2 = (x - ring.x) * (x - ring.x) + (y - ring.y) * (y - ring.y);
+    return x < ring.x && d2 > (r * 0.5) * (r * 0.5) && d2 < (r * 1.05) * (r * 1.05);
+  };
+  const { drawPathOn, drawTip, growPath, drawPulse, linkPts } =
+    FibrilTendrils.makeKit({
+      px, py, sway, swayT,
+      reducedMotion: REDUCED_MOTION,
+      pulseHidden,
+    });
+
+  const BATCH = ["#6db5f2", "#6db5f2", "#3d7bf0", "#8a4be8"];
+  const strandsN = Math.max(4, Math.min(7, 3 + Math.ceil(model.total / 4)));
+  const fiberColor = (i) =>
+    BATCH[hashStr("c" + (hashStr("conn|cross|" + i) % 1000)) % BATCH.length];
+
+  // The exact fan-tip position of crossing strand i on `side`, shared by
+  // the batch pass below and the endpoint fusing.
+  const batchTip = (side, i) => {
+    const seed = hashStr("conn|cross|" + i) % 1000;
+    const wob = REDUCED_MOTION ? 0 : Math.sin(sway + seed) * 2.2;
+    const s2 = side < 0 ? seed + 10 : seed + 20;
+    const reach = r * (0.95 + rnd(s2) * 0.75);
+    const rise = (((i / (strandsN - 1)) - 0.5) * 2 + (rnd(s2 + 1) - 0.5)) * r * 0.85;
+    return [ring.x + side * (r * 0.75 + reach),
+            ring.y + rise + wob * (rnd(s2 + 2) > 0.5 ? 1 : -1)];
+  };
+
+  const dimmed = (id) => (focusConn && id !== focusConn ? 0.1 : 1);
+
+  // Ring crossing bundle (same grammar as the cluster diagram's batches:
+  // tight wavy lanes through the opening, over-layer clipped past 0.38r).
+  const consumed = new Set();
+  const welds = [];
+  for (let i = 0; i < strandsN; i++) {
+    const seed = hashStr("conn|cross|" + i) % 1000;
+    const laneY = ((i / (strandsN - 1)) - 0.5) * r * 0.34 + (rnd(seed) - 0.5) * 3;
+    const wob = REDUCED_MOTION ? 0 : Math.sin(sway + seed) * 2.2;
+    const amp = 1.3 + rnd(seed + 4) * 1.1;
+    const ph = i * 0.5 + rnd(seed + 5) * 0.6;
+    const uy = (o) => Math.sin(sway * 0.9 + ph + o) * amp;
+    const lt = batchTip(-1, i), rt = batchTip(1, i);
+    const pts = [
+      lt,
+      [ring.x - r * 0.85, ring.y + laneY * 2 + wob * 0.5],
+      [ring.x - r * 0.3, ring.y + laneY + uy(0)],
+      [ring.x, ring.y + laneY + uy(1.8) * 1.25],
+      [ring.x + r * 0.3, ring.y + laneY + uy(3.6)],
+      [ring.x + r * 0.85, ring.y + laneY * 2 - wob * 0.5],
+      rt,
+    ];
+    const color = fiberColor(i);
+    drawPathOn(ctxU, pts, color, 0.8, 2.7);
+    const cutX = ring.x + r * 0.38;
+    ctxO.save();
+    ctxO.beginPath();
+    ctxO.rect(px(cutX), 0, bw, bh);
+    ctxO.clip();
+    drawPathOn(ctxO, pts, color, 0.8, 2.7);
+    ctxO.restore();
+    if (!consumed.has("-1|" + i)) drawTip(ctxU, lt[0], lt[1], "#7df0b8", 0.8);
+    if (!consumed.has("1|" + i)) drawTip(ctxO, rt[0], rt[1], "#7df0b8", 0.8);
+  }
+
+  // One strand per endpoint, fused onto the nearest free fan tip.
+  const PUB_COLORS = ["#3d7bf0", "#6db5f2"];
+  const plug = (ep, side, color, cadence, dir, ctx) => {
+    const seed = hashStr("conn|" + (ep.id || ep.label)) % 1000;
+    let best = null;
+    for (let i = 0; i < strandsN; i++) {
+      if (consumed.has(side + "|" + i)) continue;
+      const tip = batchTip(side, i);
+      const d = Math.abs(tip[1] - ep.y);
+      if (!best || d < best.d) best = { d, tip, i };
+    }
+    if (!best) best = { tip: batchTip(side, seed % strandsN), i: seed % strandsN };
+    consumed.add(side + "|" + best.i);
+    const [tx, ty] = best.tip;
+    const ux = tx - ring.x, uxy = ty - ring.y;
+    const ulen = Math.hypot(ux, uxy) || 1;
+    const span = Math.hypot(tx - ep.x, ty - ep.y);
+    const glide = Math.min(26, Math.max(8, span * 0.18));
+    const core = [tx + (ux / ulen) * glide, ty + (uxy / ulen) * glide];
+    const pts = linkPts(ep.x, ep.y, core[0], core[1], seed);
+    pts.push([tx, ty]);
+    const fib = fiberColor(best.i);
+    const stops = fib !== color
+      ? [[0, color], [0.55, color], [1, fib]] : null;
+    const alpha = 0.85 * dimmed(ep.id);
+    const width = ep.agg ? 4.4 : 3.0;
+    drawPathOn(ctxU, pts, color, alpha, width, stops);
+    welds.push({ tip: [tx, ty], u: [ux / ulen, uxy / ulen], color: fib,
+      alpha, width, glide, over: side > 0 });
+    // The plug end: a socket dot at the endpoint.
+    drawTip(ctxU, ep.x, ep.y, color, alpha);
+    if (!ep.agg && cadence) drawPulse(ctx, pts, seed, "#c8ecff", cadence, dir);
+  };
+  for (const ep of model.pubs) {
+    const color = PUB_COLORS[hashStr("pc" + (ep.id || "agg")) % PUB_COLORS.length];
+    plug(ep, -1, color, PULSE_CADENCE[rateBucket(ep.rate)] , 1, ctxU);
+  }
+  for (const ep of model.subs) {
+    // Subscribers run the violet family. Delivery has no per-connection
+    // counter yet, so their pulses tick at a steady gentle cadence that
+    // thickens a little with subscription count.
+    const cadence = PULSE_CADENCE[Math.min(1 + Math.floor((ep.subs - 1) / 3), 2)];
+    plug(ep, 1, "#8a4be8", cadence, 1, ctxO);
+  }
+
+  // Junction welds close the outline seams at the fuse points.
+  for (const w of welds) {
+    const ctx = w.over ? ctxO : ctxU;
+    const [tx, ty] = w.tip;
+    const [ux, uy2] = w.u;
+    const seg = (a, b, lw) => {
+      ctx.lineWidth = lw;
+      ctx.beginPath();
+      ctx.moveTo(px(tx + ux * a), py(ty + uy2 * a));
+      ctx.lineTo(px(tx + ux * b), py(ty + uy2 * b));
+      ctx.stroke();
+    };
+    ctx.globalAlpha = w.alpha;
+    ctx.strokeStyle = w.color;
+    seg(Math.min(16, w.glide + 4), 0, w.width);
+    seg(2, -8, 2.7);
+  }
+
+  // Idle connections: a dim stub bundle drooping from the ring's underside.
+  const idleN = Math.min(model.idle, 8);
+  for (let i = 0; i < idleN; i++) {
+    const seed = hashStr("idle" + i) % 1000;
+    const a = Math.PI / 2 + (i - (idleN - 1) / 2) * 0.16;
+    const stub = growPath(ring.x + (i - (idleN - 1) / 2) * 6, ring.y + r * 0.8,
+      a, 22 + rnd(seed) * 14, seed);
+    drawPathOn(ctxU, stub, "#6db5f2", 0.22, 2.0);
+  }
+
+  ctxU.globalAlpha = 1;
+  ctxO.globalAlpha = 1;
+}
+
 function render(bundle) {
   const rows = bundle.connections;
   const list = Array.isArray(rows) ? rows : [];
+  lastConns = list;
+  trackRates(list);
   const search = (document.getElementById("conn-search")?.value || "").trim().toLowerCase();
   const visible = list.filter((r) =>
     !search || `${r.peer || ""} ${r.id || ""}`.toLowerCase().includes(search));
 
   const authed = list.filter((r) => r.authenticated).length;
   const subs = list.reduce((acc, r) => acc + (r.subs || 0), 0);
+  const publishing = list.filter((r) => connRate(r) > 0).length;
   document.getElementById("conn-strip").innerHTML = `
     <span><b>${list.length}</b> connections</span>
+    <span><b class="${publishing ? "v-active" : "v-dim"}">${publishing}</b> publishing</span>
     <span><b class="v-active">${subs}</b> subscriptions</span>
     <span><b class="${authed ? "v-ok" : "v-dim"}">${authed}</b> authenticated</span>`;
 
   document.getElementById("conn-empty").hidden = visible.length > 0;
   document.getElementById("conn-rows").innerHTML = visible.map((r) => `
-    <tr>
+    <tr data-conn="${escapeHtml(r.id)}">
       <td>
         <div class="ident-name mono">${escapeHtml(r.peer)}</div>
         <div class="ident-sub mono">${escapeHtml(r.id)}</div>
       </td>
+      <td class="text-right ${connRate(r) > 0 ? "v-active" : "v-dim"}">${
+        connRate(r) > 0 ? escapeHtml(fmtRate(connRate(r))) : (r.published ?? 0)}</td>
       <td class="text-right ${r.subs > 0 ? "v-active" : "v-dim"}">${r.subs ?? 0}</td>
       <td>${r.authenticated
         ? '<span class="chip-ok">authenticated</span>'
         : '<span class="chip-plain">anonymous</span>'}</td>
       <td class="text-right">${escapeHtml(fmtUptime(r.uptime ?? 0))}</td>
     </tr>`).join("");
+  for (const row of document.querySelectorAll("#conn-rows tr[data-conn]")) {
+    row.addEventListener("mouseenter", () => setFocus(row.dataset.conn));
+    row.addEventListener("mouseleave", () => setFocus(null));
+  }
+
+  buildDiagram(list);
+  drawConnTendrils();
 }
+
+function setConnView(mode) {
+  connView = mode;
+  localStorage.setItem("connections.view", mode);
+  const isList = mode === "list";
+  document.getElementById("conn-diagram-view").hidden = isList;
+  document.getElementById("conn-view-diagram").classList.toggle("active", !isList);
+  document.getElementById("conn-view-list").classList.toggle("active", isList);
+  drawConnTendrils();
+}
+document.getElementById("conn-view-diagram").addEventListener("click", () => setConnView("diagram"));
+document.getElementById("conn-view-list").addEventListener("click", () => setConnView("list"));
+setConnView(connView);
+
+// Sway loop, self-terminating when boosted navigation removes the canvas.
+if (!REDUCED_MOTION) {
+  let lastFrame = 0;
+  const loop = (ts) => {
+    const canvas = document.getElementById("conn-tendril-canvas");
+    if (!canvas || !canvas.isConnected) return;
+    window.requestAnimationFrame(loop);
+    if (document.hidden || connView === "list") return;
+    if (ts - lastFrame < 80) return;
+    lastFrame = ts;
+    swayT += 0.045;
+    drawConnTendrils();
+  };
+  window.requestAnimationFrame(loop);
+}
+
 // Fetch-based refresh: re-renders on filter edits and is the polling
 // fallback when the event stream is out.
 async function refresh() {

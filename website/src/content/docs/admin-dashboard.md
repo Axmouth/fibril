@@ -209,6 +209,19 @@ you loaded the page, the save is rejected and you are asked to reload and resubm
 Global DLQ target changes are persisted in storage-owned state and survive
 restart.
 
+## Connections
+
+The connections page lists every open client connection with its publish
+count, subscriptions, auth state, and uptime. Its diagram view renders the
+broker as the fibril ring with clients plugged in: publisher connections run
+blue strands into the left side, subscribers violet strands out of the
+right, pulses travel along each strand at a cadence following that
+connection's live rate (derived in the page from successive data ticks),
+and idle connections gather as a dim bundle under the ring. Hovering an
+endpoint spotlights its strand and its table row. In a cluster the smart
+clients follow partition ownership, so a connection appears on the broker
+it actually talks to.
+
 ## Subscriptions and Cohorts
 
 The subscriptions page lists active subscriptions. When exclusive consumer groups

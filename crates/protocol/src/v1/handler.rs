@@ -2312,6 +2312,9 @@ where
         .heartbeat_interval
         .unwrap_or(DEFAULT_HEARTBEAT_INTERVAL);
     let timeout = tokio::time::Duration::from_secs(heartbeat_interval * 3);
+    // Cloned once so the per-publish bump below is a bare atomic increment,
+    // never a map lookup on the hot path. Feeds the connections admin view.
+    let conn_published = connection_stats.publish_counter(&conn_id);
     // TODO: Consider sharing it between connections?
     let req_id_gen = ReqIdGenerator::new();
 
@@ -3764,6 +3767,9 @@ where
                 let publish_received = unix_millis();
                 let pubreq: Publish =
                     decode_wire_or_400!(frame, frame_tx_low_prio, metrics, wire::decode_publish);
+                if let Some(counter) = &conn_published {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 if fence_stale_partitioning(
                     &frame_tx_low_prio,
                     frame.request_id,
@@ -3956,6 +3962,9 @@ where
                     metrics,
                     wire::decode_publish_delayed
                 );
+                if let Some(counter) = &conn_published {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 if fence_stale_partitioning(
                     &frame_tx_low_prio,
                     frame.request_id,

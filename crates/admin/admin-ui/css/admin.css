@@ -824,6 +824,11 @@ textarea:focus {
   outline: none;
 }
 
+/* A table row spotlighted from the connections diagram. */
+.row-spot {
+  background: var(--accent-soft);
+}
+
 /* Checks and radios pick up the flavor accent instead of the OS default. */
 input[type="checkbox"],
 input[type="radio"] {

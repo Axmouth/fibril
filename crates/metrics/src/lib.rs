@@ -1249,6 +1249,9 @@ struct ConnectionState {
     connected_at: Instant,
     authenticated: bool,
     subs: DashMap<SubId, SubInfo>,
+    // Messages this connection published. Arc so the frame loop clones it
+    // once at connection start and increments without touching the map.
+    published: Arc<AtomicU64>,
 }
 
 impl ConnectionState {
@@ -1264,6 +1267,7 @@ impl ConnectionState {
             connected_at,
             authenticated,
             subs: DashMap::new(),
+            published: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -1318,6 +1322,14 @@ impl ConnectionStats {
         );
 
         conn_id
+    }
+
+    /// The connection's publish counter. The frame loop clones it once at
+    /// connection start, so the per-publish increment is a bare atomic.
+    pub fn publish_counter(&self, conn_id: &ConnId) -> Option<Arc<AtomicU64>> {
+        self.connections
+            .get(conn_id)
+            .map(|conn| conn.published.clone())
     }
 
     pub fn set_connection_auth(&self, key: &Uuid, auth: bool) -> bool {
@@ -1375,7 +1387,8 @@ impl ConnectionStats {
                 "peer": c.peer.to_string(),
                 "uptime": uptime,
                 "authenticated": c.authenticated,
-                "subs": c.subs.len()
+                "subs": c.subs.len(),
+                "published": c.published.load(Ordering::Relaxed),
             }));
         }
 
@@ -1399,5 +1412,27 @@ impl ConnectionStats {
         }
 
         serde_json::Value::Array(subs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_publish_counter_rides_the_snapshot() {
+        let stats = ConnectionStats::new();
+        let conn =
+            stats.add_connection("127.0.0.1:9000".parse().unwrap(), Instant::now(), true);
+        let counter = stats.publish_counter(&conn).expect("known connection");
+        counter.fetch_add(41, Ordering::Relaxed);
+        counter.fetch_add(1, Ordering::Relaxed);
+
+        let snapshot = stats.snapshot();
+        let entry = &snapshot.as_array().expect("array")[0];
+        assert_eq!(entry["published"], 42);
+
+        // Unknown connections yield no counter.
+        assert!(stats.publish_counter(&Uuid::now_v7()).is_none());
     }
 }
