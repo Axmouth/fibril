@@ -694,6 +694,11 @@ pub async fn topology(
             // liveness provider separates the two so the diagram can show a
             // dead broker instead of silently pretending it is fine.
             let live = server.liveness.as_ref().map(|provider| provider());
+            let raft_ids = server
+                .node_raft_ids
+                .as_ref()
+                .map(|provider| provider())
+                .unwrap_or_default();
             let mut nodes: Vec<serde_json::Value> = snapshot
                 .nodes
                 .values()
@@ -705,6 +710,7 @@ pub async fn topology(
                         "live": live
                             .as_ref()
                             .is_none_or(|set| set.contains(&node.node_id)),
+                        "raft_id": raft_ids.get(&node.node_id),
                     })
                 })
                 .collect();

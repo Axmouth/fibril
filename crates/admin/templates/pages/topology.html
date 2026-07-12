@@ -217,6 +217,8 @@ const seenNodes = new Map(); // node_id -> { node, lastSeen }
 const nodesCtx = new Map();  // node_id -> { img, ghost, active, size, mid }
 let tendrils = [];           // { owner, follower, from, to, count }
 let stubs = [];              // { from, dir, idx, ringR }
+let consensusLinks = [];     // { a, b, from, to } leader <-> voter
+let currentSpriteS = 96;
 let focusId = null;
 let lightPhase = 0;
 let swayT = 0;
@@ -311,7 +313,11 @@ function renderDiagram(data) {
 
   const raft = data.consensus ?? {};
   const leaderId = raft.leader != null ? String(raft.leader) : null;
+  const isLeaderNode = (node) => leaderId != null && (
+    (node.raft_id != null && String(node.raft_id) === leaderId)
+    || String(node.node_id) === leaderId);
   const S = spriteSize(nodes.length);
+  currentSpriteS = S;
   const { positions, width, height } = computeLayout(nodes, S);
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svg.setAttribute("height", height);
@@ -355,6 +361,23 @@ function renderDiagram(data) {
     if (from && to) tendrils.push({ owner, follower, from, to, count });
   }
 
+  // Consensus mesh: one faint strand from the leader to every other voter,
+  // correlated through raft ids. A different layer than data replication.
+  consensusLinks = [];
+  if (leaderId != null) {
+    const leaderNode = nodes.find((n) => isLeaderNode(n));
+    const voterSet = new Set((raft.voters ?? []).map(String));
+    if (leaderNode) {
+      const from = positions.get(leaderNode.node_id);
+      for (const node of nodes) {
+        if (node.node_id === leaderNode.node_id) continue;
+        if (node.raft_id == null || !voterSet.has(String(node.raft_id))) continue;
+        const to = positions.get(node.node_id);
+        if (from && to) consensusLinks.push({ a: leaderNode.node_id, b: node.node_id, from, to });
+      }
+    }
+  }
+
   // A lone broker gets queue stubs instead: strands sprouting per declared
   // queue (bucketed at 8), inbound palette left, outbound right.
   stubs = [];
@@ -375,7 +398,7 @@ function renderDiagram(data) {
     const ghost = !!node.__ghost || node.live === false;
     const owned = ownedCount.get(node.node_id) ?? 0;
     const active = !ghost && owned > 0;
-    const isLeader = !ghost && leaderId != null && String(node.node_id) === leaderId;
+    const isLeader = !ghost && isLeaderNode(node);
     const group = el("g", {
       class: "node-card" + (ghost ? " node-ghost" : ""),
       "data-node": node.node_id,
@@ -456,11 +479,14 @@ function drawTendrils() {
   // offsets from layered sine waves (tapered to zero at the endpoints so
   // strands meet their rings cleanly), drawn twice - a dark under-stroke
   // then the bright core - so the bundle reads like the outlined fiber art.
-  const strand = (x1, y1, x2, y2, seed, color, alpha) => {
+  const strand = (x1, y1, x2, y2, seed, color, alpha, opts) => {
     const dx = x2 - x1, dy = y2 - y1;
     const len = Math.hypot(dx, dy) || 1;
     const nx = -dy / len, ny = dx / len;
-    const amp = Math.min(26, 8 + len * 0.06) * (0.7 + rnd(seed) * 0.6);
+    const thin = opts && opts.thin;
+    const lane = opts && opts.lane != null ? opts.lane : 0;
+    const laneEnd = opts && opts.laneEnd != null ? opts.laneEnd : lane;
+    const amp = Math.min(26, 8 + len * 0.06) * (0.7 + rnd(seed) * 0.6) * (thin ? 0.5 : 1);
     const waves = 1.5 + rnd(seed + 4) * 1.5;
     const phase = rnd(seed + 5) * Math.PI * 2;
     const sway = REDUCED_MOTION ? 0 : swayT;
@@ -471,7 +497,7 @@ function drawTendrils() {
       const taper = Math.sin(Math.PI * t);
       const wob = Math.sin(t * Math.PI * 2 * waves + phase + sway)
         + 0.4 * Math.sin(t * Math.PI * 4.7 + phase * 2 - sway * 1.3);
-      const off = wob * amp * taper;
+      const off = wob * amp * taper + lane + (laneEnd - lane) * t;
       pts.push([px(x1 + dx * t + nx * off), py(y1 + dy * t + ny * off)]);
     }
     const trace = () => {
@@ -486,13 +512,23 @@ function drawTendrils() {
       ctx.stroke();
     };
     ctx.globalAlpha = alpha;
-    ctx.strokeStyle = "#0b0e14";
-    ctx.lineWidth = 3.1;
-    trace();
+    if (!thin) {
+      ctx.strokeStyle = "#0b0e14";
+      ctx.lineWidth = 3.1;
+      trace();
+    }
     ctx.strokeStyle = color;
-    ctx.lineWidth = 1.7;
+    ctx.lineWidth = thin ? 1.1 : 1.7;
     trace();
   };
+
+  // Consensus layer first, underneath the data bundles.
+  for (const link of consensusLinks) {
+    const on = !focusId || link.a === focusId || link.b === focusId;
+    const seed = hashStr("raft|" + link.a + "|" + link.b) % 1000;
+    strand(link.from.x, link.from.y, link.to.x, link.to.y, seed,
+      "#e8b65b", on ? 0.3 : 0.05, { thin: true });
+  }
 
   for (const e of tendrils) {
     // Always a small bundle like the art; density adds strands on top.
@@ -500,8 +536,12 @@ function drawTendrils() {
     const on = !focusId || e.owner === focusId || e.follower === focusId;
     for (let s = 0; s < count; s++) {
       const seed = hashStr(e.owner + "|" + e.follower + "|" + s) % 1000;
+      const spread = currentSpriteS * 0.42;
       strand(e.from.x, e.from.y, e.to.x, e.to.y, seed,
-        STRANDS_IN[seed % STRANDS_IN.length], on ? 0.85 : 0.07);
+        STRANDS_IN[seed % STRANDS_IN.length], on ? 0.85 : 0.07, {
+          lane: (rnd(seed + 7) - 0.5) * spread,
+          laneEnd: (rnd(seed + 8) - 0.5) * spread,
+        });
     }
   }
   for (const st of stubs) {
@@ -512,7 +552,10 @@ function drawTendrils() {
       const x2 = st.from.x + st.dir * (st.ringR + reach);
       const y2 = st.from.y + (rnd(seed + 3) - 0.5) * 190;
       const palette = st.dir < 0 ? STRANDS_IN : STRANDS_OUT;
-      strand(x1, st.from.y, x2, y2, seed, palette[seed % palette.length], 0.85);
+      strand(x1, st.from.y, x2, y2, seed, palette[seed % palette.length], 0.85, {
+        lane: (rnd(seed + 7) - 0.5) * st.ringR * 0.8,
+        laneEnd: (rnd(seed + 8) - 0.5) * 30,
+      });
     }
   }
   ctx.globalAlpha = 1;
@@ -527,10 +570,8 @@ function scheduleBlink(id) {
   const delay = n.active ? 6000 + Math.random() * 6000 : 15000 + Math.random() * 10000;
   setTimeout(() => {
     const cur = nodesCtx.get(id);
-    if (!cur || !cur.img.isConnected || document.hidden) {
-      if (cur && cur.img.isConnected) scheduleBlink(id);
-      return;
-    }
+    if (!cur || cur.ghost || !cur.img.isConnected) return;
+    if (document.hidden) { scheduleBlink(id); return; }
     playBlink(cur, () => scheduleBlink(id));
   }, delay);
 }
@@ -591,6 +632,10 @@ function highlight(id) {
   for (const e of tendrils) {
     if (e.owner === id) active.add(e.follower);
     if (e.follower === id) active.add(e.owner);
+  }
+  for (const link of consensusLinks) {
+    if (link.a === id) active.add(link.b);
+    if (link.b === id) active.add(link.a);
   }
   for (const [nodeId, group] of renderCtx.cards) {
     group.classList.toggle("node-active", active.has(nodeId));

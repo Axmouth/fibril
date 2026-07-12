@@ -114,6 +114,10 @@ pub type TlsReloadHandler = dyn Fn() -> Result<String, String> + Send + Sync;
 pub type LivenessProvider =
     dyn Fn() -> std::collections::HashSet<String> + Send + Sync;
 
+/// Returns each registered broker's raft id, keyed by node id.
+pub type RaftIdsProvider =
+    dyn Fn() -> std::collections::HashMap<String, u64> + Send + Sync;
+
 /// Returns presentation metadata for the certificate the broker currently
 /// serves, as JSON (fingerprint, validity window, subject). The broker wires
 /// one in when TLS is enabled; feeds the security view and the certificate
@@ -248,6 +252,9 @@ pub struct AdminServer {
     /// coordination. Feeds the topology payload's per-node `live` flag and
     /// the activity watcher's joined/left transitions. Absent = all live.
     pub liveness: Option<Arc<LivenessProvider>>,
+    /// Optional node-id -> raft-id correlation (from heartbeat labels), so
+    /// the topology view can mark consensus roles on broker nodes.
+    pub node_raft_ids: Option<Arc<RaftIdsProvider>>,
     /// True only under real cluster coordination (ganglion). The standalone
     /// single-node coordination view (wired for the topology page and broker
     /// switcher) must NOT trip cluster-only restrictions like the queue-delete
@@ -302,6 +309,7 @@ impl AdminServer {
             derived: crate::audit::DerivedConditions::default(),
             draining_flag: None,
             liveness: None,
+            node_raft_ids: None,
             cluster_mode: false,
         }
     }
@@ -327,6 +335,12 @@ impl AdminServer {
     /// Attach the live-broker set provider (heartbeat-fresh node ids).
     pub fn with_liveness(mut self, provider: Arc<LivenessProvider>) -> Self {
         self.liveness = Some(provider);
+        self
+    }
+
+    /// Attach the node-id to raft-id correlation provider.
+    pub fn with_node_raft_ids(mut self, provider: Arc<RaftIdsProvider>) -> Self {
+        self.node_raft_ids = Some(provider);
         self
     }
 

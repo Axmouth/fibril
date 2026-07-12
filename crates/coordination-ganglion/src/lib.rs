@@ -57,6 +57,9 @@ pub const ADVERTISE_LABEL: &str = "fibril/advertise";
 /// new on it. A label rather than a raft attribute so the state expires with
 /// the node's heartbeats and a crashed drain leaves nothing behind.
 pub const DRAINING_LABEL: &str = "fibril/draining";
+/// Advisory label carrying the node's raft id, so observability can correlate
+/// broker node ids with consensus membership.
+pub const RAFT_ID_LABEL: &str = "fibril/raft-id";
 
 /// Serialize a broker's advertise list for its heartbeat label.
 pub fn encode_advertise(addrs: &[String]) -> String {
@@ -2333,6 +2336,20 @@ impl GanglionCoordination {
     /// Live brokers: registered nodes whose heartbeat is within `ttl` of this
     /// process's clock. Nodes without a heartbeat label are treated as live
     /// (manually registered/static entries).
+    /// Registered nodes' raft ids, from the advisory heartbeat label. Nodes
+    /// that never carried the label are absent.
+    pub fn node_raft_ids(&self) -> HashMap<String, u64> {
+        self.node
+            .committed_snapshot()
+            .nodes
+            .values()
+            .filter_map(|node| {
+                let raft_id = node.labels.get(RAFT_ID_LABEL)?.parse().ok()?;
+                Some((node.node_id.clone(), raft_id))
+            })
+            .collect()
+    }
+
     pub fn live_nodes(&self, ttl: std::time::Duration) -> HashMap<String, NodeInfo> {
         let now = unix_millis_now();
         let ttl_ms = ttl.as_millis() as u64;

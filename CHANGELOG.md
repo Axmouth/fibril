@@ -127,6 +127,13 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Changed
 
+- The consensus layer joined the diagram: the heartbeat now carries each
+  node's raft id, so the leader marking finally correlates in real clusters
+  (raft ids never matched broker node ids before) and faint gold strands
+  connect the leader to every voter - the consensus mesh visible alongside
+  the data-replication bundles. Tendril bundles also gained body: strands
+  spread across the ring opening in lanes instead of converging on its
+  center, and a dead broker's ring no longer sneaks a blink.
 - The Cluster diagram came alive, then got its first live-review polish:
   replication links draw as proper fiber bundles (three to five snaking,
   outlined strands with layered waves, tapered into their rings) instead of

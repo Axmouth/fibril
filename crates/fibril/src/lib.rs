@@ -904,8 +904,13 @@ pub fn broker_heartbeat_labels(
     topology_adoption: Option<&TopologyAdoptionTracker>,
     advertise: &[String],
     draining: bool,
+    raft_node_id: u64,
 ) -> BTreeMap<String, String> {
     let mut labels = BTreeMap::new();
+    labels.insert(
+        fibril_coordination_ganglion::RAFT_ID_LABEL.to_string(),
+        raft_node_id.to_string(),
+    );
     if draining {
         labels.insert(
             fibril_coordination_ganglion::DRAINING_LABEL.to_string(),
@@ -1028,6 +1033,7 @@ pub fn spawn_ganglion_broker_tasks(
         .cloned()
         .unwrap_or_else(|| config.broker.listener.bind.to_string());
     let heartbeat_advertise = advertise_list.clone();
+    let heartbeat_raft_id = config.coordination.ganglion.raft_node_id;
     let heartbeat = parts.coordination.spawn_heartbeat_with_labels(
         NodeInfo {
             node_id: config.coordination.node_id.clone(),
@@ -1041,6 +1047,7 @@ pub fn spawn_ganglion_broker_tasks(
                 labels_adoption.as_deref(),
                 &heartbeat_advertise,
                 draining.load(std::sync::atomic::Ordering::Relaxed),
+                heartbeat_raft_id,
             )
         },
     );
@@ -1921,6 +1928,10 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
                         .into_keys()
                         .collect()
                 }))
+                .with_node_raft_ids({
+                    let source = parts.coordination.clone();
+                    Arc::new(move || source.node_raft_ids())
+                })
                 .with_coordination(parts.coordination.clone())
                 .with_consensus_topology(Arc::new(move || {
                     let mut value =
