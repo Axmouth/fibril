@@ -748,6 +748,11 @@ pub async fn topology(
                 .as_ref()
                 .map(|provider| provider())
                 .unwrap_or_default();
+            let meta = server
+                .node_meta
+                .as_ref()
+                .map(|provider| provider())
+                .unwrap_or_default();
             let mut nodes: Vec<serde_json::Value> = snapshot
                 .nodes
                 .values()
@@ -762,6 +767,7 @@ pub async fn topology(
                         "raft_id": raft_ids.get(&node.node_id),
                         "rate_pub": rates.get(&node.node_id).map(|rate| rate.0),
                         "rate_dlv": rates.get(&node.node_id).map(|rate| rate.1),
+                        "runtime": meta.get(&node.node_id),
                     })
                 })
                 .collect();

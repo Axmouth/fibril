@@ -169,6 +169,17 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   approximation (the last visible seam inside the ring opening is gone),
   and the leader's glow paints last so strands on its turned-away side
   carry the gold cast too.
+- The Cluster page's list view became the mockup's broker cards: one card
+  per broker with a live dot, the consensus leader starred, a this-node
+  chip, address, owned and followed partition counts (queues and streams
+  together), version and uptime, a TLS chip with days-to-expiry when
+  serving TLS, and live publish/delivery rates - plus an open-its-admin
+  link on every other node. Below them, the placement matrix: owned
+  partitions per broker per topic, streams marked. Powered by new
+  advisory heartbeat labels (version, start time, TLS mode, and the
+  leaf's not-after, which only changes on rotation), surfaced per node
+  in the topology payload as a runtime block. The view also answers to
+  ?view=list in the URL, shareable like the filters.
 - A dead-letter tour: the `e2e_c` bench client gains `--nack-every N`
   (requeue instead of complete, so messages burn their retry budgets),
   the scenario runner gains `declare-queue-dlq` and `consume-nack` verbs,

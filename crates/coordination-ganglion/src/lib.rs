@@ -64,6 +64,15 @@ pub const RAFT_ID_LABEL: &str = "fibril/raft-id";
 /// second since its previous heartbeat - for the admin topology view.
 pub const RATE_PUB_LABEL: &str = "fibril/rate-pub";
 pub const RATE_DLV_LABEL: &str = "fibril/rate-dlv";
+/// Advisory labels carrying broker runtime facts for the admin views:
+/// version, process start (unix ms), TLS mode ("off" | "tls" | "mtls"),
+/// and - when serving TLS - the leaf certificate's not-after (unix
+/// seconds; days-left computes reader-side so the label only changes on
+/// rotation).
+pub const VERSION_LABEL: &str = "fibril/version";
+pub const STARTED_AT_LABEL: &str = "fibril/started-at";
+pub const TLS_LABEL: &str = "fibril/tls";
+pub const CERT_EXPIRY_LABEL: &str = "fibril/cert-expiry";
 
 /// Serialize a broker's advertise list for its heartbeat label.
 pub fn encode_advertise(addrs: &[String]) -> String {
@@ -2350,6 +2359,39 @@ impl GanglionCoordination {
             .filter_map(|node| {
                 let raft_id = node.labels.get(RAFT_ID_LABEL)?.parse().ok()?;
                 Some((node.node_id.clone(), raft_id))
+            })
+            .collect()
+    }
+
+    /// Registered nodes' runtime facts from the advisory heartbeat labels,
+    /// as loose JSON ready for the topology payload. Nodes that never
+    /// carried the version label are absent.
+    pub fn node_runtime_meta(&self) -> HashMap<String, serde_json::Value> {
+        self.node
+            .committed_snapshot()
+            .nodes
+            .values()
+            .filter_map(|node| {
+                let version = node.labels.get(VERSION_LABEL)?;
+                let mut meta = serde_json::json!({ "version": version });
+                if let Some(started) = node
+                    .labels
+                    .get(STARTED_AT_LABEL)
+                    .and_then(|raw| raw.parse::<u64>().ok())
+                {
+                    meta["started_at_ms"] = started.into();
+                }
+                if let Some(tls) = node.labels.get(TLS_LABEL) {
+                    meta["tls"] = serde_json::Value::String(tls.clone());
+                }
+                if let Some(expiry) = node
+                    .labels
+                    .get(CERT_EXPIRY_LABEL)
+                    .and_then(|raw| raw.parse::<i64>().ok())
+                {
+                    meta["cert_not_after_unix"] = expiry.into();
+                }
+                Some((node.node_id.clone(), meta))
             })
             .collect()
     }

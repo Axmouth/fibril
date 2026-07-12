@@ -167,7 +167,11 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 // cards and edges from the most recent diagram render so highlighting can be
 // re-applied without rebuilding listeners.
 let selectedNode = null;
-let viewMode = localStorage.getItem("topology.view") === "list" ? "list" : "diagram";
+// The view rides the URL when named there (shareable), else the sticky
+// per-browser choice.
+const viewParam = new URLSearchParams(window.location.search).get("view");
+let viewMode = (viewParam || localStorage.getItem("topology.view")) === "list"
+  ? "list" : "diagram";
 
 // The animated fiber layer gets expensive as clusters grow: past this many
 // rings it defaults off, and the Fibers toggle makes either choice stick.
@@ -962,24 +966,94 @@ function renderBrokerDetail(id) {
 // dashboards default to.
 function renderList(data) {
   const host = document.getElementById("broker-list");
-  const nodes = data.coordination?.nodes ?? [];
+  const coord = data.coordination || {};
+  const nodes = coord.nodes ?? [];
   if (!nodes.length) {
     host.innerHTML = `<p class="settings-note">no registered brokers yet</p>`;
     return;
   }
-  host.innerHTML = nodes.map((node) => {
-    const id = node.node_id;
-    const { owned, followed } = partitionsFor(data, id);
-    const roles = brokerRoles(data, id);
-    const tag = roles.length ? ` · ${escapeHtml(roles.join(", "))}` : "";
-    return `<details class="broker-list-item">` +
-      `<summary><b>${escapeHtml(id)}</b> · ${escapeHtml(node.broker_addr)}${tag}` +
-      ` · owns ${owned.length}, follows ${followed.length}</summary>` +
-      `<div class="broker-list-body">` +
-      detailSection("Owns", owned, "owner", true) +
-      detailSection("Follows", followed, "follow", false) +
-      `</div></details>`;
+  const selfId = coord.node_id;
+  const consensus = data.consensus ?? {};
+  const leaderId = consensus.leader != null ? String(consensus.leader) : null;
+  const leads = (n) => leaderId != null && (
+    (n.raft_id != null && String(n.raft_id) === leaderId) || String(n.node_id) === leaderId);
+
+  const cards = nodes.map((node) => {
+    const { owned, followed } = partitionsFor(data, node.node_id);
+    // partitionsFor covers queue assignments; streams ride their own table.
+    const streamOwned = (coord.stream_assignments ?? [])
+      .filter((a) => a.owner === node.node_id).length;
+    const streamFollowed = (coord.stream_assignments ?? [])
+      .filter((a) => (a.followers || []).includes(node.node_id)).length;
+    const live = node.live !== false;
+    const rt = node.runtime || {};
+    const up = rt.started_at_ms
+      ? fmtUptime((Date.now() - rt.started_at_ms) / 1000) : null;
+    let tlsCell = '<span class="chip-plain">no TLS</span>';
+    if (rt.tls && rt.tls !== "off") {
+      tlsCell = `<span class="chip-ok">${rt.tls === "mtls" ? "mTLS" : "TLS"}</span>`;
+      if (rt.cert_not_after_unix) {
+        const days = Math.floor((rt.cert_not_after_unix * 1000 - Date.now()) / 86400000);
+        tlsCell += ` <span class="${days <= 30 ? "chip-warn" : "chip-plain"}">cert ${days}d</span>`;
+      }
+    }
+    return `
+      <div class="node-card${live ? "" : " node-card-dead"}">
+        <div class="node-card-head">
+          <span class="node-dot ${live ? "node-dot-ok" : "node-dot-bad"}"></span>
+          <span class="mono node-card-name">${leads(node) ? "\u2605 " : ""}${escapeHtml(node.node_id)}</span>
+          ${node.node_id === selfId ? '<span class="chip-plain">this node</span>' : ""}
+          ${live ? "" : '<span class="chip-bad">unreachable</span>'}
+        </div>
+        <div class="node-card-body">
+          <div class="node-kv"><span>address</span><b>${escapeHtml(node.broker_addr || "")}</b></div>
+          <div class="node-kv"><span>owns \u00b7 follows</span><b>${owned.length + streamOwned} \u00b7 ${followed.length + streamFollowed}</b></div>
+          ${rt.version ? `<div class="node-kv"><span>version \u00b7 uptime</span><b>${escapeHtml(rt.version)}${up ? " \u00b7 " + escapeHtml(up) : ""}</b></div>` : ""}
+          <div class="node-kv"><span>TLS</span><b>${tlsCell}</b></div>
+          <div class="node-kv"><span>publish \u00b7 delivered /s</span><b>${fmtCompact(node.rate_pub ?? 0)} \u00b7 ${fmtCompact(node.rate_dlv ?? 0)}</b></div>
+        </div>
+        <div class="node-card-foot">
+          ${node.node_id === selfId
+            ? '<span class="settings-note">draining this node lives in the panel above</span>'
+            : node.admin_addr
+              ? `<a data-no-boost href="${location.protocol}//${escapeHtml(node.admin_addr)}${location.pathname}">open its admin</a>`
+              : '<span class="settings-note">no admin address registered</span>'}
+        </div>
+      </div>`;
   }).join("");
+
+  // Placement matrix: owned partitions per broker per topic, queues and
+  // streams together (streams marked).
+  const topics = new Map();
+  const add = (a, stream) => {
+    const key = stream ? `${a.topic} (stream)`
+      : (a.group ? `${a.topic} \u00b7 ${a.group}` : a.topic);
+    const m = topics.get(key) || new Map();
+    m.set(a.owner, (m.get(a.owner) || 0) + 1);
+    topics.set(key, m);
+  };
+  for (const a of coord.assignments ?? []) add(a, false);
+  for (const a of coord.stream_assignments ?? []) add(a, true);
+  const topicNames = [...topics.keys()].sort();
+  const matrix = topicNames.length === 0 ? "" : `
+    <div class="queue-table-wrap" style="margin-top:12px">
+      <div class="card-head">
+        <span class="micro">placement \u2014 owned partitions per broker</span>
+        <span class="queue-group-note">handoff moves ownership only to a caught-up follower</span>
+      </div>
+      <table class="table table-compact metric-table">
+        <tr><th>Broker</th>${topicNames.map((t) => `<th class="text-right">${escapeHtml(t)}</th>`).join("")}</tr>
+        ${nodes.map((n) => `<tr>
+          <td class="mono">${escapeHtml(n.node_id)}</td>
+          ${topicNames.map((t) => {
+            const count = topics.get(t).get(n.node_id) || 0;
+            return `<td class="text-right ${count ? "" : "v-dim"}">${count}</td>`;
+          }).join("")}
+        </tr>`).join("")}
+      </table>
+    </div>`;
+
+  host.innerHTML = `<div class="node-cards">${cards}</div>${matrix}`;
 }
 
 function applyViewMode() {

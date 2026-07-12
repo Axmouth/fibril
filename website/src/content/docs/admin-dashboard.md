@@ -266,6 +266,13 @@ behind a Consensus toggle (membership already implies a leader connection),
 and a Fibers toggle turns the animated layer off entirely, defaulting off
 past twelve rings. Honoring reduced-motion preferences stills all of it.
 
+The list view shows the same cluster as broker cards - liveness, the
+consensus leader starred, address, owned and followed partitions, version
+and uptime, TLS state with certificate expiry, and live rates, with an
+open-its-admin link on every other node - above a placement matrix of
+owned partitions per broker per topic. The view choice sticks per browser
+and answers to `?view=list` in the URL.
+
 The page also exposes three operator actions, each with a confirmation:
 
 - **Drain this broker**: clients are told to move and, in coordinated mode,

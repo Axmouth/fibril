@@ -124,6 +124,12 @@ pub type RaftIdsProvider =
 pub type NodeRatesProvider =
     dyn Fn() -> std::collections::HashMap<String, (u64, u64)> + Send + Sync;
 
+/// Per-node runtime facts (version, boot time, TLS mode, cert expiry) as
+/// loose JSON, keyed by node id - heartbeat labels in cluster mode, local
+/// values standalone. Spliced into the topology payload per node.
+pub type NodeMetaProvider =
+    dyn Fn() -> std::collections::HashMap<String, serde_json::Value> + Send + Sync;
+
 /// Coordinated queue declare for cluster mode: records the partitioning
 /// with coordination FIRST - the returned count is authoritative (an
 /// already-declared queue's count wins, a conflicting request errors) and
@@ -292,6 +298,8 @@ pub struct AdminServer {
     /// local-only and the controller never learns the partition count.
     pub declare_queue_coordinator: Option<Arc<QueueDeclareCoordinator>>,
     pub declare_stream_coordinator: Option<Arc<StreamDeclareCoordinator>>,
+    /// Optional per-node runtime facts for the topology payload.
+    pub node_meta: Option<Arc<NodeMetaProvider>>,
     /// True only under real cluster coordination (ganglion). The standalone
     /// single-node coordination view (wired for the topology page and broker
     /// switcher) must NOT trip cluster-only restrictions like the queue-delete
@@ -350,6 +358,7 @@ impl AdminServer {
             node_rates: None,
             declare_queue_coordinator: None,
             declare_stream_coordinator: None,
+            node_meta: None,
             cluster_mode: false,
         }
     }
@@ -396,6 +405,12 @@ impl AdminServer {
         coordinator: Arc<QueueDeclareCoordinator>,
     ) -> Self {
         self.declare_queue_coordinator = Some(coordinator);
+        self
+    }
+
+    /// Attach the per-node runtime facts provider.
+    pub fn with_node_meta(mut self, provider: Arc<NodeMetaProvider>) -> Self {
+        self.node_meta = Some(provider);
         self
     }
 

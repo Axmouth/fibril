@@ -3490,7 +3490,11 @@ M3 - DLQ scenario. SHIPPED 2026-07-13 (e2e_c --nack-every,
   under a ttl-routing policy if that path exists. Whichever is honest and
   small wins.
 
-M4 - Cluster page: adopt the mockup's non-diagram view.
+M4 - Cluster page: adopt the mockup's non-diagram view. SHIPPED
+  2026-07-13 (version/started-at/tls/cert-expiry heartbeat labels +
+  node_runtime_meta + admin NodeMetaProvider + runtime block per node,
+  broker cards + placement matrix incl streams, ?view=list URL param;
+  cert-days chip untested visually until the M6 TLS scenario exists).
   Replace the current dense list view with the mockup's layout (diagram
   view untouched): per-broker cards (.node: header dot + name + chips,
   kv body rows, footer action) + the PLACEMENT matrix (topics x brokers,

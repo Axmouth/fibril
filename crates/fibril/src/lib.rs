@@ -931,6 +931,17 @@ impl Default for HeartbeatRateTracker {
     }
 }
 
+/// Static-per-process runtime facts the heartbeat advertises, plus a
+/// rotation-aware reader for the serving leaf's expiry.
+#[derive(Clone)]
+pub struct HeartbeatRuntimeInfo {
+    pub version: &'static str,
+    pub started_at_ms: u64,
+    /// "off" | "tls" | "mtls".
+    pub tls: &'static str,
+    pub cert_not_after: Option<Arc<dyn Fn() -> Option<i64> + Send + Sync>>,
+}
+
 /// Build advisory heartbeat labels from local broker state. `topology_adoption`,
 /// when present, contributes the node's lowest acked topology generation so the
 /// repartition controller can fence a cutover on cluster-wide client adoption.
@@ -942,12 +953,31 @@ pub fn broker_heartbeat_labels(
     draining: bool,
     raft_node_id: u64,
     rates: (u64, u64),
+    runtime_info: &HeartbeatRuntimeInfo,
 ) -> BTreeMap<String, String> {
     let mut labels = BTreeMap::new();
     labels.insert(
         fibril_coordination_ganglion::RAFT_ID_LABEL.to_string(),
         raft_node_id.to_string(),
     );
+    labels.insert(
+        fibril_coordination_ganglion::VERSION_LABEL.to_string(),
+        runtime_info.version.to_string(),
+    );
+    labels.insert(
+        fibril_coordination_ganglion::STARTED_AT_LABEL.to_string(),
+        runtime_info.started_at_ms.to_string(),
+    );
+    labels.insert(
+        fibril_coordination_ganglion::TLS_LABEL.to_string(),
+        runtime_info.tls.to_string(),
+    );
+    if let Some(expiry) = runtime_info.cert_not_after.as_ref().and_then(|f| f()) {
+        labels.insert(
+            fibril_coordination_ganglion::CERT_EXPIRY_LABEL.to_string(),
+            expiry.to_string(),
+        );
+    }
     labels.insert(
         fibril_coordination_ganglion::RATE_PUB_LABEL.to_string(),
         rates.0.to_string(),
@@ -1036,6 +1066,7 @@ pub fn spawn_ganglion_broker_tasks(
     peer_tls: Option<fibril_tls::TlsConnector>,
     draining: Arc<std::sync::atomic::AtomicBool>,
     broker_stats: Arc<fibril_metrics::BrokerStats>,
+    runtime_info: HeartbeatRuntimeInfo,
 ) -> GanglionBrokerTaskHandles {
     let mut resolver_cfg = fibril_protocol::v1::replication::ProtocolOwnerPeerResolverConfig::new(
         std::collections::HashMap::new(),
@@ -1111,6 +1142,7 @@ pub fn spawn_ganglion_broker_tasks(
                 draining.load(std::sync::atomic::Ordering::Relaxed),
                 heartbeat_raft_id,
                 rates,
+                &runtime_info,
             )
         },
     );
@@ -1679,7 +1711,10 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
             ca_path: config.tls.client_ca_path.clone(),
         },
     )?;
-    match &server_tls {
+    // Arc-wrapped here so long-lived closures (heartbeat runtime facts,
+    // admin cert info) can hold the material alongside the listeners.
+    let server_tls = server_tls.map(Arc::new);
+    match server_tls.as_deref() {
         Some(tls::ServerTls {
             source:
                 TlsMaterialSource::Generated {
@@ -1754,6 +1789,26 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     // controller evacuates this node's partitions before the process stops.
     let draining = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
+    // Runtime facts the heartbeat advertises (and standalone admin reads
+    // directly): version, boot time, and how the broker serves TLS.
+    let heartbeat_runtime = HeartbeatRuntimeInfo {
+        version: env!("CARGO_PKG_VERSION"),
+        started_at_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+        tls: match (&server_tls, config.tls.client_auth) {
+            (None, _) => "off",
+            (Some(_), fibril_config::ClientAuthMode::Require) => "mtls",
+            (Some(_), _) => "tls",
+        },
+        cert_not_after: server_tls.as_ref().map(|tls| {
+            let tls = tls.clone();
+            Arc::new(move || tls.leaf_metadata().not_after_unix)
+                as Arc<dyn Fn() -> Option<i64> + Send + Sync>
+        }),
+    };
+
     let _ganglion_broker_tasks = match (ganglion_parts.as_ref(), cluster_secret.as_deref()) {
         (Some(parts), Some(secret)) => Some(spawn_ganglion_broker_tasks(
             parts,
@@ -1765,6 +1820,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
             peer_tls,
             draining.clone(),
             metrics.broker(),
+            heartbeat_runtime.clone(),
         )),
         // The ganglion-requires-secret check above makes this unreachable,
         // stated here so a future reorder cannot silently spawn
@@ -1869,7 +1925,6 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     };
     // ServerTls stays alive behind an Arc so the admin reload endpoint can
     // swap material for the lifetime of the process.
-    let server_tls = server_tls.map(Arc::new);
     let tls_acceptor = server_tls.as_ref().map(|tls| tls.acceptor.clone());
 
     let user_admin: Arc<dyn UserAdmin> = match ganglion_parts.as_ref() {
@@ -1987,6 +2042,21 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
                     let delivered = stats.delivered.ops.sum_last(5) / 5;
                     std::iter::once((node_id.clone(), (published, delivered))).collect()
                 })
+            })
+            .with_node_meta({
+                let info = heartbeat_runtime.clone();
+                let node_id = config.coordination.node_id.clone();
+                Arc::new(move || {
+                    let mut meta = serde_json::json!({
+                        "version": info.version,
+                        "started_at_ms": info.started_at_ms,
+                        "tls": info.tls,
+                    });
+                    if let Some(expiry) = info.cert_not_after.as_ref().and_then(|f| f()) {
+                        meta["cert_not_after_unix"] = expiry.into();
+                    }
+                    std::iter::once((node_id.clone(), meta)).collect()
+                })
             }),
         Some(parts) => {
             _consensus_server = Some(parts.consensus_server.clone());
@@ -2011,6 +2081,10 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
                 .with_node_rates({
                     let source = parts.coordination.clone();
                     Arc::new(move || source.node_rates())
+                })
+                .with_node_meta({
+                    let source = parts.coordination.clone();
+                    Arc::new(move || source.node_runtime_meta())
                 })
                 // Admin declares take the same coordinated two-step as
                 // client declares, so the controller places every
