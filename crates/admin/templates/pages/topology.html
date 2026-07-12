@@ -78,9 +78,14 @@
       <h5>Brokers</h5>
       <p>Hover a broker to highlight its replication links, or click to inspect its assignments. The consensus leader is marked.</p>
     </div>
-    <div class="view-toggle" role="group" aria-label="View mode">
-      <button type="button" id="view-diagram" class="btn">Diagram</button>
-      <button type="button" id="view-list" class="btn">List</button>
+    <div style="display:flex; align-items:center; gap:14px;">
+      <label class="settings-note" style="display:flex; align-items:center; gap:6px; cursor:pointer; margin:0;">
+        <input type="checkbox" id="fibers-toggle"> Fibers
+      </label>
+      <div class="view-toggle" role="group" aria-label="View mode">
+        <button type="button" id="view-diagram" class="btn">Diagram</button>
+        <button type="button" id="view-list" class="btn">List</button>
+      </div>
     </div>
   </div>
   <div id="diagram-view">
@@ -159,6 +164,13 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 // re-applied without rebuilding listeners.
 let selectedNode = null;
 let viewMode = localStorage.getItem("topology.view") === "list" ? "list" : "diagram";
+
+// The animated fiber layer gets expensive as clusters grow: past this many
+// rings it defaults off, and the Fibers toggle makes either choice stick.
+const TENDRIL_AUTO_MAX = 12;
+let tendrilPref = localStorage.getItem("topology.fibers"); // "on" | "off" | null = auto
+const tendrilsOn = () => tendrilPref === "on"
+  || (tendrilPref !== "off" && ringNodes.length <= TENDRIL_AUTO_MAX);
 let renderCtx = { cards: new Map(), edges: [], data: null };
 
 function el(name, attrs, text) {
@@ -232,8 +244,9 @@ function hashStr(s) {
 }
 const rnd = (seed) => { const x = Math.sin(seed) * 43758.5453; return x - Math.floor(x); };
 
-// Sprite size by cluster shape: lone hero ring, ellipse rings, dense grid.
-function spriteSize(n) { return n <= 1 ? 128 : n <= 6 ? 96 : 64; }
+// Sprite size by cluster shape: lone hero ring, full-size rings, and a
+// denser grid only once the cluster is genuinely big.
+function spriteSize(n) { return n <= 1 ? 128 : n <= 24 ? 96 : 64; }
 
 const LABEL_H = 40;
 
@@ -257,12 +270,16 @@ function computeLayout(nodes, S) {
     return { positions, width, height };
   }
 
+  // Fixed viewBox width, rows grow downward: rings keep their size and the
+  // diagram extends instead of shrinking to fit.
   const gapX = 40, gapY = 22;
   const cellW = Math.max(160, S + 76);
-  const cols = Math.min(5, Math.ceil(Math.sqrt(n)));
+  const stagger = cellW / 2;
+  const targetW = S >= 96 ? 860 : 1200;
+  const cols = Math.max(2,
+    Math.floor((targetW - 2 * gapX - S - stagger) / cellW) + 1);
   const rows = Math.ceil(n / cols);
   const rowPitch = S + LABEL_H + gapY;
-  const stagger = cellW / 2;
   const blockWidth = (cols - 1) * cellW + S + stagger;
   const width = blockWidth + 2 * gapX;
   const height = bannerTop + rows * rowPitch + gapY;
@@ -483,6 +500,10 @@ function drawTendrils() {
   const ctxO = over.getContext("2d");
   ctxU.clearRect(0, 0, bw, bh);
   ctxO.clearRect(0, 0, bw, bh);
+  const fibersLive = tendrilsOn();
+  const ft = document.getElementById("fibers-toggle");
+  if (ft && ft.checked !== fibersLive) ft.checked = fibersLive;
+  if (!fibersLive) return;
   const vb = svg.viewBox.baseVal;
   if (!vb || !vb.width) return;
   const scale = Math.min(cw / vb.width, ch / vb.height) / RES;
@@ -501,7 +522,10 @@ function drawTendrils() {
     "#8a4be8": "#b78ef2", "#e8b65b": "#f6d795",
   };
 
-  const drawPathOn = (ctx, pts, color, alpha, width) => {
+  // Optional stops ([[t, color], ...]) stroke the path with a gradient laid
+  // between its endpoints - used to melt a link's color into the color of
+  // the fiber it fuses onto, so junctions never show a hard color seam.
+  const drawPathOn = (ctx, pts, color, alpha, width, stops) => {
     if (pts.length < 2) return;
     const trace = (dx, dy) => {
       ctx.beginPath();
@@ -515,17 +539,23 @@ function drawTendrils() {
       ctx.lineTo(px(last[0] + dx), py(last[1] + dy));
       ctx.stroke();
     };
+    const grad = (mapColor) => {
+      const a = pts[0], b = pts[pts.length - 1];
+      const g = ctx.createLinearGradient(px(a[0]), py(a[1]), px(b[0]), py(b[1]));
+      for (const [t, c] of stops) g.addColorStop(t, mapColor(c));
+      return g;
+    };
     ctx.globalAlpha = alpha;
     ctx.strokeStyle = "#0b0e14";
     ctx.lineWidth = width + 2.6;
     trace(0, 0);
-    ctx.strokeStyle = color;
+    ctx.strokeStyle = stops ? grad((c) => c) : color;
     ctx.lineWidth = width;
     trace(0, 0);
     const hl = HIGHLIGHT[color];
     if (hl) {
       ctx.globalAlpha = alpha * 0.8;
-      ctx.strokeStyle = hl;
+      ctx.strokeStyle = stops ? grad((c) => HIGHLIGHT[c] || c) : hl;
       ctx.lineWidth = Math.max(1, width * 0.4);
       trace(-0.9, -0.9);
     }
@@ -626,6 +656,11 @@ function drawTendrils() {
   };
 
   const ringById = new Map(ringNodes.map((rn) => [rn.id, rn]));
+  // Batch fiber palette, hoisted here so a link can know the color of the
+  // fiber it fuses onto before the batch pass runs.
+  const BATCH = ["#6db5f2", "#6db5f2", "#3d7bf0", "#8a4be8"];
+  const fiberColor = (id, i) =>
+    BATCH[hashStr("c" + (hashStr(id + "|cross|" + i) % 1000)) % BATCH.length];
   // Fiber tips a link has fused onto: the batch pass skips their glow, so a
   // junction reads as a joint rather than two endpoints stacked.
   const consumedTips = new Set();
@@ -654,7 +689,7 @@ function drawTendrils() {
     const r = currentSpriteS / 2;
     if (!rn || rn.ghost) {
       const pt = [from.x + side * r * 0.95, from.y + (rnd(seed) - 0.5) * r * 0.4];
-      return { tip: pt, approach: pt, key: null };
+      return { tip: pt, approach: pt, key: null, color: null };
     }
     const strandsN = rn.stems + 1;
     const bearing = Math.atan2(to.y - from.y, to.x - from.x);
@@ -666,11 +701,11 @@ function drawTendrils() {
       const dir = Math.atan2(pt[1] - rn.y, pt[0] - rn.x);
       let d = Math.abs(dir - bearing);
       if (d > Math.PI) d = 2 * Math.PI - d;
-      if (!best || d < best.d) best = { d, pt, key };
+      if (!best || d < best.d) best = { d, pt, key, i };
     }
     if (!best) {
       const pt = [from.x + side * r * 0.95, from.y + (rnd(seed) - 0.5) * r * 0.4];
-      return { tip: pt, approach: pt, key: null };
+      return { tip: pt, approach: pt, key: null, color: null };
     }
     consumedTips.add(best.key);
     const ux = best.pt[0] - rn.x, uy = best.pt[1] - rn.y;
@@ -679,6 +714,7 @@ function drawTendrils() {
       tip: best.pt,
       approach: [best.pt[0] + (ux / ulen) * 26, best.pt[1] + (uy / ulen) * 26],
       key: best.key,
+      color: fiberColor(rn.id, best.i),
     };
   };
 
@@ -718,7 +754,10 @@ function drawTendrils() {
           tipColor, alpha * 0.85);
       }
     }
-    drawPathOn(ctxU, pts, color, alpha, width);
+    const c1 = j1.color || color, c2 = j2.color || color;
+    const stops = (c1 !== color || c2 !== color)
+      ? [[0, c1], [0.3, color], [0.7, color], [1, c2]] : null;
+    drawPathOn(ctxU, pts, color, alpha, width, stops);
     if (severed) {
       // A dim, unlit end where the fiber was cut.
       const end = ghostA ? pts[0] : pts[pts.length - 1];
@@ -745,7 +784,6 @@ function drawTendrils() {
   // Per-ring batches: continuous strands, tight through the opening,
   // spreading at the tips. Full strand on the under canvas; the part beyond
   // the opening's right edge re-draws above, seam hidden on the band.
-  const BATCH = ["#6db5f2", "#6db5f2", "#3d7bf0", "#8a4be8"];
   for (const rn of ringNodes) {
     if (rn.ghost) continue;
     const on = !focusId || rn.id === focusId;
@@ -764,11 +802,18 @@ function drawTendrils() {
                 rn.y + rise + wob * (rnd(s2 + 2) > 0.5 ? 1 : -1)];
       };
       const lt = tip(-1, seed + 10), rt = tip(1, seed + 20);
+      // Gentle undulation through the opening. Neighbouring strands share
+      // most of their phase (i * 0.5) so they wave together and stay
+      // near-parallel instead of cross-hatching.
+      const amp = 1.3 + rnd(seed + 4) * 1.1;
+      const ph = i * 0.5 + rnd(seed + 5) * 0.6;
+      const uy = (o) => Math.sin(sway * 0.9 + ph + o) * amp;
       const pts = [
         lt,
         [rn.x - r * 0.85, rn.y + laneY * 2 + wob * 0.5],
-        [rn.x - r * 0.3, rn.y + laneY],
-        [rn.x + r * 0.3, rn.y + laneY],
+        [rn.x - r * 0.3, rn.y + laneY + uy(0)],
+        [rn.x, rn.y + laneY + uy(1.8) * 1.25],
+        [rn.x + r * 0.3, rn.y + laneY + uy(3.6)],
         [rn.x + r * 0.85, rn.y + laneY * 2 - wob * 0.5],
         rt,
       ];
@@ -790,8 +835,8 @@ function drawTendrils() {
       drawPathOn(ctxU, pts, color, alpha, 2.7);
       // Right-of-opening portion above the sprite; the cut sits on the band.
       const overSeg = pts.filter((pt) => pt[0] >= rn.x + r * 0.45);
-      overSeg.unshift([rn.x + r * 0.45, pts[3][1] + (pts[4][1] - pts[3][1]) * 0.2]);
-      branchAt(ctxO, 4, 1);
+      overSeg.unshift([rn.x + r * 0.45, pts[4][1] + (pts[5][1] - pts[4][1]) * 0.27]);
+      branchAt(ctxO, 5, 1);
       drawPathOn(ctxO, overSeg, color, alpha, 2.7);
       if (!consumedTips.has(rn.id + "|-1|" + i)) drawTip(ctxU, lt[0], lt[1], "#7df0b8", alpha);
       if (!consumedTips.has(rn.id + "|1|" + i)) drawTip(ctxO, rt[0], rt[1], "#7df0b8", alpha);
@@ -1095,6 +1140,11 @@ document.getElementById("membership-remove").addEventListener("click", () => sub
 
 document.getElementById("view-diagram").addEventListener("click", () => setView("diagram"));
 document.getElementById("view-list").addEventListener("click", () => setView("list"));
+document.getElementById("fibers-toggle").addEventListener("change", (ev) => {
+  tendrilPref = ev.target.checked ? "on" : "off";
+  localStorage.setItem("topology.fibers", tendrilPref);
+  drawTendrils();
+});
 // Click on empty diagram canvas clears the current selection (card clicks stop
 // propagation, so only background clicks reach here).
 document.getElementById("topology-diagram").addEventListener("click", () => {

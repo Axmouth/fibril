@@ -143,7 +143,14 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   connect the leader to every voter - the consensus mesh visible alongside
   the data-replication bundles. Tendril bundles also gained body: strands
   spread across the ring opening in lanes instead of converging on its
-  center, and a dead broker's ring no longer sneaks a blink.
+  center, and a dead broker's ring no longer sneaks a blink. Links now fuse
+  onto the fiber tip whose direction best matches the peer and melt into
+  that fiber's color across the junction, and the lanes through the opening
+  undulate gently instead of reading as ruler-straight lines. Bigger
+  clusters extend instead of shrinking: rings keep their full size up to 24
+  brokers with the grid growing downward, and a Fibers toggle turns the
+  animated layer off (it defaults off past 12 rings, and either choice
+  sticks).
 - The Cluster diagram came alive, then got its first live-review polish:
   replication links draw as proper fiber bundles (three to five snaking,
   outlined strands with layered waves, tapered into their rings) instead of
