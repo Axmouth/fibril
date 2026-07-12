@@ -133,12 +133,17 @@ pub async fn watch_once(server: &AdminServer, seen: &mut WatchState) {
     seen.attention = Some(current);
 
     if let Some(coordination) = &server.coordination {
-        let nodes: HashSet<String> = coordination
-            .snapshot()
-            .nodes
-            .keys()
-            .map(|id| id.to_string())
-            .collect();
+        // Prefer the heartbeat-fresh set: registration survives a crash, so
+        // diffing registered nodes would sleep through one.
+        let nodes: HashSet<String> = match &server.liveness {
+            Some(provider) => provider(),
+            None => coordination
+                .snapshot()
+                .nodes
+                .keys()
+                .map(|id| id.to_string())
+                .collect(),
+        };
         if let Some(previous) = &seen.nodes {
             for id in nodes.difference(previous) {
                 server
@@ -150,7 +155,7 @@ pub async fn watch_once(server: &AdminServer, seen: &mut WatchState) {
                     "node_left",
                     "warning",
                     id.clone(),
-                    "Left the cluster view",
+                    "Unreachable - its coordination heartbeat stopped",
                 );
             }
         }

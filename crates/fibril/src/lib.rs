@@ -1910,8 +1910,17 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
             let topology_source = parts.coordination.clone();
             let consensus_server = parts.consensus_server;
             let controller_status = parts.controller_status;
+            let liveness_source = parts.coordination.clone();
+            let liveness_ttl =
+                Duration::from_millis(config.coordination.ganglion.liveness_ttl_ms);
             admin
                 .with_cluster_mode()
+                .with_liveness(Arc::new(move || {
+                    liveness_source
+                        .live_nodes(liveness_ttl)
+                        .into_keys()
+                        .collect()
+                }))
                 .with_coordination(parts.coordination.clone())
                 .with_consensus_topology(Arc::new(move || {
                     let mut value =

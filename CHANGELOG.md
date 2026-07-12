@@ -127,6 +127,14 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Changed
 
+- The Cluster diagram came alive, then got its first live-review polish:
+  replication links draw as proper fiber bundles (three to five snaking,
+  outlined strands with layered waves, tapered into their rings) instead of
+  thin curves, the consensus leader breathes under a soft gold glow, brokers
+  whose coordination heartbeat stops now show as X-eyed ghosts immediately
+  (the topology payload carries a per-node `live` flag, and the Activity
+  feed's joined/left entries follow heartbeats rather than registration),
+  and blink cadence is floored so even busy rings stay calm.
 - The Cluster diagram came alive. Each broker renders as the fibril ring
   itself: active nodes blink more often than idle ones, the band lights
   breathe, and a broker that vanishes from the cluster lingers for ten

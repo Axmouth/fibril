@@ -690,6 +690,10 @@ pub async fn topology(
     let coordination = match &server.coordination {
         Some(coordination) => {
             let snapshot = coordination.snapshot();
+            // Registration survives a crash; the heartbeat does not. The
+            // liveness provider separates the two so the diagram can show a
+            // dead broker instead of silently pretending it is fine.
+            let live = server.liveness.as_ref().map(|provider| provider());
             let mut nodes: Vec<serde_json::Value> = snapshot
                 .nodes
                 .values()
@@ -698,6 +702,9 @@ pub async fn topology(
                         "node_id": node.node_id,
                         "broker_addr": node.broker_addr.to_string(),
                         "admin_addr": node.admin_addr.map(|addr| addr.to_string()),
+                        "live": live
+                            .as_ref()
+                            .is_none_or(|set| set.contains(&node.node_id)),
                     })
                 })
                 .collect();

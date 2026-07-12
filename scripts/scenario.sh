@@ -71,7 +71,7 @@ start_node() {
   if [[ "$GANGLION" == true ]]; then
     local peers=""
     for ((p = 1; p <= NODES; p++)); do
-      peers+="${peers:+,}$p@127.0.0.1:$((BASE_RAFT_PORT + p))"
+      peers+="${peers:+,}$p=127.0.0.1:$((BASE_RAFT_PORT + p))"
     done
     env_vars+=(
       "FIBRIL_CLUSTER_SECRET=scenario-secret"

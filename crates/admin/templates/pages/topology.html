@@ -16,6 +16,13 @@
   #topology-diagram.has-focus .node-card { opacity: 0.35; }
   #topology-diagram.has-focus .node-card.node-active { opacity: 1; }
   #topology-diagram .node-ghost { opacity: 0.5; }
+  @media (prefers-reduced-motion: no-preference) {
+    #topology-diagram .leader-glow { animation: leader-breathe 3.2s ease-in-out infinite; }
+  }
+  @keyframes leader-breathe {
+    0%, 100% { opacity: 0.55; }
+    50% { opacity: 1; }
+  }
   #topology-diagram .ring-halo {
     fill: none;
     stroke: var(--active);
@@ -273,18 +280,21 @@ function renderDiagram(data) {
   nodesCtx.clear();
   const coordination = data.coordination;
   const now = Date.now();
-  const liveNodes = coordination?.nodes ?? [];
-  for (const n of liveNodes) seenNodes.set(n.node_id, { node: n, lastSeen: now });
+  const presentNodes = coordination?.nodes ?? [];
+  for (const n of presentNodes) {
+    if (n.live !== false) seenNodes.set(n.node_id, { node: n, lastSeen: now });
+  }
 
-  // Ghosts: brokers this page saw this session that vanished from the
-  // committed view. They linger with X-eyes so the hole has a face.
+  // Ghosts two ways: a registered broker whose heartbeat stopped (live:
+  // false from the payload), and one deregistered entirely, remembered from
+  // this session. Both linger with X-eyes so the hole has a face.
   const ghosts = [];
   for (const [id, entry] of seenNodes) {
-    if (liveNodes.some((n) => n.node_id === id)) continue;
+    if (presentNodes.some((n) => n.node_id === id)) continue;
     if (now - entry.lastSeen > GHOST_TTL_MS) { seenNodes.delete(id); continue; }
     ghosts.push({ ...entry.node, __ghost: true, __lastSeen: entry.lastSeen });
   }
-  const nodes = [...liveNodes, ...ghosts];
+  const nodes = [...presentNodes, ...ghosts];
 
   if (!coordination || nodes.length === 0) {
     svg.setAttribute("viewBox", "0 0 860 300");
@@ -305,6 +315,15 @@ function renderDiagram(data) {
   const { positions, width, height } = computeLayout(nodes, S);
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svg.setAttribute("height", height);
+
+  // One-time defs: the gold radial the leader ring glows with.
+  const defs = el("defs", {});
+  const grad = el("radialGradient", { id: "leader-glow-grad" });
+  grad.appendChild(el("stop", { offset: "0%", "stop-color": "#e8b65b", "stop-opacity": "0.5" }));
+  grad.appendChild(el("stop", { offset: "70%", "stop-color": "#e8b65b", "stop-opacity": "0.12" }));
+  grad.appendChild(el("stop", { offset: "100%", "stop-color": "#e8b65b", "stop-opacity": "0" }));
+  defs.appendChild(grad);
+  svg.appendChild(defs);
 
   if (data.consensus) {
     svg.appendChild(el("text", {
@@ -339,8 +358,8 @@ function renderDiagram(data) {
   // A lone broker gets queue stubs instead: strands sprouting per declared
   // queue (bucketed at 8), inbound palette left, outbound right.
   stubs = [];
-  if (liveNodes.length === 1 && tendrils.length === 0) {
-    const id = liveNodes[0].node_id;
+  if (presentNodes.length === 1 && tendrils.length === 0) {
+    const id = presentNodes[0].node_id;
     const owned = assignments.filter((a) => a.owner === id).length;
     const queueCount = Math.max(owned, data.__queueCount ?? 0);
     const c = positions.get(id);
@@ -353,14 +372,20 @@ function renderDiagram(data) {
   const cards = new Map();
   nodes.forEach((node) => {
     const pos = positions.get(node.node_id);
-    const ghost = !!node.__ghost;
+    const ghost = !!node.__ghost || node.live === false;
     const owned = ownedCount.get(node.node_id) ?? 0;
-    const active = owned > 0;
+    const active = !ghost && owned > 0;
     const isLeader = !ghost && leaderId != null && String(node.node_id) === leaderId;
     const group = el("g", {
       class: "node-card" + (ghost ? " node-ghost" : ""),
       "data-node": node.node_id,
     });
+    if (isLeader) {
+      group.appendChild(el("circle", {
+        class: "leader-glow", cx: pos.x, cy: pos.y, r: S * 0.72,
+        fill: "url(#leader-glow-grad)",
+      }));
+    }
     group.appendChild(el("circle", { class: "ring-halo", cx: pos.x, cy: pos.y, r: S / 2 + 7 }));
     const img = el("image", {
       x: pos.x - S / 2, y: pos.y - S / 2, width: S, height: S,
@@ -372,9 +397,11 @@ function renderDiagram(data) {
       "font-size": 14, "font-weight": 600,
       style: isLeader ? "fill: var(--warn)" : "fill: var(--text)",
     }, isLeader ? "★ " + node.node_id : node.node_id));
-    const sub = ghost
+    const sub = node.__ghost
       ? "last seen " + timeAgoShort(node.__lastSeen / 1000)
-      : node.broker_addr + (owned ? " · owns " + owned : "");
+      : ghost
+        ? "unreachable \u00b7 " + node.broker_addr
+        : node.broker_addr + (owned ? " \u00b7 owns " + owned : "");
     group.appendChild(el("text", {
       x: pos.x, y: pos.y + S / 2 + 32, "text-anchor": "middle", "font-size": 11,
       style: ghost ? "fill: var(--bad)" : "fill: var(--muted)",
@@ -425,43 +452,68 @@ function drawTendrils() {
   const py = (y) => oy + y * scale;
   ctx.lineCap = "round";
 
+  // One strand: a snaking polyline sampled along the run, perpendicular
+  // offsets from layered sine waves (tapered to zero at the endpoints so
+  // strands meet their rings cleanly), drawn twice - a dark under-stroke
+  // then the bright core - so the bundle reads like the outlined fiber art.
   const strand = (x1, y1, x2, y2, seed, color, alpha) => {
     const dx = x2 - x1, dy = y2 - y1;
     const len = Math.hypot(dx, dy) || 1;
     const nx = -dy / len, ny = dx / len;
-    const amp = 10 + rnd(seed) * 16;
-    const sway = REDUCED_MOTION ? 0 : Math.sin(swayT + seed) * 4;
-    const o1 = (rnd(seed + 1) - 0.5) * 2 * amp + sway;
-    const o2 = (rnd(seed + 2) - 0.5) * 2 * amp - sway;
+    const amp = Math.min(26, 8 + len * 0.06) * (0.7 + rnd(seed) * 0.6);
+    const waves = 1.5 + rnd(seed + 4) * 1.5;
+    const phase = rnd(seed + 5) * Math.PI * 2;
+    const sway = REDUCED_MOTION ? 0 : swayT;
+    const SAMPLES = 9;
+    const pts = [];
+    for (let k = 0; k <= SAMPLES; k++) {
+      const t = k / SAMPLES;
+      const taper = Math.sin(Math.PI * t);
+      const wob = Math.sin(t * Math.PI * 2 * waves + phase + sway)
+        + 0.4 * Math.sin(t * Math.PI * 4.7 + phase * 2 - sway * 1.3);
+      const off = wob * amp * taper;
+      pts.push([px(x1 + dx * t + nx * off), py(y1 + dy * t + ny * off)]);
+    }
+    const trace = () => {
+      ctx.beginPath();
+      ctx.moveTo(pts[0][0], pts[0][1]);
+      for (let k = 1; k < pts.length - 1; k++) {
+        const mx = (pts[k][0] + pts[k + 1][0]) / 2;
+        const my = (pts[k][1] + pts[k + 1][1]) / 2;
+        ctx.quadraticCurveTo(pts[k][0], pts[k][1], mx, my);
+      }
+      ctx.lineTo(pts[pts.length - 1][0], pts[pts.length - 1][1]);
+      ctx.stroke();
+    };
     ctx.globalAlpha = alpha;
+    ctx.strokeStyle = "#0b0e14";
+    ctx.lineWidth = 3.1;
+    trace();
     ctx.strokeStyle = color;
-    ctx.lineWidth = 1.4;
-    ctx.beginPath();
-    ctx.moveTo(px(x1), py(y1));
-    ctx.bezierCurveTo(
-      px(x1 + dx * 0.33 + nx * o1), py(y1 + dy * 0.33 + ny * o1),
-      px(x1 + dx * 0.66 + nx * o2), py(y1 + dy * 0.66 + ny * o2),
-      px(x2), py(y2));
-    ctx.stroke();
+    ctx.lineWidth = 1.7;
+    trace();
   };
 
   for (const e of tendrils) {
-    const count = e.count >= 5 ? 3 : e.count >= 2 ? 2 : 1;
+    // Always a small bundle like the art; density adds strands on top.
+    const count = e.count >= 5 ? 5 : e.count >= 2 ? 4 : 3;
     const on = !focusId || e.owner === focusId || e.follower === focusId;
     for (let s = 0; s < count; s++) {
       const seed = hashStr(e.owner + "|" + e.follower + "|" + s) % 1000;
       strand(e.from.x, e.from.y, e.to.x, e.to.y, seed,
-        STRANDS_IN[seed % STRANDS_IN.length], on ? 0.8 : 0.07);
+        STRANDS_IN[seed % STRANDS_IN.length], on ? 0.85 : 0.07);
     }
   }
   for (const st of stubs) {
-    const seed = hashStr("stub|" + st.idx) % 1000;
-    const reach = 110 + rnd(seed) * 70;
-    const x1 = st.from.x + st.dir * (st.ringR - 8);
-    const x2 = st.from.x + st.dir * (st.ringR + reach);
-    const y2 = st.from.y + (rnd(seed + 3) - 0.5) * 170;
-    const palette = st.dir < 0 ? STRANDS_IN : STRANDS_OUT;
-    strand(x1, st.from.y, x2, y2, seed, palette[seed % palette.length], 0.8);
+    for (let s = 0; s < 2; s++) {
+      const seed = hashStr("stub|" + st.idx + "|" + s) % 1000;
+      const reach = 110 + rnd(seed) * 80;
+      const x1 = st.from.x + st.dir * (st.ringR - 8);
+      const x2 = st.from.x + st.dir * (st.ringR + reach);
+      const y2 = st.from.y + (rnd(seed + 3) - 0.5) * 190;
+      const palette = st.dir < 0 ? STRANDS_IN : STRANDS_OUT;
+      strand(x1, st.from.y, x2, y2, seed, palette[seed % palette.length], 0.85);
+    }
   }
   ctx.globalAlpha = 1;
 }
@@ -472,7 +524,7 @@ const openFrame = () => (lightPhase ? "open-b" : "open-a");
 function scheduleBlink(id) {
   const n = nodesCtx.get(id);
   if (!n || n.ghost || REDUCED_MOTION) return;
-  const delay = n.active ? 2800 + Math.random() * 3500 : 11000 + Math.random() * 9000;
+  const delay = n.active ? 6000 + Math.random() * 6000 : 15000 + Math.random() * 10000;
   setTimeout(() => {
     const cur = nodesCtx.get(id);
     if (!cur || !cur.img.isConnected || document.hidden) {

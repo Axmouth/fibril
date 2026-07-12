@@ -3064,6 +3064,16 @@ buckets to a load face variant + faster light cycling. Also unlocks honest
 S3 signal speeds along tendrils (per-edge rate needs per-partition rates -
 assess cost then).
 
+## Future: connections page tendril view (user vision 2026-07-12)
+
+An optional Connections-page view modeled on the "tendrils plugged both
+sides" art: the fibril ring center, publisher connections plugging strands
+into one side, subscriber connections the other, with pulses traveling along
+the tendrils from pubs to subs (rate-proportional). Builds directly on the
+cluster-diagram tendril renderer (S3 signal particles + S4 plugging in the
+mascot plan). Needs per-connection pub/sub role data (the connections
+snapshot already carries subs counts; publisher role needs a look).
+
 ## Future: broker memory audit (filed 2026-07-11)
 
 User observation: RSS does not drop back to earlier levels after all active

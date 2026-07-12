@@ -110,6 +110,10 @@ pub struct TestPublishOutcome {
 /// certificate fingerprint. Errors leave the old material serving.
 pub type TlsReloadHandler = dyn Fn() -> Result<String, String> + Send + Sync;
 
+/// Returns the set of broker node ids whose coordination heartbeat is fresh.
+pub type LivenessProvider =
+    dyn Fn() -> std::collections::HashSet<String> + Send + Sync;
+
 /// Returns presentation metadata for the certificate the broker currently
 /// serves, as JSON (fingerprint, validity window, subject). The broker wires
 /// one in when TLS is enabled; feeds the security view and the certificate
@@ -240,6 +244,10 @@ pub struct AdminServer {
     /// Whether this node is draining (set by the drain flow), for the
     /// attention rule that flags a parked drain.
     pub draining_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Optional live-broker set (heartbeat within TTL), wired under ganglion
+    /// coordination. Feeds the topology payload's per-node `live` flag and
+    /// the activity watcher's joined/left transitions. Absent = all live.
+    pub liveness: Option<Arc<LivenessProvider>>,
     /// True only under real cluster coordination (ganglion). The standalone
     /// single-node coordination view (wired for the topology page and broker
     /// switcher) must NOT trip cluster-only restrictions like the queue-delete
@@ -293,6 +301,7 @@ impl AdminServer {
             audit: crate::audit::AuditLog::default(),
             derived: crate::audit::DerivedConditions::default(),
             draining_flag: None,
+            liveness: None,
             cluster_mode: false,
         }
     }
@@ -312,6 +321,12 @@ impl AdminServer {
     /// Attach the test-message publisher for `POST /admin/api/publish`.
     pub fn with_test_publisher(mut self, publisher: Arc<dyn BrokerTestPublisher>) -> Self {
         self.test_publisher = Some(publisher);
+        self
+    }
+
+    /// Attach the live-broker set provider (heartbeat-fresh node ids).
+    pub fn with_liveness(mut self, provider: Arc<LivenessProvider>) -> Self {
+        self.liveness = Some(provider);
         self
     }
 
