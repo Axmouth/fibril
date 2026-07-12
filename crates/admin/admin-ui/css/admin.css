@@ -29,8 +29,8 @@
   --ok-soft: rgba(59, 214, 143, .13);
   --warn: #e6ac47;
   --warn-soft: rgba(230, 172, 71, .13);
-  --bad: #f4716a;
-  --bad-soft: rgba(244, 113, 106, .13);
+  --bad: #ef5350;
+  --bad-soft: rgba(239, 83, 80, .13);
   --shadow: 0 8px 28px rgba(0, 0, 0, .45);
   --radius-sm: 4px;
   --radius-md: 6px;

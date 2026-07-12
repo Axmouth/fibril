@@ -258,7 +258,7 @@ function spriteSize(n) { return n <= 1 ? 128 : n <= 24 ? 96 : 64; }
 
 const LABEL_H = 40;
 
-function computeLayout(nodes, S) {
+function computeLayout(nodes, S, availW) {
   const n = nodes.length;
   const positions = new Map();
   const bannerTop = 56;
@@ -285,7 +285,7 @@ function computeLayout(nodes, S) {
   const gapX = 40, gapY = 34;
   const cellW = S >= 96 ? S + 140 : Math.max(160, S + 76);
   const stagger = cellW / 2;
-  const targetW = S >= 96 ? 860 : 1200;
+  const targetW = S >= 96 ? availW : Math.max(1200, availW);
   const cols = Math.max(2,
     Math.floor((targetW - 2 * gapX - S - stagger) / cellW) + 1);
   const rows = Math.ceil(n / cols);
@@ -347,7 +347,8 @@ function renderDiagram(data) {
     || String(node.node_id) === leaderId);
   const S = spriteSize(nodes.length);
   currentSpriteS = S;
-  const { positions, width, height } = computeLayout(nodes, S);
+  const availW = Math.max(860, Math.min(1440, svg.clientWidth || 860));
+  const { positions, width, height } = computeLayout(nodes, S, availW);
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svg.setAttribute("height", height);
 
@@ -864,31 +865,21 @@ function drawTendrils() {
       drawPathOn(ctxU, pts, color, alpha, 2.7);
       // Right-of-opening portion above the sprite; the cut sits on the band.
       // Measured from the sprite: the opening's right inner edge sits at
-      // ~0.34r and the band is opaque from ~0.36r to ~0.79r. Cutting just
-      // past the edge means the strand emerges from behind the band with
-      // no hidden stretch, and the stub's y stays on the strand's chord.
+      // ~0.34r and the band is opaque from ~0.36r to ~0.79r, so the cut
+      // lands just past the edge. The over layer redraws the SAME path
+      // clipped to the right of the cut - pixel-identical with the under
+      // strand, seam hidden on the band.
       const cutX = rn.x + r * 0.38;
-      const overSeg = pts.filter((pt) => pt[0] >= cutX);
-      overSeg.unshift([cutX, pts[4][1] + (pts[5][1] - pts[4][1]) * 0.145]);
+      ctxO.save();
+      ctxO.beginPath();
+      ctxO.rect(px(cutX), 0, bw, bh);
+      ctxO.clip();
+      drawPathOn(ctxO, pts, color, alpha, 2.7);
+      ctxO.restore();
       branchAt(ctxO, 5, 1);
-      drawPathOn(ctxO, overSeg, color, alpha, 2.7);
       if (!consumedTips.has(rn.id + "|-1|" + i)) drawTip(ctxU, lt[0], lt[1], "#7df0b8", alpha);
       if (!consumedTips.has(rn.id + "|1|" + i)) drawTip(ctxO, rt[0], rt[1], "#7df0b8", alpha);
       drawPulse(pts, seed, "#c8ecff");
-    }
-    // The leader's glow re-asserts itself above the over-layer strands, so
-    // the turned-away side glows too instead of being swallowed.
-    if (rn.leader) {
-      const g = ctxO.createRadialGradient(
-        px(rn.x), py(rn.y), 1, px(rn.x), py(rn.y), r * 1.4 * scale);
-      const breathe = REDUCED_MOTION ? 0.2 : 0.14 + 0.1 * (0.5 + 0.5 * Math.sin(sway * 1.4));
-      g.addColorStop(0, "rgba(232, 182, 91, " + breathe.toFixed(3) + ")");
-      g.addColorStop(1, "rgba(232, 182, 91, 0)");
-      ctxO.globalAlpha = 1;
-      ctxO.fillStyle = g;
-      ctxO.beginPath();
-      ctxO.arc(px(rn.x), py(rn.y), r * 1.4 * scale, 0, Math.PI * 2);
-      ctxO.fill();
     }
   }
 
@@ -907,6 +898,23 @@ function drawTendrils() {
     ctx.strokeStyle = w.j.color;
     seg(Math.min(16, w.glide + 4), 0, w.width);
     seg(2, -8, 2.7);
+  }
+
+  // The leader's glow is the final pass, above every strand, link, and
+  // weld - so the turned-away side glows too instead of being swallowed.
+  for (const rn of ringNodes) {
+    if (!rn.leader || rn.ghost) continue;
+    const r = currentSpriteS / 2;
+    const g = ctxO.createRadialGradient(
+      px(rn.x), py(rn.y), 1, px(rn.x), py(rn.y), r * 1.55 * scale);
+    const breathe = REDUCED_MOTION ? 0.2 : 0.14 + 0.1 * (0.5 + 0.5 * Math.sin(sway * 1.4));
+    g.addColorStop(0, "rgba(232, 182, 91, " + breathe.toFixed(3) + ")");
+    g.addColorStop(1, "rgba(232, 182, 91, 0)");
+    ctxO.globalAlpha = 1;
+    ctxO.fillStyle = g;
+    ctxO.beginPath();
+    ctxO.arc(px(rn.x), py(rn.y), r * 1.55 * scale, 0, Math.PI * 2);
+    ctxO.fill();
   }
 
   ctxU.globalAlpha = 1;

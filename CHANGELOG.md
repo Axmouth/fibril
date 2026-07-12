@@ -160,7 +160,15 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   cut now sits on the band's measured inner edge), and links between close
   neighbours draw one gentle curve instead of folding into hairpins.
 - Checkboxes and radios follow the flavor accent instead of the OS default
-  color.
+  color, and the danger red (delete and drain buttons, failure badges)
+  sharpened from a salmon that read as the default flavor's accent to an
+  unmistakable red in every flavor.
+- Cluster diagram, continued: grid columns follow the actual container
+  width (a wide screen fits five full-size rings per row), the over-band
+  strand redraw clips the identical path instead of stroking an
+  approximation (the last visible seam inside the ring opening is gone),
+  and the leader's glow paints last so strands on its turned-away side
+  carry the gold cast too.
 - The Cluster diagram came alive, then got its first live-review polish:
   replication links draw as proper fiber bundles (three to five snaking,
   outlined strands with layered waves, tapered into their rings) instead of
