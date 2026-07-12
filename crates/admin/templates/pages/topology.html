@@ -460,7 +460,7 @@ function drawTendrils() {
   if (!canvas || !svg) return;
   const cw = svg.clientWidth, ch = svg.clientHeight;
   if (!cw || !ch) return;
-  const RES = 3;
+  const RES = 2;
   const bw = Math.max(1, Math.round(cw / RES));
   const bh = Math.max(1, Math.round(ch / RES));
   if (canvas.width !== bw) canvas.width = bw;
@@ -498,7 +498,7 @@ function drawTendrils() {
     };
     if (outline) {
       ctx.strokeStyle = "#0b0e14";
-      ctx.lineWidth = width + 1.4;
+      ctx.lineWidth = width + 2;
       trace();
     }
     ctx.strokeStyle = color;
@@ -513,8 +513,9 @@ function drawTendrils() {
     let a = angle;
     for (let k = 1; k <= steps; k++) {
       const t = k / steps;
-      a += (rnd(seed + k) - 0.5) * 0.55
-        + Math.sin(sway * 0.8 + seed + k * 1.7) * 0.045;
+      const settle = Math.min(1, (k - 1) / 2);
+      a += ((rnd(seed + k) - 0.5) * 0.55
+        + Math.sin(sway * 0.8 + seed + k * 1.7) * 0.045) * settle;
       const step = (len / steps) * (0.8 + rnd(seed + 40 + k) * 0.4);
       x += Math.cos(a) * step;
       y += Math.sin(a) * step;
@@ -577,12 +578,30 @@ function drawTendrils() {
     }
   };
 
-  // Consensus mesh: one organic gold strand leader <-> each voter.
+  // Endpoints threaded through the rings: pull each end past the ring
+  // center to its far side, so the strand crosses the transparent opening,
+  // hides under the band, and emerges outside.
+  const threadEnds = (from, to, lane) => {
+    const dx = to.x - from.x, dy = to.y - from.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const ux = dx / len, uy = dy / len;
+    const reach = currentSpriteS * 0.4;
+    return {
+      x1: from.x - ux * reach - uy * lane,
+      y1: from.y - uy * reach * 0.5 + ux * lane,
+      x2: to.x + ux * reach - uy * lane,
+      y2: to.y + uy * reach * 0.5 + ux * lane,
+    };
+  };
+
+  // Consensus mesh: one organic gold strand leader <-> each voter, offset a
+  // lane from the data stem so the pair reads side by side.
   for (const link of consensusLinks) {
     const on = !focusId || link.a === focusId || link.b === focusId;
     const seed = hashStr("raft|" + link.a + "|" + link.b) % 1000;
-    drawLink(link.from.x, link.from.y, link.to.x, link.to.y, seed,
-      "#e8b65b", on ? 0.5 : 0.06, 1.2, false);
+    const e = threadEnds(link.from, link.to, 7);
+    drawLink(e.x1, e.y1, e.x2, e.y2, seed,
+      "#e8b65b", on ? 0.5 : 0.06, 1.7, false);
   }
 
   // Data links: ONE stem per owner->follower pair, thicker with more
@@ -590,8 +609,9 @@ function drawTendrils() {
   for (const e of tendrils) {
     const on = !focusId || e.owner === focusId || e.follower === focusId;
     const seed = hashStr(e.owner + "|" + e.follower) % 1000;
-    const width = e.count >= 5 ? 2.6 : e.count >= 2 ? 2.1 : 1.7;
-    drawLink(e.from.x, e.from.y, e.to.x, e.to.y, seed,
+    const width = e.count >= 5 ? 3.6 : e.count >= 2 ? 3.0 : 2.4;
+    const ends = threadEnds(e.from, e.to, -6);
+    drawLink(ends.x1, ends.y1, ends.x2, ends.y2, seed,
       STRANDS_IN[seed % STRANDS_IN.length], on ? 0.85 : 0.07, width, true);
   }
 
@@ -608,12 +628,16 @@ function drawTendrils() {
         const seed = hashStr(rn.id + "|batch|" + side + "|" + i) % 1000;
         const fan = (i - (rn.stems - 1) / 2) * 0.42 + (rnd(seed + 9) - 0.5) * 0.2;
         const angle = (side < 0 ? Math.PI : 0) + fan;
-        const len = 42 + rnd(seed + 3) * 30;
+        // Start behind the ring's far side so the stem crosses the opening
+        // (visible through the sprite's transparent hole), slips under the
+        // band, and emerges - the through-the-ring look.
+        const back = r * 0.45;
+        const len = 42 + back + rnd(seed + 3) * 30;
         drawTendril(
-          rn.x + Math.cos(angle) * (r - 12),
-          rn.y + Math.sin(angle) * (r - 12) * 0.5,
+          rn.x - Math.cos(angle) * back + (rnd(seed + 11) - 0.5) * 10,
+          rn.y - Math.sin(angle) * back * 0.5 + (rnd(seed + 12) - 0.5) * 12,
           angle, len, seed,
-          BATCH[hashStr("c" + seed) % BATCH.length], alpha, 1.5);
+          BATCH[hashStr("c" + seed) % BATCH.length], alpha, 2.1);
       }
     }
   }
