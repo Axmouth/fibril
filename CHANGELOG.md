@@ -169,6 +169,12 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   approximation (the last visible seam inside the ring opening is gone),
   and the leader's glow paints last so strands on its turned-away side
   carry the gold cast too.
+- A dead-letter tour: the `e2e_c` bench client gains `--nack-every N`
+  (requeue instead of complete, so messages burn their retry budgets),
+  the scenario runner gains `declare-queue-dlq` and `consume-nack` verbs,
+  and `dlq-tour.scenario` walks the whole story on one broker - a custom
+  DLQ target, a failing consumer, three hundred dead letters, and
+  replay-to-source from the Messages page.
 - The Streams page shows durable cursors: each stream card gains a
   subscriber table - cursor name, partition, a tail / catching-up position
   chip, how far behind the tail, read rate, and when it last advanced - so

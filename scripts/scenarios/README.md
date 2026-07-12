@@ -34,6 +34,8 @@ One step per line, `#` comments allowed:
 | `publish-burst <topic> <count> [size]` | real client load via `e2e_c` (runs at full speed, so a burst is seconds long) |
 | `consume <topic> <seconds>` | background reader draining the topic (caps at 1M messages) |
 | `stream-load <topic> <rate> <seconds> [readers] [partitions]` | rate-limited stream writers plus durable-cursor readers via `bench_stream`; cursor names are stable so a later run resumes the same cursors |
+| `declare-queue-dlq <topic> <partitions> <max_retries> <dlq_topic>` | a queue with a custom dead-letter target and retry budget |
+| `consume-nack <topic> <seconds> [every]` | a consumer that requeues instead of completing (every Nth), so messages burn their retries and dead-letter |
 | `test-publish <topic> [text...]` | one marked message via the admin API |
 | `delete-queue <topic>` | delete a queue |
 | `drain <grace_ms>` | announce a drain |
@@ -54,6 +56,9 @@ One step per line, `#` comments allowed:
   stream declared through the admin API, durable readers at tail, cursors
   falling behind during a readerless append, then the same cursors
   resuming and catching up. Run with `--nodes 3 --ganglion`.
+- `dlq-tour.scenario` - dead letters end to end on one broker: a custom
+  DLQ target, a failing consumer burning retry budgets, the Dead letters
+  page filling, and replay-to-source from the Messages page.
 
 ## Extra load recipes
 

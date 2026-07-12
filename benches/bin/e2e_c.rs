@@ -49,6 +49,7 @@ async fn run_load_test(
     idle_timeout_ms: u64,
     confirmed: bool,
     firehose: bool,
+    nack_every: u64,
     topic: std::sync::Arc<str>,
 ) {
     let start = Instant::now();
@@ -197,8 +198,18 @@ async fn run_load_test(
             });
 
             let acker = tokio::spawn(async move {
+                let mut seen = 0u64;
                 while let Some(msg) = rx_acker.recv().await {
-                    msg.complete().await.unwrap();
+                    seen += 1;
+                    if nack_every > 0 && seen % nack_every == 0 {
+                        // Requeue instead of completing: drives the retry
+                        // counter toward retries-exhausted dead-lettering.
+                        // The server dead-letters at max, so an error here
+                        // just means the message is already past saving.
+                        let _ = msg.retry().await;
+                    } else {
+                        msg.complete().await.unwrap();
+                    }
                 }
             });
 
@@ -351,6 +362,12 @@ struct Args {
     #[arg(long, default_value_t = false)]
     firehose: bool,
 
+    /// Nack (requeue) every Nth received message instead of completing it,
+    /// to drive retries-exhausted dead-lettering in demos. 1 nacks every
+    /// message; 0 (the default) completes everything.
+    #[arg(long, default_value_t = 0)]
+    nack_every: u64,
+
     /// Topic to publish to / subscribe from. Lets publish and delivery run on
     /// different topics against one broker to separate per-topic contention.
     #[arg(long, default_value = "topic1")]
@@ -385,6 +402,7 @@ async fn main() {
             args.idle_timeout_ms,
             args.confirmed,
             args.firehose,
+            args.nack_every,
             args.topic.into(),
         )
         .await;

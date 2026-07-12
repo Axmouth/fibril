@@ -3477,7 +3477,11 @@ M2 - Streams durable cursor view + streams scenario. SHIPPED 2026-07-13
      cursor that disconnects and resumes, lag recovery visible. Document
      in scripts/scenarios/README.md (standing rule).
 
-M3 - DLQ scenario.
+M3 - DLQ scenario. SHIPPED 2026-07-13 (e2e_c --nack-every,
+  declare-queue-dlq + consume-nack verbs, dlq-tour.scenario, verified:
+  300 dead-lettered via retries-exhausted, 3 replayed to source).
+  Assessment outcome: TTL expiry does NOT dead-letter (drop only), so the
+  nack flag was the honest driver.
   scripts/scenarios/dlq-tour.scenario: queue with max_retries + DLQ
   policy, messages that dead-letter, then replay-to-source from the
   Messages page. BLOCKER TO ASSESS FIRST: driving retries-exhausted needs

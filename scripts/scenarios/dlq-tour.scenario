@@ -1,0 +1,23 @@
+# Dead letters end to end on one broker: a queue with a custom DLQ target
+# and a small retry budget, a consumer that fails everything, the dead
+# letters flowing, and the Messages page replaying them back to source.
+# Run: scripts/scenario.sh scripts/scenarios/dlq-tour.scenario
+# Watch: /admin/dlq and /admin/messages (topic orders.dead, then select
+# rows and "Replay selected to source").
+
+say Declaring the dead-letter target and a queue that routes to it
+declare-queue orders.dead 1
+declare-queue-dlq orders 1 2 orders.dead
+wait 2
+
+say A batch arrives
+publish-burst orders 300 256
+wait 2
+
+say A consumer that fails every message - two retries each, then dead letters
+consume-nack orders 40 1
+wait 50
+
+say The batch should now live in orders.dead - browse Dead letters, then
+say replay some from the Messages page (they return to orders with reset attempts)
+wait 600

@@ -144,6 +144,19 @@ while IFS= read -r line || [[ -n "$line" ]]; do
       target/release/e2e_c --addr "$(broker_addr)" -m "${count:-1000}" -c 1 --writer \
         --size "${size:-256}" --topic "$topic" >/dev/null 2>&1 || echo "  (burst failed)"
       echo "  published ${count:-1000} to $topic" ;;
+    declare-queue-dlq)
+      # A queue with a custom dead-letter target and a retry budget, so a
+      # failing consumer visibly dead-letters.
+      read -r topic partitions retries dlq_topic <<<"$rest"
+      post "/admin/api/queues" "{\"topic\":\"$topic\",\"partition_count\":${partitions:-1},\"policy\":\"custom\",\"target\":{\"topic\":\"$dlq_topic\",\"group\":null},\"max_retries\":${retries:-2}}" ;;
+    consume-nack)
+      # A consumer that requeues instead of completing: every message burns
+      # through its retry budget and dead-letters.
+      read -r topic seconds every <<<"$rest"
+      timeout "${seconds:-30}" target/release/e2e_c --addr "$(broker_addr)" -m 1000000 -c 1 --reader \
+        --nack-every "${every:-1}" --topic "$topic" --idle-timeout-ms $(( (${seconds:-30}) * 1000 )) >/dev/null 2>&1 &
+      CONSUMERS+=("$!")
+      echo "  nacking consumer on $topic for ${seconds:-30}s (every ${every:-1})" ;;
     stream-load)
       # Rate-limited stream writers plus durable-cursor readers via
       # bench_stream. Cursor names are stable (bench-reader-N), so a later
