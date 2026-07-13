@@ -75,7 +75,11 @@ function renderTls(info) {
       ? '<span class="chip-bad">expired</span>'
       : daysLeft <= 30
         ? `<span class="chip-warn">expires in ${daysLeft} day(s)</span>`
-        : `<span class="chip-ok">expires in ${daysLeft} day(s)</span>`;
+        : daysLeft > 365
+          // Decades-out material (long-lived self-signed): the date says
+          // more than an absurd day count.
+          ? `<span class="chip-ok">expires ${new Date(notAfter * 1000).toISOString().slice(0, 10)}</span>`
+          : `<span class="chip-ok">expires in ${daysLeft} day(s)</span>`;
   }
   body.innerHTML = `
     <p>${info.subject ? `<span class="chip-plain">${escapeHtml(info.subject)}</span> ` : ""}${expiry}</p>

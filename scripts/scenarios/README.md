@@ -21,6 +21,18 @@ scripts/scenario.sh my.scenario --admin http://127.0.0.1:8081
 Ctrl-C tears everything down. Node data lives in temp dirs and is removed on
 exit.
 
+`--tls` boots the node with generated self-signed material (broker port
+serves TLS, admin stays on plain HTTP so the script's API verbs work).
+Single-node only: per-node self-signed CAs cannot trust each other, so
+cluster TLS is out of scope here. The plain-TCP load verbs (publish-burst,
+consume, stream-load) cannot connect to a TLS broker port - use
+test-publish. The runner prints the tls dir and the command for issuing a
+client certificate from the deployment CA:
+
+```sh
+target/release/fibrilctl cert issue <user> --data-dir <run-dir>/node-1
+```
+
 ## Verbs
 
 One step per line, `#` comments allowed:
@@ -59,6 +71,9 @@ One step per line, `#` comments allowed:
 - `dlq-tour.scenario` - dead letters end to end on one broker: a custom
   DLQ target, a failing consumer burning retry budgets, the Dead letters
   page filling, and replay-to-source from the Messages page.
+- `security-tour.scenario` - the Security page with real material: a TLS
+  broker generating its own CA and leaf at boot, the certificate card and
+  reload button, users, and client-cert issuance. Run with `--tls`.
 
 ## Extra load recipes
 

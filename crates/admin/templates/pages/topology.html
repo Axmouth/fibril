@@ -994,7 +994,11 @@ function renderList(data) {
       tlsCell = `<span class="chip-ok">${rt.tls === "mtls" ? "mTLS" : "TLS"}</span>`;
       if (rt.cert_not_after_unix) {
         const days = Math.floor((rt.cert_not_after_unix * 1000 - Date.now()) / 86400000);
-        tlsCell += ` <span class="${days <= 30 ? "chip-warn" : "chip-plain"}">cert ${days}d</span>`;
+        // Only when it says something: an expiry decades out (long-lived
+        // self-signed material) is noise, an approaching one is the point.
+        if (days <= 90) {
+          tlsCell += ` <span class="${days <= 30 ? "chip-warn" : "chip-plain"}">cert ${days}d</span>`;
+        }
       }
     }
     return `

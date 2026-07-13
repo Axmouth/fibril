@@ -3526,7 +3526,13 @@ M5 - Settings layout pass. PHASE 1 SHIPPED 2026-07-13 (auto-fill grids,
   "default X" ghosts, and a "recently changed" strip fed from the audit
   ring's settings entries.
 
-M6 - Security page: cert testing scenario.
+M6 - Security page: cert testing scenario. SHIPPED 2026-07-13
+  (scenario.sh --tls single-node via FIBRIL_TLS_ENABLED +
+  AUTO_SELF_SIGNED + admin HTTP, security-tour.scenario, fibrilctl cert
+  issue validated against the live CA, far-out expiries show dates not
+  day counts; M4 TLS chip verified live). Cluster TLS stays out of scope
+  until shared deployment material exists (per-node self-signed CAs
+  cannot trust each other) - pairs with the TLS-from-UI design pass.
   A TLS-enabled scenario mode (scenario.sh flag that generates
   self-signed material via the existing setup machinery before boot), so
   the Security page shows a real cert, rotation can be exercised, and

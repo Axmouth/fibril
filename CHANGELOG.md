@@ -190,6 +190,13 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   leaf's not-after, which only changes on rotation), surfaced per node
   in the topology payload as a runtime block. The view also answers to
   ?view=list in the URL, shareable like the filters.
+- A security tour: the scenario runner gains `--tls` (single-node TLS
+  from generated self-signed material, admin kept on plain HTTP so the
+  script verbs work), and `security-tour.scenario` exercises the Security
+  page with real certificates, including issuing a client certificate
+  from the live deployment CA with `fibrilctl cert issue`. Certificate
+  expiries decades out now show the date instead of an absurd day count,
+  on the Security card and the cluster broker cards alike.
 - A dead-letter tour: the `e2e_c` bench client gains `--nack-every N`
   (requeue instead of complete, so messages burn their retry budgets),
   the scenario runner gains `declare-queue-dlq` and `consume-nack` verbs,

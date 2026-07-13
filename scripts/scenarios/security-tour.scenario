@@ -1,0 +1,19 @@
+# The Security page with real material: a TLS broker generating its own
+# self-signed CA and leaf at first boot, the certificate card, live reload,
+# users, and client-certificate issuance from the same CA.
+# Run: scripts/scenario.sh scripts/scenarios/security-tour.scenario --tls
+# Watch: /admin/security. The runner prints the tls dir and the fibrilctl
+# command for issuing a client certificate against this deployment's CA.
+
+say TLS broker up - the Security page shows the served certificate
+say (fingerprint, validity window, subject) and the reload button
+wait 5
+
+declare-queue orders 1
+test-publish orders confirmed over the TLS listener
+say A test message went through the broker's real publish path
+
+say Try it: create a user on the Security page, then issue a matching
+say client certificate with the fibrilctl command printed above - with
+say tls.client_auth enabled the certificate authenticates as that user
+wait 900

@@ -29,15 +29,26 @@ SCENARIO="${1:?usage: scripts/scenario.sh <scenario-file> [--nodes N] [--ganglio
 shift
 NODES=1
 GANGLION=false
+TLS=false
 ADMIN_URL=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --nodes) NODES="$2"; shift 2 ;;
     --ganglion) GANGLION=true; shift ;;
+    --tls) TLS=true; shift ;;
     --admin) ADMIN_URL="$2"; shift 2 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
 done
+
+# Each --tls node generates its own self-signed CA, and separate CAs cannot
+# trust each other - so cluster TLS (shared deployment material, inter-broker
+# trust) is out of scope here. Single node exercises the Security page, cert
+# rotation, and client-cert issuance honestly.
+if [[ "$TLS" == true && "$GANGLION" == true ]]; then
+  echo "--tls supports single-node scenarios only (per-node self-signed CAs cannot trust each other)" >&2
+  exit 2
+fi
 
 # Deliberately OFF the default ports so a dev broker on 9876/8081 is never
 # silently adopted or disturbed.
@@ -68,6 +79,17 @@ start_node() {
     "FIBRIL_BROKER_BIND=127.0.0.1:$((BASE_BROKER_PORT + i))"
     "FIBRIL_ADMIN_BIND=127.0.0.1:$((BASE_ADMIN_PORT + i))"
   )
+  if [[ "$TLS" == true ]]; then
+    # Broker port serves TLS from generated material; the admin stays on
+    # plain HTTP so this script's curl verbs keep working. The plain-TCP
+    # load verbs (publish-burst, consume, stream-load) will NOT connect to
+    # a TLS broker port - drive traffic with test-publish instead.
+    env_vars+=(
+      "FIBRIL_TLS_ENABLED=true"
+      "FIBRIL_TLS_AUTO_SELF_SIGNED=true"
+      "FIBRIL_TLS_ADMIN_ENABLED=false"
+    )
+  fi
   if [[ "$GANGLION" == true ]]; then
     local peers=""
     for ((p = 1; p <= NODES; p++)); do
@@ -117,6 +139,9 @@ if [[ -z "$ADMIN_URL" ]]; then
 fi
 echo
 echo "Dashboard: $(admin_url)/admin  (Activity: $(admin_url)/admin/activity)"
+if [[ "$TLS" == true ]]; then
+  echo "TLS material: $RUN_DIR/node-1/tls  (issue a client cert: target/release/fibrilctl cert issue <user> --data-dir $RUN_DIR/node-1)"
+fi
 echo "Running scenario: $SCENARIO"
 echo
 
