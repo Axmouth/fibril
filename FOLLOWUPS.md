@@ -3511,7 +3511,11 @@ M4 - Cluster page: adopt the mockup's non-diagram view. SHIPPED
   3. Placement matrix from assignments (data already in the payload).
   4. "Cluster" naming already done; the diagram/list toggle stays.
 
-M5 - Settings layout pass.
+M5 - Settings layout pass. PHASE 1 SHIPPED 2026-07-13 (auto-fill grids,
+  uniform 150px numeric controls, duration pairs shrink input-first,
+  bottom-anchored controls per row, Delivery/Connections/Idle-Cleanup
+  wrapped into the shared grid). Phase 2 still banked: defaults ghosts +
+  recently-changed strip from the audit ring.
   The current form is ragged (mixed control widths, full-width strays,
   two-column jumble - user screenshots 43/44). Phase 1 is CSS-first:
   a consistent field grid (label + control columns aligned, uniform

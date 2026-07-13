@@ -953,13 +953,15 @@ input[type="radio"] {
 .settings-grid {
   display: grid;
   gap: 12px 18px;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  /* auto-fill, not auto-fit: a row's lone field keeps its column width
+     instead of stretching across the page. */
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
 }
 
 .settings-grid-two {
   display: grid;
   gap: 12px 18px;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
 }
 
 .settings-field {
@@ -978,6 +980,31 @@ input[type="radio"] {
   align-items: center;
   display: flex;
   gap: 6px;
+}
+
+/* Every numeric control the same width, paired with a unit or not - the
+   ragged mix of tiny and page-wide inputs was the whole complaint. */
+.settings-field input[type="number"] {
+  max-width: 150px;
+}
+
+/* Inside a value+unit pair the input yields before the unit select does,
+   so tight grid cells never push the select into the neighbour column. */
+.settings-duration input[type="number"] {
+  flex: 1 1 90px;
+  min-width: 60px;
+}
+
+.settings-duration select {
+  flex: none;
+}
+
+/* Controls anchor to the cell bottom, so a row's inputs line up even when
+   their help texts run different lengths. */
+.settings-field > .settings-duration,
+.settings-field > input,
+.settings-field > select {
+  margin-top: auto;
 }
 
 .duration-unit {

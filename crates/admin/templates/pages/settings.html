@@ -23,6 +23,7 @@
         <h5>Delivery</h5>
         <p>Controls how long messages can stay leased and how aggressively delayed or expired work is polled.</p>
       </div>
+      <div class="settings-grid settings-grid-two">
       <label class="settings-field">
         <span class="settings-label">Inflight TTL</span>
         <span class="settings-help">How long a delivered message can remain unacknowledged before it becomes eligible again.</span>
@@ -61,6 +62,7 @@
           </select>
         </span>
       </label>
+      </div>
     </section>
 
     <section class="settings-section">
@@ -68,6 +70,7 @@
         <h5>Connections</h5>
         <p>Controls how the broker treats short TCP disconnects from clients that can resume.</p>
       </div>
+      <div class="settings-grid settings-grid-two">
       <label class="settings-field">
         <span class="settings-label">Reconnect grace</span>
         <span class="settings-help">Blank disables grace. Otherwise, a disconnected client can resume within this window before its subscriptions are cleaned up.</span>
@@ -79,6 +82,7 @@
           </select>
         </span>
       </label>
+      </div>
     </section>
 
     <section class="settings-section">
@@ -231,6 +235,7 @@
           <span class="settings-help">When disabled, idle queues remain materialized after first use.</span>
         </span>
       </label>
+      <div class="settings-grid settings-grid-two">
       <label class="settings-field">
         <span class="settings-label">Evict after</span>
         <span class="settings-help">How long a queue must have no publishers or subscribers before it can be removed from memory.</span>
@@ -264,6 +269,7 @@
           </select>
         </span>
       </label>
+</div>
     </section>
 
     <div class="settings-actions">
