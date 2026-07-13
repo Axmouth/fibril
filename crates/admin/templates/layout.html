@@ -46,9 +46,9 @@
     #page-root { transition: opacity 0.12s ease; }
     #page-root.swapping { opacity: 0.35; }
   </style>
-  <link rel="icon" type="image/png" sizes="16x16" href="/static/img/face-16.png">
-  <link rel="icon" type="image/png" sizes="32x32" href="/static/img/face-32.png">
-  <link rel="icon" type="image/png" sizes="48x48" href="/static/img/face-48.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="/static/img/face-16.png?v=2">
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/img/face-32.png?v=2">
+  <link rel="icon" type="image/png" sizes="48x48" href="/static/img/face-48.png?v=2">
   <link rel="stylesheet" href="/static/css/admin.css">
 </head>
 <body class="admin-body">
@@ -204,7 +204,6 @@
       // from the topology poll), the smile otherwise. Swapping the icon
       // links repaints the tab; a 4s hold keeps reconnect blips from
       // flickering the face.
-      const iconLinks = document.querySelectorAll('link[rel="icon"]');
       let faceNow = "face";
       let facePending = { name: "face", since: 0 };
       const applyFace = (state) => {
@@ -213,9 +212,13 @@
         if (want !== facePending.name) facePending = { name: want, since: Date.now() };
         if (want !== faceNow && Date.now() - facePending.since >= 4000) {
           faceNow = want;
-          for (const link of iconLinks) {
+          // Replace the nodes rather than mutating href: Firefox only
+          // reliably re-reads a favicon when the link element is new.
+          for (const link of document.querySelectorAll('link[rel="icon"]')) {
             const size = (link.getAttribute("sizes") || "32x32").split("x")[0];
-            link.href = `/static/img/${faceNow}-${size}.png`;
+            const fresh = link.cloneNode();
+            fresh.href = `/static/img/${faceNow}-${size}.png?v=2`;
+            link.replaceWith(fresh);
           }
         }
       };
