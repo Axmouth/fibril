@@ -196,6 +196,12 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   silently drove the wrong node), and scenarios that need TLS material
   declare `require-tls` and abort with the exact rerun command instead of
   referencing a hint that was never printed.
+- The favicon is the mascot's face now, and it reacts. Redrawn tiles with
+  the mascot's elongated capsule eyes (the old extraction read as square
+  dots at 16px), plus two states: X-eyes while this broker is unreachable
+  (riding the same signal as the live pill) and the strained face while
+  it runs flat out, with a short hold so reconnect blips never flicker
+  the tab.
 - A security tour: the scenario runner gains `--tls` (single-node TLS
   from generated self-signed material, admin kept on plain HTTP so the
   script verbs work), and `security-tour.scenario` exercises the Security

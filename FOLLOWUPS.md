@@ -3541,7 +3541,11 @@ M6 - Security page: cert testing scenario. SHIPPED 2026-07-13
   known per connection; user last-seen) BANKED as a follow-on, roles need
   the shelved authz work and stay shelved.
 
-M7 - Favicon: mascot eyes + state (user idea 2026-07-13).
+M7 - Favicon: mascot eyes + state (user idea 2026-07-13). SHIPPED
+  2026-07-13: capsule-eye redraw at 16/32/48 + face-dead (X-eyes) +
+  face-strain (chevrons, gritted) variants, dynamic swap on the live-pill
+  tick (dead state / own rate >= 20k from the topology poll), 4s hold
+  against flicker. THE M-SERIES IS COMPLETE.
   1. Redraw the favicon face tiles with the mascot's elongated capsule
      eyes (current extraction reads as square dots at 16px), regenerated
      from mascot-master with the established pixel pipeline.

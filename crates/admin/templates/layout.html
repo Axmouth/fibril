@@ -199,6 +199,26 @@
       const pill = document.getElementById("live-pill");
       const text = document.getElementById("live-pill-text");
       if (!pill || !text) return;
+      // The favicon mirrors the mascot's face: X-eyes while this broker is
+      // unreachable, the strained face while it runs flat out (own rate
+      // from the topology poll), the smile otherwise. Swapping the icon
+      // links repaints the tab; a 4s hold keeps reconnect blips from
+      // flickering the face.
+      const iconLinks = document.querySelectorAll('link[rel="icon"]');
+      let faceNow = "face";
+      let facePending = { name: "face", since: 0 };
+      const applyFace = (state) => {
+        const want = state === "dead" ? "face-dead"
+          : (window.__fibrilSelfRate || 0) >= 20000 ? "face-strain" : "face";
+        if (want !== facePending.name) facePending = { name: want, since: Date.now() };
+        if (want !== faceNow && Date.now() - facePending.since >= 4000) {
+          faceNow = want;
+          for (const link of iconLinks) {
+            const size = (link.getAttribute("sizes") || "32x32").split("x")[0];
+            link.href = `/static/img/${faceNow}-${size}.png`;
+          }
+        }
+      };
       const update = () => {
         const last = window.__fibrilLastOk || 0;
         // Before the first successful fetch the state is simply unknown:
@@ -213,6 +233,7 @@
         }
         text.textContent = state === "dead" ? "unreachable"
           : state === "connecting" ? "connecting" : state;
+        applyFace(state);
       };
       update();
       window.__nativeSetInterval(update, 2000);
@@ -385,6 +406,10 @@
         const nodes = (coordination && coordination.nodes) || [];
         const selfId = coordination && coordination.node_id;
         const reachable = nodes.filter((n) => n.admin_addr);
+        // This broker's own load, for the strained-face favicon.
+        const selfNode = nodes.find((n) => n.node_id === selfId);
+        window.__fibrilSelfRate = Math.max(
+          selfNode?.rate_pub ?? 0, selfNode?.rate_dlv ?? 0);
         // Cluster membership chip: live/registered. Only meaningful under
         // real coordination (a lone broker's topology view has no
         // consensus block).
