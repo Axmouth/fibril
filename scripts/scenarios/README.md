@@ -52,6 +52,7 @@ One step per line, `#` comments allowed:
 | `delete-queue <topic>` | delete a queue |
 | `drain <grace_ms>` | announce a drain |
 | `node-kill <n>` / `node-start <n>` | cluster membership churn (`--nodes` mode) |
+| `require-tls` | abort with guidance unless the run was started with `--tls` |
 
 ## Included scenarios
 

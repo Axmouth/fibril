@@ -72,8 +72,18 @@ broker_addr() {
   if [[ -n "$ADMIN_URL" ]]; then echo "127.0.0.1:9876"; else echo "127.0.0.1:$((BASE_BROKER_PORT + 1))"; fi
 }
 
+port_free() {
+  ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+}
+
 start_node() {
   local i="$1"
+  for port in $((BASE_BROKER_PORT + i)) $((BASE_ADMIN_PORT + i)); do
+    if ! port_free "$port"; then
+      echo "port $port is already in use - a previous scenario run is still holding it (Ctrl-C it first)" >&2
+      exit 1
+    fi
+  done
   local env_vars=(
     "FIBRIL_DATA_DIR=$RUN_DIR/node-$i"
     "FIBRIL_BROKER_BIND=127.0.0.1:$((BASE_BROKER_PORT + i))"
@@ -169,6 +179,11 @@ while IFS= read -r line || [[ -n "$line" ]]; do
       target/release/e2e_c --addr "$(broker_addr)" -m "${count:-1000}" -c 1 --writer \
         --size "${size:-256}" --topic "$topic" >/dev/null 2>&1 || echo "  (burst failed)"
       echo "  published ${count:-1000} to $topic" ;;
+    require-tls)
+      if [[ "$TLS" != true ]]; then
+        echo "this scenario needs TLS material - rerun with: scripts/scenario.sh $SCENARIO --tls" >&2
+        exit 1
+      fi ;;
     declare-queue-dlq)
       # A queue with a custom dead-letter target and a retry budget, so a
       # failing consumer visibly dead-letters.

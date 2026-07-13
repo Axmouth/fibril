@@ -5,6 +5,7 @@
 # Watch: /admin/security. The runner prints the tls dir and the fibrilctl
 # command for issuing a client certificate against this deployment's CA.
 
+require-tls
 say TLS broker up - the Security page shows the served certificate
 say (fingerprint, validity window, subject) and the reload button
 wait 5

@@ -190,6 +190,12 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   leaf's not-after, which only changes on rotation), surfaced per node
   in the topology payload as a runtime block. The view also answers to
   ?view=list in the URL, shareable like the filters.
+- Scenario runner guardrails, both learned the embarrassing way: a run
+  now fails fast when a previous run still holds its ports (before, the
+  stale broker answered the new run's health check and the scenario
+  silently drove the wrong node), and scenarios that need TLS material
+  declare `require-tls` and abort with the exact rerun command instead of
+  referencing a hint that was never printed.
 - A security tour: the scenario runner gains `--tls` (single-node TLS
   from generated self-signed material, admin kept on plain HTTP so the
   script verbs work), and `security-tour.scenario` exercises the Security
