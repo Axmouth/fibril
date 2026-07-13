@@ -23,8 +23,10 @@ endpoint on the same listener (same auth, same HTTPS) for continuous
 monitoring. See [monitoring](/deployment/monitoring/).
 
 When broker TLS is enabled (`tls.enabled = true`) the dashboard serves HTTPS
-from the same certificate material. Set `tls.admin_enabled = false` to keep it
-on plain HTTP behind a reverse proxy that terminates TLS. See
+from the same certificate material. A plain `http://` request to the TLS
+listener gets redirected to the same URL under `https://`, so a bookmark or
+habit-typed address still lands on the dashboard. Set `tls.admin_enabled =
+false` to keep it on plain HTTP behind a reverse proxy that terminates TLS. See
 [configuration](/configuration/) for the `tls` section. The settings page
 startup summary shows the current TLS state, including the CA fingerprint for
 generated material.

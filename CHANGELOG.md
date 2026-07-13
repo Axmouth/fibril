@@ -363,6 +363,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- A plain `http://` request to a TLS-enabled admin listener now gets a
+  redirect to the same URL under `https://`. Before, the TLS stack answered
+  the plaintext bytes with a raw TLS alert, which browsers rendered as
+  binary garbage. The startup banner also prints the admin URL with the
+  scheme it actually serves.
 - Declaring a multi-partition queue or stream from the dashboard (or the
   admin API) in cluster mode now registers the partitioning with
   coordination first, exactly like client declares - the returned count is

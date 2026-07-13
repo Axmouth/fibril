@@ -38,6 +38,7 @@ tracing-opentelemetry = "0.32"
 uuid = { version = "1.19", features = ["v7"] }
 
 [dev-dependencies]
+fibril-tls = { path = "../tls" }
 tokio-util = { version = "0.7", features = ["codec"] }
 
 [package.metadata.ai]

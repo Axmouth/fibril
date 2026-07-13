@@ -1244,6 +1244,7 @@ dependencies = [
  "fibril-broker",
  "fibril-metrics",
  "fibril-protocol",
+ "fibril-tls",
  "fibril-util",
  "fs2",
  "futures",

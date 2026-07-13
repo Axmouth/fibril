@@ -513,9 +513,10 @@ impl AdminServer {
         if let Some(tls) = state.config.tls.clone() {
             let addr = resolve_bind_addr(&state.config.bind)?;
             let rustls_config = axum_server::tls_rustls::RustlsConfig::from_config(tls);
-            print_admin_banner(&state.config.bind, state.config.auth.is_some());
+            print_admin_banner(&state.config.bind, state.config.auth.is_some(), true);
             tracing::info!("listening on {} (HTTPS)", state.config.bind);
-            axum_server::bind_rustls(addr, rustls_config)
+            axum_server::bind(addr)
+                .acceptor(TlsOrRedirectAcceptor::new(rustls_config))
                 .serve(app.into_make_service())
                 .await
                 .map_err(AdminServerError::Serve)?;
@@ -528,7 +529,7 @@ impl AdminServer {
                 bind: state.config.bind.clone(),
                 source,
             })?;
-        print_admin_banner(&state.config.bind, state.config.auth.is_some());
+        print_admin_banner(&state.config.bind, state.config.auth.is_some(), false);
         tracing::info!("listening on {}", state.config.bind);
         axum::serve(listener, app)
             .await
@@ -1038,22 +1039,140 @@ fn resolve_bind_addr(bind: &str) -> Result<std::net::SocketAddr, AdminServerErro
         })
 }
 
-pub fn print_admin_banner(bind: &str, auth: bool) {
+/// First byte of every TLS connection (the handshake record type).
+const TLS_HANDSHAKE_RECORD: u8 = 0x16;
+
+/// How long to wait for a fresh connection's first bytes, and for the rest
+/// of a plaintext request head, before dropping the connection.
+const PLAINTEXT_SNIFF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Cap on how much of a plaintext request head is read for the redirect.
+const PLAINTEXT_HEAD_CAP: usize = 8 * 1024;
+
+/// TLS acceptor that answers plaintext HTTP with a redirect. A browser
+/// pointed at `http://` on a TLS admin port would otherwise receive a raw
+/// TLS alert rendered as binary garbage. Every TLS connection opens with a
+/// handshake record byte, so anything else is read as an HTTP request and
+/// answered in plain HTTP with a redirect to the same URL under `https://`.
+#[derive(Clone)]
+struct TlsOrRedirectAcceptor {
+    tls: axum_server::tls_rustls::RustlsAcceptor,
+}
+
+impl TlsOrRedirectAcceptor {
+    fn new(config: axum_server::tls_rustls::RustlsConfig) -> Self {
+        Self {
+            tls: axum_server::tls_rustls::RustlsAcceptor::new(config),
+        }
+    }
+}
+
+impl<S> axum_server::accept::Accept<tokio::net::TcpStream, S> for TlsOrRedirectAcceptor
+where
+    S: Send + 'static,
+{
+    type Stream = tokio_rustls::server::TlsStream<tokio::net::TcpStream>;
+    type Service = S;
+    type Future = std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = std::io::Result<(Self::Stream, Self::Service)>>
+                + Send,
+        >,
+    >;
+
+    fn accept(&self, stream: tokio::net::TcpStream, service: S) -> Self::Future {
+        let tls = self.tls.clone();
+        Box::pin(async move {
+            let mut first = [0u8; 1];
+            let peeked =
+                match tokio::time::timeout(PLAINTEXT_SNIFF_TIMEOUT, stream.peek(&mut first)).await
+                {
+                    Ok(Ok(n)) => n,
+                    Ok(Err(err)) => return Err(err),
+                    Err(_) => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "no bytes from the client before the sniff deadline",
+                        ));
+                    }
+                };
+            if peeked == 0 || first[0] == TLS_HANDSHAKE_RECORD {
+                return tls.accept(stream, service).await;
+            }
+            redirect_plaintext_to_https(stream).await;
+            Err(std::io::Error::other(
+                "plaintext request answered with a redirect",
+            ))
+        })
+    }
+}
+
+/// Read enough of a plaintext HTTP request to name its target and answer a
+/// redirect to the same URL under `https://`. 307 keeps the method for API
+/// callers and is not cached, so a deployment that later turns TLS off does
+/// not strand browsers on a remembered permanent redirect. Write and
+/// shutdown failures are ignored because the connection is being dropped
+/// either way.
+async fn redirect_plaintext_to_https(mut stream: tokio::net::TcpStream) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut head = Vec::with_capacity(1024);
+    let mut buf = [0u8; 1024];
+    let deadline = tokio::time::Instant::now() + PLAINTEXT_SNIFF_TIMEOUT;
+    while !head.windows(4).any(|w| w == b"\r\n\r\n") && head.len() < PLAINTEXT_HEAD_CAP {
+        match tokio::time::timeout_at(deadline, stream.read(&mut buf)).await {
+            Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+            Ok(Ok(n)) => head.extend_from_slice(&buf[..n]),
+        }
+    }
+    let head = String::from_utf8_lossy(&head);
+    // Origin-form request target from the request line. Split on whitespace,
+    // so it cannot smuggle header bytes into the response.
+    let target = head.lines().next().and_then(|line| {
+        let target = line.split_whitespace().nth(1)?;
+        target.starts_with('/').then(|| target.to_string())
+    });
+    let host = head
+        .lines()
+        .skip(1)
+        .take_while(|line| !line.trim().is_empty())
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("host")
+                .then(|| value.trim().to_string())
+        });
+    let response = match (host, target) {
+        (Some(host), Some(target)) if !host.is_empty() => format!(
+            "HTTP/1.1 307 Temporary Redirect\r\nLocation: https://{host}{target}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+        ),
+        _ => {
+            let body = "This port serves HTTPS. Retry with https:// in the URL.\n";
+            format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+        }
+    };
+    let _ = stream.write_all(response.as_bytes()).await;
+    let _ = stream.shutdown().await;
+}
+
+pub fn print_admin_banner(bind: &str, auth: bool, tls: bool) {
     let auth = if auth { "enabled " } else { "disabled" };
+    let url = format!("{}://{bind}", if tls { "https" } else { "http" });
 
     tracing::info!(
         r#"
-                                                
+
 ┌──────────────────────────────────────────────┐
 │            Fibril Admin Console              │
 ├──────────────────────────────────────────────┤
-│  Web UI        : http://{bind:<20} │
+│  Web UI        : {url:<27} │
 │  Mode          : internal / operator         │
 │  Auth          : {auth:<27} │
 └──────────────────────────────────────────────┘
-                                                
-"#,
-        bind = bind
+
+"#
     );
 }
 
@@ -3791,5 +3910,105 @@ mod tests {
         let body = String::from_utf8(body.to_vec()).unwrap();
         assert!(body.contains("Log out"));
         assert!(body.contains("href=\"/logout\""));
+    }
+
+    struct TlsTestDir(std::path::PathBuf);
+
+    impl TlsTestDir {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!("fibril-admin-tls-{}", uuid::Uuid::now_v7()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TlsTestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn tls_or_redirect_acceptor(data_dir: &std::path::Path) -> TlsOrRedirectAcceptor {
+        let tls = fibril_tls::build_server_tls(&fibril_tls::TlsMode::AutoSelfSigned, data_dir, &[])
+            .unwrap()
+            .unwrap();
+        TlsOrRedirectAcceptor::new(axum_server::tls_rustls::RustlsConfig::from_config(
+            tls.server_config.clone(),
+        ))
+    }
+
+    async fn accept_one(
+        acceptor: TlsOrRedirectAcceptor,
+        listener: TcpListener,
+    ) -> std::io::Result<(tokio_rustls::server::TlsStream<TcpStream>, ())> {
+        use axum_server::accept::Accept as _;
+        let (stream, _) = listener.accept().await.unwrap();
+        acceptor.accept(stream, ()).await
+    }
+
+    #[tokio::test]
+    async fn plaintext_http_on_tls_admin_gets_a_redirect() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = TlsTestDir::new();
+        let acceptor = tls_or_redirect_acceptor(&dir.0);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(accept_one(acceptor, listener));
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"GET /admin/queues?view=list HTTP/1.1\r\nHost: 127.0.0.1:18081\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.unwrap();
+
+        assert!(response.starts_with("HTTP/1.1 307"), "{response}");
+        assert!(
+            response.contains("Location: https://127.0.0.1:18081/admin/queues?view=list\r\n"),
+            "{response}"
+        );
+        let accepted = server.await.unwrap();
+        assert!(
+            accepted.is_err(),
+            "a plaintext connection must not reach the TLS stack"
+        );
+    }
+
+    #[tokio::test]
+    async fn plaintext_http_without_host_gets_a_plain_400() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = TlsTestDir::new();
+        let acceptor = tls_or_redirect_acceptor(&dir.0);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(accept_one(acceptor, listener));
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(b"GET / HTTP/1.0\r\n\r\n").await.unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.unwrap();
+
+        assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+        assert!(response.contains("serves HTTPS"), "{response}");
+        assert!(server.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn tls_handshake_still_reaches_the_tls_stack() {
+        let dir = TlsTestDir::new();
+        let acceptor = tls_or_redirect_acceptor(&dir.0);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(accept_one(acceptor, listener));
+
+        let connector = fibril_tls::build_peer_connector(None, &dir.0).unwrap();
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let sni = tokio_rustls::rustls::pki_types::ServerName::try_from("localhost").unwrap();
+        let _client = connector.connect(sni, tcp).await.unwrap();
+
+        assert!(server.await.unwrap().is_ok());
     }
 }
