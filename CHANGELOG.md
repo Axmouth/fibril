@@ -197,8 +197,9 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   declare `require-tls` and abort with the exact rerun command instead of
   referencing a hint that was never printed.
 - The favicon is the mascot's face now, and it reacts. Redrawn tiles with
-  the mascot's elongated capsule eyes (the old extraction read as square
-  dots at 16px), plus two states: X-eyes while this broker is unreachable
+  the mascot's ring eyes - bright rim, dark center - at 32 and 48px, solid
+  capsules at 16px where a hole cannot resolve (the old extraction read as
+  square dots), plus two states: X-eyes while this broker is unreachable
   (riding the same signal as the live pill) and the strained face while
   it runs flat out, with a short hold so reconnect blips never flicker
   the tab.

@@ -406,16 +406,16 @@ See also: [admin dashboard](/admin-dashboard/).
 | Item | Status | Implemented surface |
 | --- | --- | --- |
 | Overview metrics | Implemented | Dashboard and API |
-| Connections and subscriptions | Implemented | Dashboard and API |
-| Queues page | Implemented | Dashboard and API, per-partition expand, follower-replication view, DLQ-policy column, hide-inactive toggle + search filter |
-| Create queue | Implemented | `POST /admin/api/queues` + dashboard form (partition count, optional DLQ policy, optional default message TTL) |
+| Connections and subscriptions | Implemented | Dashboard and API; per-connection publish counters, and a diagram view of the broker as the fibril ring with publisher connections plugged into one side and subscribers the other, pulses following each connection's live rate |
+| Queues page | Implemented | Dashboard and API, per-partition expand, follower-replication view, DLQ-policy column, hide-inactive toggle + search filter, live in/s and out/s columns, and a depth-trend drilldown (chart, rates, oldest ready message's age) |
+| Create queue | Implemented | `POST /admin/api/queues` + dashboard form (partition count, optional DLQ policy, optional default message TTL); coordinated in cluster mode - the partitioning registers with coordination first, its count is authoritative, and the controller places every partition |
 | Delete queue (single-node) | Implemented | `POST /admin/api/queues/delete` + per-row dashboard button; refuses while messages are inflight (409) and in cluster mode (501) pending coordinated teardown |
-| Streams page | Implemented | Dashboard and API (`GET /admin/api/streams`), per-topic partition rows with head/tail/retained, declared durability and retention, plus per-partition role and applied offset and a follower-replication view (`GET /admin/api/streams_debug`) |
-| Create stream | Implemented | `POST /admin/api/streams` + dashboard form (partition count, durability tier, optional retention by records/bytes/age) |
+| Streams page | Implemented | Dashboard and API (`GET /admin/api/streams`), per-topic partition rows with head/tail/retained, declared durability and retention, per-partition role and applied offset, a follower-replication view (`GET /admin/api/streams_debug`), an append-rate chip, and a durable-cursor table per stream (cursor name, tail/catching-up, behind, read rate, last advance) |
+| Create stream | Implemented | `POST /admin/api/streams` + dashboard form (partition count, durability tier, optional retention by records/bytes/age); coordinated in cluster mode like queue declares, so multi-partition streams place fully |
 | Settings page | Implemented | Dashboard and API, incl. replication and streaming-replication settings |
-| Message inspection page | Implemented | Dashboard and API |
+| Message inspection page | Implemented | Dashboard and API; targets a specific partition (`partition` query param - offsets are per partition) |
 | DLQ replay controls | Implemented | Dashboard and API |
-| Topology page | Implemented | Coordination nodes, per-partition ownership/epochs, consensus block |
+| Topology page | Implemented | Coordination nodes, per-partition ownership/epochs (queues and streams), consensus block, per-node liveness/raft-id/publish+delivery rates/runtime facts (version, uptime, TLS state, cert expiry) from heartbeat labels; rendered as the living cluster diagram (ring sprites, fiber tendrils, load signals) or a card list with a placement matrix (`?view=list`) |
 | Repartition control | Partial | `/admin/api/repartition` and a topology-page form (Ganglion mode) |
 | Coordination membership control | Partial | Add/remove a consensus voting member from the topology page and API |
 | Cohort visibility | Partial | Per-broker exclusive-cohort membership with live per-partition coverage on the subscriptions page, queue-detail partition cards, and `/admin/api/cohorts` |
