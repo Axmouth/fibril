@@ -1047,6 +1047,28 @@ input[type="radio"] {
   gap: 7px;
 }
 
+/* Settings checkbox rows: the label sits beside the box and the help
+   drops to its own line - inline, the pair read as one run-on sentence
+   ("Streaming replication Use credit-based streaming..."). The row also
+   spans the grid and takes a little air above, so it breaks cleanly from
+   the fields around it. */
+.settings-section .checkbox-label {
+  align-items: flex-start;
+  grid-column: 1 / -1;
+  margin: 8px 0 2px;
+}
+
+.settings-section .checkbox-label input[type="checkbox"] {
+  flex: none;
+  margin-top: 2px;
+}
+
+.settings-section .checkbox-label > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 .settings-message {
   border: 1px solid var(--line);
   border-radius: var(--radius-md);

@@ -169,7 +169,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   approximation (the last visible seam inside the ring opening is gone),
   and the leader's glow paints last so strands on its turned-away side
   carry the gold cast too.
-- The settings page aligned: every numeric control shares one width
+- The settings page aligned: checkbox rows (Streaming replication, idle
+  cleanup's Enabled) stack their help text under the label instead of
+  running into it like one sentence, span their own grid row, and take a
+  little air from the fields above.
+  Also: every numeric control shares one width
   (page-wide strays are gone), value-and-unit pairs shrink gracefully in
   tight columns instead of overflowing, controls anchor to a shared
   baseline per row regardless of help-text length, grid rows stopped
