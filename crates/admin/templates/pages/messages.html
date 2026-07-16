@@ -85,13 +85,14 @@
   <div id="payload-modal" class="message-modal" hidden>
     <div class="message-modal-card" role="dialog" aria-modal="true" aria-labelledby="payload-modal-title">
       <div class="message-modal-header">
-        <h5 id="payload-modal-title">Payload preview</h5>
+        <h5 id="payload-modal-title">Payload</h5>
         <button class="btn btn-sm" type="button" id="payload-modal-close">Close</button>
       </div>
       <dl class="message-modal-meta">
         <div><dt>Offset</dt><dd id="payload-modal-offset"></dd></div>
         <div><dt>Bytes</dt><dd id="payload-modal-bytes"></dd></div>
         <div><dt>Status</dt><dd id="payload-modal-status"></dd></div>
+        <div><dt>Type</dt><dd id="payload-modal-type"></dd></div>
       </dl>
       <pre id="payload-modal-body"></pre>
     </div>
@@ -249,14 +250,24 @@ function payloadPreviewText(item) {
 }
 
 function renderPayloadCell(item) {
-  if (!item.payload_base64) return '<span class="message-muted">not requested</span>';
+  // View always works: the modal fetches this message's full payload on
+  // demand, so a row is openable whether or not previews were requested.
+  const offset = item.state?.offset;
+  const button = `<button class="btn btn-sm message-payload-open" type="button" data-offset="${escapeHtml(offset)}">View</button>`;
+  if (!item.payload_base64) {
+    return `
+      <div class="message-payload-cell">
+        <span class="message-muted">preview off</span>
+        ${button}
+      </div>
+    `;
+  }
   const preview = payloadPreviewText(item);
   const short = preview.length > 96 ? `${preview.slice(0, 96)}...` : preview;
-  const offset = item.state?.offset;
   return `
     <div class="message-payload-cell">
       <code>${escapeHtml(short)}</code>
-      <button class="btn btn-sm message-payload-open" type="button" data-offset="${escapeHtml(offset)}">View</button>
+      ${button}
     </div>
   `;
 }
@@ -396,14 +407,63 @@ function renderReplayReport(report) {
   `);
 }
 
-function openPayloadModal(offset) {
+// Fetch one message with its whole payload (up to the server's 1 MiB
+// inspection cap), independent of the list's preview settings.
+function buildSingleMessageQuery(offset) {
+  const params = new URLSearchParams();
+  params.set("topic", field("message-topic").value.trim());
+  const group = normalizedGroupValue("message-group");
+  if (group) params.set("group", group);
+  const partition = optionalNumber("message-partition");
+  if (partition !== null) params.set("partition", String(partition));
+  params.set("from", String(offset));
+  params.set("limit", "1");
+  // The message may settle between listing and opening it - still show it.
+  params.set("include_settled", "true");
+  params.set("include_payload", "true");
+  params.set("payload_limit_bytes", "1048576");
+  return params;
+}
+
+function fullPayloadText(item) {
+  let text = decodePayloadPreview(item.payload_base64);
+  // Pretty-print structured payloads so they read at a glance.
+  const trimmed = text.trimStart();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      text = JSON.stringify(JSON.parse(text), null, 2);
+    } catch {
+      // Not JSON after all - show it as decoded.
+    }
+  }
+  return item.payload_truncated ? `${text}\n\n(truncated at 1 MiB)` : text;
+}
+
+async function openPayloadModal(offset) {
   const item = lastItems.get(String(offset));
   if (!item) return;
   field("payload-modal-offset").textContent = item.state?.offset ?? "";
   field("payload-modal-bytes").textContent = item.payload_len ?? "";
   field("payload-modal-status").textContent = item.state?.status ?? "";
-  field("payload-modal-body").textContent = payloadPreviewText(item);
+  field("payload-modal-type").textContent = item.headers?.content_type
+    ? contentTypeLabel(item.headers.content_type)
+    : "none";
+  field("payload-modal-body").textContent = "loading the payload...";
   payloadModal.hidden = false;
+  try {
+    const data = await api(`/admin/api/messages?${buildSingleMessageQuery(offset)}`);
+    const full = (data.items || []).find(entry => String(entry.state?.offset) === String(offset));
+    if (!full || !full.payload_base64) {
+      field("payload-modal-body").textContent =
+        "the message is no longer inspectable at this offset (it may have been consumed and compacted away)";
+      return;
+    }
+    field("payload-modal-bytes").textContent = full.payload_len ?? "";
+    field("payload-modal-status").textContent = full.state?.status ?? "";
+    field("payload-modal-body").textContent = fullPayloadText(full);
+  } catch (err) {
+    field("payload-modal-body").textContent = `could not load the payload: ${err.message || err}`;
+  }
 }
 
 function closePayloadModal() {

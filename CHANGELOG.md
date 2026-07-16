@@ -381,6 +381,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- Message inspection can open any message's whole payload. Every result row
+  now has a View button - previously it only appeared when the payload
+  preview checkbox was on, and even then the dialog showed just the
+  truncated preview. The dialog fetches the full payload on demand (up to
+  the 1 MiB inspection cap), pretty-prints JSON, and names the content type.
 - The visualizer tryout (viz.sh / compose.viz.example.yaml) authenticates
   again. It rode the built-in default credentials from a sibling container,
   and those are deliberately accepted from loopback only, so the broker
