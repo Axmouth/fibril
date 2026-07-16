@@ -3560,35 +3560,37 @@ M7 - Favicon: mascot eyes + state (user idea 2026-07-13). SHIPPED
 ## User field notes (2026-07-16) - dashboard bugs + demo wishlist
 
 Noted by the user while exercising the cluster tryout and the dashboard.
+Status sweep same day: all four bugs FIXED, the demo wishlist below remains.
 
-### BUG: topology "open its admin" links unusable
-The broker cards' "open its admin" links rendered 0.0.0.0 hosts (not
-connectable from a browser) and pointed at the SAME instance. The broker
-switcher dropdown gets working addresses for the same nodes, so the data
-exists - the card link should derive a reachable host the same way (e.g.
-substitute the node's broker_addr host when admin_addr registered 0.0.0.0).
-Fix rather than remove.
+### FIXED: topology "open its admin" links unusable (5154e35)
+Nodes registered their raw admin BIND, so 0.0.0.0 (the container default)
+became a link that resolves to localhost - dead or the wrong instance.
+Nodes now register admin.listener.advertise (FIBRIL_ADMIN_ADVERTISE), else
+derive the broker advertise host + admin port for unspecified binds; the UI
+suppresses links for unspecified hosts; the cluster Compose advertises the
+host-mapped ports.
 
-### INVESTIGATE: random "unreachable" states in the UI
-Nodes/pages intermittently flag unreachable while the cluster is healthy.
-Suspects the user noted: boosted-link navigation undoing SSE wiring, and the
-topology page not riding live data. Direction: any successful admin API
-response should also stamp liveness (not only the event stream tick), and
-move more of the topology/list payloads onto SSE so pages share one live
-source of truth. Trace before patching.
+### FIXED: random "unreachable" states in the UI (1ff6171)
+Root cause: the live pill derived its state purely from the age of the last
+successful poll, but polling legitimately pauses (the refresh guard skips
+ticks in hidden tabs and during interaction - scroll/wheel/focused inputs -
+and browsers throttle background timers), so 30 quiet seconds on a healthy
+broker read as an outage. Unreachable (and X-eyes) now requires an observed
+failure since the last success; paused updates cap at stale with a tooltip;
+POSTs stamp liveness; pages refresh on tab return via a per-swap-cleared
+visibility-kick registry. STILL OPEN (direction, not bug): move more list
+payloads onto SSE so pages share one live source.
 
-### Trend charts: the LABEL should fit short uptimes
-The charts already size to the samples actually held - but the label still
-claims "30 min" regardless. With less than 30 minutes of data the label
-should state the span actually shown (user-corrected 2026-07-16: label
-issue only, the chart window itself is fine).
+### FIXED: trend-chart labels fit short uptimes (39136de)
+Shared setHistorySpanLabels sizes every .history-span heading to the
+samples actually rendered (Overview x3, queue detail, Dead letters).
 
-### BUG: viz demo fails - "local admin ... loopback only" error
-Running the viz demo (website/public/viz.sh) errored with wording along the
-lines of the local admin running on loopback only (exact message not
-captured). Likely the demo drives an admin API bind or check that refuses
-non-loopback (or expects a non-loopback bind). Reproduce, capture the exact
-error, fix the demo or the guard.
+### FIXED: viz demo loopback denial (f4612bc)
+Exact error: "401 waiting for AuthOk: default credentials are accepted from
+loopback only...". The TUI rode the default fibril:fibril credentials from a
+sibling container = non-loopback peer. The viz service now shares the
+broker's network namespace (network_mode: service:broker) and dials
+127.0.0.1, so the demo stays credential-free without weakening the rule.
 
 ### Proper live demo scenario (make the dashboard look alive)
 A "real environment" scenario (or family) well beyond the current tours:
