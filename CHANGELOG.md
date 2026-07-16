@@ -12,6 +12,12 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- The cluster tryout comes alive out of the box: the Docker image carries
+  fibril-demo, and compose.cluster.example.yaml runs it as a service in
+  place of the old one-shot seeder - realistic traffic, attention arcs,
+  dead letters, and stream cursors on every dashboard from the first
+  minutes. The brokers seed a demo-only user for it, since a sibling
+  container is not loopback and the default credentials do not apply.
 - fibril-demo, a living demo world (`cargo run --release -p fibril-demo`
   against any broker): three businesses with realistic fake data - a
   delivery bistro whose orders flow through a kitchen into deliveries,

@@ -3611,10 +3611,10 @@ personalities as knobs (steady / sluggish napper -> attention raise+resolve /
 flaky -> dead letters), content types JSON/XML/msgpack/text, compressed
 day-clock rhythms, stoppable and idempotent. Composes with a scenario.sh
 cluster by pointing --addr at it.
+Docker-tryout integration SHIPPED 2026-07-17: the image carries fibril-demo
+and the cluster compose runs it as a service replacing the one-shot seeder
+(demo-only seeded user for the non-loopback sibling container).
 STILL OPEN from the original wishlist:
-- docker-tryout integration: the tryout printing "open any node's admin from
-  the links above, then run <command> to watch live traffic" (needs a
-  published image carrying fibril-demo or a compose service for it)
 - a PLUS arc driving occasional repartitioning + node churn around the demo
   (node lifecycle lives with scenario.sh, could wrap fibril-demo)
 

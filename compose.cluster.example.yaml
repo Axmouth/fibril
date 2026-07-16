@@ -1,10 +1,12 @@
 # Three-broker Fibril cluster in coordinated (Ganglion) mode, for trying out
 # clustering with no clone and no build. The brokers form one coordination
-# group and each broker's admin dashboard is exposed on the host.
+# group, each broker's admin dashboard is exposed on the host, and a demo
+# service keeps gentle realistic traffic flowing so the dashboards are alive
+# from the first minute.
 #
 #   docker compose -f compose.cluster.example.yaml up
 #
-# Then open a dashboard and visit the topology page:
+# Then open a dashboard and watch the world go by:
 #   http://127.0.0.1:8081/   http://127.0.0.1:8082/   http://127.0.0.1:8083/
 #
 # Clients can connect to any broker (9876, 9877, 9878) and are routed to the
@@ -40,6 +42,10 @@ services:
       # Demo-only shared secret. Real deployments generate their own with
       # fibrilctl secret generate and never commit it.
       FIBRIL_CLUSTER_SECRET: fibril-demo-cluster-secret
+      # Demo-only user for the in-compose demo traffic (a sibling container
+      # is not loopback, so the default credentials do not apply to it).
+      FIBRIL_AUTH_USERNAME: demo
+      FIBRIL_AUTH_PASSWORD: fibril-demo-tryout
       FIBRIL_COORDINATION_NODE_ID: broker-1
       FIBRIL_COORDINATION_RAFT_ID: "1"
       FIBRIL_COORDINATION_LISTEN: 0.0.0.0:7000
@@ -61,6 +67,10 @@ services:
       # Demo-only shared secret. Real deployments generate their own with
       # fibrilctl secret generate and never commit it.
       FIBRIL_CLUSTER_SECRET: fibril-demo-cluster-secret
+      # Demo-only user for the in-compose demo traffic (a sibling container
+      # is not loopback, so the default credentials do not apply to it).
+      FIBRIL_AUTH_USERNAME: demo
+      FIBRIL_AUTH_PASSWORD: fibril-demo-tryout
       FIBRIL_COORDINATION_NODE_ID: broker-2
       FIBRIL_COORDINATION_RAFT_ID: "2"
       FIBRIL_COORDINATION_LISTEN: 0.0.0.0:7000
@@ -81,6 +91,10 @@ services:
       # Demo-only shared secret. Real deployments generate their own with
       # fibrilctl secret generate and never commit it.
       FIBRIL_CLUSTER_SECRET: fibril-demo-cluster-secret
+      # Demo-only user for the in-compose demo traffic (a sibling container
+      # is not loopback, so the default credentials do not apply to it).
+      FIBRIL_AUTH_USERNAME: demo
+      FIBRIL_AUTH_PASSWORD: fibril-demo-tryout
       FIBRIL_COORDINATION_NODE_ID: broker-3
       FIBRIL_COORDINATION_RAFT_ID: "3"
       FIBRIL_COORDINATION_LISTEN: 0.0.0.0:7000
@@ -88,13 +102,15 @@ services:
     volumes:
       - broker-3-data:/app/server_data
 
-  # One-shot seeder so the cluster comes up already alive: a couple of
-  # multi-partition queues (one grouped) and a Plexus stream, so the topology
-  # page shows ownership spread across the three brokers instead of an empty
-  # board. Runs once after the brokers are healthy, then exits.
-  seed:
+  # The living demo world: three fake businesses (a delivery bistro, a
+  # freight desk, a hotel group) publish and consume gentle, realistic
+  # traffic with rush hours, a napping consumer that raises and resolves
+  # backlog attention, a flaky one that feeds the dead-letter flow, and
+  # streams with durable readers. Every dashboard page has something to
+  # show within a couple of minutes. Declares its own queues and streams,
+  # retries until the cluster elects a leader, and is safe to restart.
+  demo:
     <<: *broker
-    restart: "no"
     depends_on:
       broker-1:
         condition: service_healthy
@@ -102,36 +118,12 @@ services:
         condition: service_healthy
       broker-3:
         condition: service_healthy
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        set -eu
-        broker=broker-1:9876
-        admin=http://broker-1:8081
-        echo "fibril seed: declaring demo queues and a stream..."
-        # A queue declare fails until the coordination group has elected a
-        # leader, so retry the first one until it lands.
-        n=0
-        until fibrilctl --broker "$$broker" queue declare orders --partitions 4; do
-          n=$$((n + 1))
-          if [ "$$n" -ge 60 ]; then
-            echo "fibril seed: gave up waiting for the cluster to be ready"
-            exit 1
-          fi
-          echo "fibril seed: cluster not ready yet, retrying..."
-          sleep 2
-        done
-        fibrilctl --broker "$$broker" queue declare payments --partitions 3
-        fibrilctl --broker "$$broker" queue declare emails --group marketing --partitions 2
-        if curl -fsS -X POST "$$admin/admin/api/streams" \
-          -H 'content-type: application/json' \
-          -d '{"tp":"events","partition_count":3,"durability":"speculative"}'; then
-          echo ""
-        else
-          echo "fibril seed: stream declare skipped"
-        fi
-        echo "fibril seed: done"
+    entrypoint: ["fibril-demo"]
+    command:
+      - "--addr"
+      - "broker-1:9876"
+      - "--auth"
+      - "demo:fibril-demo-tryout"
 
 volumes:
   broker-1-data:

@@ -15,7 +15,7 @@ COPY crates ./crates
 RUN scripts/stroma-source.sh git
 
 RUN cargo build --release -p fibril --bin fibril-server -p fibril-cli --bin fibrilctl \
-    -p fibril-tui-example --bin fibril-tui-example
+    -p fibril-tui-example --bin fibril-tui-example -p fibril-demo --bin fibril-demo
 
 FROM debian:bookworm-slim
 
@@ -35,6 +35,7 @@ WORKDIR /app
 COPY --from=builder /app/target/release/fibril-server /usr/local/bin/fibril-server
 COPY --from=builder /app/target/release/fibrilctl /usr/local/bin/fibrilctl
 COPY --from=builder /app/target/release/fibril-tui-example /usr/local/bin/fibril-tui-example
+COPY --from=builder /app/target/release/fibril-demo /usr/local/bin/fibril-demo
 
 VOLUME ["/app/server_data"]
 EXPOSE 9876 8081
