@@ -90,11 +90,15 @@ pub struct DrainOutcome {
 /// client. The error string is shown to the operator verbatim.
 #[async_trait]
 pub trait BrokerTestPublisher: Send + Sync + 'static {
+    /// `content_type` is a MIME string for the message headers (None keeps
+    /// the plain-text default), so demo and debugging traffic can exercise
+    /// the content types real producers use.
     async fn publish_text(
         &self,
         topic: &str,
         group: Option<&str>,
         text: String,
+        content_type: Option<String>,
     ) -> Result<TestPublishOutcome, String>;
 }
 
@@ -2172,7 +2176,7 @@ mod tests {
     }
 
     struct FakeTestPublisher {
-        seen: StdArc<StdMutex<Vec<(String, Option<String>, String)>>>,
+        seen: StdArc<StdMutex<Vec<(String, Option<String>, String, Option<String>)>>>,
         result: Result<u32, String>,
     }
 
@@ -2183,11 +2187,13 @@ mod tests {
             topic: &str,
             group: Option<&str>,
             text: String,
+            content_type: Option<String>,
         ) -> Result<TestPublishOutcome, String> {
             self.seen.lock().unwrap().push((
                 topic.to_string(),
                 group.map(str::to_string),
                 text,
+                content_type,
             ));
             self.result.clone().map(|partition| TestPublishOutcome {
                 partition,
@@ -2354,9 +2360,42 @@ mod tests {
             &[(
                 "orders".to_string(),
                 Some("billing".to_string()),
-                "hi".to_string()
+                "hi".to_string(),
+                None
             )]
         );
+    }
+
+    #[tokio::test]
+    async fn test_publish_normalizes_content_type_shorthands() {
+        let seen = StdArc::new(StdMutex::new(Vec::new()));
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let server = with_fake_publisher(
+            server,
+            FakeTestPublisher {
+                seen: seen.clone(),
+                result: Ok(0),
+            },
+        );
+        let app = AdminServer::router(server);
+
+        for (raw, want) in [
+            ("json", "application/json"),
+            ("xml", "application/xml"),
+            ("text", "text/plain; charset=utf-8"),
+            ("application/x-custom", "application/x-custom"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(publish_request(
+                    json!({ "topic": "orders", "text": "hi", "content_type": raw }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{raw}");
+            let got = seen.lock().unwrap().pop().unwrap().3;
+            assert_eq!(got.as_deref(), Some(want), "{raw}");
+        }
     }
 
     #[tokio::test]

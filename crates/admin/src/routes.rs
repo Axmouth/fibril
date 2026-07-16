@@ -1011,8 +1011,26 @@ pub struct TestPublishRequest {
     pub topic: String,
     #[serde(default)]
     pub group: Option<String>,
-    /// Text body of the test message, published with a text content type.
+    /// Text body of the test message, published with a text content type
+    /// unless `content_type` says otherwise.
     pub text: String,
+    /// Optional content type for the message headers: the shorthands `text`,
+    /// `json`, and `xml`, or any MIME string. Lets demo and debugging traffic
+    /// exercise the content types real producers use.
+    #[serde(default)]
+    pub content_type: Option<String>,
+}
+
+/// Expand the request shorthands to the MIME strings the broker stores.
+fn normalize_test_content_type(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    match raw {
+        "" => None,
+        "text" => Some("text/plain; charset=utf-8".to_string()),
+        "json" => Some("application/json".to_string()),
+        "xml" => Some("application/xml".to_string()),
+        other => Some(other.to_string()),
+    }
 }
 
 pub async fn publish_test_message(
@@ -1044,7 +1062,15 @@ pub async fn publish_test_message(
         .map(str::trim)
         .filter(|g| !g.is_empty());
 
-    match publisher.publish_text(topic, group, request.text).await {
+    let content_type = request
+        .content_type
+        .as_deref()
+        .and_then(normalize_test_content_type);
+
+    match publisher
+        .publish_text(topic, group, request.text, content_type)
+        .await
+    {
         Ok(outcome) => {
             server.audit.record(
                 "test_publish",

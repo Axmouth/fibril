@@ -12,6 +12,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- The admin test-publish endpoint takes an optional `content_type`: the
+  shorthands `text`, `json`, and `xml`, or any MIME string, stamped on the
+  message headers. Operator probe messages can now look like the traffic
+  real producers send.
+
 - The admin dashboard rebuilt as an operations surface. A sidebar shell with a
   command palette, live 30-minute throughput and backlog charts, a
   needs-attention panel computed by the broker (backlog with no consumer,

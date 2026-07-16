@@ -337,6 +337,7 @@ impl AdminTestPublisher {
         topic: &str,
         local_partition_count: Option<u32>,
         text: String,
+        content_type: MessageContentType,
     ) -> Result<fibril_admin::TestPublishOutcome, String> {
         // Without a locally open channel the count is unknown - try partition
         // zero and let the ownership check say who serves this stream.
@@ -364,7 +365,7 @@ impl AdminTestPublisher {
             let headers = MessageHeaders {
                 published: now,
                 publish_received: now,
-                content_type: Some(MessageContentType::Text),
+                content_type: Some(content_type.clone()),
                 extra,
             };
             let confirm = channel
@@ -404,7 +405,11 @@ impl fibril_admin::BrokerTestPublisher for AdminTestPublisher {
         topic: &str,
         group: Option<&str>,
         text: String,
+        content_type: Option<String>,
     ) -> Result<fibril_admin::TestPublishOutcome, String> {
+        let content_type = content_type
+            .map(MessageContentType::from_header)
+            .unwrap_or(MessageContentType::Text);
         // Streams resolve first, mirroring the publish handler's routing: a
         // topic declared as a stream must never grow queue state as a side
         // effect of a test message.
@@ -418,7 +423,9 @@ impl fibril_admin::BrokerTestPublisher for AdminTestPublisher {
             if group.is_some() {
                 return Err("streams have no consumer groups - leave group empty".to_string());
             }
-            return self.publish_stream_text(topic, stream_partitions, text).await;
+            return self
+                .publish_stream_text(topic, stream_partitions, text, content_type)
+                .await;
         }
 
         let mut partitions: Vec<u32> = self
@@ -464,7 +471,7 @@ impl fibril_admin::BrokerTestPublisher for AdminTestPublisher {
                     text.clone().into_bytes(),
                     now,
                     now,
-                    Some(MessageContentType::Text),
+                    Some(content_type.clone()),
                     extra,
                     None,
                 )
