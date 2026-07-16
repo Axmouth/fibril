@@ -383,7 +383,10 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   last success; paused updates show as stale with a tooltip saying why. Pages
   also refresh immediately when their tab becomes visible again, admin POST
   calls count as liveness proof too, and an HTTP error status counts as
-  reachable (the broker answered).
+  reachable (the broker answered). A passive probe keeps watching when page
+  polls pause, so a broker that dies behind an inactive tab still turns that
+  tab's favicon to X-eyes within a couple of minutes - the glanceable signal
+  works without looking.
 - The Cluster page's "open its admin" links and the broker switcher no longer
   point browsers at dead or wrong addresses. Nodes used to register their raw
   admin bind, so a `0.0.0.0` bind (the container default) produced links that

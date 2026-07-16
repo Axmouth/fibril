@@ -288,6 +288,31 @@
       };
       update();
       window.__nativeSetInterval(update, 2000);
+
+      // Passive liveness probe. Page polls pause in hidden tabs and during
+      // interaction, but the whole point of a glanceable favicon is not
+      // looking: a broker that dies behind an inactive tab should still get
+      // its X-eyes. Whenever nothing has stamped liveness recently, probe a
+      // trivial endpoint - any response proves reachability, only a network
+      // failure counts against it. Browsers throttle hidden-tab timers to
+      // about once a minute, so the signal lands within a couple of minutes
+      // (a discarded/sleeping tab runs nothing and keeps its last face).
+      window.__nativeSetInterval(async () => {
+        const latest = Math.max(
+          window.__fibrilLastOk || 0,
+          window.__fibrilLastFail || 0,
+        );
+        if (Date.now() - latest < 15000) return;
+        try {
+          await fetch("/healthz", {
+            cache: "no-store",
+            signal: AbortSignal.timeout(5000),
+          });
+          window.__fibrilLastOk = Date.now();
+        } catch {
+          window.__fibrilLastFail = Date.now();
+        }
+      }, 10000);
     })();
   </script>
   <script>

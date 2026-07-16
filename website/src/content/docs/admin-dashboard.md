@@ -64,7 +64,11 @@ once no matter how many pages watch it. An idle dashboard costs the broker
 nothing, and pages fall back to polling automatically if the stream is
 unavailable. The live pill in the top bar tracks the stream's health, and it
 only declares the broker unreachable on an observed failure - updates merely
-paused (a background tab, active interaction on the page) show as stale.
+paused (a background tab, active interaction on the page) show as stale. A
+passive probe keeps checking while polls pause, so a broker dying behind an
+inactive tab still turns that tab's favicon to X-eyes within a couple of
+minutes (a tab the browser has put to sleep runs nothing and keeps its last
+face).
 
 The overview also carries a collapsed resources panel - memory, CPU, and
 disk over the last 30 minutes - for when a resource question needs a shape,
