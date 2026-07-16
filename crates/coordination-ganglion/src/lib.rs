@@ -674,7 +674,7 @@ pub fn to_ganglion_snapshot(
                 ganglion_core::NodeInfo::new(
                     info.node_id.clone(),
                     info.broker_addr.clone(),
-                    info.admin_addr.map(|addr| addr.to_string()),
+                    info.admin_addr.clone(),
                 ),
             )
         })
@@ -1012,7 +1012,7 @@ impl GanglionCoordination {
         let mut node = ganglion_core::NodeInfo::new(
             info.node_id.clone(),
             info.broker_addr.clone(),
-            info.admin_addr.map(|addr| addr.to_string()),
+            info.admin_addr.clone(),
         );
         node.labels = labels;
         node.labels
@@ -3129,7 +3129,7 @@ mod tests {
             NodeInfo {
                 node_id: "broker-b".to_string(),
                 broker_addr: "127.0.0.1:9001".to_string(),
-                admin_addr: Some("127.0.0.1:9101".parse().expect("addr")),
+                admin_addr: Some("127.0.0.1:9101".to_string()),
             },
         );
 

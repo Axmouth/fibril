@@ -363,6 +363,15 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- The Cluster page's "open its admin" links and the broker switcher no longer
+  point browsers at dead or wrong addresses. Nodes used to register their raw
+  admin bind, so a `0.0.0.0` bind (the container default) produced links that
+  resolve to localhost - the wrong instance. Nodes now register a usable
+  admin address: the new `admin.listener.advertise` (`FIBRIL_ADMIN_ADVERTISE`)
+  when set, else the broker advertise host with the admin port when the bind
+  host is unspecified. The dashboard also refuses to render a link for an
+  unspecified host, and the cluster Compose example advertises each node's
+  host-mapped admin port.
 - The example Compose files now set `pull_policy: always` on the
   `fibril-server:main` image. The `:main` tag is mutable, so `compose up`
   would otherwise reuse whatever image was cached on a previous run - the

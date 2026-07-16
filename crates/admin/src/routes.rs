@@ -760,7 +760,7 @@ pub async fn topology(
                     serde_json::json!({
                         "node_id": node.node_id,
                         "broker_addr": node.broker_addr.to_string(),
-                        "admin_addr": node.admin_addr.map(|addr| addr.to_string()),
+                        "admin_addr": node.admin_addr.clone(),
                         "live": live
                             .as_ref()
                             .is_none_or(|set| set.contains(&node.node_id)),

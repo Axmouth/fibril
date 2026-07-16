@@ -404,6 +404,13 @@
         })[c]);
       }
 
+      // An admin address a browser can actually open: an unspecified host (a
+      // node that registered its raw 0.0.0.0/[::] bind) resolves to localhost
+      // and lands on the wrong instance, so treat it as not registered.
+      function adminLinkable(addr) {
+        return !!addr && !addr.startsWith("0.0.0.0:") && !addr.startsWith("[::]:");
+      }
+
       // The nodes chip must never lie: it grays out when its data source
       // stops answering (fetch failures or a stale last success), keeping
       // the last-known count visible but visibly untrusted.
@@ -434,7 +441,7 @@
         const coordination = data && data.coordination;
         const nodes = (coordination && coordination.nodes) || [];
         const selfId = coordination && coordination.node_id;
-        const reachable = nodes.filter((n) => n.admin_addr);
+        const reachable = nodes.filter((n) => adminLinkable(n.admin_addr));
         // This broker's own load, for the strained-face favicon.
         const selfNode = nodes.find((n) => n.node_id === selfId);
         window.__fibrilSelfRate = Math.max(
@@ -466,7 +473,7 @@
         btn.textContent = `${selfId} \u25be`;
         menu.innerHTML = nodes.map((n) => {
           const self = n.node_id === selfId;
-          if (self || !n.admin_addr) {
+          if (self || !adminLinkable(n.admin_addr)) {
             return `<span class="broker-switch-item is-self mono">${esc(n.node_id)}${self ? " · here" : " · no admin"}</span>`;
           }
           const href = `${window.location.protocol}//${esc(n.admin_addr)}${window.location.pathname}${window.location.search}`;

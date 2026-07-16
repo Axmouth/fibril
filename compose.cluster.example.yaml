@@ -32,6 +32,10 @@ services:
     environment:
       FIBRIL_BROKER_BIND: 0.0.0.0:9876
       FIBRIL_ADMIN_BIND: 0.0.0.0:8081
+      # The host-mapped admin port, so the dashboard's cross-broker links
+      # ("open its admin", the broker switcher) work from the browser
+      # running the tryout.
+      FIBRIL_ADMIN_ADVERTISE: 127.0.0.1:8081
       FIBRIL_COORDINATION_MODE: ganglion
       # Demo-only shared secret. Real deployments generate their own with
       # fibrilctl secret generate and never commit it.
@@ -52,6 +56,7 @@ services:
     environment:
       FIBRIL_BROKER_BIND: 0.0.0.0:9876
       FIBRIL_ADMIN_BIND: 0.0.0.0:8081
+      FIBRIL_ADMIN_ADVERTISE: 127.0.0.1:8082
       FIBRIL_COORDINATION_MODE: ganglion
       # Demo-only shared secret. Real deployments generate their own with
       # fibrilctl secret generate and never commit it.
@@ -71,6 +76,7 @@ services:
     environment:
       FIBRIL_BROKER_BIND: 0.0.0.0:9876
       FIBRIL_ADMIN_BIND: 0.0.0.0:8081
+      FIBRIL_ADMIN_ADVERTISE: 127.0.0.1:8083
       FIBRIL_COORDINATION_MODE: ganglion
       # Demo-only shared secret. Real deployments generate their own with
       # fibrilctl secret generate and never commit it.

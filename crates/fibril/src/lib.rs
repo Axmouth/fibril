@@ -1118,7 +1118,7 @@ pub fn spawn_ganglion_broker_tasks(
         NodeInfo {
             node_id: config.coordination.node_id.clone(),
             broker_addr: advertise_primary,
-            admin_addr: Some(config.admin.listener.bind),
+            admin_addr: Some(config.admin_advertise_address()),
         },
         Duration::from_millis(config.coordination.ganglion.heartbeat_interval_ms),
         move || {

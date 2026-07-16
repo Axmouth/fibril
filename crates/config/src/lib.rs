@@ -421,6 +421,16 @@ impl ServerConfig {
         if let Some(value) = env_value(&mut get, "FIBRIL_ADMIN_BIND")? {
             self.admin.listener.bind = parse_env("FIBRIL_ADMIN_BIND", &value)?;
         }
+        if let Some(value) = env_value(&mut get, "FIBRIL_ADMIN_ADVERTISE")? {
+            // Comma-separated `host:port` entries like FIBRIL_BROKER_ADVERTISE.
+            // Only the first is registered with the cluster today.
+            self.admin.listener.advertise = value
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+        }
         if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_MODE")? {
             self.coordination.mode = parse_env("FIBRIL_COORDINATION_MODE", &value)?;
         }
@@ -1480,12 +1490,13 @@ fn default_event_log_section() -> KeratinLogSection {
 #[serde(default)]
 pub struct ListenerSection {
     pub bind: SocketAddr,
-    /// Addresses to advertise to peers and clients, separate from `bind`, in
-    /// priority order (clients try them in turn). Broker listener only; ignored
-    /// for the admin listener. Each is a `host:port` the cluster can dial back -
-    /// e.g. a service name when `bind` is `0.0.0.0`. Empty means derive from the
-    /// coordination peer host (in ganglion mode) or fall back to `bind`. Held as
-    /// raw `host:port` strings here; resolved to routable addresses at startup.
+    /// Addresses to advertise instead of `bind`, in priority order (clients try
+    /// them in turn). Each is a `host:port` others can actually dial - e.g. a
+    /// service name when `bind` is `0.0.0.0`. Empty means derive from the
+    /// coordination peer host (in ganglion mode) or fall back to `bind`. On the
+    /// admin listener the first entry is what the cluster registers for the
+    /// dashboard's cross-broker links. Held as raw `host:port` strings here;
+    /// resolved to routable addresses at startup.
     pub advertise: Vec<String>,
 }
 
@@ -1545,6 +1556,39 @@ impl ServerConfig {
             out.push(derived);
         }
         out
+    }
+
+    /// The admin address this node registers with the cluster, feeding the
+    /// dashboard's cross-broker links (the Cluster page's "open its admin" and
+    /// the broker switcher). Priority: the first explicit admin advertise
+    /// entry, else - when the admin bind host is unspecified and so useless to
+    /// a browser - the primary broker advertise host recombined with the admin
+    /// port, else the admin bind itself.
+    pub fn admin_advertise_address(&self) -> String {
+        if let Some(entry) = self
+            .admin
+            .listener
+            .advertise
+            .iter()
+            .map(|entry| entry.trim())
+            .find(|entry| !entry.is_empty())
+        {
+            return entry.to_string();
+        }
+        let bind = self.admin.listener.bind;
+        if bind.ip().is_unspecified()
+            && let Some(primary) = self.broker_advertise_addresses().into_iter().next()
+        {
+            let host = primary
+                .rsplit_once(':')
+                .map(|(host, _)| host)
+                .unwrap_or(primary.as_str())
+                .trim();
+            if !host.is_empty() {
+                return format!("{host}:{}", bind.port());
+            }
+        }
+        bind.to_string()
     }
 }
 
@@ -1820,6 +1864,60 @@ mod tests {
         let config = ServerConfig::default();
         // Static mode, no explicit advertise -> nothing known, caller uses bind.
         assert!(config.broker_advertise_addresses().is_empty());
+    }
+
+    #[test]
+    fn admin_advertise_explicit_entry_wins() {
+        let mut config = ServerConfig::default();
+        config.admin.listener.bind = "0.0.0.0:8081".parse().unwrap();
+        config.admin.listener.advertise =
+            vec!["".to_string(), "dash.example:8081".to_string()];
+        assert_eq!(config.admin_advertise_address(), "dash.example:8081");
+    }
+
+    #[test]
+    fn admin_advertise_substitutes_broker_host_when_bind_unspecified() {
+        let mut config = ServerConfig::default();
+        config.admin.listener.bind = "0.0.0.0:8081".parse().unwrap();
+        config.broker.listener.advertise = vec!["broker-2.example:9876".to_string()];
+        // Unspecified admin host is useless to a browser - reuse the broker
+        // advertise host with the admin port.
+        assert_eq!(config.admin_advertise_address(), "broker-2.example:8081");
+
+        // A bracketed IPv6 broker host stays intact.
+        config.broker.listener.advertise = vec!["[2001:db8::7]:9876".to_string()];
+        assert_eq!(config.admin_advertise_address(), "[2001:db8::7]:8081");
+    }
+
+    #[test]
+    fn admin_advertise_falls_back_to_the_bind() {
+        let mut config = ServerConfig::default();
+        // A specific bind host is already reachable - registered as is.
+        config.admin.listener.bind = "192.0.2.9:8081".parse().unwrap();
+        config.broker.listener.advertise = vec!["broker-2.example:9876".to_string()];
+        assert_eq!(config.admin_advertise_address(), "192.0.2.9:8081");
+
+        // Unspecified bind with nothing to derive from still registers the
+        // bind - the dashboard suppresses the link for unspecified hosts.
+        config.admin.listener.bind = "0.0.0.0:8081".parse().unwrap();
+        config.broker.listener.advertise = Vec::new();
+        assert_eq!(config.admin_advertise_address(), "0.0.0.0:8081");
+    }
+
+    #[test]
+    fn admin_advertise_env_override_applies() {
+        let mut config = ServerConfig::default();
+        config
+            .apply_env_from(|name| match name {
+                "FIBRIL_ADMIN_ADVERTISE" => Some(Ok("127.0.0.1:8082, ".to_string())),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            config.admin.listener.advertise,
+            vec!["127.0.0.1:8082".to_string()]
+        );
+        assert_eq!(config.admin_advertise_address(), "127.0.0.1:8082");
     }
 
     #[test]

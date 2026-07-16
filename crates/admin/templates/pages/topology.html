@@ -962,6 +962,13 @@ function renderBrokerDetail(id) {
     detailSection("Follows", followed, "follow", false);
 }
 
+// A registered admin address a browser can actually open. An unspecified host
+// (a node that registered its raw 0.0.0.0/[::] bind) resolves to localhost in
+// a browser, which lands on the WRONG instance - suppress the link instead.
+function adminLinkable(addr) {
+  return !!addr && !addr.startsWith("0.0.0.0:") && !addr.startsWith("[::]:");
+}
+
 // List-mode: every broker as an expandable row, the plain view other cluster
 // dashboards default to.
 function renderList(data) {
@@ -1019,9 +1026,9 @@ function renderList(data) {
         <div class="node-card-foot">
           ${node.node_id === selfId
             ? '<span class="settings-note">draining this node lives in the panel above</span>'
-            : node.admin_addr
+            : adminLinkable(node.admin_addr)
               ? `<a data-no-boost href="${location.protocol}//${escapeHtml(node.admin_addr)}${location.pathname}">open its admin</a>`
-              : '<span class="settings-note">no admin address registered</span>'}
+              : '<span class="settings-note">no reachable admin address registered</span>'}
         </div>
       </div>`;
   }).join("");

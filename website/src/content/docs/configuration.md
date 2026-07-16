@@ -141,6 +141,7 @@ These fields are read on process start.
 | `broker.listener.bind` | `FIBRIL_BROKER_BIND` | `--broker-bind` | `0.0.0.0:9876` |
 | `broker.listener.advertise` | `FIBRIL_BROKER_ADVERTISE` | none | derived (see below) |
 | `admin.listener.bind` | `FIBRIL_ADMIN_BIND` | `--admin-bind` | `0.0.0.0:8081` |
+| `admin.listener.advertise` | `FIBRIL_ADMIN_ADVERTISE` | none | derived (see below) |
 | `admin.auth.enabled` | `FIBRIL_ADMIN_AUTH_ENABLED` | `--admin-auth-enabled` | `false` |
 | `admin.auth.username` | `FIBRIL_ADMIN_USERNAME` | `--admin-username` | `fibril` |
 | `admin.auth.password` | `FIBRIL_ADMIN_PASSWORD` | `--admin-password` | unset |
@@ -183,6 +184,14 @@ fine, it is resolved at connect time), or several comma-separated entries in
 otherwise falls back to `bind`. Standalone single-broker deployments do not need
 it (clients connect to the broker directly). Only the first entry is dialed today;
 the rest are carried for forward compatibility.
+
+`admin.listener.advertise` is the same idea for the dashboard: the address a
+node registers with the cluster so the Cluster page's "open its admin" links
+and the broker switcher can point a browser at it. When unset and the admin
+bind host is unspecified (`0.0.0.0`), the node reuses the broker advertise
+host with the admin port; a raw unspecified address is never linked (the
+dashboard shows "no reachable admin address registered" instead). In the
+Docker cluster example each node advertises its host-mapped admin port.
 
 `coordination.mode` is `static` for a standalone single-broker deployment (the
 default) or `ganglion` to run the embedded coordinator and form a cluster. The

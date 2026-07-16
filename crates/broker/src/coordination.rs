@@ -31,7 +31,9 @@ pub struct NodeInfo {
     /// `host:port` string (resolved at connect time). A `String` rather than a
     /// `SocketAddr` so it can carry a service name when `bind` is `0.0.0.0`.
     pub broker_addr: String,
-    pub admin_addr: Option<SocketAddr>,
+    /// The admin endpoint to advertise for the dashboard's cross-broker links,
+    /// a `host:port` string for the same reason as `broker_addr`.
+    pub admin_addr: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
