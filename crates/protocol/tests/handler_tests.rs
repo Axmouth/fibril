@@ -216,6 +216,28 @@ fn follower_assignment_transition(topic: &str, group: Option<&str>) -> LocalAssi
     }
 }
 
+/// A real owner treats a follower dropping its connection as end-of-connection,
+/// not a fault. At teardown the follower and resolver close their sockets
+/// abruptly, so depending on scheduling a fake owner server's blocked read (or a
+/// mid-flight send) surfaces a connection reset or broken pipe rather than a
+/// graceful EOF. Fold those two IO kinds into a clean exit so the teardown
+/// assertion is deterministic under load - any other error is a genuine protocol
+/// fault and still fails the test.
+fn tolerate_peer_disconnect(result: anyhow::Result<()>) -> anyhow::Result<()> {
+    match result {
+        Err(err)
+            if matches!(
+                err.downcast_ref::<std::io::Error>()
+                    .map(std::io::Error::kind),
+                Some(std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe)
+            ) =>
+        {
+            Ok(())
+        }
+        other => other,
+    }
+}
+
 async fn start_checkpoint_required_owner_server(
     checkpoint: ReplicationStateCheckpoint,
     message_records: Vec<ReplicationMessageRecord>,
@@ -224,6 +246,7 @@ async fn start_checkpoint_required_owner_server(
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server_task = tokio::spawn(async move {
+        let served: anyhow::Result<()> = async move {
         let (stream, _) = listener.accept().await?;
         let mut conn = plain_conn(stream);
 
@@ -309,6 +332,9 @@ async fn start_checkpoint_required_owner_server(
             }
         }
         Ok(())
+        }
+        .await;
+        tolerate_peer_disconnect(served)
     });
     (addr, server_task)
 }
@@ -365,6 +391,25 @@ async fn recv_frame(framed: &mut Conn) -> Frame {
         .expect("frame did not arrive within the receive timeout")
         .expect("framed stream ended unexpectedly")
         .expect("frame decode failed")
+}
+
+/// Receive the next frame matching `expected`, transparently skipping the
+/// server heartbeat Pings that can interleave ahead of a response on a
+/// short-heartbeat connection under load. A Ping is skipped only when it is not
+/// itself the expected opcode, so a test that awaits a heartbeat still gets one.
+/// Any other unexpected opcode fails loudly rather than looping.
+async fn recv_frame_expect(framed: &mut Conn, expected: Op) -> Frame {
+    loop {
+        let frame = recv_frame(framed).await;
+        if frame.opcode == expected as u16 {
+            return frame;
+        }
+        assert_eq!(
+            frame.opcode,
+            Op::Ping as u16,
+            "expected {expected:?} while skipping heartbeats, got a different opcode"
+        );
+    }
 }
 
 async fn handshake(framed: &mut Conn) {
@@ -438,8 +483,8 @@ async fn assert_connection_still_responds(framed: &mut Conn) {
         .send(try_encode(Op::Ping, 99, &()).unwrap())
         .await
         .unwrap();
-    let frame = recv_frame(framed).await;
-    assert_eq!(frame.opcode, Op::Pong as u16);
+    // Skip any server heartbeat Ping that raced ahead of our Pong.
+    let frame = recv_frame_expect(framed, Op::Pong).await;
     assert_eq!(frame.request_id, 99);
 }
 
@@ -5097,8 +5142,9 @@ async fn publisher_cache_idle_timeout_allows_queue_eviction_while_connection_sta
         .await
         .unwrap();
 
-    let frame = recv_frame(&mut framed).await;
-    assert_eq!(frame.opcode, Op::PublishOk as u16);
+    // Under load the 1s heartbeat can beat the PublishOk to the socket, so skip
+    // an interleaved Ping rather than asserting the wrong frame.
+    let frame = recv_frame_expect(&mut framed, Op::PublishOk).await;
     assert_eq!(frame.request_id, 2);
     assert!(broker.is_queue_materialized("publisher.cache.eviction", None));
     assert_eq!(
@@ -5352,8 +5398,9 @@ async fn publisher_cache_idle_timeout_updates_existing_connection() {
         .await
         .unwrap();
 
-    let frame = recv_frame(&mut framed).await;
-    assert_eq!(frame.opcode, Op::PublishOk as u16);
+    // Under load the 1s heartbeat can beat the PublishOk to the socket, so skip
+    // an interleaved Ping rather than asserting the wrong frame.
+    let frame = recv_frame_expect(&mut framed, Op::PublishOk).await;
     assert_eq!(frame.request_id, 2);
     assert_eq!(
         broker
