@@ -93,6 +93,12 @@ worth a fresh pass.
   - Detail: [USER_FACING_DOCUMENTATION_SHAPE_AUDIT.md](archive/replication-sharding-plan/USER_FACING_DOCUMENTATION_SHAPE_AUDIT.md)
   - Next: add a clustered queues and replication explainer, then keep TypeScript
     examples scoped to the single-owner API until the parity pass lands.
+- [x] Broker memory after queue eviction
+  - Status: Addressed (no leak found)
+  - Detail: [MEMORY_AUDIT.md](MEMORY_AUDIT.md)
+  - Next: low-priority follow-up recorded there - identify the ~1 MB
+    retained per materialized queue-partition if a large-queue-count
+    deployment ever appears. Regression probe: scripts/memory-audit.sh.
 
 ## Single-Node Guardrail
 

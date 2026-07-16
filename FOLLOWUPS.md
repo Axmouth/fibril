@@ -3172,7 +3172,16 @@ diffed client-side, idle bundle, hover focus, empty state, reduced-motion
 still, template JS check green, admin suite green, CHANGELOG +
 admin-dashboard.md in the same change.
 
-## Future: broker memory audit (filed 2026-07-11, procedure detailed 2026-07-12)
+## Broker memory audit - EXECUTED 2026-07-16, no leak found
+
+Full report: MEMORY_AUDIT.md. Verdict: eviction returns 95%+ of a 2.3 GB
+working set, nothing is retained per message, repeated load/evict cycles
+stay flat within fragmentation noise, and eager mimalloc purge changes
+nothing. Residual = ~60 MB one-time warm cost + ~1 MB per queue-partition
+ever materialized (low-priority identification follow-up recorded in the
+report). Regression probe checked in as scripts/memory-audit.sh (--check
+fails on incomplete eviction or >25% cycle-over-cycle settled-RSS growth).
+The original brief follows for the record.
 
 User observation: RSS does not drop back to earlier levels after all active
 queues evict. Suspects: mimalloc arena retention (freed memory kept in
