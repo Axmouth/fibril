@@ -37,7 +37,19 @@ struct BootedServer {
     admin_addr: std::net::SocketAddr,
     data_dir: PathBuf,
     handle: tokio::task::JoinHandle<()>,
+    // Held for the whole test so the number of full servers alive at once stays
+    // bounded (see BOOT_PERMITS). Never read - Rust keeps this field alive until
+    // the BootedServer's scope ends, even when the struct is partially moved or
+    // shadowed, which is exactly the lifetime we want.
+    _boot_permit: tokio::sync::SemaphorePermit<'static>,
 }
+
+/// Every test here boots a full server (TLS keygen, broker and admin listeners,
+/// background tasks). Cap how many boot at once so the parallel suite does not
+/// churn loopback ports excessively (see boot_server_with for the port-collision
+/// retry) or oversubscribe the machine. The correctness of a boot no longer
+/// depends on this - it just keeps the common case fast with few retries.
+static BOOT_PERMITS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
 async fn boot_server(tag: &str, tls_auto: bool) -> BootedServer {
     boot_server_with(tag, |config| {
@@ -48,30 +60,63 @@ async fn boot_server(tag: &str, tls_auto: bool) -> BootedServer {
 }
 
 async fn boot_server_with(tag: &str, configure: impl FnOnce(&mut ServerConfig)) -> BootedServer {
-    let root = temp_root(tag);
-    let mut config = ServerConfig::default();
-    config.server.data_dir = root.join("data");
-    config.broker.listener.bind = free_loopback_addr();
-    config.admin.listener.bind = free_loopback_addr();
-    configure(&mut config);
-    let broker_addr = config.broker.listener.bind;
-    let admin_addr = config.admin.listener.bind;
-    let data_dir = config.server.data_dir.clone();
-    let handle = tokio::spawn(async move {
-        let _ = run_server_from_config(config).await;
-    });
-    for _ in 0..1200 {
-        if TcpStream::connect(broker_addr).await.is_ok() {
+    let _boot_permit = BOOT_PERMITS.acquire().await.expect("boot permit");
+    // free_loopback_addr binds :0, closes it, and hands back the port, so a
+    // parallel test can grab that port before this server binds it - the server
+    // then exits with AddrInUse. That error used to be swallowed and surfaced
+    // only as a 30s readiness timeout ("did not come up"). Re-pick ports and
+    // retry on a bind collision; surface any other boot error at once instead.
+    let mut base = ServerConfig::default();
+    configure(&mut base);
+    for _ in 0..12 {
+        let root = temp_root(tag);
+        let mut config = base.clone();
+        config.server.data_dir = root.join("data");
+        config.broker.listener.bind = free_loopback_addr();
+        config.admin.listener.bind = free_loopback_addr();
+        let broker_addr = config.broker.listener.bind;
+        let admin_addr = config.admin.listener.bind;
+        let data_dir = config.server.data_dir.clone();
+
+        let boot_error = Arc::new(std::sync::Mutex::new(None));
+        let sink = boot_error.clone();
+        let handle = tokio::spawn(async move {
+            if let Err(e) = run_server_from_config(config).await {
+                *sink.lock().unwrap() = Some(format!("{e:?}"));
+            }
+        });
+
+        let mut ready = false;
+        for _ in 0..1200 {
+            if handle.is_finished() {
+                break;
+            }
+            if TcpStream::connect(broker_addr).await.is_ok() {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        if ready {
             return BootedServer {
                 broker_addr,
                 admin_addr,
                 data_dir,
                 handle,
+                _boot_permit,
             };
         }
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        if handle.is_finished() {
+            let err = boot_error.lock().unwrap().take().unwrap_or_default();
+            if err.contains("AddrInUse") {
+                continue;
+            }
+            panic!("server exited during boot: {err}");
+        }
+        handle.abort();
+        panic!("broker listener did not come up within the readiness budget");
     }
-    panic!("broker listener did not come up");
+    panic!("broker listener could not bind free ports after repeated collisions");
 }
 
 fn hello_frame(request_id: u64) -> Vec<u8> {
@@ -633,45 +678,110 @@ async fn post_setup_choice(admin_addr: std::net::SocketAddr, body: &str) -> Stri
     .await
 }
 
+struct SetupFlowServer {
+    broker_addr: std::net::SocketAddr,
+    data_dir: PathBuf,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+/// Boot a setup-mode server and drive the first-boot flow through `body` until
+/// the broker listener serves. The scenario leans on freed ephemeral ports
+/// twice: the broker port must stay SILENT until setup completes, and then the
+/// server must BIND it. A parallel test squatting the freed port breaks both
+/// legs falsely (an early answer, then AddrInUse at bind time), so retry the
+/// whole flow with fresh ports on those collisions - a genuine setup-gate
+/// regression reproduces on every attempt and still fails.
+async fn run_setup_flow(tag: &str, body: &str) -> SetupFlowServer {
+    let mut answered_early = 0;
+    let mut bind_collisions = 0;
+    for _ in 0..12 {
+        let root = temp_root(tag);
+        let config = setup_mode_config(&root);
+        let broker_addr = config.broker.listener.bind;
+        let admin_addr = config.admin.listener.bind;
+        let data_dir = config.server.data_dir.clone();
+        let boot_error = Arc::new(std::sync::Mutex::new(None));
+        let sink = boot_error.clone();
+        let handle = tokio::spawn(async move {
+            if let Err(e) = run_server_from_config(config).await {
+                *sink.lock().unwrap() = Some(format!("{e:?}"));
+            }
+        });
+
+        // While setup is pending the broker listener must be down. An answer
+        // here is either the gate regression this test guards against or a
+        // squatter on the freed port - only the regression survives a re-pick.
+        wait_for_port(admin_addr).await;
+        if TcpStream::connect(broker_addr).await.is_ok() {
+            answered_early += 1;
+            handle.abort();
+            continue;
+        }
+
+        let response = post_setup_choice(admin_addr, body).await;
+        assert!(response.contains("setup complete"), "{response}");
+
+        // The choice persists, and the broker listener comes up.
+        let mut ready = false;
+        for _ in 0..1200 {
+            if handle.is_finished() {
+                break;
+            }
+            if TcpStream::connect(broker_addr).await.is_ok() {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        if ready {
+            return SetupFlowServer {
+                broker_addr,
+                data_dir,
+                handle,
+            };
+        }
+        if handle.is_finished() {
+            let err = boot_error.lock().unwrap().take().unwrap_or_default();
+            if err.contains("AddrInUse") {
+                bind_collisions += 1;
+                continue;
+            }
+            panic!("server exited during the setup flow: {err}");
+        }
+        handle.abort();
+        panic!("broker listener did not come up after setup completed");
+    }
+    panic!(
+        "setup flow never completed cleanly across 12 port re-picks \
+         (broker answered before setup {answered_early}x - the setup gate looks \
+         broken if that dominates - bind collisions {bind_collisions}x)"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn first_boot_setup_auto_flow_then_normal_reboot() {
-    let root = temp_root("setup-auto");
-    let config = setup_mode_config(&root);
-    let broker_addr = config.broker.listener.bind;
-    let admin_addr = config.admin.listener.bind;
-    let data_dir = config.server.data_dir.clone();
-    let handle = tokio::spawn(async move {
-        let _ = run_server_from_config(config).await;
-    });
-
-    // While setup is pending the broker listener must be down.
-    wait_for_port(admin_addr).await;
-    assert!(
-        TcpStream::connect(broker_addr).await.is_err(),
-        "broker must not serve before setup completes"
-    );
-
-    let response = post_setup_choice(admin_addr, "mode=auto").await;
-    assert!(response.contains("setup complete"), "{response}");
+    let server = run_setup_flow("setup-auto", "mode=auto").await;
+    let data_dir = server.data_dir.clone();
 
     // The choice persists, and the broker comes up serving TLS.
-    wait_for_port(broker_addr).await;
     assert!(data_dir.join("setup_complete").exists());
     assert!(data_dir.join("config-overlay.toml").exists());
     let ca_pem = data_dir.join("tls").join("ca.pem");
     let connector = tls_connector(Some(&ca_pem));
-    let tcp = TcpStream::connect(broker_addr).await.expect("tcp connect");
+    let tcp = TcpStream::connect(server.broker_addr)
+        .await
+        .expect("tcp connect");
     let name = rustls::pki_types::ServerName::try_from("localhost").expect("server name");
     let mut stream = connector.connect(name, tcp).await.expect("tls handshake");
     write_all(&mut stream, &hello_frame(3)).await;
     let frame = read_frame(&mut stream).await;
     assert_eq!(frame.opcode, Op::HelloOk as u16);
-    handle.abort();
+    server.handle.abort();
 
     // A reboot with the marker present skips setup and adopts the overlay.
     // Asserted at the config layer because the first boot's storage threads
     // still hold the data dir within this test process.
-    let mut rebooted = setup_mode_config(&root);
+    let mut rebooted = setup_mode_config(&temp_root("setup-auto-reboot"));
     rebooted.server.data_dir = data_dir.clone();
     assert!(
         !rebooted.setup_pending(),
@@ -686,45 +796,28 @@ async fn first_boot_setup_auto_flow_then_normal_reboot() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn first_boot_setup_skip_records_the_choice_and_stays_plaintext() {
-    let root = temp_root("setup-skip");
-    let config = setup_mode_config(&root);
-    let broker_addr = config.broker.listener.bind;
-    let admin_addr = config.admin.listener.bind;
-    let data_dir = config.server.data_dir.clone();
-    let handle = tokio::spawn(async move {
-        let _ = run_server_from_config(config).await;
-    });
+    let server = run_setup_flow("setup-skip", "mode=skip").await;
 
-    let response = post_setup_choice(admin_addr, "mode=skip").await;
-    assert!(response.contains("setup complete"), "{response}");
-
-    wait_for_port(broker_addr).await;
-    assert!(data_dir.join("setup_complete").exists());
-    let mut stream = TcpStream::connect(broker_addr).await.expect("tcp connect");
+    assert!(server.data_dir.join("setup_complete").exists());
+    let mut stream = TcpStream::connect(server.broker_addr)
+        .await
+        .expect("tcp connect");
     write_all(&mut stream, &hello_frame(4)).await;
     let frame = read_frame(&mut stream).await;
     assert_eq!(frame.opcode, Op::HelloOk as u16);
-    handle.abort();
+    server.handle.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn first_boot_setup_creates_admin_user_and_cluster_secret() {
-    let root = temp_root("setup-user-secret");
-    let config = setup_mode_config(&root);
-    let broker_addr = config.broker.listener.bind;
-    let admin_addr = config.admin.listener.bind;
-    let data_dir = config.server.data_dir.clone();
-    let handle = tokio::spawn(async move {
-        let _ = run_server_from_config(config).await;
-    });
-
     let body = "mode=auto&admin_username=ops&admin_password=setup-pass\
                 &secret_mode=generate";
-    let response = post_setup_choice(admin_addr, body).await;
-    assert!(response.contains("setup complete"), "{response}");
+    let server = run_setup_flow("setup-user-secret", body).await;
+    let broker_addr = server.broker_addr;
+    let data_dir = server.data_dir.clone();
+    let handle = server.handle;
 
     // The cluster secret landed in the data dir.
-    wait_for_port(broker_addr).await;
     assert!(data_dir.join("cluster.secret").exists());
 
     // The seeded admin user works remotely (would be rejected if it were the
