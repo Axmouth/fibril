@@ -104,7 +104,13 @@ mod tests {
 static LOG_GUARD: OnceLock<non_blocking::WorkerGuard> = OnceLock::new();
 
 pub fn init_tracing() {
-    let app_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let app_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        // The storage engine's info logs scale with queue count (per-partition
+        // init lines, snapshot chatter) and drown the broker's own events on
+        // busy boxes, so the default quiets them to warnings. Setting RUST_LOG
+        // replaces this entirely - RUST_LOG=info,stroma_core=info opts back in.
+        EnvFilter::new("info,stroma_core=warn,keratin_log=warn")
+    });
 
     // Console needs TRACE-ish telemetry
     // let console_filter = EnvFilter::new("trace");

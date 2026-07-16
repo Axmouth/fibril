@@ -381,6 +381,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- The broker's default log filter quiets the storage engine to warnings.
+  Its info logs scale with queue count (per-partition init lines, snapshot
+  chatter) and drowned the broker's own events on busy boxes. Setting
+  RUST_LOG replaces the default entirely, so
+  `RUST_LOG=info,stroma_core=info` opts back in.
 - Message inspection can open any message's whole payload. Every result row
   now has a View button - previously it only appeared when the payload
   preview checkbox was on, and even then the dialog showed just the
