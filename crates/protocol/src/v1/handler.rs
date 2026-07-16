@@ -393,18 +393,24 @@ fn broker_error_response(err: &BrokerError) -> (u16, String) {
 
         // A genuine broker-side fault. Keep the retryable 500 but say plainly it
         // is not the caller's request, so a user does not chase a fix on their
-        // end - the broker logs carry the cause.
+        // end. A short trace id is stamped on the client message AND logged
+        // here with the full error, so "the broker logs carry the cause"
+        // comes with something to actually search for.
         BrokerError::Storage(_)
         | BrokerError::Engine(_)
         | BrokerError::ChannelClosed
         | BrokerError::InvalidReplicationProgress { .. }
-        | BrokerError::Unknown(_) => (
-            500,
-            format!(
-                "internal broker error: {err}. This is a broker-side fault, not a problem \
-                 with your request; check the broker logs for the cause"
-            ),
-        ),
+        | BrokerError::Unknown(_) => {
+            let trace = format!("{:08x}", uuid::Uuid::now_v7().as_u128() as u32);
+            tracing::error!("internal broker error [trace {trace}]: {err}");
+            (
+                500,
+                format!(
+                    "internal broker error: {err}. This is a broker-side fault, not a \
+                     problem with your request - search the broker logs for trace id {trace}"
+                ),
+            )
+        }
     }
 }
 
@@ -3580,12 +3586,14 @@ where
                             break;
                         }
                         Err(err) => {
-                            tracing::error!("Declare plexus failed: {err}");
+                            let trace =
+                                format!("{:08x}", uuid::Uuid::now_v7().as_u128() as u32);
+                            tracing::error!("Declare plexus failed [trace {trace}]: {err}");
                             failure = Some((
                                 500,
                                 format!(
                                     "declare plexus failed: {err}. This is a broker-side \
-                                     fault - check the broker logs for the cause"
+                                     fault - search the broker logs for trace id {trace}"
                                 ),
                             ));
                             break;

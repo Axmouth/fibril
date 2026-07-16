@@ -381,6 +381,10 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- Internal broker errors carry a trace id on both sides: the client-facing
+  message ends with "search the broker logs for trace id <id>" and the
+  broker logs the full error under the same id, so "check the logs" comes
+  with something to actually find.
 - A standalone broker re-learns its streams from storage before serving.
   After a restart the stream routing map started empty, so a publish
   arriving before a re-declare was routed down the queue path - failing at

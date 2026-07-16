@@ -3643,3 +3643,12 @@ touched: the boot window itself (queue index warm racing the listener,
 same family as the stream warm-up fixed in the same change), and the
 message (it names "the cluster" on a broker that has none). Repro: run
 fibril-demo, restart the broker mid-day.
+
+## Admin catalogue of recent internal errors (user idea 2026-07-17)
+
+Internal 500s now carry a trace id stamped on both the client message and
+the broker log line, so operators have something to grep. The bigger idea:
+a bounded ring of recent internal errors (trace id, time, error, op)
+surfaced on the admin board - diagnostics page or the activity feed family -
+so a client-reported trace id can be looked up without shell access to the
+broker's logs. Rides the same in-memory ring pattern as the audit feed.
