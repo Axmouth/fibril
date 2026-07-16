@@ -62,7 +62,9 @@ Pages update live: each open page holds one server-sent-events stream and the
 broker pushes its data every couple of seconds, serializing each data family
 once no matter how many pages watch it. An idle dashboard costs the broker
 nothing, and pages fall back to polling automatically if the stream is
-unavailable. The live pill in the top bar tracks the stream's health.
+unavailable. The live pill in the top bar tracks the stream's health, and it
+only declares the broker unreachable on an observed failure - updates merely
+paused (a background tab, active interaction on the page) show as stale.
 
 The overview also carries a collapsed resources panel - memory, CPU, and
 disk over the last 30 minutes - for when a resource question needs a shape,

@@ -1,5 +1,17 @@
 async function api(path) {
-  const r = await fetch(path);
+  let r;
+  try {
+    r = await fetch(path);
+  } catch (err) {
+    // A network-level failure is the signal that the broker itself is
+    // unreachable - the live pill separates this from polling merely
+    // being paused.
+    window.__fibrilLastFail = Date.now();
+    throw err;
+  }
+  // Any HTTP response proves the broker is reachable, error statuses
+  // included - liveness and per-request success are different questions.
+  window.__fibrilLastOk = Date.now();
   if (!r.ok) {
     let body = "";
     try {
@@ -9,18 +21,24 @@ async function api(path) {
     }
     throw new Error(body || `API error: HTTP ${r.status}`);
   }
-  window.__fibrilLastOk = Date.now();
   return r.json();
 }
 
 // POST JSON and return { ok, data } without throwing, so callers can show a
 // message either way. Mirrors the per-page postJson used on the topology page.
 async function apiPost(path, body) {
-  const r = await fetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  let r;
+  try {
+    r = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    window.__fibrilLastFail = Date.now();
+    return { ok: false, data: null };
+  }
+  window.__fibrilLastOk = Date.now();
   let data = null;
   try {
     data = await r.json();

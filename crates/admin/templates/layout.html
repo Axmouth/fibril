@@ -30,6 +30,16 @@
       // navigation can close them - a leaked stream per swap would pile
       // connections onto the broker.
       window.__spaEventSources = new Set();
+      // Page refreshers register here to be kicked when the tab becomes
+      // visible again: browsers throttle hidden-tab timers and the refresh
+      // guard skips hidden ticks, so without a kick the first seconds after
+      // a return show stale data. One layout-owned listener, page entries
+      // cleared on navigation like the timers above.
+      window.__spaVisibilityKicks = new Set();
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) return;
+        for (const kick of window.__spaVisibilityKicks) kick();
+      });
       window.setInterval = (fn, ms, ...rest) => {
         const id = window.__nativeSetInterval(fn, ms, ...rest);
         window.__spaIntervals.add(id);
@@ -250,18 +260,30 @@
       };
       const update = () => {
         const last = window.__fibrilLastOk || 0;
+        const fail = window.__fibrilLastFail || 0;
+        const age = Date.now() - last;
+        // An old success stamp alone only means polling PAUSED - the guard
+        // skips ticks in hidden tabs and during interaction, and browsers
+        // throttle background timers. "Unreachable" (and the X-eyed favicon)
+        // requires an observed failure since the last success, so a healthy
+        // broker never gets declared dead just because nobody asked it.
+        const failing = fail > last;
         // Before the first successful fetch the state is simply unknown:
         // show a neutral "connecting" pill instead of nothing, so the top
         // bar does not pop in and out across broker switches.
         const state = !last ? "connecting"
-          : Date.now() - last > 30000 ? "dead"
-          : Date.now() - last > 10000 ? "stale" : "live";
+          : age <= 10000 ? "live"
+          : failing && age > 30000 ? "dead"
+          : "stale";
         pill.hidden = false;
         for (const s of ["live", "stale", "dead", "connecting"]) {
           pill.classList.toggle(s, state === s);
         }
         text.textContent = state === "dead" ? "unreachable"
           : state === "connecting" ? "connecting" : state;
+        pill.title = state === "stale" && !failing
+          ? "updates paused (background tab or active interaction)"
+          : "";
         applyFace(state);
       };
       update();
@@ -492,6 +514,12 @@
       load();
       // Layout-owned poller: native timer so boosted navigation keeps it.
       window.__nativeSetInterval(load, 30000);
+      // Hidden tabs throttle that timer past the 45s staleness threshold,
+      // so refresh immediately on return rather than graying a healthy
+      // cluster's chip until the next tick.
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) load();
+      });
       // Staleness sweep between polls, so an unreachable broker grays the
       // chip within seconds of the age threshold rather than at the next
       // 30s tick.
@@ -725,6 +753,7 @@
         window.__spaTimeouts.clear();
         for (const es of window.__spaEventSources) es.close();
         window.__spaEventSources.clear();
+        window.__spaVisibilityKicks.clear();
       }
 
       function setActiveNav(pathname) {

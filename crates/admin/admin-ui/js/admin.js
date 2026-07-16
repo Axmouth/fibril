@@ -69,6 +69,10 @@ function autoRefresh(refreshFn, intervalMs) {
   };
 
   setInterval(tick, intervalMs);
+  // Hidden tabs skip ticks (the guard) and browsers throttle their timers,
+  // so refresh immediately when the tab becomes visible again instead of
+  // showing stale data until the next interval.
+  window.__spaVisibilityKicks?.add(tick);
 }
 
 // ---- tiny SVG charts, shared by every page ----
@@ -398,6 +402,9 @@ function liveData(families, onTick, fallbackRefresh) {
     render(bundle);
   });
   es.onerror = () => {
+    // Record the failure: the live pill declares "unreachable" only on an
+    // observed failure, never on polling merely being paused.
+    window.__fibrilLastFail = Date.now();
     // Transient errors auto-reconnect. CLOSED is final (e.g. an auth
     // redirect): fall back to polling for the rest of this page view.
     if (es.readyState === EventSource.CLOSED) {

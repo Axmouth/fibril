@@ -363,6 +363,15 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- The live pill (and the X-eyed favicon) no longer declare a healthy broker
+  unreachable. The state was derived purely from the age of the last
+  successful poll, but polling legitimately pauses - hidden tabs, active
+  interaction on a page, throttled background timers - so 30 quiet seconds
+  read as an outage. Unreachable now requires an observed failure since the
+  last success; paused updates show as stale with a tooltip saying why. Pages
+  also refresh immediately when their tab becomes visible again, admin POST
+  calls count as liveness proof too, and an HTTP error status counts as
+  reachable (the broker answered).
 - The Cluster page's "open its admin" links and the broker switcher no longer
   point browsers at dead or wrong addresses. Nodes used to register their raw
   admin bind, so a `0.0.0.0` bind (the container default) produced links that
