@@ -15,6 +15,7 @@ members = [
     "crates/tui-example",
     "crates/coordination-ganglion",
     "crates/compat-fixture-gen",
+    "crates/demo",
     "benches",
 ]
 

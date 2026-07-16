@@ -12,6 +12,19 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- fibril-demo, a living demo world (`cargo run --release -p fibril-demo`
+  against any broker): three businesses with realistic fake data - a
+  delivery bistro whose orders flow through a kitchen into deliveries,
+  payments, and courier-position pings, a freight desk publishing XML
+  manifests with a slow customs lane, and a hotel group whose rare
+  cancellations reference real remembered bookings with tiered refunds -
+  each on its own rush-hour rhythm over a compressed day clock. Consumers
+  have personalities (steady, sluggish with an afternoon nap that raises
+  and resolves backlog attention, flaky enough to feed the dead-letter
+  flow), payloads span JSON, XML, msgpack, and plain text, and both sides
+  are rate-limited so the dashboard tells a readable story at a handful of
+  messages per second. Traffic scale, flakiness, day length, and naps are
+  knobs.
 - The admin test-publish endpoint takes an optional `content_type`: the
   shorthands `text`, `json`, and `xml`, or any MIME string, stamped on the
   message headers. Operator probe messages can now look like the traffic

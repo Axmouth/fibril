@@ -17,6 +17,13 @@ needs and makes no external requests. In cluster mode the
 top bar shows which broker you are on and switches to another broker's admin
 on the same page.
 
+To see the whole dashboard busy without inventing traffic by hand, run the
+demo world against any broker: `cargo run --release -p fibril-demo`. It
+drives three small businesses (orders through kitchens into deliveries and
+payments, XML freight manifests, hotel bookings with rare tiered-refund
+cancellations) with rush hours, a napping consumer that raises and resolves
+backlog attention, and a flaky one that feeds the dead-letter flow.
+
 The dashboard is not meant to be a high-frequency monitoring feed. Use it to
 answer specific operational questions, and point Prometheus at the `/metrics`
 endpoint on the same listener (same auth, same HTTPS) for continuous

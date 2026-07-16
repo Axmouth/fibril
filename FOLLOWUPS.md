@@ -3601,15 +3601,19 @@ sibling container = non-loopback peer. The viz service now shares the
 broker's network namespace (network_mode: service:broker) and dials
 127.0.0.1, so the demo stays credential-free without weakening the rule.
 
-### Proper live demo scenario (make the dashboard look alive)
-A "real environment" scenario (or family) well beyond the current tours:
-- spiky publish AND consumption rates, deliberately out of sync
-- connection churn (publishers/subscribers joining and dropping)
-- many queues and streams at once, mixed durability tiers
-- mismatched combos: over-published queues, starved consumers, idle queues
-- dead letters flowing (a failing consumer burning retries)
-- varied content types on the wire: JSON, XML, plain text, binary
-- PLUS variant: occasional repartitioning, nodes joining and leaving
-Delivery shape: scripted arcs on the scenario runner; the tryout prints
-prompts like "open any node's admin from the links above, then run <command>
-to watch live traffic". Stoppable and idempotent (safe to rerun, converges).
+### Live demo world - SHIPPED as crates/demo (fibril-demo), 2026-07-16
+Built as its own crate rather than scenario-runner arcs: a supervisor over
+the real fibril-client with three fake businesses (bistro pipeline
+orders->kitchen->deliveries+payments+courier pings, XML freight with a slow
+customs lane, hotels with a stateful booking ledger, rare tiered-refund
+cancellations, and guest mail), rate limiting on BOTH sides, consumer
+personalities as knobs (steady / sluggish napper -> attention raise+resolve /
+flaky -> dead letters), content types JSON/XML/msgpack/text, compressed
+day-clock rhythms, stoppable and idempotent. Composes with a scenario.sh
+cluster by pointing --addr at it.
+STILL OPEN from the original wishlist:
+- docker-tryout integration: the tryout printing "open any node's admin from
+  the links above, then run <command> to watch live traffic" (needs a
+  published image carrying fibril-demo or a compose service for it)
+- a PLUS arc driving occasional repartitioning + node churn around the demo
+  (node lifecycle lives with scenario.sh, could wrap fibril-demo)
