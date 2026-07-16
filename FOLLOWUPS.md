@@ -3617,3 +3617,19 @@ STILL OPEN from the original wishlist:
   published image carrying fibril-demo or a compose service for it)
 - a PLUS arc driving occasional repartitioning + node churn around the demo
   (node lifecycle lives with scenario.sh, could wrap fibril-demo)
+
+## Durable declared-queues catalogue in stroma (user direction 2026-07-17)
+
+Incident: a stray dir named `deleted` inside a topic's on-disk tree refused
+the whole engine open ("bad partition dir"). Fixed in keratin be2b943 - the
+scan now finishes interrupted destroys (.trash- leftovers) and skips unknown
+dirs with a warning instead of failing the boot, regression-tested.
+
+The deeper direction the user wants: stop deriving the queue set from
+directory scans and persist the DECLARED catalogue in stroma storage itself
+(topics, groups, partition counts, policies). Boot then reconciles disk
+against the catalogue instead of trusting dir names, which also gives honest
+detection of missing/extra partitions and folds into the queue-lifecycle
+plan above (declare_partitioning as the authority) and the golden-fixture /
+back-compat story. Design it with the storage back-compat brief - a new
+persisted structure needs versioning from day one.
