@@ -3577,10 +3577,18 @@ response should also stamp liveness (not only the event stream tick), and
 move more of the topology/list payloads onto SSE so pages share one live
 source of truth. Trace before patching.
 
-### Trend charts: window should fit short uptimes
-History charts render a fixed 30-minute window. With less than 30 minutes of
-samples the chart should size to the data actually held (a fresh broker shows
-a mostly-empty axis today).
+### Trend charts: the LABEL should fit short uptimes
+The charts already size to the samples actually held - but the label still
+claims "30 min" regardless. With less than 30 minutes of data the label
+should state the span actually shown (user-corrected 2026-07-16: label
+issue only, the chart window itself is fine).
+
+### BUG: viz demo fails - "local admin ... loopback only" error
+Running the viz demo (website/public/viz.sh) errored with wording along the
+lines of the local admin running on loopback only (exact message not
+captured). Likely the demo drives an admin API bind or check that refuses
+non-loopback (or expects a non-loopback bind). Reproduce, capture the exact
+error, fix the demo or the guard.
 
 ### Proper live demo scenario (make the dashboard look alive)
 A "real environment" scenario (or family) well beyond the current tours:
