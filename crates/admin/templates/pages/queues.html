@@ -36,7 +36,7 @@
 <div class="spark-pop" id="spark-pop" hidden>
   <div class="spark-pop-head">
     <span class="mono" id="spark-pop-title"></span>
-    <span class="micro">depth · 30 min</span>
+    <span class="micro">depth · <span class="history-span">last 30 min</span></span>
     <button class="close" id="spark-pop-close" type="button" aria-label="Close">×</button>
   </div>
   <svg id="spark-pop-chart" class="chart" style="height:100px" width="300" height="100"></svg>
@@ -359,7 +359,7 @@ function render(bundle) {
             <td class="queue-topic-cell" title="${escapeHtml(topic)}"><span class="queue-caret">${open ? "▼" : "▶"}</span> ${escapeHtml(topic)}</td>
             <td><span class="chip-plain">${loaded}/${parts.length} loaded</span></td>
             <td class="text-right ${depthTone(depthSeries.get(`${topic} ${parts[0]?.group || ""}`), aggReady)}" title="${aggReady}">${fmtCompact(aggReady)}</td>
-            <td class="queue-spark-cell"><svg class="queue-spark" data-key="${escapeHtml(`${topic} ${parts[0]?.group || ""}`)}" width="90" height="22" aria-label="Depth over the last 30 minutes"></svg></td>
+            <td class="queue-spark-cell"><svg class="queue-spark" data-key="${escapeHtml(`${topic} ${parts[0]?.group || ""}`)}" width="90" height="22" aria-label="Depth over the recorded history window"></svg></td>
             <td class="text-right">${rateCell(queueRates.get(`${topic} ${parts[0]?.group || ""}`)?.inRate ?? 0, "v-accent")}</td>
             <td class="text-right">${rateCell(queueRates.get(`${topic} ${parts[0]?.group || ""}`)?.outRate ?? 0, "v-ok")}</td>
             <td class="text-right v-active">${fmtCompact(sumState("inflight_count"))}</td>
@@ -397,12 +397,12 @@ function render(bundle) {
             <span class="chip-group">${escapeHtml(group)}</span>
             <span class="queue-group-note">${topicEntries.length} topic(s) · ${partCount} partition(s) — click a topic to expand its partitions</span>
           </div>
-          <table class="table table-compact metric-table queue-table">
+          <table class="table table-compact metric-table queue-table queue-grid-table">
             <tr>
               <th>Topic / partition</th>
               <th>State</th>
               <th class="text-right">Depth</th>
-              <th>Trend — 30 min</th>
+              <th>Trend — <span class="history-span">last 30 min</span></th>
               <th class="text-right">In / s</th>
               <th class="text-right">Out / s</th>
               <th class="text-right">Leased</th>
@@ -419,6 +419,7 @@ function render(bundle) {
     }).join('');
 
   container.innerHTML = summary + html + replicationHtml;
+  setHistorySpanLabels((history.samples || []).length, history.interval_ms);
   container.querySelectorAll(".queue-spark").forEach((svg) => {
     renderSparkline(svg, depthSeries.get(svg.dataset.key)?.depths ?? [], "var(--accent)");
   });

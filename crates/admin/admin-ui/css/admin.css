@@ -2415,3 +2415,46 @@ html[data-theme="light"][data-flavor="carotene"] {
 .broker-switch-btn {
   min-width: 96px;
 }
+
+/* Per-group tables repeat down the Queues and Streams pages. Pin their
+   column widths so every instance shares one grid and a column reads
+   straight down the page across groups, instead of each table auto-sizing
+   to its own content. The first (name) column takes the remainder. */
+.queue-grid-table,
+.stream-parts-table,
+.stream-cursors-table {
+  table-layout: fixed;
+  width: 100%;
+}
+
+/* The queues grid carries many pinned columns - keep the topic column
+   roomy and let the wrap scroll sideways when the viewport is narrower. */
+.queue-grid-table {
+  min-width: 1280px;
+}
+
+.queue-grid-table th:nth-child(2) { width: 92px; }
+.queue-grid-table th:nth-child(3) { width: 64px; }
+.queue-grid-table th:nth-child(4) { width: 158px; }
+.queue-grid-table th:nth-child(5) { width: 64px; }
+.queue-grid-table th:nth-child(6) { width: 64px; }
+.queue-grid-table th:nth-child(7) { width: 64px; }
+.queue-grid-table th:nth-child(8) { width: 84px; }
+.queue-grid-table th:nth-child(9) { width: 84px; }
+.queue-grid-table th:nth-child(10) { width: 112px; }
+.queue-grid-table th:nth-child(11) { width: 128px; }
+.queue-grid-table th:nth-child(12) { width: 110px; }
+
+.stream-parts-table th:nth-child(2) { width: 84px; }
+.stream-parts-table th:nth-child(3) { width: 84px; }
+.stream-parts-table th:nth-child(4) { width: 84px; }
+.stream-parts-table th:nth-child(5) { width: 90px; }
+.stream-parts-table th:nth-child(6) { width: 84px; }
+.stream-parts-table th:nth-child(7) { width: 64px; }
+.stream-parts-table th:nth-child(8) { width: 118px; }
+
+.stream-cursors-table th:nth-child(2) { width: 84px; }
+.stream-cursors-table th:nth-child(3) { width: 100px; }
+.stream-cursors-table th:nth-child(4) { width: 84px; }
+.stream-cursors-table th:nth-child(5) { width: 84px; }
+.stream-cursors-table th:nth-child(6) { width: 130px; }

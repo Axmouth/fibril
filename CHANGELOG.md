@@ -396,8 +396,13 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 - Trend-chart headings state the span the chart actually shows. History
   lives in memory and starts with the broker, so a young broker's charts
   cover less than the promised "last 30 min" - the labels on the Overview,
-  queue detail, and Dead letters pages now fit themselves to the recorded
-  samples (e.g. "last 50 s") until the full window fills.
+  queue detail, and Dead letters pages, plus the queues list's trend column
+  and group heading, now fit themselves to the recorded samples (e.g.
+  "last 50 s") until the full window fills.
+- The per-group tables on the Queues and Streams pages share one column
+  grid. Each group's table used to auto-size to its own content, so the
+  same column landed at a different place in every group - columns now
+  read straight down the page across groups.
 - The live pill (and the X-eyed favicon) no longer declare a healthy broker
   unreachable. The state was derived purely from the age of the last
   successful poll, but polling legitimately pauses - hidden tabs, active
