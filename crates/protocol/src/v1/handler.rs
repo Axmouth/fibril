@@ -3581,7 +3581,13 @@ where
                         }
                         Err(err) => {
                             tracing::error!("Declare plexus failed: {err}");
-                            failure = Some((500, "declare plexus failed".into()));
+                            failure = Some((
+                                500,
+                                format!(
+                                    "declare plexus failed: {err}. This is a broker-side \
+                                     fault - check the broker logs for the cause"
+                                ),
+                            ));
                             break;
                         }
                     }

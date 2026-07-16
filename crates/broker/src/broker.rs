@@ -1849,6 +1849,33 @@ impl<
         None
     }
 
+    /// Reopen every stream partition durably recorded in local storage, so
+    /// publish and subscribe routing recognizes them from the first request
+    /// after a restart. Without this a standalone broker forgets its streams
+    /// until a re-declare: the in-memory channel map starts empty, there is no
+    /// coordination view to consult, and a publish routed down the queue path
+    /// is refused by the engine's kind guard. Config detail (durability tier,
+    /// retention) reopens with the same defaults as route_stream's durable
+    /// fallback - the stream's own persisted state carries its data.
+    pub async fn warm_streams_from_storage(&self) -> Result<usize, StromaError> {
+        let mut opened = 0;
+        for (tp, part, group) in self.engine.list_partitions().await? {
+            if group.is_some() || !self.engine.durable_is_stream(&tp, part) {
+                continue;
+            }
+            match self
+                .get_or_open_stream(&tp, part, StreamDurability::default(), None)
+                .await
+            {
+                Ok(_) => opened += 1,
+                Err(err) => {
+                    tracing::warn!("could not reopen stream {tp}/{part} from storage: {err}");
+                }
+            }
+        }
+        Ok(opened)
+    }
+
     /// Whether `(tp, part)` is an open stream channel on this broker.
     pub fn is_stream(&self, tp: &str, part: u32) -> bool {
         self.streams.contains_key(&QueueKey {

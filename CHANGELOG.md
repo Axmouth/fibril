@@ -381,6 +381,14 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- A standalone broker re-learns its streams from storage before serving.
+  After a restart the stream routing map started empty, so a publish
+  arriving before a re-declare was routed down the queue path - failing at
+  best, and on older builds durably poisoning the stream's log so the
+  stream could never be declared again (fixed storage-side in keratin,
+  existing poisoned logs heal on boot). Stream declares whose underlying
+  open fails also report the actual cause instead of a bare "declare
+  plexus failed".
 - The broker's default log filter quiets the storage engine to warnings.
   Its info logs scale with queue count (per-partition init lines, snapshot
   chatter) and drowned the broker's own events on busy boxes. Setting

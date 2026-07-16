@@ -3633,3 +3633,13 @@ detection of missing/extra partitions and folds into the queue-lifecycle
 plan above (declare_partitioning as the authority) and the golden-fixture /
 back-compat story. Design it with the storage back-compat brief - a new
 persisted structure needs versioning from day one.
+
+## Transient 404 on queue publish during standalone boot (filed 2026-07-17)
+
+Seen once per restart-under-load: a queue publish arriving in the boot
+window gets 404 "topic/0 is not declared in the cluster" on a STANDALONE
+broker, then heals on the client's next retry. Two things to fix when
+touched: the boot window itself (queue index warm racing the listener,
+same family as the stream warm-up fixed in the same change), and the
+message (it names "the cluster" on a broker that has none). Repro: run
+fibril-demo, restart the broker mid-day.

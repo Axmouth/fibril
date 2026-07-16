@@ -1777,6 +1777,18 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         stream_ownership,
     );
 
+    // Standalone brokers re-learn their streams from storage before serving,
+    // so routing recognizes them from the first request after a restart. A
+    // cluster recognizes streams through their coordination declaration
+    // instead, and owners open channels on demand.
+    if ganglion_parts.is_none() {
+        match broker.warm_streams_from_storage().await {
+            Ok(0) => {}
+            Ok(count) => tracing::info!("reopened {count} stream partition(s) from storage"),
+            Err(err) => tracing::warn!("stream warm-up scan failed: {err}"),
+        }
+    }
+
     // Tracks the lowest topology generation each connection has acked, so the
     // repartition controller can fence a cutover on cluster-wide client adoption.
     // Shared between the connection handlers (which record acks) and the heartbeat
