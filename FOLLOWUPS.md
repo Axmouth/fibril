@@ -3556,3 +3556,41 @@ M7 - Favicon: mascot eyes + state (user idea 2026-07-13). SHIPPED
      the top load bucket (overview data already on hand). Generate the two
      extra 16/32px face tiles, swap in layout.js where the live pill state
      changes. Throttle swaps (no flicker on reconnect blips).
+
+## User field notes (2026-07-16) - dashboard bugs + demo wishlist
+
+Noted by the user while exercising the cluster tryout and the dashboard.
+
+### BUG: topology "open its admin" links unusable
+The broker cards' "open its admin" links rendered 0.0.0.0 hosts (not
+connectable from a browser) and pointed at the SAME instance. The broker
+switcher dropdown gets working addresses for the same nodes, so the data
+exists - the card link should derive a reachable host the same way (e.g.
+substitute the node's broker_addr host when admin_addr registered 0.0.0.0).
+Fix rather than remove.
+
+### INVESTIGATE: random "unreachable" states in the UI
+Nodes/pages intermittently flag unreachable while the cluster is healthy.
+Suspects the user noted: boosted-link navigation undoing SSE wiring, and the
+topology page not riding live data. Direction: any successful admin API
+response should also stamp liveness (not only the event stream tick), and
+move more of the topology/list payloads onto SSE so pages share one live
+source of truth. Trace before patching.
+
+### Trend charts: window should fit short uptimes
+History charts render a fixed 30-minute window. With less than 30 minutes of
+samples the chart should size to the data actually held (a fresh broker shows
+a mostly-empty axis today).
+
+### Proper live demo scenario (make the dashboard look alive)
+A "real environment" scenario (or family) well beyond the current tours:
+- spiky publish AND consumption rates, deliberately out of sync
+- connection churn (publishers/subscribers joining and dropping)
+- many queues and streams at once, mixed durability tiers
+- mismatched combos: over-published queues, starved consumers, idle queues
+- dead letters flowing (a failing consumer burning retries)
+- varied content types on the wire: JSON, XML, plain text, binary
+- PLUS variant: occasional repartitioning, nodes joining and leaving
+Delivery shape: scripted arcs on the scenario runner; the tryout prints
+prompts like "open any node's admin from the links above, then run <command>
+to watch live traffic". Stoppable and idempotent (safe to rerun, converges).
