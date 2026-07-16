@@ -12,7 +12,8 @@
 #
 #   docker compose -f compose.viz.example.yaml down -v
 #
-# The visualizer connects to the broker over the compose network. This is a single
+# The visualizer shares the broker's network namespace and connects over
+# loopback (the default credentials are loopback-only). This is a single
 # standalone broker (no clustering), so every partition is owned by the one broker.
 # To watch ownership spread across a real cluster, see compose.cluster.example.yaml
 # and the admin topology page.
@@ -20,6 +21,9 @@
 services:
   broker:
     image: ghcr.io/axmouth/fibril-server:main
+    # The :main tag is mutable, so always re-pull it rather than reuse a stale
+    # image cached on a previous run.
+    pull_policy: always
     restart: unless-stopped
     ports:
       - "9876:9876"   # broker (client connections)
@@ -34,14 +38,20 @@ services:
   # terminal (tty + stdin); it is not a background service, so `up` skips it.
   viz:
     image: ghcr.io/axmouth/fibril-server:main
+    pull_policy: always
     # Profiled so a plain `up` starts only the broker. `compose run viz` starts it
     # regardless of profile and brings the broker up as its dependency.
     profiles: ["viz"]
     depends_on:
       broker:
         condition: service_healthy
+    # Share the broker's network namespace so the visualizer connects FROM
+    # loopback: the demo rides the built-in default credentials, which the
+    # broker accepts from loopback only. A separate container would dial from
+    # the compose network and be denied with the create-a-user guidance.
+    network_mode: "service:broker"
     entrypoint: ["fibril-tui-example"]
-    command: ["--addr", "broker:9876", "--clients", "4", "--partitions", "4"]
+    command: ["--addr", "127.0.0.1:9876", "--clients", "4", "--partitions", "4"]
     tty: true
     stdin_open: true
     environment:

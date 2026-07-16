@@ -363,6 +363,13 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- The visualizer tryout (viz.sh / compose.viz.example.yaml) authenticates
+  again. It rode the built-in default credentials from a sibling container,
+  and those are deliberately accepted from loopback only, so the broker
+  denied it with the create-a-user guidance. The visualizer now shares the
+  broker's network namespace and connects over loopback, keeping the demo
+  credential-free without weakening the loopback rule. The viz Compose file
+  also re-pulls the mutable :main image like the other examples.
 - Trend-chart headings state the span the chart actually shows. History
   lives in memory and starts with the broker, so a young broker's charts
   cover less than the promised "last 30 min" - the labels on the Overview,
