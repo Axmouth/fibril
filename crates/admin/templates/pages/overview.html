@@ -58,14 +58,14 @@
 <div class="overview-two">
   <section class="overview-panel" aria-label="Throughput">
     <div class="overview-panel-heading">
-      <h5>Throughput — last 30 min</h5>
+      <h5>Throughput — <span class="history-span">last 30 min</span></h5>
       <p>
         <span class="legend-dot" style="background: var(--accent)"></span> published / s
         <span class="legend-dot" style="background: var(--muted)"></span> delivered / s
       </p>
     </div>
     <svg id="chart-throughput" class="chart chart-tall" width="720" height="170" role="img"
-      aria-label="Publish and deliver rates over the last 30 minutes"></svg>
+      aria-label="Publish and deliver rates over the recorded history window"></svg>
     <p class="overview-help" id="history-note" hidden>
       History lives in memory and starts with the broker - a few samples in, the lines appear.
     </p>
@@ -80,14 +80,14 @@
 
 <section class="overview-panel" aria-label="Backlog over time">
   <div class="overview-panel-heading">
-    <h5>Backlog — last 30 min
+    <h5>Backlog — <span class="history-span">last 30 min</span>
       <span class="chart-current"><b id="backlog-now">--</b> <span id="backlog-trend" class="trend-word"></span></span>
     </h5>
     <p>Ready messages across every queue. The trend says whether consumers are draining
       or falling behind - more useful than any single gauge.</p>
   </div>
   <svg id="chart-backlog" class="chart chart-short" width="720" height="110" role="img"
-    aria-label="Total backlog over the last 30 minutes"></svg>
+    aria-label="Total backlog over the recorded history window"></svg>
 </section>
 
 <section class="overview-panel" aria-label="Cluster nodes" id="nodes-panel" hidden>
@@ -115,22 +115,22 @@
 </section>
 
 <details class="overview-details overview-panel" id="resource-graphs">
-  <summary>Resources — last 30 min (memory, CPU, disk)</summary>
+  <summary>Resources — <span class="history-span">last 30 min</span> (memory, CPU, disk)</summary>
   <div class="resource-grid">
     <div>
       <h5 class="micro">Memory, MB</h5>
       <svg id="chart-rss" class="chart chart-short" width="720" height="90" role="img"
-        aria-label="Resident memory over the last 30 minutes"></svg>
+        aria-label="Resident memory over the recorded history window"></svg>
     </div>
     <div>
       <h5 class="micro">CPU</h5>
       <svg id="chart-cpu" class="chart chart-short" width="720" height="90" role="img"
-        aria-label="Process CPU over the last 30 minutes"></svg>
+        aria-label="Process CPU over the recorded history window"></svg>
     </div>
     <div>
       <h5 class="micro">Disk, MB</h5>
       <svg id="chart-disk" class="chart chart-short" width="720" height="90" role="img"
-        aria-label="Data directory usage over the last 30 minutes"></svg>
+        aria-label="Data directory usage over the recorded history window"></svg>
     </div>
   </div>
 </details>
@@ -327,6 +327,7 @@ function renderAttention(items) {
 function renderHistory(history) {
   const samples = history.samples ?? [];
   document.getElementById("history-note").hidden = samples.length >= 3;
+  setHistorySpanLabels(samples.length, history.interval_ms);
   const times = samples.map((s) => s.at);
   const published = samples.map((s) => s.published_per_sec);
   const delivered = samples.map((s) => s.delivered_per_sec);

@@ -22,10 +22,10 @@
       <h5>Dead-letter backlog
         <span class="chart-current"><b id="dlq-depth-now">--</b> <span id="dlq-depth-trend" class="trend-word"></span></span>
       </h5>
-      <p>Ready messages sitting in the global target — 30 min.</p>
+      <p>Ready messages sitting in the global target — <span class="history-span">last 30 min</span>.</p>
     </div>
     <svg id="dlq-chart" class="chart chart-short" width="340" height="110" role="img"
-      aria-label="Global dead-letter queue depth over the last 30 minutes"></svg>
+      aria-label="Global dead-letter queue depth over the recorded history window"></svg>
   </section>
 </div>
 
@@ -101,6 +101,10 @@ function render(bundle) {
         entry.topic === target.topic && (entry.group || "") === (target.group || ""))
     : null;
   const depths = series ? series.samples.map((p) => p.depth) : [];
+  setHistorySpanLabels(
+    series ? series.samples.length : (history.samples || []).length,
+    history.interval_ms,
+  );
   renderChart(document.getElementById("dlq-chart"), [
     { values: depths, color: "var(--bad)", fill: true, label: "dead letters" },
   ], { hover: true, times: series ? series.samples.map((p) => p.at) : undefined });

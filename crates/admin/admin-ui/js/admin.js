@@ -75,6 +75,20 @@ function autoRefresh(refreshFn, intervalMs) {
   window.__spaVisibilityKicks?.add(tick);
 }
 
+// The trend headings promise "last 30 min", but history lives in memory and
+// starts with the broker - until the ring holds 30 minutes the charts show a
+// shorter span. Fit every .history-span label on the page to the samples
+// actually rendered.
+function setHistorySpanLabels(sampleCount, intervalMs) {
+  const spanMs = Math.max(0, sampleCount - 1) * (intervalMs || 5000);
+  const label = spanMs >= 29.5 * 60000 ? "last 30 min"
+    : spanMs < 60000 ? `last ${Math.max(5, Math.round(spanMs / 1000))} s`
+    : `last ${Math.round(spanMs / 60000)} min`;
+  for (const el of document.querySelectorAll(".history-span")) {
+    el.textContent = label;
+  }
+}
+
 // ---- tiny SVG charts, shared by every page ----
 // All charts read their size from the svg's width/height attributes and draw in
 // that coordinate space (preserveAspectRatio="none" makes them stretch). Values

@@ -48,7 +48,7 @@
 
   <section class="overview-panel" aria-label="Depth over time">
     <div class="overview-panel-heading">
-      <h5>Depth — last 30 min
+      <h5>Depth — <span class="history-span">last 30 min</span>
         <span class="chart-current"><b id="q-depth-now">--</b> <span id="q-depth-trend" class="trend-word"></span></span>
       </h5>
       <p>
@@ -58,7 +58,7 @@
       </p>
     </div>
     <svg id="q-chart" class="chart chart-short" width="720" height="110" role="img"
-      aria-label="Queue depth and leased work over the last 30 minutes"></svg>
+      aria-label="Queue depth and leased work over the recorded history window"></svg>
   </section>
 
   <h5 class="metrics-header queue-group-heading">Partitions</h5>
@@ -207,6 +207,10 @@ function render(bundle) {
     .find((entry) => entry.topic === topic && (entry.group || "") === group);
   const depths = series ? series.samples.map((p) => p.depth) : [];
   const leasedSeries = series ? series.samples.map((p) => p.leased) : [];
+  setHistorySpanLabels(
+    series ? series.samples.length : (history.samples || []).length,
+    history.interval_ms,
+  );
   renderChart(document.getElementById("q-chart"), [
     { values: depths, color: "var(--accent)", fill: true, label: "depth" },
     { values: leasedSeries, color: "var(--active)", label: "leased" },
