@@ -363,6 +363,10 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- The example Compose files now set `pull_policy: always` on the
+  `fibril-server:main` image. The `:main` tag is mutable, so `compose up`
+  would otherwise reuse whatever image was cached on a previous run - the
+  cluster tryout could silently run a stale build missing recent fixes.
 - A plain `http://` request to a TLS-enabled admin listener now gets a
   redirect to the same URL under `https://`. Before, the TLS stack answered
   the plaintext bytes with a raw TLS alert, which browsers rendered as

@@ -17,6 +17,10 @@
 
 x-broker: &broker
   image: ghcr.io/axmouth/fibril-server:main
+  # The :main tag is mutable, so always re-pull it. Without this, `compose up`
+  # reuses whatever :main was cached on a previous run and the tryout can
+  # silently run a stale build.
+  pull_policy: always
   restart: unless-stopped
 
 services:

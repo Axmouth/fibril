@@ -1,6 +1,9 @@
 services:
   fibril-server:
     image: ghcr.io/axmouth/fibril-server:main
+    # The :main tag is mutable, so always re-pull it rather than reuse a stale
+    # image cached on a previous `compose up`.
+    pull_policy: always
     container_name: fibril-server
     restart: unless-stopped
     ports:
