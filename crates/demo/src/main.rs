@@ -194,7 +194,7 @@ async fn main() -> anyhow::Result<()> {
     );
     println!("  seed      {seed}");
     println!("  scale     {}  flakiness {}", demo.scale, demo.flakiness);
-    println!("  stop with Ctrl-C; restarts are safe");
+    println!("  stop with Ctrl-C - restarts are safe");
 
     // The bistro pipeline: customers -> kitchen -> couriers + payments.
     let (courier_tx, courier_rx) = tokio::sync::mpsc::channel(64);
