@@ -243,7 +243,9 @@ function render(bundle) {
                 <td class="text-right">${c.partition}</td>
                 <td>${c.behind === 0
                   ? '<span class="chip-ok">tail</span>'
-                  : '<span class="chip-warn">catching up</span>'}</td>
+                  : c.rate > 0.5
+                    ? '<span class="chip-warn">catching up</span>'
+                    : '<span class="chip-warn">behind</span>'}</td>
                 <td class="text-right ${c.behind > 0 ? "v-warn" : "v-dim"}">${fmtCompact(c.behind)}</td>
                 <td class="text-right ${c.rate > 0.5 ? "v-active" : "v-dim"}">${fmtCompact(Math.round(c.rate))}</td>
                 <td>${c.lastAdvance ? escapeHtml(fmtAgo(c.lastAdvance / 1000)) : "—"}</td>

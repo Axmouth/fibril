@@ -381,6 +381,9 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- A durable stream cursor that is behind with nobody reading shows "behind"
+  instead of "catching up" - catching up is reserved for a cursor that is
+  actually advancing.
 - Internal broker errors carry a trace id on both sides: the client-facing
   message ends with "search the broker logs for trace id <id>" and the
   broker logs the full error under the same id, so "check the logs" comes
