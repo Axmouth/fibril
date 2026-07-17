@@ -3683,3 +3683,43 @@ STILL OPEN, with evidence captured:
    queues_debug is empty (the user's "blank page" in the tryout). It needs
    an honest empty state: the metrics strip at zero plus "this broker hosts
    no materialized queues - see the Cluster page for placement".
+
+## Field-note triage (2026-07-17 scribbles + agent summary)
+
+Actioned already: queues-page investigation (see the kind-races section
+above - two fixes landed, empty-state UI + kind race remain), tryout demo
+wiring (shipped), unreachable pill (shipped), trace ids on internal errors
+(shipped; the error-catalogue idea is its own section above).
+
+Filed for the attention arc (extends the threshold-rules brief above):
+- Debounce/coalesce same-origin attention events in the EVALUATION layer
+  (hold-before-raise or hysteresis-on-resolve) so built-in and future
+  user rules both inherit it and cannot flap.
+- The rules UI as a structured condition builder: metric dropdown +
+  comparison + threshold + optional trend, independent rows, small fixed
+  comparison set. No row composition, no syntax - demand pulls a real
+  engine later or never.
+- Scope decision BEFORE storage: queue/stream rules are cluster state
+  (settings-replicated, owner-evaluated), resource rules per-node.
+- Configurable grace/threshold on existing built-in conditions as the
+  smallest first slice.
+- External delivery as channels consuming the same condition-event stream
+  the panel and desktop notifications already consume: a webhook POST on
+  raise/resolve first, attention-as-Prometheus-gauges second. No native
+  integrations.
+
+Copy/vocabulary sweep (one sitting):
+- "Auth disabled" top-bar pill vs connections "authenticated" chips read
+  as a contradiction - scope the pill (admin auth) and the chips (client
+  auth) with distinct wording.
+- Action-verb audit across tables (Detail / Inspect / Open / Delete).
+- "version: 0" on runtime settings reads like a build version - reword as
+  revision.
+- "Frozen" partition role could hint its cause (mid-transition).
+
+Also noted: distinguish planned drain vs crash in the at-a-glance
+indicators; connections diagram degradation at 10x scale; landing-page
+hero shot of the demo under load; benchmark tiering (SATA/NVMe/tmpfs) with
+conditions glued to numbers; latency-floor honesty in docs; Arc<str> for
+Topic/Group hot paths; keratin clean-shutdown marker to skip integrity
+checks on clean restart.
