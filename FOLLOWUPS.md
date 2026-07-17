@@ -3782,3 +3782,11 @@ pays if the contention is shardable (cache bouncing, contended locks) -
 a structural single-writer choke would survive sharding. Rule out the
 cheap classic first: shared metrics counters false-sharing across cores
 (fix = padding / per-core counters, no architecture needed).
+PIPELINING NOTE: per-partition ordering serializes the ORDER, not the
+work - stages of one partition's flow (parse/validate/append/fsync/apply/
+confirm) can overlap across successive messages, Disruptor-style, so the
+per-message serial cost is the longest stage, not the sum. Group commit
+and the parallel msg/event fsyncs already do this for the worst stage;
+the probe should also ask which stages still run INSIDE the serialized
+actor context without needing to (payload encode, delivery selection vs
+socket write, one-by-one confirm-gate wakeups).
