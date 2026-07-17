@@ -387,6 +387,9 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- Live pages paint immediately from a one-shot poll instead of waiting for
+  the event stream's first tick. A page could sit blank for seconds - or
+  indefinitely behind a live-looking pill if the tick pipeline hiccupped.
 - Redeclaring an already-placed queue through a broker that does not own
   all its partitions no longer fails with a role-mismatch 500. The declare
   records the partitioning with coordination as before, and locally

@@ -401,6 +401,11 @@ function liveData(families, onTick, fallbackRefresh) {
     }, 500);
   };
 
+  // First paint comes from a one-shot poll: the stream's first tick can be
+  // a couple of seconds out, and a page that waits for it shows nothing -
+  // indefinitely, if the tick pipeline hiccups. The tick then takes over.
+  fallbackRefresh();
+
   const es = new EventSource(`/admin/api/events?families=${families.join(",")}`);
   window.__spaEventSources?.add(es);
   es.addEventListener("tick", (event) => {
