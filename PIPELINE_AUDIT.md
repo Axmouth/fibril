@@ -48,13 +48,23 @@ Clean bill: no IO, no encoding, no locks inside the hot commands.
 
 ## Congestion visibility (user direction 2026-07-18)
 
-The actor ALREADY tracks per-lane cmd_queue_depth (atomics, ~837/890) and
-cmd_wait_latency histograms - surface them through the /metrics exporter
-and a dashboard panel (diagnostics page fits) so a congested lane is
-visible directly: "if notification were the bottleneck, the queue would
-fill and backpressure the rest" becomes a readable graph instead of a
-theory. Depths exist per priority lane per partition - export aggregated
-per lane, with a top-K by depth breakdown.
+Two layers, the second being the real ask:
+
+1. Stroma actor lanes: per-lane cmd_queue_depth atomics + cmd_wait_latency
+   histograms already exist (~837/890) - surface via exporter + a
+   diagnostics panel if not already visible.
+2. KERATIN PIPELINE STAGES (the ask): the writer -> fsync worker ->
+   manifest/completion chain has bounded inter-stage buffers (the
+   writer/fsync bounded channel was the publish-wedge deadlock site -
+   keratin 3cb1218 added the hard cap + ensure_fsync_slot gate). Add
+   per-stage saturation metrics: current depth vs capacity (y/N), the
+   fraction of submissions made while the buffer was FULL ("batches while
+   maxed x%"), and average fill. A downstream stage that blocks (fsync
+   stalls, notify backlog) then shows as its buffer pinned at N with
+   upstream stages' full-fraction climbing - the bottleneck reads
+   directly off the graph instead of needing a gdb session. Export via
+   the existing keratin stats plumbing (the IO stats line already tracks
+   per-stage TIME - this adds per-stage QUEUE state) and feed /metrics.
 
 ## Delivery path (broker.rs spawn_delivery_loop ~3649 + handler.rs pump ~1270 + writer ~2460)
 
