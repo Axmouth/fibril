@@ -3724,22 +3724,26 @@ conditions glued to numbers; latency-floor honesty in docs; Arc<str> for
 Topic/Group hot paths; keratin clean-shutdown marker to skip integrity
 checks on clean restart.
 
-## Live-pill semantics + dead page-script after boosted swap (2026-07-17)
+## Blank Queues page - SOLVED 2026-07-17 (formatTime on a progress struct)
 
-From the blank-Queues investigation. The initial-paint fix (liveData does a
-one-shot poll before subscribing) covers the visible symptom, two causes
-remain open:
-1. The live pill reads __fibrilLastOk, which ANY successful api() call
-   stamps - including the layout's own attention (15s) and topology (30s)
-   pollers. A page whose own event stream and render pipeline are dead
-   still shows "live". Either scope the pill to the PAGE's stream (a
-   per-page stamp) or reword it to what it measures (broker reachability).
-2. The user's blank tab had no page-driven network activity at all: after
-   a boosted nav swap the page script apparently failed to re-establish
-   its EventSource (and pre-fix, nothing repainted). Reproduce by driving
-   repeated boosted swaps and check __spaEventSources contents and tick
-   arrival per swap. The scripts re-run inside IIFEs at swap - check for a
-   failure mode that dies silently before liveData runs.
+Root cause found via the user's console: the follower tables on the Queues
+and Streams pages formatted `last_progress` as a timestamp, but the worker
+reports a struct of applied counts - Intl.DateTimeFormat threw RangeError
+and the async render died silently, so any broker whose followers had made
+PROGRESS blanked (null progress rendered "N/A" fine, which is why it was
+broker- and time-dependent). Fixed by rendering the counts, hardening
+formatTime, and surfacing initial-paint failures. Verified by proxy-
+patching the fix into the live broker exhibiting the blank. The earlier
+initial-paint fix (liveData one-shot poll) is what surfaced the error.
+
+STILL WORTH DOING from that investigation:
+- The live pill reads __fibrilLastOk, which ANY successful api() call
+  stamps - including the layout's attention (15s) and topology (30s)
+  pollers. A page whose own render pipeline is dead still shows "live".
+  Scope the pill per-page or reword it to what it measures.
+- The render swallows (liveData paint catch, autoRefresh catch) hid this
+  bug for its whole life. Consider logging swallowed render errors to the
+  console always (throttled), not just on the initial paint.
 
 ## Test-support unification (small cleanup)
 
