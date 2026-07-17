@@ -2,56 +2,26 @@
 //! standalone broker: create a user, authenticate with it via a client,
 //! rotate the password, then remove the user.
 
-use std::time::Duration;
 
-use fibril::run_server_from_config;
 use fibril_client::{ClientOptions, FibrilError};
-use fibril_config::ServerConfig;
-use tokio::net::TcpStream;
 
-fn temp_root(tag: &str) -> std::path::PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "fibril-user-admin-{tag}-{}-{}",
-        std::process::id(),
-        fastrand::u64(..)
-    ));
-    std::fs::create_dir_all(&root).expect("temp root");
-    root
-}
-
-fn free_loopback_addr() -> std::net::SocketAddr {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind free port");
-    listener.local_addr().expect("local addr")
-}
+mod common;
 
 struct Booted {
     broker: String,
     admin: String,
     handle: tokio::task::JoinHandle<()>,
+    _permit: tokio::sync::SemaphorePermit<'static>,
 }
 
 async fn boot() -> Booted {
-    let root = temp_root("api");
-    let mut config = ServerConfig::default();
-    config.server.data_dir = root.join("data");
-    config.broker.listener.bind = free_loopback_addr();
-    config.admin.listener.bind = free_loopback_addr();
-    let broker = config.broker.listener.bind;
-    let admin = config.admin.listener.bind;
-    let handle = tokio::spawn(async move {
-        let _ = run_server_from_config(config).await;
-    });
-    for _ in 0..1200 {
-        if TcpStream::connect(broker).await.is_ok() && TcpStream::connect(admin).await.is_ok() {
-            return Booted {
-                broker: broker.to_string(),
-                admin: admin.to_string(),
-                handle,
-            };
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
+    let booted = common::boot_server("fibril-user-admin", "api", true, |_| {}).await;
+    Booted {
+        broker: booted.broker_addr.to_string(),
+        admin: booted.admin_addr.to_string(),
+        handle: booted.handle,
+        _permit: booted.boot_permit,
     }
-    panic!("broker did not come up");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
-    net::SocketAddr,
     sync::{Arc, RwLock},
 };
 

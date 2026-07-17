@@ -4,57 +4,14 @@
 
 use std::time::Duration;
 
-use fibril::run_server_from_config;
 use fibril_client::ClientOptions;
 use fibril_config::ServerConfig;
-use tokio::net::TcpStream;
 
-fn temp_root(tag: &str) -> std::path::PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "fibril-metrics-{tag}-{}-{}",
-        std::process::id(),
-        fastrand::u64(..)
-    ));
-    std::fs::create_dir_all(&root).expect("temp root");
-    root
-}
+mod common;
+use common::BootedServer;
 
-fn free_loopback_addr() -> std::net::SocketAddr {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind free port");
-    listener.local_addr().expect("local addr")
-}
-
-struct Booted {
-    broker_addr: std::net::SocketAddr,
-    admin_addr: std::net::SocketAddr,
-    handle: tokio::task::JoinHandle<()>,
-}
-
-async fn boot(tag: &str, configure: impl FnOnce(&mut ServerConfig)) -> Booted {
-    let root = temp_root(tag);
-    let mut config = ServerConfig::default();
-    config.server.data_dir = root.join("data");
-    config.broker.listener.bind = free_loopback_addr();
-    config.admin.listener.bind = free_loopback_addr();
-    configure(&mut config);
-    let broker_addr = config.broker.listener.bind;
-    let admin_addr = config.admin.listener.bind;
-    let handle = tokio::spawn(async move {
-        let _ = run_server_from_config(config).await;
-    });
-    for _ in 0..1200 {
-        if TcpStream::connect(broker_addr).await.is_ok()
-            && TcpStream::connect(admin_addr).await.is_ok()
-        {
-            return Booted {
-                broker_addr,
-                admin_addr,
-                handle,
-            };
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    panic!("broker did not come up");
+async fn boot(tag: &str, configure: impl Fn(&mut ServerConfig)) -> BootedServer {
+    common::boot_server("fibril-metrics", tag, true, configure).await
 }
 
 /// Publish and settle five messages on `metrics.jobs`, leaving the queue

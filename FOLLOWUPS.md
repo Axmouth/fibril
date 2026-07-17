@@ -3740,3 +3740,12 @@ remain open:
    repeated boosted swaps and check __spaEventSources contents and tick
    arrival per swap. The scripts re-run inside IIFEs at swap - check for a
    failure mode that dies silently before liveData runs.
+
+## Test-support unification (small cleanup)
+
+crates/fibril/tests/common/mod.rs now carries the hardened broker boot
+(port-collision retry + error surfacing + boot cap) and metrics_endpoint +
+user_admin use it. tls_listener still carries its own equivalent copy
+(independently hardened and 30x-verified) - fold it onto common in a quiet
+moment. raft_tls binds its raft listeners immediately after freeing them
+(tiny window) and was left alone.
