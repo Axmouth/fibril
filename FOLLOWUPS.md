@@ -3753,3 +3753,21 @@ user_admin use it. tls_listener still carries its own equivalent copy
 (independently hardened and 30x-verified) - fold it onto common in a quiet
 moment. raft_tls binds its raft listeners immediately after freeing them
 (tiny window) and was left alone.
+
+## Thread-per-core assessment (user direction 2026-07-18, latency-first)
+
+Verdict from the discussion: full sync rip-out is executor-rewrite class
+for ~zero perf gain, but thread-per-core (runtime-per-thread, pinned
+current_thread shards owning partition actors, SPSC between shards) is an
+EVOLUTION of the existing sharded-actor design, not a rewrite - async
+stays, openraft/axum untouched. The durable-publish p99 is floored by
+coalescing windows + fsync (100us-ms), so TPC's us-class wins only matter
+for (a) the speculative stream tier and (b) the deliver-path contention,
+which may be cross-core cache bouncing - the disease TPC actually cures.
+ORDER: 1) latency decomposition bench via e2e_c percentiles (client
+coalesce / wire / handler / actor hop / append+fsync / confirm gate),
+2) the deliver-path contention probe (already filed - its result IS the
+TPC verdict), 3) a pinned-shard experiment: one pinned current_thread
+runtime hosting hot partition actors behind the unchanged channel API,
+bench the confirm-path and delivery deltas. Adaptive coalescing windows
+remain the biggest durable-latency lever regardless.
