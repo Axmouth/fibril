@@ -1,0 +1,131 @@
+# Three-broker Fibril cluster in coordinated (Ganglion) mode, for trying out
+# clustering with no clone and no build. The brokers form one coordination
+# group, each broker's admin dashboard is exposed on the host, and a demo
+# service keeps gentle realistic traffic flowing so the dashboards are alive
+# from the first minute.
+#
+#   docker compose -f compose.cluster.example.yaml up
+#
+# Then open a dashboard and watch the world go by:
+#   http://127.0.0.1:8081/   http://127.0.0.1:8082/   http://127.0.0.1:8083/
+#
+# Clients can connect to any broker (9876, 9877, 9878) and are routed to the
+# current owner of each partition. Stop and remove everything, including the
+# persisted data volumes, with:
+#
+#   docker compose -f compose.cluster.example.yaml down -v
+#
+# Clustering is experimental and not yet production-ready high availability.
+
+x-broker: &broker
+  image: ghcr.io/axmouth/fibril-server:main
+  # The :main tag is mutable, so always re-pull it. Without this, `compose up`
+  # reuses whatever :main was cached on a previous run and the tryout can
+  # silently run a stale build.
+  pull_policy: always
+  restart: unless-stopped
+
+services:
+  broker-1:
+    <<: *broker
+    ports:
+      - "9876:9876"   # broker (client connections)
+      - "8081:8081"   # admin dashboard
+    environment:
+      FIBRIL_BROKER_BIND: 0.0.0.0:9876
+      FIBRIL_ADMIN_BIND: 0.0.0.0:8081
+      # The host-mapped admin port, so the dashboard's cross-broker links
+      # ("open its admin", the broker switcher) work from the browser
+      # running the tryout.
+      FIBRIL_ADMIN_ADVERTISE: 127.0.0.1:8081
+      FIBRIL_COORDINATION_MODE: ganglion
+      # Demo-only shared secret. Real deployments generate their own with
+      # fibrilctl secret generate and never commit it.
+      FIBRIL_CLUSTER_SECRET: fibril-demo-cluster-secret
+      # Demo-only user for the in-compose demo traffic (a sibling container
+      # is not loopback, so the default credentials do not apply to it).
+      FIBRIL_AUTH_USERNAME: demo
+      FIBRIL_AUTH_PASSWORD: fibril-demo-tryout
+      FIBRIL_COORDINATION_NODE_ID: broker-1
+      FIBRIL_COORDINATION_RAFT_ID: "1"
+      FIBRIL_COORDINATION_LISTEN: 0.0.0.0:7000
+      FIBRIL_COORDINATION_PEERS: 1=broker-1:7000,2=broker-2:7000,3=broker-3:7000
+      FIBRIL_COORDINATION_BOOTSTRAP: "true"
+    volumes:
+      - broker-1-data:/app/server_data
+
+  broker-2:
+    <<: *broker
+    ports:
+      - "9877:9876"
+      - "8082:8081"
+    environment:
+      FIBRIL_BROKER_BIND: 0.0.0.0:9876
+      FIBRIL_ADMIN_BIND: 0.0.0.0:8081
+      FIBRIL_ADMIN_ADVERTISE: 127.0.0.1:8082
+      FIBRIL_COORDINATION_MODE: ganglion
+      # Demo-only shared secret. Real deployments generate their own with
+      # fibrilctl secret generate and never commit it.
+      FIBRIL_CLUSTER_SECRET: fibril-demo-cluster-secret
+      # Demo-only user for the in-compose demo traffic (a sibling container
+      # is not loopback, so the default credentials do not apply to it).
+      FIBRIL_AUTH_USERNAME: demo
+      FIBRIL_AUTH_PASSWORD: fibril-demo-tryout
+      FIBRIL_COORDINATION_NODE_ID: broker-2
+      FIBRIL_COORDINATION_RAFT_ID: "2"
+      FIBRIL_COORDINATION_LISTEN: 0.0.0.0:7000
+      FIBRIL_COORDINATION_PEERS: 1=broker-1:7000,2=broker-2:7000,3=broker-3:7000
+    volumes:
+      - broker-2-data:/app/server_data
+
+  broker-3:
+    <<: *broker
+    ports:
+      - "9878:9876"
+      - "8083:8081"
+    environment:
+      FIBRIL_BROKER_BIND: 0.0.0.0:9876
+      FIBRIL_ADMIN_BIND: 0.0.0.0:8081
+      FIBRIL_ADMIN_ADVERTISE: 127.0.0.1:8083
+      FIBRIL_COORDINATION_MODE: ganglion
+      # Demo-only shared secret. Real deployments generate their own with
+      # fibrilctl secret generate and never commit it.
+      FIBRIL_CLUSTER_SECRET: fibril-demo-cluster-secret
+      # Demo-only user for the in-compose demo traffic (a sibling container
+      # is not loopback, so the default credentials do not apply to it).
+      FIBRIL_AUTH_USERNAME: demo
+      FIBRIL_AUTH_PASSWORD: fibril-demo-tryout
+      FIBRIL_COORDINATION_NODE_ID: broker-3
+      FIBRIL_COORDINATION_RAFT_ID: "3"
+      FIBRIL_COORDINATION_LISTEN: 0.0.0.0:7000
+      FIBRIL_COORDINATION_PEERS: 1=broker-1:7000,2=broker-2:7000,3=broker-3:7000
+    volumes:
+      - broker-3-data:/app/server_data
+
+  # The living demo world: three fake businesses (a delivery bistro, a
+  # freight desk, a hotel group) publish and consume gentle, realistic
+  # traffic with rush hours, a napping consumer that raises and resolves
+  # backlog attention, a flaky one that feeds the dead-letter flow, and
+  # streams with durable readers. Every dashboard page has something to
+  # show within a couple of minutes. Declares its own queues and streams,
+  # retries until the cluster elects a leader, and is safe to restart.
+  demo:
+    <<: *broker
+    depends_on:
+      broker-1:
+        condition: service_healthy
+      broker-2:
+        condition: service_healthy
+      broker-3:
+        condition: service_healthy
+    entrypoint: ["fibril-demo"]
+    command:
+      - "--addr"
+      - "broker-1:9876"
+      - "--auth"
+      - "demo:fibril-demo-tryout"
+
+volumes:
+  broker-1-data:
+  broker-2-data:
+  broker-3-data:

@@ -2297,6 +2297,14 @@ impl GanglionCoordination {
                     let known: std::collections::HashSet<QueueIdentity> =
                         provider.registered_queues().into_iter().collect();
                     for queue in local {
+                        // A topic declared as a stream must never enter the
+                        // queue catalogue, whatever the local listing said -
+                        // a queue assignment for a stream partition sends
+                        // queue follower workers at a stream.
+                        if queue.group.is_none() && provider.stream_config(&queue.topic).is_some()
+                        {
+                            continue;
+                        }
                         if !known.contains(&queue) {
                             if let Err(error) = provider.register_queue(&queue).await {
                                 tracing::debug!(%error, topic = %queue.topic, "catalogue sync deferred");

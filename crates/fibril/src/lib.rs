@@ -854,6 +854,17 @@ pub fn spawn_ganglion_catalogue_sync(
                     Ok(snapshot) => snapshot
                         .queues
                         .keys()
+                        .filter(|key| {
+                            // Streams share the engine index but register with
+                            // coordination through their own declare path.
+                            // Syncing them here handed every stream a spurious
+                            // QUEUE assignment too - and with it queue follower
+                            // workers pointed at stream partitions.
+                            !(key.group.is_none()
+                                && fibril_broker::queue_engine::StreamStore::durable_is_stream(
+                                    &engine, &key.topic, 0,
+                                ))
+                        })
                         .map(|key| {
                             // Queue stats key by (topic, group) only.
                             // Partition 0 always exists; declare registers

@@ -3652,3 +3652,34 @@ a bounded ring of recent internal errors (trace id, time, error, op)
 surfaced on the admin board - diagnostics page or the activity feed family -
 so a client-reported trace id can be looked up without shell access to the
 broker's logs. Rides the same in-memory ring pattern as the audit feed.
+
+## Cluster stream/queue kind races - PARTIALLY FIXED, remainder filed (2026-07-17)
+
+Found via fibril-demo against a 3-node scenario cluster. Fixed in the same
+sitting: (1) redeclare-through-non-owner role-mismatch 500 that wedged
+idempotent declares, (2) catalogue sync registering streams as queues
+(spurious queue assignments + queue follower workers on stream partitions).
+Both verified: full demo world declares through a non-bootstrap node,
+assignment overlap between queue and stream catalogues is empty, ownership
+spread healthy (6/5/5 queues, 2/2/1 streams).
+
+STILL OPEN, with evidence captured:
+1. KIND RACE at stream birth: during the convergence window a stream
+   publish reached a broker before it knew the topic was a stream, went
+   down the queue path, and AUTO-MATERIALIZED a queue-kind partition -
+   observed end state: node-1 held kitchen.telemetry/0 as kind=queue,
+   role=owner while coordination assigned it as a stream partition to the
+   same broker. Also observed transiently as "expected Owner, current role
+   is Frozen" (trace 578dee12 in that run). First-writer-decides-kind makes
+   the damage durable. Direction: publishes must consult the authoritative
+   kind (coordination stream config or a durable catalogue) before
+   auto-materializing anything in cluster mode - ties into the durable
+   declared-queues catalogue direction above.
+2. Owners with assignments but EMPTY local queues_debug: brokers 2/3 owned
+   5 partitions each yet listed nothing after 60s of demo traffic. Either
+   materialization-on-owner is lazier than expected or routing kept all
+   traffic on node-1. Trace before patching.
+3. UI: the Queues page renders NOTHING below the filter bar when
+   queues_debug is empty (the user's "blank page" in the tryout). It needs
+   an honest empty state: the metrics strip at zero plus "this broker hosts
+   no materialized queues - see the Cluster page for placement".

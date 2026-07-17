@@ -387,6 +387,17 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- Redeclaring an already-placed queue through a broker that does not own
+  all its partitions no longer fails with a role-mismatch 500. The declare
+  records the partitioning with coordination as before, and locally
+  materializes only what this broker may host - a partition assigned
+  elsewhere is its owner's to open. Idempotent redeclares (a restarting
+  app, the demo world) used to wedge on this.
+- Streams no longer leak into the cluster queue catalogue. The catalogue
+  sync registered every locally-hosted topic as a queue, streams included,
+  handing each stream a spurious queue assignment and queue follower
+  workers pointed at stream partitions. Both the sync and the coordination
+  register path now exclude stream-declared topics.
 - A durable stream cursor that is behind with nobody reading shows "behind"
   instead of "catching up" - catching up is reserved for a cursor that is
   actually advancing.

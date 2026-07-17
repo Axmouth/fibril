@@ -3485,13 +3485,29 @@ where
                         .await
                     {
                         Ok(()) => {}
+                        // A partition the controller has assigned to another
+                        // broker (this one may merely follow it) is that
+                        // owner's to materialize - a role refusal here is not
+                        // a declare failure. Without this, redeclaring an
+                        // already-placed queue through a non-owner failed 500
+                        // and idempotent declares wedged.
+                        Err(StromaError::WrongQueueRole { .. })
+                            if declare_coordinator.is_some() => {}
                         Err(err @ StromaError::InvalidArgument(_)) => {
                             failure = Some((400, err.to_string()));
                             break;
                         }
                         Err(err) => {
-                            tracing::error!("Declare queue failed: {err}");
-                            failure = Some((500, "declare queue failed".into()));
+                            let trace =
+                                format!("{:08x}", uuid::Uuid::now_v7().as_u128() as u32);
+                            tracing::error!("Declare queue failed [trace {trace}]: {err}");
+                            failure = Some((
+                                500,
+                                format!(
+                                    "declare queue failed: {err}. This is a broker-side \
+                                     fault - search the broker logs for trace id {trace}"
+                                ),
+                            ));
                             break;
                         }
                     }
