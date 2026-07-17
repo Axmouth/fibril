@@ -36,6 +36,8 @@ const HOTELS: &[(&str, &str)] = &[
     ("Palazzo Vento", "Genoa"),
     ("Amber Court", "Gdansk"),
     ("The Old Mill Lodge", "Bilbao"),
+    ("Seaglass Suites", "Antwerp"),
+    ("Fortezza Grand", "Trieste"),
 ];
 
 const BOARDS: &[&str] = &["RO", "BB", "HB", "FB", "AI"];
@@ -47,6 +49,8 @@ const CANCEL_REASONS: &[&str] = &[
     "illness",
     "double booking",
     "work emergency",
+    "visa not approved in time",
+    "booked the wrong week",
 ];
 
 #[derive(Clone, Serialize)]

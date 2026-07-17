@@ -30,9 +30,17 @@ const TAGS: &[&str] = &[
     "high-value",
     "stackable",
     "this-side-up",
+    "live-animals",
+    "keep-dry",
 ];
 
-const CARRIERS: &[&str] = &["NordCargo", "Meltemi Lines", "TransAdria", "Baltic Star"];
+const CARRIERS: &[&str] = &[
+    "NordCargo",
+    "Meltemi Lines",
+    "TransAdria",
+    "Baltic Star",
+    "Ionian Freight Co",
+];
 
 fn build_shipment_xml() -> (String, bool) {
     let id = reference("SHP");

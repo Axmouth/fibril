@@ -41,6 +41,10 @@ const MENU: &[(&str, u32)] = &[
     ("seabass fillet", 1690),
     ("wild mushroom pie", 1140),
     ("baklava cheesecake", 680),
+    ("charred cauliflower steak", 1090),
+    ("short rib ragu pappardelle", 1560),
+    ("crispy chicken souvlaki", 1180),
+    ("burrata and blood orange", 950),
 ];
 
 const ADD_ONS: &[(&str, u32)] = &[
@@ -50,6 +54,8 @@ const ADD_ONS: &[(&str, u32)] = &[
     ("side tzatziki", 180),
     ("vegan cheese", 200),
     ("chili honey", 120),
+    ("smoked paprika aioli", 150),
+    ("pickled red onion", 100),
 ];
 
 const NOTES: &[&str] = &[
@@ -131,11 +137,17 @@ fn build_order() -> Order {
         .map(|_| {
             let (item, cents) = *pick(MENU);
             let qty = 1 + fastrand::u32(..2);
-            let add_ons: Vec<&'static str> = ADD_ONS
-                .iter()
-                .filter(|_| fastrand::f64() < 0.25)
-                .map(|(name, _)| *name)
-                .collect();
+            // A chain, not independent rolls: 25% chance of one add-on,
+            // then 25% of a second given the first, and so on - most items
+            // arrive plain, a few arrive loaded.
+            let mut add_ons: Vec<&'static str> = Vec::new();
+            while add_ons.len() < 3 && fastrand::f64() < 0.25 {
+                let (name, _) = *pick(ADD_ONS);
+                if add_ons.contains(&name) {
+                    break;
+                }
+                add_ons.push(name);
+            }
             let add_on_cents: u32 = ADD_ONS
                 .iter()
                 .filter(|(name, _)| add_ons.contains(name))
