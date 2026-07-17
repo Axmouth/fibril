@@ -93,6 +93,12 @@ worth a fresh pass.
   - Detail: [USER_FACING_DOCUMENTATION_SHAPE_AUDIT.md](archive/replication-sharding-plan/USER_FACING_DOCUMENTATION_SHAPE_AUDIT.md)
   - Next: add a clustered queues and replication explainer, then keep TypeScript
     examples scoped to the single-owner API until the parity pass lands.
+- [ ] Pipeline serialization (work inside serialized contexts)
+  - Status: Audited
+  - Detail: [PIPELINE_AUDIT.md](PIPELINE_AUDIT.md)
+  - Next: ranked findings pending the contention-probe flamegraph; top
+    candidates are actor drain-batching + delivery read starvation (D2),
+    global confirm-path atomics (P1), and slow-consumer HOL blocking (D1).
 - [x] Broker memory after queue eviction
   - Status: Addressed (no leak found)
   - Detail: [MEMORY_AUDIT.md](MEMORY_AUDIT.md)
