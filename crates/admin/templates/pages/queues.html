@@ -89,13 +89,25 @@ function formatDuration(ms) {
 }
 
 function formatTime(ms) {
-  if (!ms) return "N/A";
+  const t = Number(ms);
+  if (!Number.isFinite(t) || t <= 0) return "N/A";
   return new Intl.DateTimeFormat(undefined, {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-  }).format(new Date(ms));
+  }).format(new Date(t));
+}
+
+// The replication worker reports its last progress as a small struct of
+// applied counts, not a timestamp - formatting it as a date threw and
+// blanked the whole page on any broker whose followers had made progress.
+function formatProgress(p) {
+  if (!p) return "N/A";
+  if (typeof p === "object") {
+    return `${p.applied_message_records ?? 0} msg · ${p.applied_event_records ?? 0} ev`;
+  }
+  return formatTime(p);
 }
 
 function formatLastLeaseActivity(activity) {
@@ -301,7 +313,7 @@ function render(bundle) {
           <td><span class="queue-state-pill replica-status-${escapeHtml(status)}">${escapeHtml(humanizeSnake(status))}</span></td>
           <td class="text-right">${f.state?.message_next_offset ?? 0}</td>
           <td class="text-right">${f.state?.event_next_offset ?? 0}</td>
-          <td>${escapeHtml(formatTime(f.state?.last_progress))}</td>
+          <td>${escapeHtml(formatProgress(f.state?.last_progress))}</td>
           <td class="text-right">${f.state?.next_delay_ms ?? 0}ms</td>
           <td>${f.busy ? "yes" : "no"}</td>
         </tr>`;

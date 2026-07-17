@@ -404,7 +404,10 @@ function liveData(families, onTick, fallbackRefresh) {
   // First paint comes from a one-shot poll: the stream's first tick can be
   // a couple of seconds out, and a page that waits for it shows nothing -
   // indefinitely, if the tick pipeline hiccups. The tick then takes over.
-  fallbackRefresh();
+  // Surfaced, not swallowed: a throw here is a real page bug.
+  Promise.resolve()
+    .then(fallbackRefresh)
+    .catch((err) => console.error("initial page refresh failed:", err));
 
   const es = new EventSource(`/admin/api/events?families=${families.join(",")}`);
   window.__spaEventSources?.add(es);

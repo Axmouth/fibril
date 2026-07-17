@@ -387,6 +387,13 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- The Queues and Streams pages no longer render blank on a broker whose
+  replication followers have made progress. The follower table formatted
+  `last_progress` as a timestamp, but the worker reports it as a struct of
+  applied counts - the date formatter threw and took the whole page render
+  with it, silently. The column now shows the applied counts, the date
+  helper refuses non-finite input, and the initial page paint logs a
+  failure to the console instead of swallowing it.
 - Live pages paint immediately from a one-shot poll instead of waiting for
   the event stream's first tick. A page could sit blank for seconds - or
   indefinitely behind a live-looking pill if the tick pipeline hiccupped.
