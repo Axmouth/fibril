@@ -3771,3 +3771,14 @@ TPC verdict), 3) a pinned-shard experiment: one pinned current_thread
 runtime hosting hot partition actors behind the unchanged channel API,
 bench the confirm-path and delivery deltas. Adaptive coalescing windows
 remain the biggest durable-latency lever regardless.
+
+THE MILLION TARGET (user 2026-07-18: "if we could do a casual million,
+worth the grind"): 411k/s saturation at ~5.7/32 busy cores = ~72k/s per
+effective core - clean sharding across ~14 cores hits 1M, so the ceiling
+is contention, not cycles. Two checks gate the grind: (1) the 411k may be
+LOAD-GEN limited (single box, e2e_c competes with the broker for cores) -
+re-measure with multi-process or second-box load gen first; (2) TPC only
+pays if the contention is shardable (cache bouncing, contended locks) -
+a structural single-writer choke would survive sharding. Rule out the
+cheap classic first: shared metrics counters false-sharing across cores
+(fix = padding / per-core counters, no architecture needed).
