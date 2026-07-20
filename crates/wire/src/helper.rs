@@ -184,6 +184,9 @@ pub fn try_encode<T: Serialize + Any>(op: Op, req_id: u64, msg: &T) -> ProtocolR
             wire::encode_topology_update_ack(req_id, msg)
         }),
         Op::GoingAway => encode_typed(msg, "GoingAway", |msg| wire::encode_going_away(req_id, msg)),
+        Op::SubscriptionClosed => encode_typed(msg, "SubscriptionClosed", |msg| {
+            wire::encode_subscription_closed(req_id, msg)
+        }),
         Op::Redirect => encode_typed(msg, "Redirect", |msg| wire::encode_redirect(req_id, msg)),
         Op::ReplicationStreamStart => encode_typed(msg, "ReplicationStreamStart", |msg| {
             wire::encode_replication_stream_start(req_id, msg)
@@ -334,6 +337,9 @@ pub fn try_decode<T: for<'de> Deserialize<'de> + Any>(frame: &Frame) -> Protocol
             .map_err(wire_decode_error)
             .and_then(cast_decoded),
         x if x == Op::GoingAway as u16 => wire::decode_going_away(frame)
+            .map_err(wire_decode_error)
+            .and_then(cast_decoded),
+        x if x == Op::SubscriptionClosed as u16 => wire::decode_subscription_closed(frame)
             .map_err(wire_decode_error)
             .and_then(cast_decoded),
         x if x == Op::Redirect as u16 => wire::decode_redirect(frame)
@@ -756,6 +762,7 @@ mod tests {
                 client: Some(client),
                 server: None,
                 action: ReconcileAction::CloseClientSide,
+                code: ReasonCode::ServerMissing,
                 reason: "server_missing".into(),
             }],
         };

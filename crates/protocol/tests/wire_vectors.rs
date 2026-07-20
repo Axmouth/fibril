@@ -18,9 +18,10 @@ use fibril_protocol::v1::{
     Ack, AdvertisedAddress, AssignmentChanged, Auth, ContentType, DeclarePlexus, DeclarePlexusOk,
     DeclareQueue, DeclareQueueOk, Deliver, DeliveryTag, ErrorMsg, GoingAway, Hello, HelloOk, Nack,
     Partition, Publish, PublishDelayed, PublishOk, QueueDlqPolicy, QueueTopologyEntry,
-    ReconcileClient, ReconcilePolicy, ReconcileSubscription, Redirect, ResumeIdentity,
-    ResumeOutcome, StreamDurability, StreamRetention, StreamStart, StreamTopologyEntry, Subscribe,
-    SubscribeOk, SubscribeStream, TopologyOk, TopologyRequest, TopologyUpdateAck,
+    ReasonCode, ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult,
+    ReconcileSubscription, ReconcileSubscriptionResult, Redirect, ResumeIdentity, ResumeOutcome,
+    StreamDurability, StreamRetention, StreamStart, StreamTopologyEntry, Subscribe, SubscribeOk,
+    SubscribeStream, SubscriptionClosed, TopologyOk, TopologyRequest, TopologyUpdateAck,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -737,6 +738,88 @@ fn wire_encoders_match_shared_vectors() {
                     consumer_target: None,
                     member_id: None,
                 }],
+            },
+        )
+        .unwrap()
+        .payload,
+    );
+
+    check(
+        &v,
+        "reconcile_result",
+        wire::encode_reconcile_result(
+            rid,
+            &ReconcileResult {
+                subscriptions: vec![
+                    ReconcileSubscriptionResult {
+                        client: Some(ReconcileSubscription {
+                            sub_id: 1,
+                            topic: "t".into(),
+                            group: None,
+                            partition: Partition::new(0),
+                            auto_ack: false,
+                            prefetch: 8,
+                            consumer_group: None,
+                            consumer_target: None,
+                            member_id: None,
+                        }),
+                        server: None,
+                        action: ReconcileAction::CloseClientSide,
+                        code: ReasonCode::ServerMissing,
+                        reason: "server_missing".into(),
+                    },
+                    ReconcileSubscriptionResult {
+                        client: None,
+                        server: Some(ReconcileSubscription {
+                            sub_id: 2,
+                            topic: "t".into(),
+                            group: Some("g".into()),
+                            partition: Partition::new(1),
+                            auto_ack: true,
+                            prefetch: 4,
+                            consumer_group: None,
+                            consumer_target: None,
+                            member_id: None,
+                        }),
+                        action: ReconcileAction::CloseServerSide,
+                        code: ReasonCode::ClientMissing,
+                        reason: "client_missing".into(),
+                    },
+                ],
+            },
+        )
+        .unwrap()
+        .payload,
+    );
+
+    check(
+        &v,
+        "subscription_closed",
+        wire::encode_subscription_closed(
+            rid,
+            &SubscriptionClosed {
+                sub_id: 7,
+                code: ReasonCode::OwnerMoved,
+                message: "partition moved".into(),
+            },
+        )
+        .unwrap()
+        .payload,
+    );
+
+    check(
+        &v,
+        "hello_ok_resumed_after_restart",
+        wire::encode_hello_ok(
+            rid,
+            &HelloOk {
+                protocol_version: 1,
+                owner_id: uuid_filled(9),
+                client_id: uuid_filled(8),
+                resume_token: uuid_filled(7),
+                resume_outcome: ResumeOutcome::ResumedAfterRestart,
+                server_name: "srv".into(),
+                compliance: "v=1;x".into(),
             },
         )
         .unwrap()

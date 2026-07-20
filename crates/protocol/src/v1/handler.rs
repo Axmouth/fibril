@@ -1634,15 +1634,16 @@ async fn reconcile_subscriptions(
                     && server.auto_ack == client.auto_ack
                     && server.prefetch == client.prefetch =>
             {
-                let reason = if server.sub_id == client.sub_id {
-                    "matched"
+                let (code, reason) = if server.sub_id == client.sub_id {
+                    (ReasonCode::Matched, "matched")
                 } else {
-                    "server_id_changed"
+                    (ReasonCode::ServerIdChanged, "server_id_changed")
                 };
                 results.push(ReconcileSubscriptionResult {
                     client: Some(client),
                     server: Some(server),
                     action: ReconcileAction::Keep,
+                    code,
                     reason: reason.into(),
                 });
             }
@@ -1651,6 +1652,7 @@ async fn reconcile_subscriptions(
                     client: Some(client),
                     server: Some(server),
                     action: ReconcileAction::CloseClientSide,
+                    code: ReasonCode::ServerMismatch,
                     reason: "server_mismatch".into(),
                 });
             }
@@ -1694,6 +1696,7 @@ async fn reconcile_subscriptions(
                                 member_id: ok.member_id,
                             }),
                             action: ReconcileAction::Keep,
+                            code: ReasonCode::ServerRestored,
                             reason: "server_restored".into(),
                         });
                     }
@@ -1703,6 +1706,7 @@ async fn reconcile_subscriptions(
                             client: Some(client),
                             server: None,
                             action: ReconcileAction::CloseClientSide,
+                            code: ReasonCode::ServerRestoreFailed,
                             reason: "server_restore_failed".into(),
                         });
                     }
@@ -1713,6 +1717,7 @@ async fn reconcile_subscriptions(
                     client: Some(client),
                     server: None,
                     action: ReconcileAction::CloseClientSide,
+                    code: ReasonCode::ServerMissing,
                     reason: "server_missing".into(),
                 });
             }
@@ -1745,6 +1750,7 @@ async fn reconcile_subscriptions(
                 client: None,
                 server: Some(server),
                 action: ReconcileAction::CloseServerSide,
+                code: ReasonCode::ClientMissing,
                 reason: "client_missing".into(),
             });
         }
@@ -2414,7 +2420,9 @@ where
         .resolve(hello.resume.clone());
     match resume.outcome {
         ResumeOutcome::New => tcp_stats.resume_new(),
-        ResumeOutcome::Resumed => tcp_stats.resume_accepted(),
+        ResumeOutcome::Resumed | ResumeOutcome::ResumedAfterRestart => {
+            tcp_stats.resume_accepted()
+        }
         ResumeOutcome::ResumeNotFound | ResumeOutcome::ResumeRejected => {
             tcp_stats.resume_rejected()
         }

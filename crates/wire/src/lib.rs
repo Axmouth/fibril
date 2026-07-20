@@ -130,6 +130,12 @@ pub enum Op {
     /// drains regardless.
     GoingAway = 103,
 
+    /// Server->client PUSH: one subscription ended outside a reconcile
+    /// exchange (topic deleted, ownership moved, cohort removal) while the
+    /// connection stays up, so a delivery stream never just goes silent.
+    /// Fire-and-forget: no ack, the subscription is already gone.
+    SubscriptionClosed = 104,
+
     Error = 255,
 }
 
@@ -166,6 +172,11 @@ pub enum ResumeOutcome {
     Resumed,
     ResumeNotFound,
     ResumeRejected,
+    /// The broker restarted and honored a persisted session skeleton. The
+    /// subscription set reconciles like `Resumed`, but delivery tags from
+    /// before the restart are dead, so held deliveries are stale and their
+    /// messages will redeliver.
+    ResumedAfterRestart,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -545,11 +556,104 @@ pub enum ReconcileAction {
     RecreateClientSide,
 }
 
+/// Machine-readable reason taxonomy for subscription lifecycle verdicts and
+/// closes. One namespace shared by reconcile results and the
+/// [`SubscriptionClosed`] frame, always carried beside a human-readable
+/// message so dashboards and metrics never key off prose. A value minted by
+/// a newer peer decodes as `Other`, so adding codes never breaks decoding.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasonCode {
+    /// Absent on frames from peers that predate the taxonomy.
+    #[default]
+    Unspecified,
+    // Reconcile verdicts.
+    /// Client and server agree on the subscription, kept as is.
+    Matched,
+    /// Kept, but the server re-keyed the subscription id.
+    ServerIdChanged,
+    /// Restore policy re-created the missing server-side subscription.
+    ServerRestored,
+    /// The server-side subscription differs materially, the client side closes.
+    ServerMismatch,
+    /// Restore policy failed to re-create the subscription.
+    ServerRestoreFailed,
+    /// No server-side subscription exists and the policy does not restore.
+    ServerMissing,
+    /// A server-only subscription the client no longer wants, the server closes.
+    ClientMissing,
+    /// The subscription is safely recreatable, the client should resubscribe.
+    Recreate,
+    // Close causes.
+    /// The topic (queue or stream) behind the subscription was deleted.
+    TopicDeleted,
+    /// Partition ownership moved away from this broker.
+    OwnerMoved,
+    /// The broker is shutting down or draining.
+    BrokerShutdown,
+    /// The exclusive cohort removed this member.
+    CohortRemoved,
+    /// Reserved for stream close-on-lag policies, not emitted yet.
+    Lagged,
+    /// A server-side error closed the subscription.
+    ServerError,
+    /// A code from a newer peer, preserved verbatim.
+    Other(u16),
+}
+
+impl ReasonCode {
+    pub fn to_u16(self) -> u16 {
+        match self {
+            Self::Unspecified => 0,
+            Self::Matched => 1,
+            Self::ServerIdChanged => 2,
+            Self::ServerRestored => 3,
+            Self::ServerMismatch => 4,
+            Self::ServerRestoreFailed => 5,
+            Self::ServerMissing => 6,
+            Self::ClientMissing => 7,
+            Self::Recreate => 8,
+            Self::TopicDeleted => 20,
+            Self::OwnerMoved => 21,
+            Self::BrokerShutdown => 22,
+            Self::CohortRemoved => 23,
+            Self::Lagged => 24,
+            Self::ServerError => 40,
+            Self::Other(code) => code,
+        }
+    }
+
+    pub fn from_u16(code: u16) -> Self {
+        match code {
+            0 => Self::Unspecified,
+            1 => Self::Matched,
+            2 => Self::ServerIdChanged,
+            3 => Self::ServerRestored,
+            4 => Self::ServerMismatch,
+            5 => Self::ServerRestoreFailed,
+            6 => Self::ServerMissing,
+            7 => Self::ClientMissing,
+            8 => Self::Recreate,
+            20 => Self::TopicDeleted,
+            21 => Self::OwnerMoved,
+            22 => Self::BrokerShutdown,
+            23 => Self::CohortRemoved,
+            24 => Self::Lagged,
+            40 => Self::ServerError,
+            other => Self::Other(other),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReconcileSubscriptionResult {
     pub client: Option<ReconcileSubscription>,
     pub server: Option<ReconcileSubscription>,
     pub action: ReconcileAction,
+    /// Tagged verdict reason. Metrics and client logic key off this, the
+    /// `reason` string stays for humans.
+    #[serde(default)]
+    pub code: ReasonCode,
     pub reason: String,
 }
 
@@ -953,6 +1057,18 @@ pub struct TopologyUpdateAck {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoingAway {
     pub grace_ms: u64,
+    pub message: String,
+}
+
+/// Server-initiated notice that one subscription ended outside a reconcile
+/// exchange, so a delivery stream never just goes silent while the connection
+/// is up. Fire-and-forget like [`GoingAway`]: no ack, the subscription is
+/// already gone when this is sent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubscriptionClosed {
+    pub sub_id: u64,
+    pub code: ReasonCode,
+    /// Human-readable detail for logs and surfacing.
     pub message: String,
 }
 
