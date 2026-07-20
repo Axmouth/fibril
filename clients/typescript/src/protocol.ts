@@ -63,6 +63,10 @@ export enum Op {
   // shutdown or upgrade. The client settles in-flight work and reconnects.
   GoingAway = 103,
 
+  // Server push that one subscription ended outside a reconcile exchange, so
+  // a delivery stream never just goes silent while the connection is up.
+  SubscriptionClosed = 104,
+
   Error = 255,
 }
 
@@ -111,7 +115,8 @@ export type ResumeOutcome =
   | "new"
   | "resumed"
   | "resume_not_found"
-  | "resume_rejected";
+  | "resume_rejected"
+  | "resumed_after_restart";
 
 /** Username/password authentication frame body. */
 export interface AuthMsg {
@@ -231,6 +236,8 @@ export interface ReconcileSubscriptionResult {
   client: ReconcileSubscription | null;
   server: ReconcileSubscription | null;
   action: ReconcileAction;
+  /** Tagged verdict reason, the machine-readable twin of `reason`. */
+  code: number;
   reason: string;
 }
 

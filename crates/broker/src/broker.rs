@@ -1,13 +1,13 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use dashmap::DashMap;
 use fibril_metrics::{BrokerStats, QueuesStateSnapshot};
 use futures::FutureExt;
@@ -168,6 +168,26 @@ pub struct ConsumerHandle {
     pub settler: mpsc::Sender<SettleRequest>,
     pub pending_settles: Arc<AtomicUsize>,
     pub activity_lease: ConsumerLease,
+    /// Why the broker dropped this consumer's delivery sender, stamped by the
+    /// teardown path just before the drop. The protocol layer reads it after
+    /// the message stream ends to tell the client why the subscription closed
+    /// instead of letting deliveries silently stop. Unset means the sender
+    /// vanished without a known cause.
+    pub closed: Arc<OnceLock<ConsumerCloseCause>>,
+}
+
+/// The recorded cause for a broker-side consumer teardown. Kept
+/// protocol-free: the protocol layer maps it onto the wire reason taxonomy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsumerCloseCause {
+    /// The client asked for the removal (unsubscribe or connection cleanup),
+    /// nothing to announce.
+    Unsubscribed,
+    /// Partition ownership left this broker (drain handoff, demotion, or a
+    /// shrink retiring the partition).
+    OwnerMoved,
+    /// The queue behind the subscription was deleted.
+    TopicDeleted,
 }
 
 impl ConsumerHandle {
@@ -565,10 +585,25 @@ type ConsumerId = u64;
 #[derive(Debug)]
 struct ConsumerState {
     sub_id: ConsumerId,
-    tx: mpsc::Sender<Vec<DeliverableMessage>>,
+    /// The delivery sender, swappable so a close can drop it even while the
+    /// settle loop still holds this state alive. `None` after close.
+    tx: ArcSwapOption<mpsc::Sender<Vec<DeliverableMessage>>>,
     // flow control
     prefetch: AtomicUsize,
     inflight: AtomicUsize,
+    /// Shared with the [`ConsumerHandle`]: teardown paths stamp the cause
+    /// here before dropping the sender.
+    closed: Arc<OnceLock<ConsumerCloseCause>>,
+}
+
+impl ConsumerState {
+    /// Stamp why this consumer is going away and drop its delivery sender, so
+    /// the connection's pump sees the stream end with a cause. Buffered
+    /// batches still drain to the pump first.
+    fn close(&self, cause: ConsumerCloseCause) {
+        let _ = self.closed.set(cause);
+        self.tx.store(None);
+    }
 }
 
 impl ConsumerState {
@@ -1979,6 +2014,18 @@ impl<
         self.settings_epoch.load(Ordering::Acquire)
     }
 
+    /// Whether this broker currently owns `(topic, partition, group)`. Used by
+    /// reconcile to judge whether a missing subscription is recreatable here
+    /// without side effects.
+    pub fn owns_queue_partition(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+    ) -> bool {
+        self.ownership.owns_queue(topic, partition, group)
+    }
+
     pub(crate) fn ensure_queue_owner(
         &self,
         topic: &str,
@@ -2407,6 +2454,9 @@ impl<
         };
 
         qs.cancel_owner_runtime();
+        for consumer in qs.consumers.iter() {
+            consumer.value().close(ConsumerCloseCause::OwnerMoved);
+        }
         qs.consumers.clear();
         Some(self.take_delivery_offsets_for_queue(key))
     }
@@ -2757,11 +2807,13 @@ impl<
         let (msg_tx, msg_rx) = mpsc::channel::<Vec<DeliverableMessage>>(4);
         let (settle_tx, settle_rx) = mpsc::channel::<SettleRequest>(prefetch * 8);
 
+        let closed = Arc::new(OnceLock::new());
         let consumer = Arc::new(ConsumerState {
             sub_id,
-            tx: msg_tx.clone(),
+            tx: ArcSwapOption::from_pointee(msg_tx.clone()),
             prefetch: AtomicUsize::new(prefetch),
             inflight: AtomicUsize::new(0),
+            closed: closed.clone(),
         });
 
         let key = QueueKey {
@@ -2837,6 +2889,7 @@ impl<
             settler: settle_tx,
             pending_settles: self.pending_settles.clone(),
             activity_lease,
+            closed,
         })
     }
 
@@ -3195,10 +3248,42 @@ impl<
         group: Option<&str>,
     ) -> Result<DestroyOutcome, BrokerError> {
         // Drop the local loop state so the delivery loop stops referencing it.
-        self.queues.retain(|qk, _| {
-            !(qk.tp == topic && qk.part.id() == part && qk.group.as_deref() == group)
+        self.queues.retain(|qk, qs| {
+            let retiring =
+                qk.tp == topic && qk.part.id() == part && qk.group.as_deref() == group;
+            if retiring {
+                for consumer in qs.consumers.iter() {
+                    consumer.value().close(ConsumerCloseCause::OwnerMoved);
+                }
+            }
+            !retiring
         });
         Ok(self.engine.destroy_partition(topic, part, group).await?)
+    }
+
+    /// Close every live consumer of `(topic, group)` across all partitions
+    /// with the given cause, dropping their delivery senders so each
+    /// connection's pump ends and announces the close to its client. Used by
+    /// queue deletion, which otherwise tears down storage underneath
+    /// subscribers that would wait silently forever.
+    pub fn close_queue_consumers(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+        cause: ConsumerCloseCause,
+    ) {
+        for entry in self.queues.iter() {
+            let key = entry.key();
+            if key.tp != topic || key.group.as_deref() != group {
+                continue;
+            }
+            let qs = entry.value();
+            for consumer in qs.consumers.iter() {
+                consumer.value().close(cause);
+            }
+            qs.consumers.clear();
+            qs.wake();
+        }
     }
 
     fn lock_exclusive_groups(&self) -> std::sync::MutexGuard<'_, ExclusiveGroupRouter> {
@@ -3340,6 +3425,9 @@ impl<
         };
 
         if let Some(qs) = self.queues.get(&key).map(|e| e.value().clone()) {
+            if let Some(consumer) = qs.consumers.get(&sub_id) {
+                consumer.value().close(ConsumerCloseCause::Unsubscribed);
+            }
             qs.consumers.remove(&sub_id);
             qs.wake();
         }
@@ -3887,7 +3975,11 @@ impl<
 
                     for (_, (c, batch)) in batches {
                         let n = batch.len() as u64;
-                        if c.tx.send(batch).await.is_err() {
+                        let delivered = match c.tx.load_full() {
+                            Some(tx) => tx.send(batch).await.is_ok(),
+                            None => false,
+                        };
+                        if !delivered {
                             // The batch stays inflight until expiry redelivers
                             // it, same as a failed single send before batching.
                             qs.consumers.remove(&c.sub_id);

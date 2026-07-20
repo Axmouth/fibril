@@ -65,9 +65,10 @@ const (
 	opTopologyOk op = 91
 	opRedirect   op = 92
 
-	opTopologyUpdate    op = 101
-	opTopologyUpdateAck op = 102
-	opGoingAway         op = 103
+	opTopologyUpdate     op = 101
+	opTopologyUpdateAck  op = 102
+	opGoingAway          op = 103
+	opSubscriptionClosed op = 104
 
 	opError op = 255
 )

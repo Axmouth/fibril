@@ -1089,7 +1089,7 @@ impl StreamChannel {
         start: SubscribeStart,
         filter: Option<StreamFilter>,
         sink: mpsc::Sender<Arc<StreamRecord>>,
-    ) {
+    ) -> StreamSubEnd {
         self.touch();
         self.active_subscriptions
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -1104,7 +1104,7 @@ impl StreamChannel {
             };
             let sub = match self.subscribe(attach_start, filter.clone()).await {
                 Ok(sub) => sub,
-                Err(_) => return,
+                Err(_) => return StreamSubEnd::ChannelGone,
             };
             // Detach from the live set even if the driving task is aborted
             // mid-leg, so no dead registry entry lingers until the next publish.
@@ -1115,7 +1115,7 @@ impl StreamChannel {
             let end = sub.run_leg(&sink, &mut watermark).await;
             drop(guard);
             match end {
-                LegEnd::SinkClosed => return,
+                LegEnd::SinkClosed => return StreamSubEnd::SinkClosed,
                 // Lag eviction (or an actor restart): re-attach from the
                 // watermark. If the whole channel is gone the next subscribe
                 // errors and the loop exits above.
@@ -1123,6 +1123,18 @@ impl StreamChannel {
             }
         }
     }
+}
+
+/// Why a driven stream subscription stopped, so the protocol layer can tell
+/// the client instead of letting the delivery stream silently end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamSubEnd {
+    /// The delivery side dropped its receiver (connection or teardown), there
+    /// is no one left to tell.
+    SinkClosed,
+    /// The channel itself is gone (stream deleted or evicted), nothing more
+    /// will ever arrive.
+    ChannelGone,
 }
 
 /// Decrements the channel's active-subscription count when the driver ends,

@@ -11,7 +11,7 @@ use fibril_broker::storage::Partition;
 use fibril_broker::{
     broker::{
         Broker, BrokerConfig, BrokerOwnerReplicationPeer, BrokerOwnerReplicationPeerResolver,
-        FollowerReplicationWorkerConfig, FollowerReplicationWorkerLoopExit,
+        ConsumerCloseCause, FollowerReplicationWorkerConfig, FollowerReplicationWorkerLoopExit,
         FollowerReplicationWorkerStatus, OwnedQueue, QueueEvictionAttempt, ReplicationResourceKind,
         StaticQueueOwnership,
     },
@@ -30,14 +30,16 @@ use fibril_protocol::v1::{
     Ack, AdvertisedAddress, ContentType, DeclarePlexus, DeclarePlexusOk, DeclareQueue,
     DeclareQueueOk, Deliver, ERR_CONFLICT, ERR_INVALID, ErrorMsg, HEADER_SPECULATIVE, Hello,
     HelloOk, Nack, Op, PROTOCOL_V1, Publish, PublishDelayed, QueueDlqPolicy, QueueTopologyEntry,
-    ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult, ReconcileSubscription,
+    ReasonCode, ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult,
+    ReconcileSubscription,
     ReplicationApply, ReplicationApplyOk, ReplicationCheckpointExport,
     ReplicationCheckpointExportOk, ReplicationCheckpointInstall, ReplicationCheckpointInstallOk,
     ReplicationCheckpointRequired, ReplicationEventApplyBatch, ReplicationEventRead,
     ReplicationEventRecord, ReplicationMessageApplyBatch, ReplicationMessageRead,
     ReplicationMessageRecord, ReplicationRead, ReplicationReadOk, ReplicationStateCheckpoint,
     ResumeIdentity, ResumeOutcome, StreamDurability, StreamRetention, StreamStart, Subscribe,
-    SubscribeOk, SubscribeStream, TopologyOk, TopologyRequest, TopologyUpdateAck,
+    SubscribeOk, SubscribeStream, SubscriptionClosed, TopologyOk, TopologyRequest,
+    TopologyUpdateAck,
     frame::{Frame, ProtoCodec},
     handler::{
         ClientTopologySource, ConnectionSettings, DeclareCoordinator, ProtocolConnectionError,
@@ -743,9 +745,100 @@ async fn reconcile_after_resume_closes_mismatched_subscription() {
         ReconcileAction::CloseClientSide
     );
     assert_eq!(result.subscriptions[0].reason, "server_mismatch");
+    assert_eq!(result.subscriptions[0].code, ReasonCode::ServerMismatch);
 
     drop(second);
     second_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn conservative_reconcile_advises_recreate_for_missing_manual_ack_sub() {
+    let settings = ConnectionSettings::new(Some(60)).with_reconnect_grace_ms(Some(1_000));
+    let (mut framed, task, _dir, _broker) = open_protocol_connection_with_settings(settings).await;
+    let _hello = handshake_with_resume(&mut framed, None).await;
+
+    // The client claims two subscriptions the server has no record of: a
+    // manual-ack one (safely recreatable, unsettled work redelivers on the
+    // recreated sub) and an auto-ack one (deliveries in flight at the
+    // disconnect were already settled at send, so a silent recreate could
+    // hide loss and it keeps the close verdict).
+    framed
+        .send(
+            try_encode(
+                Op::ReconcileClient,
+                3,
+                &ReconcileClient {
+                    policy: ReconcilePolicy::Conservative,
+                    subscriptions: vec![
+                        ReconcileSubscription {
+                            sub_id: 11,
+                            topic: "reconcile.manual".into(),
+                            group: None,
+                            partition: Partition::new(0),
+                            auto_ack: false,
+                            prefetch: 1,
+                            consumer_group: None,
+                            consumer_target: None,
+                            member_id: None,
+                        },
+                        ReconcileSubscription {
+                            sub_id: 12,
+                            topic: "reconcile.auto".into(),
+                            group: None,
+                            partition: Partition::new(0),
+                            auto_ack: true,
+                            prefetch: 1,
+                            consumer_group: None,
+                            consumer_target: None,
+                            member_id: None,
+                        },
+                    ],
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let frame = recv_frame_expect(&mut framed, Op::ReconcileResult).await;
+    let result: ReconcileResult = try_decode(&frame).unwrap();
+    assert_eq!(result.subscriptions.len(), 2);
+    for sub in &result.subscriptions {
+        let client = sub.client.as_ref().expect("client side present");
+        if client.auto_ack {
+            assert_eq!(sub.action, ReconcileAction::CloseClientSide);
+            assert_eq!(sub.code, ReasonCode::ServerMissing);
+        } else {
+            assert_eq!(sub.action, ReconcileAction::RecreateClientSide);
+            assert_eq!(sub.code, ReasonCode::Recreate);
+            assert_eq!(sub.reason, "recreate");
+        }
+    }
+
+    drop(framed);
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn queue_delete_closes_live_subscription_with_typed_reason() {
+    let settings = ConnectionSettings::new(Some(60)).with_reconnect_grace_ms(Some(1_000));
+    let (mut framed, task, _dir, broker) = open_protocol_connection_with_settings(settings).await;
+    handshake(&mut framed).await;
+    let sub_ok = framed_subscribe(&mut framed, 2, "delete.notice", None, false).await;
+
+    // The admin delete path closes the queue's live consumers after tearing
+    // down storage. The subscriber gets a typed close instead of a delivery
+    // stream that silently never speaks again.
+    broker.close_queue_consumers("delete.notice", None, ConsumerCloseCause::TopicDeleted);
+
+    let frame = recv_frame_expect(&mut framed, Op::SubscriptionClosed).await;
+    let closed: SubscriptionClosed = try_decode(&frame).unwrap();
+    assert_eq!(closed.sub_id, sub_ok.sub_id);
+    assert_eq!(closed.code, ReasonCode::TopicDeleted);
+    assert!(!closed.message.is_empty());
+
+    drop(framed);
+    task.await.unwrap().unwrap();
 }
 
 #[tokio::test]

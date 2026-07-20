@@ -124,6 +124,26 @@ public class WireVectorsTest
             }), b => WireOps.EncodeAssignmentChanged(WireOps.DecodeAssignmentChanged(b))),
             new("going_away", WireOps.EncodeGoingAway(new GoingAway(30000, "broker restarting for upgrade")),
                 b => WireOps.EncodeGoingAway(WireOps.DecodeGoingAway(b))),
+            new("reconcile_result", WireOps.EncodeReconcileResult(new ReconcileResult
+            {
+                Subscriptions = new[]
+                {
+                    new ReconcileSubscriptionResult
+                    {
+                        Client = new ReconcileSubscription { SubId = 1, Topic = "t", Partition = 0, AutoAck = false, Prefetch = 8 },
+                        Action = ReconcileAction.CloseClientSide, Code = ReasonCode.ServerMissing, Reason = "server_missing",
+                    },
+                    new ReconcileSubscriptionResult
+                    {
+                        Server = new ReconcileSubscription { SubId = 2, Topic = "t", Group = "g", Partition = 1, AutoAck = true, Prefetch = 4 },
+                        Action = ReconcileAction.CloseServerSide, Code = ReasonCode.ClientMissing, Reason = "client_missing",
+                    },
+                },
+            }), b => WireOps.EncodeReconcileResult(WireOps.DecodeReconcileResult(b))),
+            new("subscription_closed", WireOps.EncodeSubscriptionClosed(new SubscriptionClosed(7, ReasonCode.OwnerMoved, "partition moved")),
+                b => WireOps.EncodeSubscriptionClosed(WireOps.DecodeSubscriptionClosed(b))),
+            new("hello_ok_resumed_after_restart", WireOps.EncodeHelloOk(new HelloOk(1, Uuid.Fill(9), Uuid.Fill(8), Uuid.Fill(7), ResumeOutcome.ResumedAfterRestart, "srv", "v=1;x")),
+                b => WireOps.EncodeHelloOk(WireOps.DecodeHelloOk(b))),
             new("subscribe_stream", WireOps.EncodeSubscribeStream(new SubscribeStream
             {
                 Topic = "t", Partition = 1, DurableName = "c1", Start = new StreamStart(StreamStartKind.ByTime, 1234),

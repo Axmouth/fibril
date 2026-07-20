@@ -134,6 +134,22 @@ func cases() []vcase {
 			}},
 		{"going_away", encodeGoingAway(goingAway{GraceMs: 30000, Message: "broker restarting for upgrade"}),
 			func(b []byte) ([]byte, error) { v, e := decodeGoingAway(b); return encodeGoingAway(v), e }},
+		{"reconcile_result", encodeReconcileResult(reconcileResult{
+			Subscriptions: []reconcileSubscriptionResult{
+				{Client: &reconcileSubscription{SubID: 1, Topic: "t", Partition: 0, AutoAck: false, Prefetch: 8},
+					Action: reconcileCloseClientSide, Code: ReasonServerMissing, Reason: "server_missing"},
+				{Server: &reconcileSubscription{SubID: 2, Topic: "t", Group: sp("g"), Partition: 1, AutoAck: true, Prefetch: 4},
+					Action: reconcileCloseServerSide, Code: ReasonClientMissing, Reason: "client_missing"},
+			}}),
+			func(b []byte) ([]byte, error) { v, e := decodeReconcileResult(b); return encodeReconcileResult(v), e }},
+		{"subscription_closed", encodeSubscriptionClosed(subscriptionClosed{
+			SubID: 7, Code: ReasonOwnerMoved, Message: "partition moved"}),
+			func(b []byte) ([]byte, error) {
+				v, e := decodeSubscriptionClosed(b)
+				return encodeSubscriptionClosed(v), e
+			}},
+		{"hello_ok_resumed_after_restart", encodeHelloOk(helloOk{1, fill(9), fill(8), fill(7), ResumeResumedAfterRestart, "srv", "v=1;x"}),
+			func(b []byte) ([]byte, error) { v, e := decodeHelloOk(b); return encodeHelloOk(v), e }},
 		{"subscribe_stream", encodeSubscribeStream(SubscribeStream{
 			Topic: "t", Partition: 1, DurableName: sp("c1"), Start: StreamStart{Kind: StreamByTime, Value: 1234},
 			Filter: []StreamFilter{{"region", "eu-*"}, {"kind", "order"}}, Prefetch: 16, AutoAck: false}),

@@ -79,7 +79,7 @@ internal sealed class ReconcileRegistry
                 {
                     continue;
                 }
-                if (verdict.Action is ReconcileAction.Keep or ReconcileAction.RecreateClient)
+                if (verdict.Action is ReconcileAction.Keep)
                 {
                     var newId = verdict.Server?.SubId ?? oldId;
                     entry.Sub = entry.Sub with { SubId = newId };
@@ -88,6 +88,11 @@ internal sealed class ReconcileRegistry
                 }
                 else
                 {
+                    // Close verdicts, and for now also RecreateClient: the
+                    // server has no live subscription behind this channel, so
+                    // keeping it open would strand the consumer.
+                    // Auto-resubscribe on recreate arrives with the typed
+                    // subscription lifecycle.
                     entry.Channel.Writer.TryComplete();
                 }
             }

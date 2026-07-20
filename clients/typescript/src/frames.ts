@@ -349,6 +349,7 @@ export function encodeBody(op: Op, value: unknown): Uint8Array {
           client: s.client ? rsubToWire(s.client) : null,
           server: s.server ? rsubToWire(s.server) : null,
           action: s.action,
+          code: s.code,
           reason: s.reason,
         })),
       });
@@ -557,6 +558,7 @@ export function decodeBody(op: Op, payload: Uint8Array): unknown {
           client: s.client ? rsubFromWire(s.client) : null,
           server: s.server ? rsubFromWire(s.server) : null,
           action: s.action,
+          code: s.code,
           reason: s.reason,
         })),
       } satisfies ReconcileResultMsg;

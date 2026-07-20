@@ -715,6 +715,7 @@ pub struct TcpStats {
     pub reconcile_server_dropped: AtomicU64,
     pub reconcile_mismatched: AtomicU64,
     pub reconcile_restore_failed: AtomicU64,
+    pub reconcile_recreated: AtomicU64,
 }
 
 impl TcpStats {
@@ -737,6 +738,7 @@ impl TcpStats {
             reconcile_server_dropped: AtomicU64::new(0),
             reconcile_mismatched: AtomicU64::new(0),
             reconcile_restore_failed: AtomicU64::new(0),
+            reconcile_recreated: AtomicU64::new(0),
         })
     }
 
@@ -827,6 +829,11 @@ impl TcpStats {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    #[inline]
+    pub fn reconcile_recreated(&self) {
+        self.reconcile_recreated.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn snapshot(&self) -> TcpStatsSnapshot {
         let window = 60;
 
@@ -863,6 +870,7 @@ impl TcpStats {
             reconcile_server_dropped_total: self.reconcile_server_dropped.load(Ordering::Relaxed),
             reconcile_mismatched_total: self.reconcile_mismatched.load(Ordering::Relaxed),
             reconcile_restore_failed_total: self.reconcile_restore_failed.load(Ordering::Relaxed),
+            reconcile_recreated_total: self.reconcile_recreated.load(Ordering::Relaxed),
         }
     }
 }
@@ -894,6 +902,7 @@ pub struct TcpStatsSnapshot {
     pub reconcile_server_dropped_total: u64,
     pub reconcile_mismatched_total: u64,
     pub reconcile_restore_failed_total: u64,
+    pub reconcile_recreated_total: u64,
 }
 
 pub struct SystemStats {

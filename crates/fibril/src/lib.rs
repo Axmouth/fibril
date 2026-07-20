@@ -2047,6 +2047,17 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         engine: engine.clone(),
     }));
 
+    // After an admin queue delete, close the queue's live consumers with a
+    // typed reason so no subscriber waits silently on destroyed storage.
+    let closer_broker = broker.clone();
+    let admin = admin.with_queue_consumer_closer(Arc::new(move |topic, group| {
+        closer_broker.close_queue_consumers(
+            topic,
+            group,
+            fibril_broker::broker::ConsumerCloseCause::TopicDeleted,
+        );
+    }));
+
     // The parked-drain attention rule reads this node's draining state.
     let admin = admin.with_draining_flag(draining.clone());
 

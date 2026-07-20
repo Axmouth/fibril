@@ -76,7 +76,7 @@ func (r *reconcileRegistry) applyResult(res reconcileResult) map[uint64]*subStat
 			continue
 		}
 		switch sr.Action {
-		case reconcileKeep, reconcileRecreateClient:
+		case reconcileKeep:
 			newID := oldID
 			if sr.Server != nil {
 				newID = sr.Server.SubID
@@ -84,7 +84,12 @@ func (r *reconcileRegistry) applyResult(res reconcileResult) map[uint64]*subStat
 			e.sub.SubID = newID
 			restored[newID] = &subState{ch: e.ch, autoAck: e.autoAck, preserve: true}
 			next[newID] = e
-		default: // close_client_side / close_server_side
+		default:
+			// close_client_side / close_server_side, and for now also
+			// recreate_client_side: the server has no live subscription
+			// behind this channel, so keeping it open would strand the
+			// consumer. Auto-resubscribe on recreate arrives with the typed
+			// subscription lifecycle.
 			close(e.ch)
 		}
 	}

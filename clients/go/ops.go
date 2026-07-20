@@ -13,9 +13,16 @@ const (
 	ResumeResumed  ResumeOutcome = "resumed"
 	ResumeNotFound ResumeOutcome = "resume_not_found"
 	ResumeRejected ResumeOutcome = "resume_rejected"
+	// ResumeResumedAfterRestart means the broker restarted and honored a
+	// persisted session skeleton: subscriptions reconcile like a resume, but
+	// delivery tags from before the restart are dead and their messages
+	// redeliver.
+	ResumeResumedAfterRestart ResumeOutcome = "resumed_after_restart"
 )
 
-var resumeOutcomeOrder = []ResumeOutcome{ResumeNew, ResumeResumed, ResumeNotFound, ResumeRejected}
+var resumeOutcomeOrder = []ResumeOutcome{
+	ResumeNew, ResumeResumed, ResumeNotFound, ResumeRejected, ResumeResumedAfterRestart,
+}
 
 func (w *writer) resumeOutcome(o ResumeOutcome) {
 	for i, v := range resumeOutcomeOrder {

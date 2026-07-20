@@ -167,9 +167,33 @@ internal enum ReconcileAction : byte
 }
 
 /// <summary>
+/// The machine-readable reason taxonomy shared by reconcile results and the
+/// SubscriptionClosed push. A raw ushort on the wire, so a code minted by a
+/// newer broker survives decode verbatim (C# enums admit any underlying value).
+/// </summary>
+internal enum ReasonCode : ushort
+{
+    Unspecified = 0,
+    Matched = 1,
+    ServerIdChanged = 2,
+    ServerRestored = 3,
+    ServerMismatch = 4,
+    ServerRestoreFailed = 5,
+    ServerMissing = 6,
+    ClientMissing = 7,
+    Recreate = 8,
+    TopicDeleted = 20,
+    OwnerMoved = 21,
+    BrokerShutdown = 22,
+    CohortRemoved = 23,
+    Lagged = 24,
+    ServerError = 40,
+}
+
+/// <summary>
 /// The broker's verdict for one subscription a reconnecting client asked it to
 /// reconcile: the client's view, the server's restored view (if any), the
-/// action, and a human-readable reason.
+/// action, and a tagged code beside a human-readable reason.
 /// </summary>
 internal readonly record struct ReconcileSubscriptionResult
 {
@@ -177,6 +201,7 @@ internal readonly record struct ReconcileSubscriptionResult
     public ReconcileSubscription? Client { get; init; }
     public ReconcileSubscription? Server { get; init; }
     public ReconcileAction Action { get; init; }
+    public ReasonCode Code { get; init; }
     public string Reason { get; init; } = "";
 }
 
@@ -220,6 +245,12 @@ internal readonly record struct AssignmentChanged
 
 /// <summary>The broker's drain notice ahead of a planned shutdown or upgrade.</summary>
 internal readonly record struct GoingAway(ulong GraceMs, string Message);
+
+/// <summary>
+/// The broker's push that one subscription ended outside a reconcile exchange,
+/// so a delivery stream never just goes silent while the connection is up.
+/// </summary>
+internal readonly record struct SubscriptionClosed(ulong SubId, ReasonCode Code, string Message);
 
 /// <summary>Where a stream subscription begins reading.</summary>
 internal enum StreamStartKind : byte
@@ -746,6 +777,12 @@ internal static partial class WireOps
             w.U8((byte)s.Action);
             w.WriteStr(s.Reason);
         }
+        // Tagged codes ride as a tail array parallel to the subscriptions, one
+        // u16 each (absent on brokers from before the taxonomy).
+        foreach (var s in rr.Subscriptions)
+        {
+            w.U16((ushort)s.Code);
+        }
         return w.ToArray();
     }
 
@@ -764,6 +801,15 @@ internal static partial class WireOps
                 Action = (ReconcileAction)r.U8(),
                 Reason = r.ReadStr(),
             });
+        }
+        // A broker from before the taxonomy sends no code tail, every code
+        // stays Unspecified.
+        if (r.Remaining > 0)
+        {
+            for (var i = 0; i < subs.Count; i++)
+            {
+                subs[i] = subs[i] with { Code = (ReasonCode)r.U16() };
+            }
         }
         r.Finish();
         return new ReconcileResult { Subscriptions = subs };
@@ -850,6 +896,27 @@ internal static partial class WireOps
         var g = new GoingAway(r.U64(), r.ReadStr());
         r.Finish();
         return g;
+    }
+
+    // ---- subscription closed ----
+
+    public static byte[] EncodeSubscriptionClosed(SubscriptionClosed sc)
+    {
+        var w = new WireWriter();
+        w.Magic("FSC1");
+        w.U64(sc.SubId);
+        w.U16((ushort)sc.Code);
+        w.WriteStr(sc.Message);
+        return w.ToArray();
+    }
+
+    public static SubscriptionClosed DecodeSubscriptionClosed(byte[] body)
+    {
+        var r = new WireReader(body);
+        r.ExpectMagic("FSC1");
+        var sc = new SubscriptionClosed(r.U64(), (ReasonCode)r.U16(), r.ReadStr());
+        r.Finish();
+        return sc;
     }
 
     // ---- subscribe stream ----
