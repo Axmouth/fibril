@@ -24,6 +24,7 @@ from .engine import (
     DEFAULT_WRITE_COALESCE_WINDOW_S,
     Engine,
     EngineOptions,
+    SettleContext,
     SubscribeResult,
     SubscriptionRegistry,
 )
@@ -619,6 +620,9 @@ class _PooledConnection:
         self._on_topology_update = on_topology_update
         self._on_going_away = on_going_away
         self._engine: Optional[Engine] = None
+        # This pooled owner's persistent settle router, shared across its
+        # reconnects so a held delivery settles against the current engine.
+        self._settle = SettleContext()
         self._lock = asyncio.Lock()
 
     async def engine_for_operation(self) -> Engine:
@@ -633,6 +637,7 @@ class _PooledConnection:
                     reader,
                     writer,
                     self._opts.engine_options(),
+                    self._settle,
                     {},
                     self._on_assignment,
                     self._on_topology_update,
@@ -772,6 +777,7 @@ class Client:
         address: tuple[str, int],
         opts: ClientOptions,
         engine: Engine,
+        settle: SettleContext,
         registry: SubscriptionRegistry,
         assignment_listeners: set[AssignmentHandler],
         going_away_listeners: set[GoingAwayHandler],
@@ -782,6 +788,10 @@ class Client:
         self._address = address
         self._opts = opts
         self._engine = engine
+        # The bootstrap connection's persistent settle router, shared across every
+        # engine this client reconnects through. Handed to each bootstrap
+        # Engine.start so a held delivery settles against the current engine.
+        self._settle = settle
         self._registry = registry
         self._assignment_listeners = assignment_listeners
         self._going_away_listeners = going_away_listeners
@@ -835,12 +845,14 @@ class Client:
             _refresh_catalogue(t, catalogue)
             return generation
 
+        settle = SettleContext()
         reader, writer = await _open_connection(*addr, tls=opts.tls)
         try:
             engine = await Engine.start(
                 reader,
                 writer,
                 opts.engine_options(),
+                settle,
                 registry,
                 emit,
                 on_topology_update,
@@ -856,6 +868,7 @@ class Client:
             addr,
             opts,
             engine,
+            settle,
             registry,
             listeners,
             going_away_listeners,
@@ -931,6 +944,7 @@ class Client:
                 reader,
                 writer,
                 self._opts.engine_options(old.resume_identity),
+                self._settle,
                 self._registry,
                 self._emit_assignment,
                 self._on_topology_update,

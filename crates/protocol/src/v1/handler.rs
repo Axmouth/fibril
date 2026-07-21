@@ -2193,7 +2193,8 @@ pub struct ConnectionSettings {
     runtime: Arc<ArcSwap<ConnectionRuntimeSettings>>,
     resume_sessions: Arc<ResumeSessionRegistry>,
     /// Durable session skeletons, when configured. Absent for in-memory / test
-    /// paths (no store means no restart-resume, exactly as before #105).
+    /// paths, where no store means a resume is honored only while the process
+    /// lives and a restart starts every client fresh.
     session_store: Option<Arc<SessionSkeletonStore>>,
 }
 

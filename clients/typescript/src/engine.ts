@@ -317,7 +317,7 @@ function applyReconcileResult(
  * A non-resumed reconnect allocates a fresh incarnation, so a delivery from the
  * replaced session settles to {@link StaleDeliveryError}. A resumed reconnect
  * keeps the incarnation, so a held delivery still settles through the new engine.
- * Mirrors the Rust reference client's `SettleContext`.
+ * Mirrors the reference client's `SettleContext` (crates/client).
  */
 export class SettleContext {
   #current: { incarnation: bigint; engine: Engine } | null = null;

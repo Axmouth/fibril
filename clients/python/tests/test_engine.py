@@ -14,10 +14,19 @@ from fibril.engine import (
     Engine,
     EngineOptions,
     Inflight,
+    SettleContext,
     SubscriptionRegistry,
     _Registered,
 )
-from fibril.errors import DisconnectionError, RedirectError, ServerError, retry_advice
+from fibril.errors import (
+    DisconnectionError,
+    RedirectError,
+    ServerError,
+    StaleDeliveryError,
+    is_transient_error,
+    retry_advice,
+)
+from fibril.subscription import InflightMessage
 from fibril.frames import encode_body
 from fibril.protocol import Op
 
@@ -46,7 +55,9 @@ async def _connect(
     **opts: object,
 ) -> Engine:
     reader, writer = await asyncio.open_connection(broker.host, broker.port)
-    return await Engine.start(reader, writer, EngineOptions(**opts), registry=registry)  # type: ignore[arg-type]
+    return await Engine.start(
+        reader, writer, EngineOptions(**opts), SettleContext(), registry=registry  # type: ignore[arg-type]
+    )
 
 
 def _sub(topic: str = "jobs", *, auto_ack: bool, prefetch: int = 10) -> wire.Subscribe:
@@ -117,12 +128,83 @@ async def test_manual_subscribe_deliver_and_ack(broker: FakeBroker) -> None:
         item = await asyncio.wait_for(result.queue.recv(), timeout=1)
         assert isinstance(item, Inflight)
         assert item.payload == b"hello"
-        await eng.ack(item.sub_id, item.delivery_tag, item.deliver_request_id)
+        await eng.ack(
+            item.topic, item.group, item.partition, item.delivery_tag, item.deliver_request_id
+        )
         await asyncio.sleep(0.05)
         assert len(broker.acks) == 1
         assert broker.acks[0].tags[0].epoch == item.delivery_tag.epoch
     finally:
         eng.shutdown()
+
+
+# A delivery held across a NON-resumed reconnect settles to a typed
+# StaleDeliveryError and sends no frame. The message redelivers per at-least-once.
+async def test_held_delivery_goes_stale_across_a_non_resumed_reconnect(
+    broker: FakeBroker,
+) -> None:
+    broker.deliver_on_subscribe = [b"task"]
+    settle = SettleContext()
+    reader1, writer1 = await asyncio.open_connection(broker.host, broker.port)
+    eng1 = await Engine.start(reader1, writer1, EngineOptions(), settle)
+    try:
+        result = await eng1.subscribe(_sub(auto_ack=False), supervised=False)
+        item = await asyncio.wait_for(result.queue.recv(), timeout=1)
+        assert isinstance(item, Inflight)
+        held = InflightMessage(eng1, item)
+
+        # A non-resumed reconnect: a fresh engine binds the SAME settle context and
+        # claims a new incarnation, so the held delivery (incarnation 0) goes stale.
+        reader2, writer2 = await asyncio.open_connection(broker.host, broker.port)
+        eng2 = await Engine.start(reader2, writer2, EngineOptions(), settle)
+        try:
+            with pytest.raises(StaleDeliveryError):
+                await held.complete()
+            await asyncio.sleep(0.05)
+            assert broker.acks == [], "a stale settle must send no ack"
+        finally:
+            eng2.shutdown()
+    finally:
+        eng1.shutdown()
+
+
+# A delivery held across a RESUMED reconnect settles to the CURRENT engine.
+# Settlement is keyed by (topic, group, partition, tag), not the client sub id.
+async def test_held_delivery_settles_to_current_engine_across_a_resumed_reconnect(
+    broker: FakeBroker,
+) -> None:
+    broker.deliver_on_subscribe = [b"task"]
+    settle = SettleContext()
+    reader1, writer1 = await asyncio.open_connection(broker.host, broker.port)
+    eng1 = await Engine.start(reader1, writer1, EngineOptions(), settle)
+    result = await eng1.subscribe(_sub(auto_ack=False), supervised=False)
+    item = await asyncio.wait_for(result.queue.recv(), timeout=1)
+    assert isinstance(item, Inflight)
+    held = InflightMessage(eng1, item)
+
+    # A resumed reconnect keeps the incarnation, so the held delivery still
+    # settles - through the new engine.
+    broker.resume_outcome = "resumed"
+    reader2, writer2 = await asyncio.open_connection(broker.host, broker.port)
+    eng2 = await Engine.start(reader2, writer2, EngineOptions(), settle)
+    try:
+        # Drop the ORIGIN engine: settling must route to the current one anyway.
+        eng1.shutdown()
+        await held.complete()
+        await asyncio.sleep(0.05)
+        assert len(broker.acks) == 1
+        assert broker.acks[0].tags[0].epoch == item.delivery_tag.epoch
+        assert broker.acks[0].topic == item.topic
+    finally:
+        eng2.shutdown()
+
+
+# A stale delivery is do-not-retry and not a transient transport failure - the
+# message redelivers on its own.
+def test_stale_delivery_is_do_not_retry() -> None:
+    err = StaleDeliveryError()
+    assert retry_advice(err) == "do_not_retry"
+    assert is_transient_error(err) is False
 
 
 async def test_auto_subscribe_delivers_settled(broker: FakeBroker) -> None:

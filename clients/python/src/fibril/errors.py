@@ -62,6 +62,24 @@ class BrokenPipeError(FibrilError):
         super().__init__(message)
 
 
+class StaleDeliveryError(FibrilError):
+    """Settling a delivery whose connection was replaced.
+
+    A non-resumed reconnect (or a broker restart) replaced the session the
+    delivery arrived on, so its delivery tag is dead server-side and no settle
+    frame is sent. The message is not lost: it redelivers on the current
+    subscription per at-least-once. Distinct from ``BrokenPipeError`` (the
+    connection is down, retry) - a stale delivery must NOT be retried, since
+    re-settling would only report stale again while the message arrives afresh.
+    """
+
+    def __init__(
+        self,
+        message: str = "delivery is stale: its connection was replaced, the message will redeliver",
+    ) -> None:
+        super().__init__(message)
+
+
 class SubscriptionClosedError(FibrilError):
     """A subscription ended with a typed reason instead of a silent stop.
 
@@ -214,6 +232,9 @@ def retry_advice(err: BaseException) -> RetryAdvice:
             return "do_not_retry"
         if err.code >= 500:
             return "retry"
+        return "do_not_retry"
+    # A stale delivery redelivers on its own; retrying the settle is pointless.
+    if isinstance(err, StaleDeliveryError):
         return "do_not_retry"
     return "do_not_retry"
 

@@ -95,7 +95,7 @@ the same durable name tracks an independent cursor per partition.
 | Disable automatic reconnect | done | done | done | no | no |
 | Typed subscription close reason on the receive surface | done | done | done | done | done |
 | Auto-resubscribe on a recreate verdict (opt-out) | done | done | done | done | done |
-| Stale-delivery settlement: typed error + route to current engine <sup>22</sup> | done | done | no | no | no |
+| Stale-delivery settlement: typed error + route to current engine <sup>22</sup> | done | done | done | no | no |
 
 ## Cluster routing
 
@@ -256,9 +256,10 @@ fans in across channels by a topic glob, driven by the cluster topology.
     stale-delivery error (`StaleDelivery` in Rust, `StaleDeliveryError` in TS) and
     sends no frame; the message redelivers on the current subscription. A resumed
     reconnect keeps the incarnation, so the settle routes to the new engine and the
-    still-valid tag is accepted. Classified do-not-retry. Python, Go, and C# pin the
-    delivery to its origin engine today (a held settle silently drops or reports a
-    generic broken pipe); parity is tracked in FOLLOWUPS.
+    still-valid tag is accepted. Classified do-not-retry (`StaleDelivery` in Rust,
+    `StaleDeliveryError` in TS and Python). Go and C# pin the delivery to its origin
+    engine today (a held settle silently drops or reports a generic broken pipe);
+    parity is tracked in FOLLOWUPS.
 
 See the repo-root `FOLLOWUPS.md` "Clients" section for the brick-by-brick plan
 behind these rows.

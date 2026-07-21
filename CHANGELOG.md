@@ -23,8 +23,8 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   connection is down, retry". A resumed reconnect keeps the incarnation, so the
   held delivery still settles, now through the new connection, and the
   still-valid tag is accepted. Shipped in the Rust reference client
-  (`FibrilError::StaleDelivery`) and the TypeScript client
-  (`StaleDeliveryError`); the other clients still pin a held delivery to its
+  (`FibrilError::StaleDelivery`) and the TypeScript and Python clients
+  (`StaleDeliveryError`); the Go and C# clients still pin a held delivery to its
   origin connection and are being brought to parity.
 - Durable resume across a broker restart. A broker now persists a small
   skeleton of each resumable session (its owner identity, client id, resume

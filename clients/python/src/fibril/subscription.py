@@ -15,7 +15,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 from . import wire
-from .engine import Delivered, Engine, Inflight
+from .engine import Delivered, Engine, Inflight, SettleContext
 from .errors import (
     BrokenPipeError,
     FibrilError,
@@ -107,8 +107,16 @@ class InflightMessage:
         self.published = d.published
         self.publish_received = d.publish_received
         self.offset = d.offset
-        self._engine = engine
-        self._sub_id = d.sub_id
+        # Settlement routes through the connection's persistent SettleContext,
+        # keyed by the durable coordinates and the incarnation this delivery
+        # arrived on - not the engine it arrived on. So an ack after a reconnect
+        # reaches the current engine, or raises StaleDeliveryError if a non-resumed
+        # reconnect replaced the session.
+        self._settle_ctx: SettleContext = engine.settle_ctx
+        self._topic = d.topic
+        self._group = d.group
+        self._partition = d.partition
+        self._incarnation = d.incarnation
         self._deliver_request_id = d.deliver_request_id
         self._settled = False
 
@@ -132,27 +140,47 @@ class InflightMessage:
 
     async def complete(self) -> "Message":
         self._settle()
-        await self._engine.ack(self._sub_id, self.delivery_tag, self._deliver_request_id)
+        engine = self._settle_ctx.current_or_stale(self._incarnation)
+        await engine.ack(
+            self._topic, self._group, self._partition, self.delivery_tag, self._deliver_request_id
+        )
         return self._as_message()
 
     async def fail(self) -> "Message":
         self._settle()
-        await self._engine.nack(
-            self._sub_id, self.delivery_tag, False, None, self._deliver_request_id
+        engine = self._settle_ctx.current_or_stale(self._incarnation)
+        await engine.nack(
+            self._topic,
+            self._group,
+            self._partition,
+            self.delivery_tag,
+            False,
+            None,
+            self._deliver_request_id,
         )
         return self._as_message()
 
     async def retry(self) -> "Message":
         self._settle()
-        await self._engine.nack(
-            self._sub_id, self.delivery_tag, True, None, self._deliver_request_id
+        engine = self._settle_ctx.current_or_stale(self._incarnation)
+        await engine.nack(
+            self._topic,
+            self._group,
+            self._partition,
+            self.delivery_tag,
+            True,
+            None,
+            self._deliver_request_id,
         )
         return self._as_message()
 
     async def retry_after(self, delay: Delay) -> "Message":
         self._settle()
-        await self._engine.nack(
-            self._sub_id,
+        engine = self._settle_ctx.current_or_stale(self._incarnation)
+        await engine.nack(
+            self._topic,
+            self._group,
+            self._partition,
             self.delivery_tag,
             True,
             deadline_from_delay(delay),

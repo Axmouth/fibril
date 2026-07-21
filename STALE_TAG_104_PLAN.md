@@ -107,9 +107,15 @@ Per-client placement (the persistent context's home):
   Tests: `a manual delivery held across a non-resumed reconnect settles stale` (A1),
   `... resumed reconnect settles to the current engine` (A2/A3, asserts the ack
   lands on the second socket), plus the retryAdvice case (A4). Full TS suite green.
-- Python: no slot today - `Client._engine` (bootstrap) + `_PooledConnection._engine`.
-  Add a settle context per owner. `Inflight` currently drops topic/group/partition
-  in `_on_deliver`; add them.
+- Python: DONE. Added a `SettleContext` (engine.py) held by the bootstrap `Client`
+  and by each `_PooledConnection`; `Engine.start` reserves the incarnation from the
+  resume outcome and binds the context, `_on_deliver` stamps that captured
+  incarnation + topic/group/partition onto `Inflight`, `Engine.ack`/`nack` build
+  from the durable coords, and `InflightMessage` routes settles through the context
+  via `current_or_stale`. New `StaleDeliveryError` (do-not-retry). Tests in
+  test_engine.py: held-across-non-resumed goes stale (A1), held-across-resumed
+  routes to the current engine with the origin engine dropped (A2/A3), retry_advice
+  classification (A4). Full suite green, mypy clean on src.
 - Go: no slot - `Client.bootstrap` + `pool`. Add a per-endpoint settle context.
   `Delivery` already carries topic/group/partition; add incarnation + context ref.
 - C#: no slot - `Client._bootstrap` + `_pool`; the per-endpoint `ReconcileRegistry`

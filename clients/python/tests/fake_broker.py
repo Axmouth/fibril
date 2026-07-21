@@ -24,6 +24,9 @@ class FakeBroker:
     """A scriptable single-broker stand-in over a real loopback socket."""
 
     compliance: str = COMPLIANCE_STRING
+    # resume_outcome returned in HELLO_OK. Set to "resumed" before a second
+    # connection to script a resumed reconnect.
+    resume_outcome: wire.ResumeOutcome = "new"
     auth_ok: bool = True
     topology: Optional[wire.TopologyOk] = None
     # When set, PUBLISH gets this response instead of PUBLISH_OK.
@@ -110,7 +113,7 @@ class FakeBroker:
                 owner_id=b"\x01" * 16,
                 client_id=b"\x02" * 16,
                 resume_token=b"\x03" * 16,
-                resume_outcome="new",
+                resume_outcome=self.resume_outcome,
                 server_name="fake",
                 compliance=self.compliance,
             )
