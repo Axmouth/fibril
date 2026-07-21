@@ -84,6 +84,9 @@ type Client struct {
 	reconcileMu sync.Mutex
 	reconcile   map[string]*reconcileRegistry // per-endpoint, survives engine reconnects
 
+	settleMu sync.Mutex
+	settle   map[string]*settleContext // per-endpoint, survives engine reconnects
+
 	rr             atomic.Uint64        // round-robin cursor for keyless publishes
 	cohortMemberID atomic.Pointer[UUID] // captured once, carried across cohort subscribes
 	closed         atomic.Bool
@@ -100,6 +103,20 @@ func (c *Client) reconcileFor(endpoint string) *reconcileRegistry {
 		c.reconcile[endpoint] = reg
 	}
 	return reg
+}
+
+// settleFor returns the endpoint's settle router, creating it on first use.
+// Shared across the reconnects of that endpoint's engine so a held delivery
+// settles against the current engine (or goes stale after a non-resumed reconnect).
+func (c *Client) settleFor(endpoint string) *settleContext {
+	c.settleMu.Lock()
+	defer c.settleMu.Unlock()
+	s, ok := c.settle[endpoint]
+	if !ok {
+		s = newSettleContext()
+		c.settle[endpoint] = s
+	}
+	return s
 }
 
 // applyCohortMember offers the client's captured cohort member id on a
@@ -180,6 +197,7 @@ func Dial(ctx context.Context, addr string, opts ClientOptions) (*Client, error)
 		topo:              newTopologyCache(),
 		pool:              make(map[string]*Engine),
 		reconcile:         make(map[string]*reconcileRegistry),
+		settle:            make(map[string]*settleContext),
 	}
 	boot, err := Connect(ctx, addr, c.engineOpts(addr))
 	if err != nil {
@@ -196,6 +214,7 @@ func (c *Client) engineOpts(endpoint string) EngineOptions {
 	o := c.opts.engineOptions()
 	o.OnTopologyUpdate = c.applyTopologyPush
 	o.ReconcileRegistry = c.reconcileFor(endpoint)
+	o.settle = c.settleFor(endpoint)
 	return o
 }
 
@@ -236,6 +255,7 @@ func newClientWith(endpoint string, boot *Engine, opts ClientOptions) *Client {
 		topo:              newTopologyCache(),
 		pool:              make(map[string]*Engine),
 		reconcile:         make(map[string]*reconcileRegistry),
+		settle:            make(map[string]*settleContext),
 	}
 }
 
