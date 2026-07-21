@@ -34,6 +34,19 @@ func (e *BrokenPipeError) Error() string {
 	return e.Message
 }
 
+// StaleDeliveryError means a delivery was settled after a non-resumed reconnect
+// (or a broker restart) replaced the session it arrived on. Its delivery tag is
+// dead server-side, so no settle frame is sent. The message is not lost: it
+// redelivers on the current subscription per at-least-once. Distinct from
+// BrokenPipeError (the connection is down, retry) - a stale delivery must NOT be
+// retried, since re-settling would only report stale again while the message
+// arrives afresh.
+type StaleDeliveryError struct{}
+
+func (e *StaleDeliveryError) Error() string {
+	return "delivery is stale: its connection was replaced, the message will redeliver"
+}
+
 // UnexpectedError is a protocol violation or an otherwise unexpected state.
 type UnexpectedError struct {
 	Message string
@@ -188,6 +201,11 @@ func AdviseRetry(err error) RetryAdvice {
 		default:
 			return RetryDoNotRetry
 		}
+	}
+	// A stale delivery redelivers on its own; retrying the settle is pointless.
+	var sd *StaleDeliveryError
+	if errors.As(err, &sd) {
+		return RetryDoNotRetry
 	}
 	return RetryDoNotRetry
 }

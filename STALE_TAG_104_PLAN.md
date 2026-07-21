@@ -116,8 +116,15 @@ Per-client placement (the persistent context's home):
   test_engine.py: held-across-non-resumed goes stale (A1), held-across-resumed
   routes to the current engine with the origin engine dropped (A2/A3), retry_advice
   classification (A4). Full suite green, mypy clean on src.
-- Go: no slot - `Client.bootstrap` + `pool`. Add a per-endpoint settle context.
-  `Delivery` already carries topic/group/partition; add incarnation + context ref.
+- Go: DONE. Added a `settleContext` (engine.go, atomic.Pointer binding) held
+  per-endpoint by the `Client` (a `settle` map beside `reconcile`) and threaded via
+  an unexported `EngineOptions.settle`; standalone `Connect` gets a fresh one.
+  `startEngine` reserves the incarnation from the resume outcome and binds before
+  starting goroutines, `handleDeliver` stamps the context + incarnation on the
+  `Delivery` (which already carried topic/group/partition), and Complete/Fail/Retry/
+  RetryAfter route via `currentOrStale`. New `StaleDeliveryError` (do-not-retry).
+  Tests in delivery_test.go: A1 stale, A2/A3 route-to-current (origin dropped), A4
+  classification. go vet + full suite green.
 - C#: no slot - `Client._bootstrap` + `_pool`; the per-endpoint `ReconcileRegistry`
   is the natural home. `Delivery` (readonly struct) already carries the tuple; add
   incarnation + context ref and change the settle methods from void so they can

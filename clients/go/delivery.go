@@ -28,30 +28,58 @@ type Delivery struct {
 	// (an auto-ack subscription). Settling is then unnecessary.
 	AutoAck bool
 
-	reqID  uint64  // the DELIVER frame's request id, reused when settling
-	engine *Engine // the connection this arrived on, so settling routes correctly
+	reqID uint64 // the DELIVER frame's request id, reused when settling
+	// settle routes settlement to whatever engine is currently live for the
+	// connection (keyed by incarnation), not the engine this arrived on, so an ack
+	// after a reconnect reaches the current engine or reports a StaleDeliveryError.
+	settle      *settleContext
+	incarnation uint64
 }
 
-// Complete settles this delivery as processed, on the connection it arrived on
-// (so it stays correct even when deliveries from several partitions are fanned
-// in). Unnecessary for an auto-ack delivery, but harmless.
-func (d Delivery) Complete() error { return d.engine.Complete(d) }
+// Complete settles this delivery as processed. It routes to whatever engine is
+// currently live for the connection, so it stays correct across a reconnect (and
+// when deliveries from several partitions are fanned in). A non-resumed reconnect
+// makes it return a *StaleDeliveryError. Unnecessary for an auto-ack delivery, but
+// harmless.
+func (d Delivery) Complete() error {
+	e, err := d.settle.currentOrStale(d.incarnation)
+	if err != nil {
+		return err
+	}
+	return e.Complete(d)
+}
 
 // Retry requeues this delivery immediately for redelivery.
-func (d Delivery) Retry() error { return d.engine.Nack(d, true, nil) }
+func (d Delivery) Retry() error {
+	e, err := d.settle.currentOrStale(d.incarnation)
+	if err != nil {
+		return err
+	}
+	return e.Nack(d, true, nil)
+}
 
 // Fail settles this delivery as a terminal failure: it is not requeued, so it is
 // dead-lettered or dropped per the queue's policy.
-func (d Delivery) Fail() error { return d.engine.Nack(d, false, nil) }
+func (d Delivery) Fail() error {
+	e, err := d.settle.currentOrStale(d.incarnation)
+	if err != nil {
+		return err
+	}
+	return e.Nack(d, false, nil)
+}
 
 // RetryAfter requeues this delivery for redelivery no sooner than delay from now.
 func (d Delivery) RetryAfter(delay time.Duration) error {
+	e, err := d.settle.currentOrStale(d.incarnation)
+	if err != nil {
+		return err
+	}
 	notBefore := time.Now().UnixMilli() + delay.Milliseconds()
 	if notBefore < 0 {
 		notBefore = 0
 	}
 	nb := uint64(notBefore)
-	return d.engine.Nack(d, true, &nb)
+	return e.Nack(d, true, &nb)
 }
 
 // Subscription is a live single-partition subscription. Deliveries yields
@@ -238,7 +266,10 @@ func (e *Engine) handleDeliver(f frame) {
 		SubID:           d.SubID,
 		AutoAck:         s.autoAck,
 		reqID:           f.RequestID,
-		engine:          e,
+		// This engine's incarnation, captured now so a later settle routes to the
+		// current engine (or goes stale) without depending on this engine.
+		settle:      e.settle,
+		incarnation: e.incarnation,
 	}
 	// The channel is prefetch-sized, so this send has room under normal flow.
 	// The stop guard keeps a full channel from wedging shutdown.

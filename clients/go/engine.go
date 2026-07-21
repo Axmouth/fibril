@@ -18,10 +18,71 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const defaultHeartbeatInterval = 5 * time.Second
+
+// engineBinding pairs the currently-live engine with the incarnation its
+// deliveries are stamped with. One immutable value swapped in per (re)connect,
+// so a settle reads both from a single consistent snapshot.
+type engineBinding struct {
+	incarnation uint64
+	engine      *Engine
+}
+
+// settleContext routes a manual settle to whatever engine is currently live for a
+// connection, keyed by the connection incarnation the delivery arrived on. One
+// per persistent connection (the bootstrap owner and each pooled owner),
+// outliving every engine it swaps through, so a delivery held across a reconnect
+// settles against the current engine rather than the dead one it arrived on. A
+// non-resumed reconnect allocates a fresh incarnation, so a delivery from the
+// replaced session settles to a StaleDeliveryError; a resumed reconnect keeps the
+// incarnation, so a held delivery still settles through the new engine. Mirrors
+// the reference client's SettleContext (crates/client).
+type settleContext struct {
+	current         atomic.Pointer[engineBinding]
+	nextIncarnation atomic.Uint64
+}
+
+func newSettleContext() *settleContext { return &settleContext{} }
+
+// reserve returns the incarnation a (re)connecting engine stamps on its
+// deliveries, before its read loop can deliver. A fresh session (a non-resumed
+// reconnect, or the first connect) claims a new incarnation so deliveries held
+// from the replaced session go stale; a resumed session reuses the current one so
+// they still settle. The engine captures the returned value once and never
+// re-reads it, so a late delivery on a superseded engine keeps its own (now
+// stale) stamp.
+func (s *settleContext) reserve(freshSession bool) uint64 {
+	cur := s.current.Load()
+	if freshSession || cur == nil {
+		return s.nextIncarnation.Add(1) - 1
+	}
+	return cur.incarnation
+}
+
+// bind points settlement at an engine once it exists, under its reserved incarnation.
+func (s *settleContext) bind(incarnation uint64, engine *Engine) {
+	s.current.Store(&engineBinding{incarnation: incarnation, engine: engine})
+}
+
+// currentOrStale returns the live engine for a delivery stamped at incarnation,
+// or a StaleDeliveryError if the incarnation has moved on (the session was
+// replaced), or a BrokenPipeError if there is no live engine at all. The binding
+// is loaded once, so the incarnation check and the routed engine come from a
+// single consistent snapshot.
+func (s *settleContext) currentOrStale(incarnation uint64) (*Engine, error) {
+	cur := s.current.Load()
+	if cur == nil {
+		return nil, &BrokenPipeError{}
+	}
+	if incarnation != cur.incarnation {
+		return nil, &StaleDeliveryError{}
+	}
+	return cur.engine, nil
+}
 
 // Reserved request ids for the fixed handshake exchanges, one per op. The
 // handshake replies are matched by opcode (the request-response machinery is not
@@ -73,6 +134,10 @@ type EngineOptions struct {
 	// endpoint so a reconnect can restore them. On (re)connect the engine sends
 	// RECONCILE_CLIENT for any it holds and adopts the restored delivery channels.
 	ReconcileRegistry *reconcileRegistry
+	// settle, if set, is the endpoint's persistent settle router, shared across
+	// the reconnects of this endpoint's engine so a held delivery settles against
+	// the current engine. Unset (standalone Connect) gets a fresh one per engine.
+	settle *settleContext
 }
 
 // command is a request from a public method to the run goroutine: send op(body),
@@ -158,6 +223,11 @@ type Engine struct {
 	// Set during the handshake, immutable afterwards.
 	ResumeIdentity ResumeIdentity
 	ResumeOutcome  ResumeOutcome
+
+	// The connection's persistent settle router, and the incarnation this engine
+	// stamps on every manual delivery it hands out (captured once, never re-read).
+	settle      *settleContext
+	incarnation uint64
 }
 
 // Connect dials addr and performs the handshake (and optional auth), returning a
@@ -280,6 +350,16 @@ func startEngine(ctx context.Context, conn net.Conn, opts EngineOptions) (*Engin
 		}
 	}
 
+	// Reserve this engine's incarnation before its read loop can deliver: a
+	// resumed session keeps the current one so held deliveries still settle, any
+	// other outcome takes a fresh one so they go stale. Standalone Connect (no
+	// client) gets its own settle router.
+	settle := opts.settle
+	if settle == nil {
+		settle = newSettleContext()
+	}
+	incarnation := settle.reserve(helloOk.ResumeOutcome != ResumeResumed)
+
 	e := &Engine{
 		conn:           conn,
 		bw:             bufio.NewWriterSize(conn, writeBufSize),
@@ -294,7 +374,12 @@ func startEngine(ctx context.Context, conn net.Conn, opts EngineOptions) (*Engin
 		lastSeen:       time.Now(),
 		ResumeIdentity: ResumeIdentity{OwnerID: helloOk.OwnerID, ClientID: helloOk.ClientID, ResumeToken: helloOk.ResumeToken},
 		ResumeOutcome:  helloOk.ResumeOutcome,
+		settle:         settle,
+		incarnation:    incarnation,
 	}
+	// Bind before starting the goroutines (so no delivery is processed before the
+	// binding exists) so settlement routes to this live engine.
+	settle.bind(incarnation, e)
 	go e.readLoop(br)
 	go e.run()
 	return e, nil
