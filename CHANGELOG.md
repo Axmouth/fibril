@@ -46,7 +46,10 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   `ClientOptions(auto_resubscribe=False)` opts out. The Go client exposes
   the reason through a `CloseReason()` accessor on the subscription (read
   after its `Deliveries` channel closes), with `DisableAutoResubscribe` to
-  opt out. The C# client follows in a later change.
+  opt out. The C# client completes a subscription's `Deliveries()`
+  enumeration with a typed `SubscriptionClosedException`, with
+  `AutoResubscribe = false` to opt out. All five clients now surface the
+  typed close reason, so a subscription never ends silently on any client.
 
 - The typed subscription lifecycle, server half. The wire grew a
   machine-readable reason taxonomy: reconcile results carry a tagged code

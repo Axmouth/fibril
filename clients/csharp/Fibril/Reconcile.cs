@@ -88,12 +88,13 @@ internal sealed class ReconcileRegistry
                 }
                 else
                 {
-                    // Close verdicts, and for now also RecreateClient: the
-                    // server has no live subscription behind this channel, so
-                    // keeping it open would strand the consumer.
-                    // Auto-resubscribe on recreate arrives with the typed
-                    // subscription lifecycle.
-                    entry.Channel.Writer.TryComplete();
+                    // Close verdicts and RecreateClient: the server has no live
+                    // subscription behind this channel. Complete it with the
+                    // typed reason - a supervised subscription treats a recreate
+                    // (and other non-terminal reasons) as a cue to re-subscribe,
+                    // a terminal one surfaces to the consumer.
+                    entry.Channel.Writer.TryComplete(
+                        new SubscriptionClosedException(verdict.Code, verdict.Reason));
                 }
             }
 
@@ -102,7 +103,10 @@ internal sealed class ReconcileRegistry
             {
                 if (!visited.Contains(id))
                 {
-                    entry.Channel.Writer.TryComplete();
+                    entry.Channel.Writer.TryComplete(
+                        new SubscriptionClosedException(
+                            ReasonCode.ServerError,
+                            "subscription no longer present after reconnect"));
                 }
             }
 
