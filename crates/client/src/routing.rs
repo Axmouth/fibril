@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use tokio::sync::{broadcast, mpsc};
 
-use crate::{Catalogue, Client, FibrilResult, InflightMessage, Message};
+use crate::{Catalogue, Client, CloseReason, FibrilResult, InflightMessage, Message, SubEvent};
 
 /// Per-channel buffering for the merged pattern stream, multiplied by prefetch.
 /// Bounded so a slow consumer backpressures every attached channel rather than
@@ -150,7 +150,11 @@ impl PatternSubscribeBuilder {
             ))
         });
         tokio::spawn(run_pattern(client, glob, ChannelKind::Queue, out, attach));
-        Ok(PatternSubscription { rx })
+        Ok(PatternSubscription {
+            rx,
+            reason: crate::new_reason_slot(),
+            terminal: None,
+        })
     }
 
     /// Start with client-side automatic acknowledgement, yielding [`Message`].
@@ -166,7 +170,11 @@ impl PatternSubscribeBuilder {
             Box::pin(attach_queue_auto(client, source, prefetch, exclusive, out))
         });
         tokio::spawn(run_pattern(client, glob, ChannelKind::Queue, out, attach));
-        Ok(AutoAckPatternSubscription { rx })
+        Ok(AutoAckPatternSubscription {
+            rx,
+            reason: crate::new_reason_slot(),
+            terminal: None,
+        })
     }
 }
 
@@ -248,7 +256,11 @@ impl StreamPatternSubscribeBuilder {
             Box::pin(attach_stream_manual(client, source, config.clone(), out))
         });
         tokio::spawn(run_pattern(client, glob, ChannelKind::Stream, out, attach));
-        Ok(PatternSubscription { rx })
+        Ok(PatternSubscription {
+            rx,
+            reason: crate::new_reason_slot(),
+            terminal: None,
+        })
     }
 
     /// Start with client-side automatic acknowledgement, yielding [`Message`]. The
@@ -273,7 +285,11 @@ impl StreamPatternSubscribeBuilder {
             Box::pin(attach_stream_auto(client, source, config.clone(), out))
         });
         tokio::spawn(run_pattern(client, glob, ChannelKind::Stream, out, attach));
-        Ok(AutoAckPatternSubscription { rx })
+        Ok(AutoAckPatternSubscription {
+            rx,
+            reason: crate::new_reason_slot(),
+            terminal: None,
+        })
     }
 }
 
@@ -284,19 +300,44 @@ impl StreamPatternSubscribeBuilder {
 /// and the catalogue watcher.
 pub struct PatternSubscription {
     rx: mpsc::Receiver<(PatternSource, InflightMessage)>,
+    reason: crate::ReasonSlot,
+    terminal: Option<CloseReason>,
 }
 
 impl PatternSubscription {
-    /// Receive the next message and the channel it came from, or `None` when
-    /// closed.
-    pub async fn recv(&mut self) -> Option<(PatternSource, InflightMessage)> {
-        self.rx.recv().await
+    /// Receive the next message and the channel it came from, or the typed
+    /// terminal event when the pattern subscription ends (fused).
+    pub async fn recv(&mut self) -> SubEvent<(PatternSource, InflightMessage)> {
+        if let Some(reason) = &self.terminal {
+            return SubEvent::Closed(reason.clone());
+        }
+        match self.rx.recv().await {
+            Some(item) => SubEvent::Delivery(item),
+            None => {
+                let reason = self
+                    .reason
+                    .get()
+                    .cloned()
+                    .unwrap_or(CloseReason::Unsubscribed);
+                self.terminal = Some(reason.clone());
+                SubEvent::Closed(reason)
+            }
+        }
     }
 
-    /// Convert into a stream of `(source, message)` items.
+    /// Why the pattern subscription ended, once it has.
+    pub fn close_reason(&self) -> Option<CloseReason> {
+        self.terminal.clone().or_else(|| self.reason.get().cloned())
+    }
+
+    /// Convert into a stream of `(source, message)` items. The stream ends at
+    /// the terminal event.
     pub fn into_stream(self) -> impl futures::Stream<Item = (PatternSource, InflightMessage)> {
         futures::stream::unfold(self, |mut s| async move {
-            s.rx.recv().await.map(|item| (item, s))
+            match s.recv().await {
+                SubEvent::Delivery(item) => Some((item, s)),
+                SubEvent::Closed(_) => None,
+            }
         })
     }
 }
@@ -304,19 +345,44 @@ impl PatternSubscription {
 /// Auto-ack counterpart of [`PatternSubscription`], yielding settled [`Message`]s.
 pub struct AutoAckPatternSubscription {
     rx: mpsc::Receiver<(PatternSource, Message)>,
+    reason: crate::ReasonSlot,
+    terminal: Option<CloseReason>,
 }
 
 impl AutoAckPatternSubscription {
-    /// Receive the next message and the channel it came from, or `None` when
-    /// closed.
-    pub async fn recv(&mut self) -> Option<(PatternSource, Message)> {
-        self.rx.recv().await
+    /// Receive the next message and the channel it came from, or the typed
+    /// terminal event when the pattern subscription ends (fused).
+    pub async fn recv(&mut self) -> SubEvent<(PatternSource, Message)> {
+        if let Some(reason) = &self.terminal {
+            return SubEvent::Closed(reason.clone());
+        }
+        match self.rx.recv().await {
+            Some(item) => SubEvent::Delivery(item),
+            None => {
+                let reason = self
+                    .reason
+                    .get()
+                    .cloned()
+                    .unwrap_or(CloseReason::Unsubscribed);
+                self.terminal = Some(reason.clone());
+                SubEvent::Closed(reason)
+            }
+        }
     }
 
-    /// Convert into a stream of `(source, message)` items.
+    /// Why the pattern subscription ended, once it has.
+    pub fn close_reason(&self) -> Option<CloseReason> {
+        self.terminal.clone().or_else(|| self.reason.get().cloned())
+    }
+
+    /// Convert into a stream of `(source, message)` items. The stream ends at
+    /// the terminal event.
     pub fn into_stream(self) -> impl futures::Stream<Item = (PatternSource, Message)> {
         futures::stream::unfold(self, |mut s| async move {
-            s.rx.recv().await.map(|item| (item, s))
+            match s.recv().await {
+                SubEvent::Delivery(item) => Some((item, s)),
+                SubEvent::Closed(_) => None,
+            }
         })
     }
 }
@@ -442,7 +508,7 @@ fn forward_manual(
     out: MergedTx<InflightMessage>,
 ) {
     tokio::spawn(async move {
-        while let Some(msg) = sub.recv().await {
+        while let crate::SubEvent::Delivery(msg) = sub.recv().await {
             if out.send((source.clone(), msg)).await.is_err() {
                 break;
             }
@@ -457,7 +523,7 @@ fn forward_auto(
     out: MergedTx<Message>,
 ) {
     tokio::spawn(async move {
-        while let Some(msg) = sub.recv().await {
+        while let crate::SubEvent::Delivery(msg) = sub.recv().await {
             if out.send((source.clone(), msg)).await.is_err() {
                 break;
             }

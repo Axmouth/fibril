@@ -12,6 +12,19 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- The Rust client's typed subscription receive surface. `recv()` now returns
+  a `SubEvent` - `Delivery(msg)` or `Closed(reason)` - so a subscription
+  never just goes silent: it ends with a typed `CloseReason` (topic deleted,
+  owner moved, broker shutdown, a reconcile verdict, recreated,
+  disconnected, ...). The common loop keeps its shape, only the pattern word
+  changes (`while let SubEvent::Delivery(msg) = sub.recv().await`), and the
+  terminal event is fused so code that bailed out of the loop can still ask
+  `sub.close_reason()`. Auto-resubscribe (default on, opt out with
+  `ClientOptions::auto_resubscribe(false)`) makes a supervised subscription
+  silently re-subscribe when the broker advises a safe recreate, otherwise
+  the typed `Recreated` close surfaces. The other four clients gain the same
+  surface in a following change.
+
 - The typed subscription lifecycle, server half. The wire grew a
   machine-readable reason taxonomy: reconcile results carry a tagged code
   beside the human-readable string, and a new `SubscriptionClosed` frame

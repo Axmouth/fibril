@@ -488,6 +488,123 @@ impl PublishConfirmation {
     }
 }
 
+/// One received subscription event: a delivery, or the typed terminal close.
+///
+/// The common receive loop keeps its shape, with only the pattern changing:
+/// `while let SubEvent::Delivery(msg) = sub.recv().await { .. }`. Code that
+/// cares why the subscription ended matches both arms, or asks
+/// [`Subscription::close_reason`] after the loop.
+pub enum SubEvent<T> {
+    /// A delivered message.
+    Delivery(T),
+    /// The subscription ended. Once returned, every later `recv` returns the
+    /// same reason again (the event is fused), so a loop that only matched
+    /// deliveries can still recover it.
+    Closed(CloseReason),
+}
+
+// Hand-written so the event is `Debug` (for tests and diagnostics) without
+// requiring the delivery payload to be - `InflightMessage` holds a settle
+// channel and is deliberately not `Debug`.
+impl<T> std::fmt::Debug for SubEvent<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SubEvent::Delivery(_) => f.write_str("Delivery(..)"),
+            SubEvent::Closed(reason) => f.debug_tuple("Closed").field(reason).finish(),
+        }
+    }
+}
+
+impl<T> SubEvent<T> {
+    /// The delivered message, or `None` for the terminal close. Handy in
+    /// tests and one-shot scripts; a long-running consumer should match both
+    /// arms so the close reason is not discarded.
+    pub fn delivery(self) -> Option<T> {
+        match self {
+            SubEvent::Delivery(msg) => Some(msg),
+            SubEvent::Closed(_) => None,
+        }
+    }
+}
+
+/// Why a subscription ended. Every termination carries exactly one of these -
+/// a delivery stream never just goes silent.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub enum CloseReason {
+    /// Closed locally: the subscription handle was dropped or the client shut
+    /// down.
+    Unsubscribed,
+    /// The topic (queue or stream) behind the subscription was deleted.
+    TopicDeleted,
+    /// Partition ownership moved away and the subscription was not migrated.
+    OwnerMoved,
+    /// The broker announced shutdown or drain and the subscription could not
+    /// be handed off.
+    BrokerShutdown,
+    /// A reconcile after reconnect closed the subscription.
+    Reconciled {
+        action: ReconcileAction,
+        code: ReasonCode,
+        reason: String,
+    },
+    /// The broker said the subscription is safely recreatable and
+    /// auto-resubscribe was off (or the subscription is unsupervised), so the
+    /// old handle ends. Unsettled deliveries redeliver on a new subscription.
+    Recreated,
+    /// The connection was lost and will not recover.
+    Disconnected { msg: String },
+    /// The server closed the subscription with an error.
+    ServerError { code: ReasonCode, message: String },
+    /// Reserved for stream close-on-lag policies, not emitted yet.
+    Lagged,
+}
+
+impl CloseReason {
+    /// Map a wire-level close notice onto the client reason.
+    fn from_wire(code: ReasonCode, message: String) -> Self {
+        match code {
+            ReasonCode::TopicDeleted => CloseReason::TopicDeleted,
+            ReasonCode::OwnerMoved => CloseReason::OwnerMoved,
+            ReasonCode::BrokerShutdown => CloseReason::BrokerShutdown,
+            ReasonCode::Lagged => CloseReason::Lagged,
+            other => CloseReason::ServerError {
+                code: other,
+                message,
+            },
+        }
+    }
+
+    /// The fallback for a delivery channel that closed without a recorded
+    /// reason. The plumbing stamps every known close path, so reaching this
+    /// means a connection ended without recovery.
+    fn unrecorded() -> Self {
+        CloseReason::Disconnected {
+            msg: "the connection ended without a recorded close reason".into(),
+        }
+    }
+}
+
+/// The write-once slot a subscription's close reason travels through: whoever
+/// drops the delivery sender stamps why first, the receive side reads it after
+/// draining the channel.
+type ReasonSlot = Arc<std::sync::OnceLock<CloseReason>>;
+
+fn new_reason_slot() -> ReasonSlot {
+    Arc::new(std::sync::OnceLock::new())
+}
+
+fn stamp_reason(slot: &ReasonSlot, reason: CloseReason) {
+    let _ = slot.set(reason);
+}
+
+/// One partition's delivery leg: the receiver plus the slot the engine stamps
+/// with why the leg closed.
+pub(crate) struct PartRx<M> {
+    pub(crate) rx: mpsc::Receiver<M>,
+    pub(crate) reason: ReasonSlot,
+}
+
 /// Manual-acknowledgement subscription.
 ///
 /// Messages received from this subscription are [`InflightMessage`] values and
@@ -495,6 +612,8 @@ impl PublishConfirmation {
 /// [`InflightMessage::fail`], or [`InflightMessage::retry`].
 pub struct Subscription {
     rx: mpsc::Receiver<InflightMessage>,
+    reason: ReasonSlot,
+    terminal: Option<CloseReason>,
 }
 
 /// Client-side auto-ack subscription.
@@ -503,6 +622,8 @@ pub struct Subscription {
 /// when processing correctness depends on explicit success/failure handling.
 pub struct AutoAckedSubscription {
     rx: mpsc::Receiver<Message>,
+    reason: ReasonSlot,
+    terminal: Option<CloseReason>,
 }
 
 /// Delivered message payload and metadata.
@@ -1372,7 +1493,7 @@ impl StreamConfig {
 ///     .sub()
 ///     .await?;
 ///
-/// while let Some(msg) = sub.recv().await {
+/// while let fibril_client::SubEvent::Delivery(msg) = sub.recv().await {
 ///     msg.complete().await?;
 /// }
 /// # Ok(())
@@ -1479,9 +1600,10 @@ impl<'a> SubscriptionBuilder<'a> {
         // and a manager task picks up partitions added by a live grow.
         let cap = (prefetch as usize).max(1) * subs.len().max(1);
         let (tx, rx) = mpsc::channel(cap);
+        let reason = new_reason_slot();
         let client = self.client.clone();
         for (req, part_rx) in subs {
-            supervise_forward_manual(client.clone(), req, part_rx, tx.clone());
+            supervise_forward_manual(client.clone(), req, part_rx, tx.clone(), reason.clone());
         }
         let known: std::collections::HashSet<Partition> = partitions.into_iter().collect();
         tokio::spawn(partition_resubscribe_loop_manual(
@@ -1494,9 +1616,14 @@ impl<'a> SubscriptionBuilder<'a> {
             member_id,
             known,
             tx,
+            reason.clone(),
             interval_ms,
         ));
-        Ok(Subscription { rx })
+        Ok(Subscription {
+            rx,
+            reason,
+            terminal: None,
+        })
     }
 
     /// Subscribe with client-side automatic acknowledgement.
@@ -1541,9 +1668,10 @@ impl<'a> SubscriptionBuilder<'a> {
 
         let cap = (prefetch as usize).max(1) * subs.len().max(1);
         let (tx, rx) = mpsc::channel(cap);
+        let reason = new_reason_slot();
         let client = self.client.clone();
         for (req, part_rx) in subs {
-            supervise_forward_auto(client.clone(), req, part_rx, tx.clone());
+            supervise_forward_auto(client.clone(), req, part_rx, tx.clone(), reason.clone());
         }
         let known: std::collections::HashSet<Partition> = partitions.into_iter().collect();
         tokio::spawn(partition_resubscribe_loop_auto(
@@ -1556,9 +1684,14 @@ impl<'a> SubscriptionBuilder<'a> {
             member_id,
             known,
             tx,
+            reason.clone(),
             interval_ms,
         ));
-        Ok(AutoAckedSubscription { rx })
+        Ok(AutoAckedSubscription {
+            rx,
+            reason,
+            terminal: None,
+        })
     }
 }
 
@@ -1577,7 +1710,7 @@ impl<'a> SubscriptionBuilder<'a> {
 ///     .filter("region", "eu-*")
 ///     .sub()
 ///     .await?;
-/// while let Some(msg) = sub.recv().await {
+/// while let fibril_client::SubEvent::Delivery(msg) = sub.recv().await {
 ///     msg.complete().await?;
 /// }
 /// # Ok(())
@@ -1696,9 +1829,16 @@ impl<'a> StreamSubscriptionBuilder<'a> {
         // tracks an independent cursor per partition.
         let cap = (self.prefetch as usize).max(1) * subs.len().max(1);
         let (tx, rx) = mpsc::channel(cap);
+        let reason = new_reason_slot();
         let client = self.client.clone();
         for (req, part_rx) in subs {
-            supervise_forward_stream_manual(client.clone(), req, part_rx, tx.clone());
+            supervise_forward_stream_manual(
+                client.clone(),
+                req,
+                part_rx,
+                tx.clone(),
+                reason.clone(),
+            );
         }
         let known: std::collections::HashSet<Partition> = partitions.into_iter().collect();
         tokio::spawn(stream_partition_resubscribe_loop_manual(
@@ -1710,9 +1850,14 @@ impl<'a> StreamSubscriptionBuilder<'a> {
             self.prefetch,
             known,
             tx,
+            reason.clone(),
             interval_ms,
         ));
-        Ok(Subscription { rx })
+        Ok(Subscription {
+            rx,
+            reason,
+            terminal: None,
+        })
     }
 
     /// Subscribe with client-side automatic acknowledgement, yielding [`Message`]
@@ -1736,9 +1881,10 @@ impl<'a> StreamSubscriptionBuilder<'a> {
 
         let cap = (self.prefetch as usize).max(1) * subs.len().max(1);
         let (tx, rx) = mpsc::channel(cap);
+        let reason = new_reason_slot();
         let client = self.client.clone();
         for (req, part_rx) in subs {
-            supervise_forward_stream_auto(client.clone(), req, part_rx, tx.clone());
+            supervise_forward_stream_auto(client.clone(), req, part_rx, tx.clone(), reason.clone());
         }
         let known: std::collections::HashSet<Partition> = partitions.into_iter().collect();
         tokio::spawn(stream_partition_resubscribe_loop_auto(
@@ -1750,9 +1896,14 @@ impl<'a> StreamSubscriptionBuilder<'a> {
             self.prefetch,
             known,
             tx,
+            reason.clone(),
             interval_ms,
         ));
-        Ok(AutoAckedSubscription { rx })
+        Ok(AutoAckedSubscription {
+            rx,
+            reason,
+            terminal: None,
+        })
     }
 }
 
@@ -1793,6 +1944,7 @@ async fn partition_resubscribe_loop_manual(
     member_id: Option<uuid::Uuid>,
     mut known: std::collections::HashSet<Partition>,
     tx: mpsc::Sender<InflightMessage>,
+    reason: ReasonSlot,
     interval_ms: u64,
 ) {
     let interval = std::time::Duration::from_millis(interval_ms.max(1));
@@ -1818,7 +1970,7 @@ async fn partition_resubscribe_loop_manual(
             };
             if let Ok(part_rx) = subscribe_partition_manual(&client, req.clone()).await {
                 known.insert(partition);
-                supervise_forward_manual(client.clone(), req, part_rx, tx.clone());
+                supervise_forward_manual(client.clone(), req, part_rx, tx.clone(), reason.clone());
             }
         }
     }
@@ -1836,6 +1988,7 @@ async fn partition_resubscribe_loop_auto(
     member_id: Option<uuid::Uuid>,
     mut known: std::collections::HashSet<Partition>,
     tx: mpsc::Sender<Message>,
+    reason: ReasonSlot,
     interval_ms: u64,
 ) {
     let interval = std::time::Duration::from_millis(interval_ms.max(1));
@@ -1861,7 +2014,7 @@ async fn partition_resubscribe_loop_auto(
             };
             if let Ok(part_rx) = subscribe_partition_auto(&client, req.clone()).await {
                 known.insert(partition);
-                supervise_forward_auto(client.clone(), req, part_rx, tx.clone());
+                supervise_forward_auto(client.clone(), req, part_rx, tx.clone(), reason.clone());
             }
         }
     }
@@ -1881,6 +2034,7 @@ async fn stream_partition_resubscribe_loop_manual(
     prefetch: u32,
     mut known: std::collections::HashSet<Partition>,
     tx: mpsc::Sender<InflightMessage>,
+    reason: ReasonSlot,
     interval_ms: u64,
 ) {
     let interval = std::time::Duration::from_millis(interval_ms.max(1));
@@ -1905,7 +2059,13 @@ async fn stream_partition_resubscribe_loop_manual(
             };
             if let Ok(part_rx) = subscribe_stream_partition_manual(&client, req.clone()).await {
                 known.insert(partition);
-                supervise_forward_stream_manual(client.clone(), req, part_rx, tx.clone());
+                supervise_forward_stream_manual(
+                    client.clone(),
+                    req,
+                    part_rx,
+                    tx.clone(),
+                    reason.clone(),
+                );
             }
         }
     }
@@ -1922,6 +2082,7 @@ async fn stream_partition_resubscribe_loop_auto(
     prefetch: u32,
     mut known: std::collections::HashSet<Partition>,
     tx: mpsc::Sender<Message>,
+    reason: ReasonSlot,
     interval_ms: u64,
 ) {
     let interval = std::time::Duration::from_millis(interval_ms.max(1));
@@ -1946,7 +2107,13 @@ async fn stream_partition_resubscribe_loop_auto(
             };
             if let Ok(part_rx) = subscribe_stream_partition_auto(&client, req.clone()).await {
                 known.insert(partition);
-                supervise_forward_stream_auto(client.clone(), req, part_rx, tx.clone());
+                supervise_forward_stream_auto(
+                    client.clone(),
+                    req,
+                    part_rx,
+                    tx.clone(),
+                    reason.clone(),
+                );
             }
         }
     }
@@ -1956,7 +2123,7 @@ async fn stream_partition_resubscribe_loop_auto(
 async fn subscribe_partition_manual(
     client: &Client,
     req: Subscribe,
-) -> FibrilResult<mpsc::Receiver<InflightMessage>> {
+) -> FibrilResult<PartRx<InflightMessage>> {
     let mut attempts = 0u32;
     loop {
         let engine = client
@@ -1987,7 +2154,7 @@ async fn subscribe_partition_manual(
 async fn subscribe_partition_auto(
     client: &Client,
     req: Subscribe,
-) -> FibrilResult<mpsc::Receiver<Message>> {
+) -> FibrilResult<PartRx<Message>> {
     let mut attempts = 0u32;
     loop {
         let engine = client
@@ -2018,7 +2185,7 @@ async fn subscribe_partition_auto(
 async fn subscribe_stream_partition_manual(
     client: &Client,
     req: SubscribeStream,
-) -> FibrilResult<mpsc::Receiver<InflightMessage>> {
+) -> FibrilResult<PartRx<InflightMessage>> {
     let mut attempts = 0u32;
     loop {
         let engine = client
@@ -2049,7 +2216,7 @@ async fn subscribe_stream_partition_manual(
 async fn subscribe_stream_partition_auto(
     client: &Client,
     req: SubscribeStream,
-) -> FibrilResult<mpsc::Receiver<Message>> {
+) -> FibrilResult<PartRx<Message>> {
     let mut attempts = 0u32;
     loop {
         let engine = client
@@ -2668,45 +2835,89 @@ impl Publisher {
     }
 }
 
+/// Merge per-partition delivery legs into one channel, propagating the first
+/// leg's close reason onto the merged slot. A single leg is returned as-is (no
+/// extra hop). The merged channel closes when every forwarder ends, and the
+/// first stamped reason wins.
+fn fan_in_legs<M: Send + 'static>(mut legs: Vec<PartRx<M>>, prefetch: u32) -> PartRx<M> {
+    if legs.len() == 1 {
+        if let Some(leg) = legs.pop() {
+            return leg;
+        }
+    }
+    let cap = (prefetch as usize).max(1) * legs.len().max(1);
+    let (tx, rx) = mpsc::channel(cap);
+    let merged_reason = new_reason_slot();
+    for leg in legs {
+        let tx = tx.clone();
+        let merged_reason = merged_reason.clone();
+        tokio::spawn(async move {
+            let mut part_rx = leg.rx;
+            while let Some(msg) = part_rx.recv().await {
+                if tx.send(msg).await.is_err() {
+                    return;
+                }
+            }
+            if let Some(reason) = leg.reason.get() {
+                stamp_reason(&merged_reason, reason.clone());
+            }
+        });
+    }
+    PartRx {
+        rx,
+        reason: merged_reason,
+    }
+}
+
 impl Subscription {
-    /// Merge per-partition delivery streams into one subscription. A single
-    /// partition is returned as-is (no extra hop); multiple partitions are
-    /// forwarded into one merged channel by a task per partition. Each
+    /// Merge per-partition delivery streams into one subscription. Each
     /// `InflightMessage` carries its own settle channel, so acks route back to
     /// the delivering partition's owner regardless of the merge. Ordering is
     /// preserved within a partition, interleaved across partitions.
-    fn fan_in(mut receivers: Vec<mpsc::Receiver<InflightMessage>>, prefetch: u32) -> Self {
-        if receivers.len() == 1 {
-            if let Some(rx) = receivers.pop() {
-                return Subscription { rx };
+    fn fan_in(legs: Vec<PartRx<InflightMessage>>, prefetch: u32) -> Self {
+        let leg = fan_in_legs(legs, prefetch);
+        Subscription {
+            rx: leg.rx,
+            reason: leg.reason,
+            terminal: None,
+        }
+    }
+
+    /// Receive the next manual-ack message, or the typed terminal event when
+    /// the subscription ends. The terminal event is fused: after the first
+    /// `Closed`, every later call returns the same reason.
+    pub async fn recv(&mut self) -> SubEvent<InflightMessage> {
+        if let Some(reason) = &self.terminal {
+            return SubEvent::Closed(reason.clone());
+        }
+        match self.rx.recv().await {
+            Some(msg) => SubEvent::Delivery(msg),
+            None => {
+                let reason = self
+                    .reason
+                    .get()
+                    .cloned()
+                    .unwrap_or_else(CloseReason::unrecorded);
+                self.terminal = Some(reason.clone());
+                SubEvent::Closed(reason)
             }
         }
-        let cap = (prefetch as usize).max(1) * receivers.len().max(1);
-        let (tx, rx) = mpsc::channel(cap);
-        for mut part_rx in receivers {
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                while let Some(msg) = part_rx.recv().await {
-                    if tx.send(msg).await.is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-        Subscription { rx }
     }
 
-    /// Receive the next manual-ack message.
-    ///
-    /// Returns `None` when the subscription channel closes.
-    pub async fn recv(&mut self) -> Option<InflightMessage> {
-        self.rx.recv().await
+    /// Why the subscription ended, once it has. `None` while it is live.
+    pub fn close_reason(&self) -> Option<CloseReason> {
+        self.terminal.clone().or_else(|| self.reason.get().cloned())
     }
 
-    /// Convert this subscription into a stream of manual-ack messages.
+    /// Convert this subscription into a stream of manual-ack messages. The
+    /// stream ends at the terminal event; use [`Subscription::recv`] when the
+    /// close reason matters.
     pub fn into_stream(self) -> impl futures::Stream<Item = InflightMessage> {
         futures::stream::unfold(self, |mut s| async move {
-            s.rx.recv().await.map(|msg| (msg, s))
+            match s.recv().await {
+                SubEvent::Delivery(msg) => Some((msg, s)),
+                SubEvent::Closed(_) => None,
+            }
         })
     }
 }
@@ -2715,38 +2926,50 @@ impl AutoAckedSubscription {
     /// Merge per-partition auto-ack streams into one subscription. See
     /// [`Subscription::fan_in`]; auto-ack settles server-side, so there is no
     /// ack to route — this is a plain stream merge.
-    fn fan_in(mut receivers: Vec<mpsc::Receiver<Message>>, prefetch: u32) -> Self {
-        if receivers.len() == 1 {
-            if let Some(rx) = receivers.pop() {
-                return AutoAckedSubscription { rx };
+    fn fan_in(legs: Vec<PartRx<Message>>, prefetch: u32) -> Self {
+        let leg = fan_in_legs(legs, prefetch);
+        AutoAckedSubscription {
+            rx: leg.rx,
+            reason: leg.reason,
+            terminal: None,
+        }
+    }
+
+    /// Receive the next auto-ack message, or the typed terminal event when the
+    /// subscription ends. The terminal event is fused: after the first
+    /// `Closed`, every later call returns the same reason.
+    pub async fn recv(&mut self) -> SubEvent<Message> {
+        if let Some(reason) = &self.terminal {
+            return SubEvent::Closed(reason.clone());
+        }
+        match self.rx.recv().await {
+            Some(msg) => SubEvent::Delivery(msg),
+            None => {
+                let reason = self
+                    .reason
+                    .get()
+                    .cloned()
+                    .unwrap_or_else(CloseReason::unrecorded);
+                self.terminal = Some(reason.clone());
+                SubEvent::Closed(reason)
             }
         }
-        let cap = (prefetch as usize).max(1) * receivers.len().max(1);
-        let (tx, rx) = mpsc::channel(cap);
-        for mut part_rx in receivers {
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                while let Some(msg) = part_rx.recv().await {
-                    if tx.send(msg).await.is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-        AutoAckedSubscription { rx }
     }
 
-    /// Receive the next auto-ack message.
-    ///
-    /// Returns `None` when the subscription channel closes.
-    pub async fn recv(&mut self) -> Option<Message> {
-        self.rx.recv().await
+    /// Why the subscription ended, once it has. `None` while it is live.
+    pub fn close_reason(&self) -> Option<CloseReason> {
+        self.terminal.clone().or_else(|| self.reason.get().cloned())
     }
 
-    /// Convert this subscription into a stream of messages.
+    /// Convert this subscription into a stream of messages. The stream ends at
+    /// the terminal event; use [`AutoAckedSubscription::recv`] when the close
+    /// reason matters.
     pub fn into_stream(self) -> impl futures::Stream<Item = Message> {
         futures::stream::unfold(self, |mut s| async move {
-            s.rx.recv().await.map(|msg| (msg, s))
+            match s.recv().await {
+                SubEvent::Delivery(msg) => Some((msg, s)),
+                SubEvent::Closed(_) => None,
+            }
         })
     }
 }
@@ -3488,17 +3711,29 @@ enum Command {
 #[derive(Debug)]
 struct AutoAckedSubChannel {
     auto: mpsc::Receiver<Message>,
+    reason: ReasonSlot,
 }
 
 #[derive(Debug)]
 struct AckableSubChannel {
     manual: mpsc::Receiver<InflightMessage>,
+    reason: ReasonSlot,
 }
 
 #[derive(Debug, Clone)]
 enum SubDelivery {
-    Manual(mpsc::Sender<InflightMessage>),
-    Auto(mpsc::Sender<Message>),
+    Manual(mpsc::Sender<InflightMessage>, ReasonSlot),
+    Auto(mpsc::Sender<Message>, ReasonSlot),
+}
+
+impl SubDelivery {
+    /// Stamp why this subscription is about to end. The receive side reads it
+    /// after the channel drains.
+    fn stamp(&self, reason: CloseReason) {
+        match self {
+            SubDelivery::Manual(_, slot) | SubDelivery::Auto(_, slot) => stamp_reason(slot, reason),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -3530,7 +3765,17 @@ fn apply_reconcile_result(
         };
 
         if item.action != ReconcileAction::Keep {
-            registry.remove(&client.sub_id);
+            if let Some(registered) = registry.remove(&client.sub_id) {
+                let reason = match item.action {
+                    ReconcileAction::RecreateClientSide => CloseReason::Recreated,
+                    _ => CloseReason::Reconciled {
+                        action: item.action,
+                        code: item.code,
+                        reason: item.reason.clone(),
+                    },
+                };
+                registered.delivery.stamp(reason);
+            }
             continue;
         }
 
@@ -4162,7 +4407,7 @@ where
                             };
                             if let Some(sub) = subs.get(&d.sub_id).cloned() {
                                 match sub.delivery {
-                                    SubDelivery::Manual(tx) => {
+                                    SubDelivery::Manual(tx, _) => {
                                         let (ack_tx, ack_rx) = oneshot::channel();
                                         let msg = InflightMessage {
                                             delivery_tag: d.delivery_tag,
@@ -4229,7 +4474,7 @@ where
                                         }
                                     }
 
-                                    SubDelivery::Auto(tx) => {
+                                    SubDelivery::Auto(tx, _) => {
                                         let res = tx.send(Message {
                                             delivery_tag: d.delivery_tag,
                                             published: d.published,
@@ -4290,7 +4535,8 @@ where
                                 match waiter {
                                     Waiter::SubscribeManual(tx) => {
                                         let (txm, rxm) = mpsc::channel(ok.prefetch as usize);
-                                        let delivery = SubDelivery::Manual(txm);
+                                        let reason = new_reason_slot();
+                                        let delivery = SubDelivery::Manual(txm, reason.clone());
 
                                         subs.insert(ok.sub_id, SubState {
                                             topic: ok.topic.clone(),
@@ -4318,7 +4564,7 @@ where
                                             }
                                         }
 
-                                        let res = tx.send(Ok(AckableSubChannel { manual: rxm }));
+                                        let res = tx.send(Ok(AckableSubChannel { manual: rxm, reason }));
 
                                         if res.is_err() {
                                             tracing::warn!("Broken pipe");
@@ -4327,7 +4573,8 @@ where
 
                                     Waiter::SubscribeAuto(tx) => {
                                         let (txa, rxa) = mpsc::channel(ok.prefetch as usize);
-                                        let delivery = SubDelivery::Auto(txa);
+                                        let reason = new_reason_slot();
+                                        let delivery = SubDelivery::Auto(txa, reason.clone());
 
                                         subs.insert(ok.sub_id, SubState {
                                             topic: ok.topic.clone(),
@@ -4355,7 +4602,7 @@ where
                                             }
                                         }
 
-                                        let res = tx.send(Ok(AutoAckedSubChannel { auto: rxa }));
+                                        let res = tx.send(Ok(AutoAckedSubChannel { auto: rxa, reason }));
 
                                         if res.is_err() {
                                             tracing::warn!("Broken pipe");
@@ -4369,26 +4616,28 @@ where
                                     // the durable cursor owns resume.
                                     Waiter::StreamSubscribeManual(tx) => {
                                         let (txm, rxm) = mpsc::channel(ok.prefetch as usize);
+                                        let reason = new_reason_slot();
                                         subs.insert(ok.sub_id, SubState {
                                             topic: ok.topic.clone(),
                                             group: ok.group.clone(),
                                             partition: ok.partition,
-                                            delivery: SubDelivery::Manual(txm),
+                                            delivery: SubDelivery::Manual(txm, reason.clone()),
                                         });
-                                        if tx.send(Ok(AckableSubChannel { manual: rxm })).is_err() {
+                                        if tx.send(Ok(AckableSubChannel { manual: rxm, reason })).is_err() {
                                             tracing::warn!("Broken pipe");
                                         }
                                     }
 
                                     Waiter::StreamSubscribeAuto(tx) => {
                                         let (txa, rxa) = mpsc::channel(ok.prefetch as usize);
+                                        let reason = new_reason_slot();
                                         subs.insert(ok.sub_id, SubState {
                                             topic: ok.topic.clone(),
                                             group: ok.group.clone(),
                                             partition: ok.partition,
-                                            delivery: SubDelivery::Auto(txa),
+                                            delivery: SubDelivery::Auto(txa, reason.clone()),
                                         });
-                                        if tx.send(Ok(AutoAckedSubChannel { auto: rxa })).is_err() {
+                                        if tx.send(Ok(AutoAckedSubChannel { auto: rxa, reason })).is_err() {
                                             tracing::warn!("Broken pipe");
                                         }
                                     }
@@ -4559,6 +4808,33 @@ where
                                 });
                             }
                         }
+                        x if x == Op::SubscriptionClosed as u16 => {
+                            // The broker says one subscription ended (topic
+                            // deleted, ownership moved, ...). Stamp why and
+                            // drop the delivery sender so the consumer drains
+                            // whatever is buffered and then sees the typed
+                            // terminal event.
+                            let closed: SubscriptionClosed = match decode_protocol(&frame) {
+                                Ok(closed) => closed,
+                                Err(err) => {
+                                    fatal_error = Some(err);
+                                    break;
+                                }
+                            };
+                            if let Some(sub) = subs.remove(&closed.sub_id) {
+                                tracing::info!(
+                                    sub_id = closed.sub_id,
+                                    code = ?closed.code,
+                                    "subscription closed by the broker: {}",
+                                    closed.message
+                                );
+                                sub.delivery
+                                    .stamp(CloseReason::from_wire(closed.code, closed.message));
+                                if let Ok(mut registry) = subscription_registry.write() {
+                                    registry.remove(&closed.sub_id);
+                                }
+                            }
+                        }
                         x if x == Op::Error as u16 => {
                             let err: ErrorMsg = match decode_protocol(&frame) {
                                 Ok(err) => err,
@@ -4677,6 +4953,21 @@ where
         // retryable transport drop from a fatal rejection (auth, forbidden).
         if let Ok(mut slot) = close_reason.lock() {
             *slot = fatal_error.clone();
+        }
+
+        // A non-retryable close (bad credentials, forbidden) means no
+        // reconnect will ever revive the registered subscriptions, so end
+        // them with a typed reason instead of leaving consumers waiting on
+        // channels that can never speak again. Retryable drops keep the
+        // registry: the reconnect path reconciles and the channels resume.
+        if let Some(err) = fatal_error.as_ref().filter(|err| !err.is_retryable()) {
+            if let Ok(mut registry) = subscription_registry.write() {
+                for (_, registered) in registry.drain() {
+                    registered.delivery.stamp(CloseReason::Disconnected {
+                        msg: format!("the connection failed and will not be retried: {err}"),
+                    });
+                }
+            }
         }
 
         for (_, waiter) in waiters.drain() {
@@ -4878,52 +5169,64 @@ impl EngineHandle {
         rx.await.map_err(|_e| FibrilError::BrokenPipe)?
     }
 
-    async fn subscribe(&self, req: Subscribe) -> FibrilResult<mpsc::Receiver<InflightMessage>> {
+    async fn subscribe(&self, req: Subscribe) -> FibrilResult<PartRx<InflightMessage>> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(Command::Subscribe { req, reply: tx })
             .await
             .map_err(|_e| FibrilError::BrokenPipe)?;
         let chans = rx.await.map_err(|_e| FibrilError::BrokenPipe)??;
-        Ok(chans.manual)
+        Ok(PartRx {
+            rx: chans.manual,
+            reason: chans.reason,
+        })
         // TODO: use oneshot channel to wait for when the packet has left(better errors timing)?
     }
 
-    async fn subscribe_auto_ack(&self, req: Subscribe) -> FibrilResult<mpsc::Receiver<Message>> {
+    async fn subscribe_auto_ack(&self, req: Subscribe) -> FibrilResult<PartRx<Message>> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(Command::SubscribeAutoAcked { req, reply: tx })
             .await
             .map_err(|_e| FibrilError::BrokenPipe)?;
         let chans = rx.await.map_err(|_e| FibrilError::BrokenPipe)??;
-        Ok(chans.auto)
+        Ok(PartRx {
+            rx: chans.auto,
+            reason: chans.reason,
+        })
         // TODO: use oneshot channel to wait for when the packet has left(better errors timing)?
     }
 
     async fn subscribe_stream(
         &self,
         req: SubscribeStream,
-    ) -> FibrilResult<mpsc::Receiver<InflightMessage>> {
+    ) -> FibrilResult<PartRx<InflightMessage>> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(Command::SubscribeStream { req, reply: tx })
             .await
             .map_err(|_e| FibrilError::BrokenPipe)?;
         let chans = rx.await.map_err(|_e| FibrilError::BrokenPipe)??;
-        Ok(chans.manual)
+        Ok(PartRx {
+            rx: chans.manual,
+            reason: chans.reason,
+        })
     }
 
     async fn subscribe_stream_auto_ack(
         &self,
         req: SubscribeStream,
-    ) -> FibrilResult<mpsc::Receiver<Message>> {
+    ) -> FibrilResult<PartRx<Message>> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(Command::SubscribeStreamAutoAcked { req, reply: tx })
             .await
             .map_err(|_e| FibrilError::BrokenPipe)?;
         let chans = rx.await.map_err(|_e| FibrilError::BrokenPipe)??;
-        Ok(chans.auto)
+        Ok(PartRx {
+            rx: chans.auto,
+            reason: chans.reason,
+        })
     }
 }
 
@@ -4993,6 +5296,13 @@ pub struct ClientOptions {
     pub auto_reconnect: AutoReconnect,
     /// How resumed connections reconcile subscriptions after reconnect.
     pub reconcile_policy: ReconcilePolicy,
+    /// Whether a supervised subscription silently re-subscribes when a
+    /// reconcile says the broker-side subscription is gone but safely
+    /// recreatable (`recreate_client_side`). Off, the subscription instead
+    /// ends with the typed `Recreated` close reason. Unsupervised
+    /// subscriptions (no `partition_resubscribe_interval_ms`) always surface
+    /// the close.
+    pub auto_resubscribe: bool,
     /// Max times a single operation will follow `Op::Redirect` before failing.
     pub max_redirects: u32,
     /// Minimum interval between client topology refreshes (anti-storm).
@@ -5037,6 +5347,7 @@ impl ClientOptions {
             resume_identity: None,
             auto_reconnect: AutoReconnect::default(),
             reconcile_policy: ReconcilePolicy::Conservative,
+            auto_resubscribe: true,
             max_redirects: 3,
             topology_refresh_cooldown_ms: 1_000,
             topology_warm_timeout_ms: Some(5_000),
@@ -5186,6 +5497,16 @@ impl ClientOptions {
     pub fn reconnect_reconcile_policy(self, reconcile_policy: ReconcilePolicy) -> Self {
         Self {
             reconcile_policy,
+            ..self
+        }
+    }
+
+    /// Set whether supervised subscriptions silently re-subscribe on a
+    /// `recreate_client_side` reconcile verdict (default on). Off, the
+    /// subscription ends with the typed `Recreated` close reason instead.
+    pub fn auto_resubscribe(self, auto_resubscribe: bool) -> Self {
+        Self {
+            auto_resubscribe,
             ..self
         }
     }
@@ -5747,7 +6068,7 @@ mod tests {
                 }],
             }
         );
-        let msg = sub.recv().await.unwrap();
+        let msg = sub.recv().await.delivery().unwrap();
         assert_eq!(msg.payload, b"after-reconnect");
         assert_eq!(msg.delivery_tag, DeliveryTag { epoch: 123 });
 
@@ -6203,8 +6524,274 @@ mod tests {
         assert_eq!(reconcile.subscriptions[0].sub_id, 77);
         assert_eq!(reconcile.subscriptions[0].topic, "jobs");
         // And delivery resumes on the re-established subscription.
-        let msg = sub.recv().await.unwrap();
+        let msg = sub.recv().await.delivery().unwrap();
         assert_eq!(msg.payload, b"after-restart");
+
+        client.shutdown().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn subscription_closed_frame_surfaces_typed_terminal_event() {
+        // A broker SubscriptionClosed push ends the subscription with the typed
+        // reason instead of a silent stream stop. The static fan-in path (no
+        // supervisor) is used so the close reaches the consumer directly.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (conn, _) = listener.accept().await.unwrap();
+            let mut conn = Framed::new(conn, ProtoCodec);
+            let hello = conn.next().await.unwrap().unwrap();
+            assert_eq!(hello.opcode, Op::Hello as u16);
+            conn.send(
+                try_encode(
+                    Op::HelloOk,
+                    hello.request_id,
+                    &HelloOk {
+                        protocol_version: PROTOCOL_V1,
+                        owner_id: uuid::Uuid::new_v4(),
+                        client_id: uuid::Uuid::new_v4(),
+                        resume_token: uuid::Uuid::new_v4(),
+                        resume_outcome: ResumeOutcome::New,
+                        server_name: "fake".into(),
+                        compliance: COMPLIANCE_STRING.into(),
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+            let subscribe = conn.next().await.unwrap().unwrap();
+            assert_eq!(subscribe.opcode, Op::Subscribe as u16);
+            let req: Subscribe = try_decode(&subscribe).unwrap();
+            conn.send(
+                try_encode(
+                    Op::SubscribeOk,
+                    subscribe.request_id,
+                    &SubscribeOk {
+                        sub_id: 55,
+                        topic: req.topic,
+                        group: req.group,
+                        partition: Partition::new(0),
+                        prefetch: req.prefetch,
+                        consumer_group: None,
+                        consumer_target: None,
+                        member_id: None,
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+            // Deliver one message, then close the subscription with a reason.
+            conn.send(
+                wire::encode_deliver(
+                    1,
+                    &Deliver {
+                        sub_id: 55,
+                        topic: "jobs".into(),
+                        group: None,
+                        partition: Partition::new(0),
+                        offset: 1,
+                        delivery_tag: DeliveryTag { epoch: 1 },
+                        published: 1,
+                        publish_received: 2,
+                        content_type: None,
+                        headers: HashMap::new(),
+                        payload: b"last".to_vec(),
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            conn.send(
+                wire::encode_subscription_closed(
+                    2,
+                    &SubscriptionClosed {
+                        sub_id: 55,
+                        code: ReasonCode::TopicDeleted,
+                        message: "the queue was deleted".into(),
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            // Keep the connection open so the close is not mistaken for a drop.
+            let _ = conn.next().await;
+        });
+
+        let client = ClientOptions::new()
+            .disable_topology_warm()
+            .disable_partition_resubscribe()
+            .connect(addr)
+            .await
+            .unwrap();
+        let mut sub = client.subscribe("jobs").unwrap().sub().await.unwrap();
+
+        // The buffered delivery arrives first, in order.
+        let msg = match sub.recv().await {
+            SubEvent::Delivery(msg) => msg,
+            other => panic!("expected a delivery, got {other:?}"),
+        };
+        assert_eq!(msg.payload, b"last");
+
+        // Then exactly one typed terminal event.
+        match sub.recv().await {
+            SubEvent::Closed(CloseReason::TopicDeleted) => {}
+            other => panic!("expected TopicDeleted close, got {other:?}"),
+        }
+        // The event is fused: recv keeps returning the same reason, and the
+        // accessor agrees.
+        assert!(matches!(
+            sub.recv().await,
+            SubEvent::Closed(CloseReason::TopicDeleted)
+        ));
+        assert_eq!(sub.close_reason(), Some(CloseReason::TopicDeleted));
+
+        client.shutdown().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn recreate_verdict_without_auto_resubscribe_surfaces_recreated_close() {
+        // With auto_resubscribe off, a reconcile RecreateClientSide verdict
+        // ends the subscription with the typed Recreated reason rather than
+        // silently re-subscribing. Static fan-in so the reconcile close reaches
+        // the consumer directly.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let owner_id = uuid::Uuid::new_v4();
+            let client_id = uuid::Uuid::new_v4();
+            let resume_token = uuid::Uuid::new_v4();
+
+            let (first, _) = listener.accept().await.unwrap();
+            let mut first = Framed::new(first, ProtoCodec);
+            let hello = first.next().await.unwrap().unwrap();
+            first
+                .send(
+                    try_encode(
+                        Op::HelloOk,
+                        hello.request_id,
+                        &HelloOk {
+                            protocol_version: PROTOCOL_V1,
+                            owner_id,
+                            client_id,
+                            resume_token,
+                            resume_outcome: ResumeOutcome::New,
+                            server_name: "fake".into(),
+                            compliance: COMPLIANCE_STRING.into(),
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            let subscribe = first.next().await.unwrap().unwrap();
+            let req: Subscribe = try_decode(&subscribe).unwrap();
+            first
+                .send(
+                    try_encode(
+                        Op::SubscribeOk,
+                        subscribe.request_id,
+                        &SubscribeOk {
+                            sub_id: 61,
+                            topic: req.topic,
+                            group: req.group,
+                            partition: Partition::new(0),
+                            prefetch: req.prefetch,
+                            consumer_group: None,
+                            consumer_target: None,
+                            member_id: None,
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            // Reconnect: fresh session, reconcile advises a recreate.
+            let (second, _) = listener.accept().await.unwrap();
+            let mut second = Framed::new(second, ProtoCodec);
+            let hello = second.next().await.unwrap().unwrap();
+            second
+                .send(
+                    try_encode(
+                        Op::HelloOk,
+                        hello.request_id,
+                        &HelloOk {
+                            protocol_version: PROTOCOL_V1,
+                            owner_id,
+                            client_id,
+                            resume_token,
+                            resume_outcome: ResumeOutcome::ResumeRejected,
+                            server_name: "fake".into(),
+                            compliance: COMPLIANCE_STRING.into(),
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            let reconcile = second.next().await.unwrap().unwrap();
+            assert_eq!(reconcile.opcode, Op::ReconcileClient as u16);
+            let client_sub = ReconcileSubscription {
+                sub_id: 61,
+                topic: "jobs".into(),
+                group: None,
+                partition: Partition::new(0),
+                auto_ack: false,
+                prefetch: 1,
+                consumer_group: None,
+                consumer_target: None,
+                member_id: None,
+            };
+            second
+                .send(
+                    try_encode(
+                        Op::ReconcileResult,
+                        reconcile.request_id,
+                        &ReconcileResult {
+                            subscriptions: vec![ReconcileSubscriptionResult {
+                                client: Some(client_sub),
+                                server: None,
+                                action: ReconcileAction::RecreateClientSide,
+                                code: ReasonCode::Recreate,
+                                reason: "recreate".into(),
+                            }],
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            let _ = second.next().await;
+        });
+
+        let mut client = ClientOptions::new()
+            .disable_topology_warm()
+            .disable_partition_resubscribe()
+            .auto_resubscribe(false)
+            .connect(addr)
+            .await
+            .unwrap();
+        let mut sub = client.subscribe("jobs").unwrap().sub().await.unwrap();
+        let outcome = client.reconnect().await.unwrap();
+        assert_eq!(outcome.resume_outcome, ResumeOutcome::ResumeRejected);
+
+        // The recreate verdict ends this handle with the typed Recreated close.
+        match sub.recv().await {
+            SubEvent::Closed(CloseReason::Recreated) => {}
+            other => panic!("expected Recreated close, got {other:?}"),
+        }
 
         client.shutdown().await;
         server.await.unwrap();
@@ -6512,7 +7099,12 @@ mod tests {
                 assert_eq!(req.prefetch, 8);
                 assert!(!req.auto_ack);
                 let (_tx, manual) = mpsc::channel(1);
-                reply.send(Ok(AckableSubChannel { manual })).unwrap();
+                reply
+                    .send(Ok(AckableSubChannel {
+                        manual,
+                        reason: new_reason_slot(),
+                    }))
+                    .unwrap();
             }
             other => panic!("expected subscribe stream, got {other:?}"),
         }
@@ -6542,7 +7134,12 @@ mod tests {
                     assert_eq!(req.start, StreamStart::Latest);
                     seen.push(req.partition.id());
                     let (_tx, auto) = mpsc::channel(1);
-                    reply.send(Ok(AutoAckedSubChannel { auto })).unwrap();
+                    reply
+                        .send(Ok(AutoAckedSubChannel {
+                            auto,
+                            reason: new_reason_slot(),
+                        }))
+                        .unwrap();
                 }
                 other => panic!("expected auto-ack subscribe stream, got {other:?}"),
             }
@@ -6682,7 +7279,10 @@ mod tests {
                 let (tx, manual_rx) = mpsc::channel(1);
                 keep_open.push(Box::new(tx));
                 reply
-                    .send(Ok(AckableSubChannel { manual: manual_rx }))
+                    .send(Ok(AckableSubChannel {
+                        manual: manual_rx,
+                        reason: new_reason_slot(),
+                    }))
                     .unwrap();
             }
             other => panic!("expected manual subscribe, got {other:?}"),
@@ -6701,7 +7301,10 @@ mod tests {
                 let (tx, auto_rx) = mpsc::channel(1);
                 keep_open.push(Box::new(tx));
                 reply
-                    .send(Ok(AutoAckedSubChannel { auto: auto_rx }))
+                    .send(Ok(AutoAckedSubChannel {
+                        auto: auto_rx,
+                        reason: new_reason_slot(),
+                    }))
                     .unwrap();
             }
             other => panic!("expected auto subscribe, got {other:?}"),

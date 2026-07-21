@@ -102,15 +102,15 @@ async fn main() -> anyhow::Result<()> {
                 .expect("sub");
             while !stop.load(Ordering::Acquire) {
                 match tokio::time::timeout(Duration::from_millis(500), sub.recv()).await {
-                    Ok(Some(msg)) => {
+                    Ok(fibril_client::SubEvent::Delivery(msg)) => {
                         if let Some(seq) = decode(&msg.payload) {
                             *received.lock().unwrap().entry(seq).or_insert(0) += 1;
                             last_rx_ms.store(unix_millis(), Ordering::Release);
                         }
                         let _ = msg.complete().await;
                     }
-                    Ok(None) => break, // stream fully closed
-                    Err(_) => {}       // idle tick; loop and re-check stop
+                    Ok(fibril_client::SubEvent::Closed(_)) => break, // stream fully closed
+                    Err(_) => {} // idle tick; loop and re-check stop
                 }
             }
         })

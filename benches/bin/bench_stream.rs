@@ -372,10 +372,12 @@ fn start_readers(
                 }
 
                 let received = match timeout(Duration::from_millis(100), sub.recv()).await {
-                    Ok(msg) => msg,
+                    Ok(event) => event,
                     Err(_) => continue,
                 };
-                let Some(msg) = received else { break };
+                let fibril_client::SubEvent::Delivery(msg) = received else {
+                    break;
+                };
 
                 stats.received_total += 1;
                 if is_measured_payload(&msg.payload) {

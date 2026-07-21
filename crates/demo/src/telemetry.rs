@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use fibril_client::NewMessage;
+use fibril_client::{NewMessage, SubEvent};
 use serde::Serialize;
 
 use crate::Demo;
@@ -61,7 +61,7 @@ pub async fn run_dashboard_reader(demo: Arc<Demo>) -> anyhow::Result<()> {
         .prefetch(64)
         .sub_auto_ack()
         .await?;
-    while sub.recv().await.is_some() {}
+    while let SubEvent::Delivery(_) = sub.recv().await {}
     Ok(())
 }
 
@@ -87,8 +87,8 @@ pub async fn run_analytics_reader(demo: Arc<Demo>) -> anyhow::Result<()> {
                 break;
             }
             tokio::select! {
-                msg = sub.recv() => {
-                    if msg.is_none() {
+                event = sub.recv() => {
+                    if matches!(event, SubEvent::Closed(_)) {
                         return Ok(());
                     }
                 }
@@ -107,6 +107,6 @@ pub async fn run_dispatch_screen(demo: Arc<Demo>) -> anyhow::Result<()> {
         .prefetch(64)
         .sub_auto_ack()
         .await?;
-    while sub.recv().await.is_some() {}
+    while let SubEvent::Delivery(_) = sub.recv().await {}
     Ok(())
 }

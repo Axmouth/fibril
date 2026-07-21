@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use fibril_client::NewMessage;
+use fibril_client::{NewMessage, SubEvent};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -201,7 +201,7 @@ pub async fn run_kitchen(demo: Arc<Demo>, couriers: mpsc::Sender<CourierJob>) ->
     let deliveries = client.publisher("deliveries")?;
     let payments = client.publisher("payments")?;
     let mut sub = client.subscribe("orders")?.prefetch(8).sub().await?;
-    while let Some(msg) = sub.recv().await {
+    while let SubEvent::Delivery(msg) = sub.recv().await {
         service_time(30, 90).await;
         let Ok(order) = serde_json::from_slice::<OrderRef>(&msg.payload) else {
             msg.complete().await?;
@@ -285,7 +285,7 @@ pub async fn run_couriers(
 pub async fn run_delivery_tracker(demo: Arc<Demo>) -> anyhow::Result<()> {
     let client = demo.client().await?;
     let mut sub = client.subscribe("deliveries")?.prefetch(8).sub().await?;
-    while let Some(msg) = sub.recv().await {
+    while let SubEvent::Delivery(msg) = sub.recv().await {
         service_time(40, 120).await;
         msg.complete().await?;
     }
@@ -298,7 +298,7 @@ pub async fn run_delivery_tracker(demo: Arc<Demo>) -> anyhow::Result<()> {
 pub async fn run_payment_processor(demo: Arc<Demo>) -> anyhow::Result<()> {
     let client = demo.client().await?;
     let mut sub = client.subscribe("payments")?.prefetch(8).sub().await?;
-    while let Some(msg) = sub.recv().await {
+    while let SubEvent::Delivery(msg) = sub.recv().await {
         service_time(30, 80).await;
         if fastrand::f64() < demo.flakiness {
             msg.retry().await?;

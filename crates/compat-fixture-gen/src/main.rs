@@ -118,8 +118,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut received = Vec::new();
     for _ in 0..RECEIVE_COUNT {
         match timeout(Duration::from_secs(5), sub.recv()).await {
-            Ok(Some(msg)) => received.push(msg),
-            Ok(None) => break,
+            Ok(fibril_client::SubEvent::Delivery(msg)) => received.push(msg),
+            Ok(fibril_client::SubEvent::Closed(_)) => break,
             Err(_) => break,
         }
     }
@@ -164,8 +164,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await?;
     for _ in 0..STREAM_COUNT {
         match timeout(Duration::from_secs(5), stream_sub.recv()).await {
-            Ok(Some(_)) => stream_consumed += 1,
-            Ok(None) => break,
+            Ok(fibril_client::SubEvent::Delivery(_)) => stream_consumed += 1,
+            Ok(fibril_client::SubEvent::Closed(_)) => break,
             Err(_) => break,
         }
     }

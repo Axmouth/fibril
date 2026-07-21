@@ -573,6 +573,7 @@ async fn subscription_fans_in_all_partitions() {
         let msg = tokio::time::timeout(std::time::Duration::from_secs(5), sub.recv())
             .await
             .expect("fan-in delivery must not hang")
+            .delivery()
             .expect("subscription should yield a message");
         payloads.insert(msg.payload[0]);
     }
@@ -654,6 +655,7 @@ async fn subscription_auto_resubscribes_to_grown_partition() {
     let first = tokio::time::timeout(std::time::Duration::from_secs(5), sub.recv())
         .await
         .expect("first delivery")
+        .delivery()
         .expect("message");
     assert_eq!(first.payload, vec![0]);
 
@@ -664,9 +666,9 @@ async fn subscription_auto_resubscribes_to_grown_partition() {
     let saw_partition_1 = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             match sub.recv().await {
-                Some(msg) if msg.payload == vec![1] => break true,
-                Some(_) => continue,
-                None => break false,
+                fibril_client::SubEvent::Delivery(msg) if msg.payload == vec![1] => break true,
+                fibril_client::SubEvent::Delivery(_) => continue,
+                fibril_client::SubEvent::Closed(_) => break false,
             }
         }
     })
@@ -721,6 +723,7 @@ async fn pattern_subscription_fans_in_matching_queues() {
         let (source, _msg) = tokio::time::timeout(std::time::Duration::from_secs(5), sub.recv())
             .await
             .expect("pattern fan-in must not hang")
+            .delivery()
             .expect("subscription should yield a message");
         sources.insert(source.topic);
     }
@@ -771,6 +774,7 @@ async fn pattern_subscription_auto_ack_fans_in_matching_queues() {
         let (source, _msg) = tokio::time::timeout(std::time::Duration::from_secs(5), sub.recv())
             .await
             .expect("pattern fan-in must not hang")
+            .delivery()
             .expect("subscription should yield a message");
         sources.insert(source.topic);
     }

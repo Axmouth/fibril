@@ -121,7 +121,7 @@ async fn run_load_test(
                             }
                         }
                     };
-                    let Some(msg) = received else {
+                    let fibril_client::SubEvent::Delivery(msg) = received else {
                         break;
                     };
                     // just drain
