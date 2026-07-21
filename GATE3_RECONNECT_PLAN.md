@@ -23,10 +23,14 @@ or a generic disconnect.
    deliveries from the old incarnation stay governed by the #104 rules.
 4. Wire changes are additive only (serde-default trailing fields, new
    opcodes, no re-tagging of existing enum values). This family lands
-   before the #110 wire freeze and must not force a version bump. One
-   deliberate pre-1.0 exception is recorded in D6: ResumeOutcome gains
-   a variant, breaking pre-0.5 clients on the restart-resume path only,
-   accepted while nothing is frozen.
+   before the #110 wire freeze and must not force a version bump. Two
+   deliberate pre-1.0 exceptions are recorded, accepted while nothing is
+   frozen: ResumeOutcome gains a variant (D6, restart-resume path only),
+   and the reconcile-result code tail breaks pre-0.5 decoders because
+   the codec's strict finish() rejects trailing bytes, so no layout is
+   truly additive for already-released clients. The tail layout still
+   buys the other direction: a 0.5 client reading an older broker
+   defaults absent codes to Unspecified.
 5. Single-node guardrail: everything here works on a standalone broker.
    Restart reconciliation (#105) especially, since single-node restart is
    its most common case.
@@ -107,7 +111,7 @@ bundle draft):
 | Variant | Emitted when | Origin |
 | --- | --- | --- |
 | Unsubscribed | user closed or dropped the subscription locally | client |
-| QueueDeleted | topic or queue removed while subscribed | server |
+| TopicDeleted | topic (queue or stream) removed while subscribed | server |
 | OwnerMoved | partition ownership moved away and the sub was not (or could not be) migrated | server |
 | Reconciled { action, code } | reconcile verdict closed the sub (server_missing, server_mismatch, restore_failed, client_missing) | server |
 | Recreated | reconcile recreated the sub and auto-resubscribe is off, so the old handle ends | client |
