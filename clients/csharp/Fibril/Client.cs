@@ -57,6 +57,13 @@ public sealed record ClientOptions
     /// subscription with the typed close reason instead.
     /// </summary>
     public bool AutoResubscribe { get; init; } = true;
+
+    /// <summary>
+    /// Whether the client transparently redials a dropped bootstrap connection
+    /// before an operation (the default). Off, a closed connection surfaces its
+    /// close error instead; <see cref="Client.ReconnectAsync"/> reconnects explicitly.
+    /// </summary>
+    public bool AutoReconnect { get; init; } = true;
 }
 
 /// <summary>Notifies an exclusive-cohort member of its new partition assignment.</summary>
@@ -220,8 +227,42 @@ public sealed partial class Client : IAsyncDisposable
             {
                 throw new BrokenPipeException("client shut down");
             }
+            // With auto-reconnect off, surface why the connection closed rather than
+            // redialing under the caller. ReconnectAsync is the explicit way back.
+            if (!_opts.AutoReconnect)
+            {
+                throw _bootstrap.Error();
+            }
             _bootstrap = await Engine.ConnectAsync(_bootstrapEndpoint, EngineOpts(_bootstrapEndpoint, _bootstrap.ResumeIdentity), ct).ConfigureAwait(false);
             return _bootstrap;
+        }
+        finally
+        {
+            _bootstrapGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Forces a fresh bootstrap connection, offering the previous session's resume
+    /// identity, and returns the broker's resume outcome. <see cref="ResumeOutcome.Resumed"/>
+    /// means the server-side session was reattached; any other outcome means the
+    /// broker treated the connection as fresh. Existing publishers use the new
+    /// connection; active non-supervised subscriptions reconcile, and supervised
+    /// ones re-subscribe.
+    /// </summary>
+    public async Task<ResumeOutcome> ReconnectAsync(CancellationToken ct = default)
+    {
+        await _bootstrapGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_closed)
+            {
+                throw new BrokenPipeException("client shut down");
+            }
+            var old = _bootstrap;
+            _bootstrap = await Engine.ConnectAsync(_bootstrapEndpoint, EngineOpts(_bootstrapEndpoint, old.ResumeIdentity), ct).ConfigureAwait(false);
+            await old.ShutdownAsync().ConfigureAwait(false);
+            return _bootstrap.ResumeOutcome;
         }
         finally
         {

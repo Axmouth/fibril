@@ -91,8 +91,8 @@ the same durable name tracks an independent cursor per partition.
 | Reconcile subscriptions on reconnect | done | done | done | done | done |
 | Owner-restart (reconcile on any reconnect, not just resumed) | done | done | done | done | done |
 | Opt-in restore reconcile policy | done | done | done | done | done |
-| Explicit `reconnect()` returning the handshake outcome | done | done | done | no | no |
-| Disable automatic reconnect | done | done | done | no | no |
+| Explicit `reconnect()` returning the handshake outcome | done | done | done | done | done |
+| Disable automatic reconnect | done | done | done | done | done |
 | Typed subscription close reason on the receive surface | done | done | done | done | done |
 | Auto-resubscribe on a recreate verdict (opt-out) | done | done | done | done | done |
 | Stale-delivery settlement: typed error + route to current engine <sup>22</sup> | done | done | done | done | done |
