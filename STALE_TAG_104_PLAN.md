@@ -66,6 +66,31 @@ Each applies to EVERY client (Rust done, then TS, Python, Go, C#).
 
 ## Multi-angle review
 
-Run `/simplify` and `/code-review` on the branch; review through efficiency,
-altitude, and adversarial lenses before replicating to the other clients. Record
-findings and resolutions here.
+### /simplify (reuse, simplification, efficiency, altitude) - DONE
+
+Applied:
+- Efficiency/simplification (3 agents): the per-settle body clone was a
+  regression. Folded `settle_with`/`as_message`/`ack_command`/`nack_command`
+  into one consuming `settle(self, Settlement)` that MOVES headers/content_type/
+  payload into the returned `Message` and topic/group into the command - zero
+  clones on the settle path.
+- Delivery path: destructure the owned `SubState` and MOVE topic/group into the
+  `InflightMessage` instead of cloning.
+- Dead code: removed the now-unused `let shutdown_acks = shutdown.clone();`
+  (its consumer was the deleted per-delivery task).
+- Altitude: consolidated the bind+invalidate transition into `start_engine` as
+  one ordered operation (invalidate-if-not-Resumed, then bind) BEFORE the reader
+  loop can deliver - removed the separate, later `invalidate()` in
+  `reconnect_once`. This fixes the awkward bind-then-invalidate ordering and
+  keeps the current-tx bound before any delivery.
+
+Accepted (not changed):
+- Two pointers to the live engine (SettleContext.current_tx vs
+  EngineSlot.engine): they serve different consumers - the reader loop (which
+  cannot see the slot) reads current_tx; publish/subscribe ops use
+  slot.current(). Unifying would require the reader loop to reach the slot, a
+  larger change with no functional gain. Documented as intentional.
+- The delivery-path removal of the per-delivery `tokio::spawn` + oneshot is a
+  net hot-path WIN (confirmed by the efficiency lens).
+
+### /code-review (adversarial / correctness) - see follow-up findings below
