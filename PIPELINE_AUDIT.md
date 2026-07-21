@@ -46,7 +46,7 @@ Ranked findings:
 
 Clean bill: no IO, no encoding, no locks inside the hot commands.
 
-## Congestion visibility (user direction 2026-07-18)
+## Congestion visibility (2026-07-18)
 
 Two layers, the second being the real ask:
 

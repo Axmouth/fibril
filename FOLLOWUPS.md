@@ -3120,7 +3120,7 @@ buckets to a load face variant + faster light cycling. Also unlocks honest
 S3 signal speeds along tendrils (per-edge rate needs per-partition rates -
 assess cost then).
 
-## S4 arc: connections page tendril view + pub/sub plugging (user vision 2026-07-12)
+## S4 arc: connections page tendril view + pub/sub plugging (2026-07-12)
 
 An optional Connections-page diagram modeled on the "tendrils plugged both
 sides" art: the fibril ring center = this broker, publisher connections plug
@@ -3277,7 +3277,7 @@ Overview as proof -> migrate the remaining pages, extending families
 -> leak/regression verification incl. a dashboard-open-during-bench sanity ->
 docs/changelog sweep for the phase.
 
-## Future: mirrored ring orientation flag (user idea 2026-07-12)
+## Future: mirrored ring orientation flag (2026-07-12)
 
 The cluster diagram's tendril renderer is fully parametrized around one ring
 orientation (3/4 view, right side turned away: strands under the band left,
@@ -3389,6 +3389,30 @@ an A/B microbench before any optimization lands (validate-hotspots rule).
    client first, then port wins to TS/Python if they replicate.
 Each sitting: strace/flamegraph proof, FEATURE_MATRIX row when a public
 option lands, BENCHMARKING.md numbers refresh, CHANGELOG.
+
+## Future: live fake admin board in the docs (brief 2026-07-21)
+
+A demo dashboard embedded in the website: the REAL admin assets (captured
+page shell + the version's CSS/JS) rendered against canned data, so
+visitors see the board alive without running anything. Replay, not a
+hosted broker (no ops burden, no admin abuse surface).
+
+Shape:
+- Data source: run fibril-demo against a real broker and RECORD a window
+  of every /admin/api/* response plus the SSE event stream (a small
+  recording proxy or a capture flag). Pick a window containing one
+  sluggish-napper arc so the attention feed shows backlog rising and
+  resolving on loop.
+- Transport seam: data enters admin.js through two doors, fetch and
+  EventSource. A demo-mode flag swaps both: fetches resolve from the
+  fixture map, a fake EventSource replays the recorded event log on
+  timers, looping, with timestamps rebased client-side so charts and
+  relative times read live.
+- Read-only: mutation endpoints (declare, drain, test publish) stub with
+  a "demo board" toast. Auth bypassed. The live-pill machine and the
+  passive /healthz probe get stubbed healthy.
+- Drift: fold "record demo fixtures" into the per-release docs snapshot
+  step, so fixtures always come from the same version as the assets.
 
 ## Future: fibrilctl + admin API cookbooks (brief 2026-07-12)
 
@@ -3550,7 +3574,7 @@ M6 - Security page: cert testing scenario. SHIPPED 2026-07-13
   known per connection; user last-seen) BANKED as a follow-on, roles need
   the shelved authz work and stay shelved.
 
-M7 - Favicon: mascot eyes + state (user idea 2026-07-13). SHIPPED
+M7 - Favicon: mascot eyes + state (2026-07-13). SHIPPED
   2026-07-13: capsule-eye redraw at 16/32/48 + face-dead (X-eyes) +
   face-strain (chevrons, gritted) variants, dynamic swap on the live-pill
   tick (dead state / own rate >= 20k from the topology poll), 4s hold
@@ -3618,7 +3642,7 @@ STILL OPEN from the original wishlist:
 - a PLUS arc driving occasional repartitioning + node churn around the demo
   (node lifecycle lives with scenario.sh, could wrap fibril-demo)
 
-## Durable declared-queues catalogue in stroma (user direction 2026-07-17)
+## Durable declared-queues catalogue in stroma (2026-07-17)
 
 Incident: a stray dir named `deleted` inside a topic's on-disk tree refused
 the whole engine open ("bad partition dir"). Fixed in keratin be2b943 - the
@@ -3644,7 +3668,7 @@ same family as the stream warm-up fixed in the same change), and the
 message (it names "the cluster" on a broker that has none). Repro: run
 fibril-demo, restart the broker mid-day.
 
-## Admin catalogue of recent internal errors (user idea 2026-07-17)
+## Admin catalogue of recent internal errors (2026-07-17)
 
 Internal 500s now carry a trace id stamped on both the client message and
 the broker log line, so operators have something to grep. The bigger idea:
@@ -3754,7 +3778,7 @@ user_admin use it. tls_listener still carries its own equivalent copy
 moment. raft_tls binds its raft listeners immediately after freeing them
 (tiny window) and was left alone.
 
-## Thread-per-core assessment (user direction 2026-07-18, latency-first)
+## Thread-per-core assessment (2026-07-18, latency-first)
 
 Verdict from the discussion: full sync rip-out is executor-rewrite class
 for ~zero perf gain, but thread-per-core (runtime-per-thread, pinned
