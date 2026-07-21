@@ -61,6 +61,30 @@ public class EngineTest
     }
 
     [Fact]
+    public async Task SubscriptionClosedFrameSurfacesTypedReason()
+    {
+        await using var broker = new FakeBroker { PushDeliveryOnSubscribe = true, PushCloseOnSubscribe = true };
+        await using var engine = await Engine.ConnectAsync(broker.Address, Opts(), Timeout());
+
+        var sub = await engine.SubscribeAsync(new SubscribeFrame { Topic = "restart.jobs", Prefetch = 8 }, noReconcile: true, Timeout());
+
+        // The buffered delivery arrives first, then the enumeration throws the
+        // typed terminal close.
+        var got = new List<string>();
+        var ex = await Assert.ThrowsAsync<SubscriptionClosedException>(async () =>
+        {
+            await foreach (var d in sub.Deliveries(Timeout()))
+            {
+                got.Add(d.Text());
+                d.Complete();
+            }
+        });
+
+        Assert.Equal(new[] { "hello" }, got);
+        Assert.Equal(ReasonCode.TopicDeleted, ex.Code);
+    }
+
+    [Fact]
     public async Task ShutdownClosesEngine()
     {
         await using var broker = new FakeBroker();
@@ -102,6 +126,7 @@ internal sealed class FakeBroker : IAsyncDisposable
 
     public string Address { get; }
     public bool PushDeliveryOnSubscribe { get; init; }
+    public bool PushCloseOnSubscribe { get; init; }
 
     /// <summary>When set, the first publish is answered with a redirect to this endpoint.</summary>
     public string? RedirectPublishTo { get; init; }
@@ -277,6 +302,11 @@ internal sealed class FakeBroker : IAsyncDisposable
                             ContentType = new ContentType(ContentKind.Text),
                             Payload = System.Text.Encoding.UTF8.GetBytes("hello"),
                         }), ct);
+                    }
+                    if (PushCloseOnSubscribe)
+                    {
+                        await WriteAsync(stream, Op.SubscriptionClosed, 0, WireOps.EncodeSubscriptionClosed(new SubscriptionClosed(
+                            subId, ReasonCode.TopicDeleted, "the queue was deleted")), ct);
                     }
                     if (ReconcileOnReconnect && !_reconcileDropped)
                     {

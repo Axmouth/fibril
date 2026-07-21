@@ -19,6 +19,24 @@ public sealed class ServerException : FibrilException
     }
 }
 
+/// <summary>
+/// A subscription ended with a typed reason instead of a silent stop. Thrown
+/// from the subscription's <c>Deliveries()</c> enumeration when the broker or a
+/// reconcile verdict closes it - a topic deletion, an ownership move that could
+/// not be migrated, a broker shutdown, a recreate the client opted out of, or a
+/// server error. A clean user close ends the enumeration without this exception.
+/// </summary>
+public sealed class SubscriptionClosedException : FibrilException
+{
+    /// <summary>Machine-readable reason code.</summary>
+    public ReasonCode Code { get; }
+
+    public SubscriptionClosedException(ReasonCode code, string message) : base(message)
+    {
+        Code = code;
+    }
+}
+
 /// <summary>The client could not establish or maintain a connection to the broker.</summary>
 public sealed class DisconnectionException : FibrilException
 {

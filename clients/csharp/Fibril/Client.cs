@@ -50,6 +50,13 @@ public sealed record ClientOptions
     /// recreates client-owned subscriptions missing after a resume.
     /// </summary>
     public ReconcilePolicy ReconcilePolicy { get; init; } = ReconcilePolicy.Conservative;
+
+    /// <summary>
+    /// Whether a supervised subscription silently re-subscribes when the broker
+    /// advises a safe recreate (the default). Off, a recreate ends the
+    /// subscription with the typed close reason instead.
+    /// </summary>
+    public bool AutoResubscribe { get; init; } = true;
 }
 
 /// <summary>Notifies an exclusive-cohort member of its new partition assignment.</summary>
@@ -386,7 +393,21 @@ public sealed partial class Client : IAsyncDisposable
     // ---- helpers used by the supervisor and fan-in ----
 
     internal bool IsClientClosed => _closed;
+    internal bool AutoResubscribe => _opts.AutoResubscribe;
     internal TimeSpan SuperviseBackoff => _opts.SuperviseBackoff > TimeSpan.Zero ? _opts.SuperviseBackoff : DefaultSuperviseBackoff;
+
+    /// <summary>
+    /// Whether a typed close ends the subscription (the supervisor stops and
+    /// surfaces it) rather than triggering a re-subscribe. Topic deletion, a
+    /// server error, and the reserved lag close are terminal; a recreate is
+    /// terminal only when the user opted out of auto-resubscribe.
+    /// </summary>
+    internal static bool IsTerminalClose(ReasonCode code, bool autoResubscribe) => code switch
+    {
+        ReasonCode.TopicDeleted or ReasonCode.ServerError or ReasonCode.Lagged => true,
+        ReasonCode.Recreate => !autoResubscribe,
+        _ => false,
+    };
     internal TimeSpan RepartitionPoll => _opts.RepartitionPollInterval > TimeSpan.Zero ? _opts.RepartitionPollInterval : DefaultRepartitionPoll;
     internal uint PartitionCountFor(string topic, string? group) => _topo.PartitionCount(topic, group);
 

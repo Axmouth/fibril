@@ -515,6 +515,25 @@ internal sealed partial class Engine : IAsyncDisposable
                     }
                 }
                 return;
+            case Op.SubscriptionClosed:
+                // The broker ended one subscription while the connection stays
+                // up. Complete its delivery channel with the typed reason so the
+                // stream never just goes silent - a supervised subscription
+                // re-subscribes on a non-terminal reason, a terminal one
+                // surfaces from the Deliveries() enumeration.
+                try
+                {
+                    var closed = WireOps.DecodeSubscriptionClosed(f.Payload);
+                    if (_subs.Remove(closed.SubId, out var closedSub))
+                    {
+                        closedSub.Channel.Writer.TryComplete(
+                            new SubscriptionClosedException(closed.Code, closed.Message));
+                    }
+                }
+                catch (WireException)
+                {
+                }
+                return;
             case Op.Redirect:
                 {
                     if (!_waiters.Remove(f.RequestId, out var w))

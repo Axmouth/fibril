@@ -171,7 +171,7 @@ internal enum ReconcileAction : byte
 /// SubscriptionClosed push. A raw ushort on the wire, so a code minted by a
 /// newer broker survives decode verbatim (C# enums admit any underlying value).
 /// </summary>
-internal enum ReasonCode : ushort
+public enum ReasonCode : ushort
 {
     Unspecified = 0,
     Matched = 1,

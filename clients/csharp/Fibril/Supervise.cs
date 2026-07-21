@@ -114,6 +114,19 @@ public sealed partial class Client
                 {
                     return;
                 }
+                catch (SubscriptionClosedException closed)
+                {
+                    // A typed close that ends the subscription (topic deleted,
+                    // server error, or a recreate the client opted out of) stops
+                    // the supervisor and carries the reason to the consumer
+                    // instead of re-subscribing.
+                    if (IsTerminalClose(closed.Code, AutoResubscribe))
+                    {
+                        outChannel.Writer.TryComplete(closed);
+                        return;
+                    }
+                    // Non-terminal: fall through to re-attach.
+                }
 
                 // The connection dropped. Re-attach: back off, refresh topology so a
                 // failed-over owner is picked up, then re-subscribe. Stop if the
