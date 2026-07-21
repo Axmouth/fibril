@@ -13,18 +13,26 @@ through the new engine.
 ## Design (as built for the Rust reference)
 
 - `SettleContext` (one per connection slot, outlives every engine incarnation):
-  `current_tx: ArcSwapOption<Sender<Command>>` + `incarnation: AtomicU64`.
-  - `bind(tx)` on every (re)connect points settlement at the live engine.
-  - `invalidate()` bumps the incarnation on a non-resumed reconnect.
-  - `settle(incarnation, cmd)`: returns `StaleDelivery` if the incarnation moved
-    on, else sends `cmd` to the current engine.
+  one atomically-swapped `EngineBinding { incarnation, tx }` + a monotonic
+  `next_incarnation` allocator. Pairing the incarnation with the sender in one
+  swapped value means a settle observes both from a single snapshot.
+  - `bind(fresh_session, tx) -> u64` on every (re)connect points settlement at the
+    live engine and RETURNS the incarnation this engine must stamp. A non-resumed
+    reconnect (`fresh_session = true`) allocates a fresh incarnation so held
+    deliveries from the replaced session go stale; a resumed reconnect reuses the
+    current one. The reader loop captures the returned incarnation ONCE and stamps
+    it on every delivery (never a live re-read), so a late delivery on a superseded
+    engine stays stale.
+  - `settle(incarnation, cmd)`: loads the current binding once; returns
+    `StaleDelivery` if the incarnation moved on, else sends `cmd` to the live
+    engine.
 - `Command::Ack`/`Nack` carry `(topic, group, partition, delivery_tag,
   request_id)` and build the frame directly - settlement no longer depends on
   the client sub id, so a reconnect that re-keyed the subscription still routes
   correctly.
 - `InflightMessage` carries `topic, group, partition, incarnation, settle:
   Arc<SettleContext>`. The per-delivery oneshot + spawned settle task are gone.
-- The slot bumps the incarnation on any reconnect whose outcome is not
+- A fresh incarnation is allocated on any reconnect whose outcome is not
   `Resumed` (New / ResumeRejected / ResumeNotFound / ResumedAfterRestart).
 
 ## Acceptance criteria
@@ -93,4 +101,47 @@ Accepted (not changed):
 - The delivery-path removal of the per-delivery `tokio::spawn` + oneshot is a
   net hot-path WIN (confirmed by the efficiency lens).
 
-### /code-review (adversarial / correctness) - see follow-up findings below
+### /code-review (adversarial / correctness) - DONE
+
+Two adversarial agents traced the diff (races/ordering and semantics/edge cases).
+Both independently flagged the same primary bug.
+
+Fixed:
+- **Shared-context stamping race (CONFIRMED by both agents).** Deliveries stamped
+  the incarnation with a LIVE read of the shared `SettleContext` at delivery time.
+  On an explicit reconnect the old engine's reader loop stays alive until after
+  the new engine binds and bumps the incarnation, so a late delivery on the old
+  socket would read the NEW incarnation and settle as fresh - acking a tag dead on
+  the replaced session (silent duplicate + false Ok), the exact failure #104 is
+  meant to prevent. Fix: `SettleContext` now holds one atomically-swapped
+  `EngineBinding { incarnation, tx }`; `bind` returns the incarnation, and each
+  engine's reader loop captures it ONCE and stamps that fixed value. A late
+  delivery on a superseded engine keeps its own (now stale) stamp.
+- **TOCTOU in `settle` (CONFIRMED, secondary).** The old `settle` read the
+  incarnation and loaded the tx as two separate atomics, so a concurrent reconnect
+  between them could route a stale delivery to the new engine. Folding both into
+  one `EngineBinding` value means `settle` reads a single consistent snapshot -
+  the check and the route can no longer disagree.
+
+Verified safe (no change needed):
+- First-connect incarnation, `current == None` window, ack-without-sub-id after a
+  re-keyed subscription, double-settle (InflightMessage is not Clone and settle
+  consumes self), auto-ack path, Arc lifetimes (a held InflightMessage does not
+  pin a dead engine).
+- Queue redelivery after StaleDelivery: on disconnect the broker drains and
+  unsubscribes the old sub (releasing leases), and a non-resumed reconnect
+  re-subscribes via reconcile, so the still-inflight message redelivers.
+- `retry_after` uses an absolute deadline computed at settle time, so a long hold
+  then retry across a resumed reconnect yields `now + delay`, not a stale absolute.
+
+Out of #104 scope (preexisting, recorded as follow-ups in FOLLOWUPS.md):
+- Nack-family settles (`fail`/`retry`/`retry_after`) on a Plexus STREAM manual
+  subscription are a broker no-op: `Op::Nack` looks up only queue subs, so the
+  frame is ignored and the client still returns Ok. This is a stream settle-model
+  gap independent of staleness (a stream's cursor model has no requeue), not a
+  regression from this diff. #104's own guarantees still hold for streams: a
+  StaleDelivery record was never acked, so it replays from the durable cursor.
+- A stream ack sent after a RESUMED reconnect can be dropped if the fan-in
+  supervisor has not yet re-subscribed; the cursor is not committed so the record
+  replays. At-least-once holds; the resumed-settleability guarantee is best-effort
+  for streams. Preexisting timing, recorded as a follow-up.
