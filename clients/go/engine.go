@@ -128,6 +128,7 @@ type subState struct {
 	ch       chan Delivery
 	autoAck  bool
 	preserve bool
+	reason   *closeReasonCell
 }
 
 // Engine is one live broker connection.
@@ -599,6 +600,20 @@ func (e *Engine) handleFrame(f frame) {
 		if e.opts.OnAssignmentChanged != nil {
 			if a, err := decodeAssignmentChanged(f.Payload); err == nil {
 				e.opts.OnAssignmentChanged(a)
+			}
+		}
+	case opSubscriptionClosed:
+		// The broker ended one subscription while the connection stays up.
+		// Stamp the typed reason and close its delivery channel so the stream
+		// never just goes silent - a supervised subscription re-subscribes on
+		// a non-terminal reason, a terminal one surfaces via CloseReason.
+		if closed, err := decodeSubscriptionClosed(f.Payload); err == nil {
+			if s, ok := e.subs[closed.SubID]; ok {
+				if s.reason != nil {
+					s.reason.set(closed.Code, closed.Message)
+				}
+				close(s.ch)
+				delete(e.subs, closed.SubID)
 			}
 		}
 	case opRedirect:

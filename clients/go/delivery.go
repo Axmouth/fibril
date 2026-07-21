@@ -65,7 +65,19 @@ type Subscription struct {
 	MemberID   *UUID
 	Deliveries <-chan Delivery
 
+	reason *closeReasonCell
 	engine *Engine
+}
+
+// CloseReason returns why the subscription ended, once its Deliveries channel
+// has closed. It is nil while the subscription is live or after a clean local
+// close, and set to the typed reason (topic deleted, owner moved, a reconcile
+// verdict, ...) when the broker or a reconcile ended it.
+func (s *Subscription) CloseReason() *CloseReason {
+	if s.reason == nil {
+		return nil
+	}
+	return s.reason.get()
 }
 
 // Subscribe opens a subscription and returns it once the broker confirms. The
@@ -170,6 +182,7 @@ func (e *Engine) handleSubscribeOk(f frame) {
 		prefetch = 1
 	}
 	ch := make(chan Delivery, prefetch)
+	reason := newCloseReasonCell()
 	// A plain subscribe is remembered so a reconnect can restore it on the same
 	// channel. The registry then owns the channel across the engine's death.
 	preserve := false
@@ -184,10 +197,10 @@ func (e *Engine) handleSubscribeOk(f frame) {
 			ConsumerGroup:  w.sub.ConsumerGroup,
 			ConsumerTarget: w.sub.ConsumerTarget,
 			MemberID:       ok2.MemberID,
-		}, ch, w.autoAck)
+		}, ch, w.autoAck, reason)
 		preserve = true
 	}
-	e.subs[ok2.SubID] = &subState{ch: ch, autoAck: w.autoAck, preserve: preserve}
+	e.subs[ok2.SubID] = &subState{ch: ch, autoAck: w.autoAck, preserve: preserve, reason: reason}
 	if w.subReply != nil {
 		w.subReply <- subResult{sub: &Subscription{
 			SubID:      ok2.SubID,
@@ -196,6 +209,7 @@ func (e *Engine) handleSubscribeOk(f frame) {
 			Group:      ok2.Group,
 			MemberID:   ok2.MemberID,
 			Deliveries: ch,
+			reason:     reason,
 			engine:     e,
 		}}
 	}

@@ -20,11 +20,22 @@ type SupervisedSubscription struct {
 	Deliveries <-chan Delivery
 	cancel     chan struct{}
 	cancelOnce sync.Once
+	reason     *closeReasonCell
 }
 
 // Close stops the supervisor and closes Deliveries.
 func (s *SupervisedSubscription) Close() {
 	s.cancelOnce.Do(func() { close(s.cancel) })
+}
+
+// CloseReason returns why the supervised subscription ended, once Deliveries
+// has closed: nil for a clean local Close, else the typed terminal reason
+// (topic deleted, server error, or a recreate the client opted out of).
+func (s *SupervisedSubscription) CloseReason() *CloseReason {
+	if s.reason == nil {
+		return nil
+	}
+	return s.reason.get()
 }
 
 // SuperviseSubscribe subscribes to one queue partition and keeps it attached
@@ -53,12 +64,13 @@ func (c *Client) superviseAttach(ctx context.Context, topic string, prefetch uin
 		capHint = 1
 	}
 	out := make(chan Delivery, capHint)
-	ss := &SupervisedSubscription{Deliveries: out, cancel: make(chan struct{})}
-	go c.superviseLoop(topic, attach, sub, out, ss.cancel)
+	reason := newCloseReasonCell()
+	ss := &SupervisedSubscription{Deliveries: out, cancel: make(chan struct{}), reason: reason}
+	go c.superviseLoop(topic, attach, sub, out, ss.cancel, reason)
 	return ss, nil
 }
 
-func (c *Client) superviseLoop(topic string, attach func(context.Context) (*Subscription, error), sub *Subscription, out chan Delivery, cancel chan struct{}) {
+func (c *Client) superviseLoop(topic string, attach func(context.Context) (*Subscription, error), sub *Subscription, out chan Delivery, cancel chan struct{}, reason *closeReasonCell) {
 	defer close(out)
 	backoff := c.opts.SuperviseBackoff
 	if backoff <= 0 {
@@ -68,6 +80,13 @@ func (c *Client) superviseLoop(topic string, attach func(context.Context) (*Subs
 		// Forward until this attachment's channel closes (a drop) or we are asked
 		// to stop.
 		if cancelled := !forwardUntilClosed(sub.Deliveries, out, cancel); cancelled {
+			return
+		}
+		// A typed close that ends the subscription (topic deleted, server error,
+		// or a recreate the client opted out of) stops the supervisor and
+		// carries the reason to the consumer instead of re-subscribing.
+		if r := sub.CloseReason(); r != nil && isTerminalClose(r.Code, !c.opts.DisableAutoResubscribe) {
+			reason.set(r.Code, r.Message)
 			return
 		}
 		// The connection dropped. Re-attach: back off, refresh the topology so a
