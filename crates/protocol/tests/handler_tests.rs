@@ -995,6 +995,273 @@ async fn resume_with_a_missing_skeleton_stays_not_found() {
 }
 
 #[tokio::test]
+async fn owner_identity_persists_across_a_real_engine_restart() {
+    use fibril_protocol::v1::session_store::SessionSkeletonStore;
+
+    // A genuine on-disk restart: open the engine, shut it down, drop it (the
+    // keratin flock releases), and reopen the same data dir. The persisted
+    // owner id survives, which is what lets a client's cached resume identity
+    // still match a restarted broker.
+    let (engine1, dir) = open_test_engine().await;
+    let store1 = SessionSkeletonStore::load_from_stroma_engine(&engine1, Uuid::from_u128(1))
+        .await
+        .expect("load session store");
+    let owner = store1.owner_id();
+    drop(store1);
+    engine1.shutdown().await.expect("engine shutdown");
+    drop(engine1);
+
+    let engine2 = StromaEngine::open(
+        &dir.root,
+        StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+        SnapshotConfig::default(),
+    )
+    .await
+    .expect("reopen engine");
+    let store2 = SessionSkeletonStore::load_from_stroma_engine(&engine2, Uuid::from_u128(2))
+        .await
+        .expect("reload session store");
+    assert_eq!(store2.owner_id(), owner, "owner id must persist across a restart");
+    engine2.shutdown().await.expect("engine shutdown");
+    drop(dir);
+}
+
+#[tokio::test]
+async fn restart_resume_disabled_by_zero_ttl() {
+    use fibril_protocol::v1::session_store::SessionSkeletonStore;
+
+    // With the restart TTL set to 0, a persisted skeleton is never honored, so
+    // a resume after a restart falls through to the ordinary not-found outcome.
+    let (broker, dir) = open_test_broker().await;
+    let store1 = Arc::new(
+        SessionSkeletonStore::load_from_stroma_engine(&broker.engine(), Uuid::from_u128(1))
+            .await
+            .expect("load session store"),
+    );
+    let settings1 = ConnectionSettings::new(Some(60))
+        .with_reconnect_grace_ms(Some(30_000))
+        .with_resume_session_restart_ttl_ms(Some(60_000))
+        .with_session_store(store1);
+    let (mut first, first_task, dir, broker) =
+        open_protocol_connection_for_broker(settings1, broker, dir).await;
+    let hello_ok = handshake_with_resume(&mut first, None).await;
+    let _ = framed_subscribe(&mut first, 2, "jobs", None, false).await;
+    assert_connection_still_responds(&mut first).await;
+    let resume = ResumeIdentity {
+        owner_id: hello_ok.owner_id,
+        client_id: hello_ok.client_id,
+        resume_token: hello_ok.resume_token,
+    };
+    drop(first);
+    first_task.await.unwrap().unwrap();
+
+    // Fresh store + registry (a restart), but restart resume is disabled.
+    let store2 = Arc::new(
+        SessionSkeletonStore::load_from_stroma_engine(&broker.engine(), Uuid::from_u128(2))
+            .await
+            .expect("reload session store"),
+    );
+    let settings2 = ConnectionSettings::new(Some(60))
+        .with_reconnect_grace_ms(Some(30_000))
+        .with_resume_session_restart_ttl_ms(Some(0))
+        .with_session_store(store2);
+    let (mut second, second_task, _dir, _broker) =
+        open_protocol_connection_for_broker(settings2, broker, dir).await;
+    let outcome = handshake_with_resume(&mut second, Some(resume)).await;
+    assert_eq!(outcome.resume_outcome, ResumeOutcome::ResumeNotFound);
+
+    drop(second);
+    second_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn clean_disconnect_forgets_the_skeleton() {
+    use fibril_protocol::v1::session_store::SessionSkeletonStore;
+
+    // A clean disconnect with no grace forgets the session AND its durable
+    // skeleton (the client is gone, no resume is owed). A later resume against
+    // a fresh store therefore reports not-found, not resumed-after-restart -
+    // only a real crash, which never runs cleanup, leaves the skeleton behind.
+    let (broker, dir) = open_test_broker().await;
+    let store1 = Arc::new(
+        SessionSkeletonStore::load_from_stroma_engine(&broker.engine(), Uuid::from_u128(1))
+            .await
+            .expect("load session store"),
+    );
+    // Grace off: disconnect forgets immediately.
+    let settings1 = ConnectionSettings::new(Some(60))
+        .with_reconnect_grace_ms(Some(0))
+        .with_resume_session_restart_ttl_ms(Some(60_000))
+        .with_session_store(store1.clone());
+    let (mut first, first_task, dir, broker) =
+        open_protocol_connection_for_broker(settings1, broker, dir).await;
+    let hello_ok = handshake_with_resume(&mut first, None).await;
+    let _ = framed_subscribe(&mut first, 2, "jobs", None, false).await;
+    assert_connection_still_responds(&mut first).await;
+    let resume = ResumeIdentity {
+        owner_id: hello_ok.owner_id,
+        client_id: hello_ok.client_id,
+        resume_token: hello_ok.resume_token,
+    };
+    // Clean disconnect: cleanup runs and removes the skeleton.
+    drop(first);
+    first_task.await.unwrap().unwrap();
+
+    // The skeleton is gone even to a fresh store load.
+    let store2 = Arc::new(
+        SessionSkeletonStore::load_from_stroma_engine(&broker.engine(), Uuid::from_u128(2))
+            .await
+            .expect("reload session store"),
+    );
+    assert!(
+        store2
+            .lookup(&hello_ok.client_id, &hello_ok.resume_token, 60_000)
+            .await
+            .is_none(),
+        "a clean disconnect must forget the skeleton",
+    );
+    let settings2 = ConnectionSettings::new(Some(60))
+        .with_reconnect_grace_ms(Some(30_000))
+        .with_resume_session_restart_ttl_ms(Some(60_000))
+        .with_session_store(store2);
+    let (mut second, second_task, _dir, _broker) =
+        open_protocol_connection_for_broker(settings2, broker, dir).await;
+    let outcome = handshake_with_resume(&mut second, Some(resume)).await;
+    assert_eq!(outcome.resume_outcome, ResumeOutcome::ResumeNotFound);
+
+    drop(second);
+    second_task.await.unwrap().unwrap();
+}
+
+/// Broker config with a short inflight lease so a restart test can watch
+/// unacked work redeliver quickly.
+fn short_lease_broker_config() -> BrokerConfig {
+    BrokerConfig {
+        inflight_ttl_ms: 400,
+        expiry_poll_min_ms: 25,
+        expiry_batch_max: 100,
+        delivery_poll_max_ms: 25,
+        queue_idle_evict_after_ms: None,
+        queue_idle_sweep_interval_ms: 60_000,
+        ..Default::default()
+    }
+}
+
+fn restart_settings(store: Arc<fibril_protocol::v1::session_store::SessionSkeletonStore>) -> ConnectionSettings {
+    ConnectionSettings::new(Some(60))
+        .with_reconnect_grace_ms(Some(30_000))
+        .with_resume_session_restart_ttl_ms(Some(60_000))
+        .with_session_store(store)
+}
+
+#[tokio::test]
+async fn resume_across_a_real_restart_redelivers_unacked_work() {
+    use fibril_protocol::v1::session_store::SessionSkeletonStore;
+
+    // The full chain, end to end over real wire frames and real durable
+    // storage: a client subscribes and receives a message it does not ack, the
+    // broker restarts for real (engine shutdown + reopen on the same data dir),
+    // the client resumes with ResumedAfterRestart, reconciles its subscription
+    // into a recreate, re-subscribes, and the unacked message redelivers per
+    // at-least-once.
+    let (engine1, dir) = open_test_engine().await;
+    let store1 = Arc::new(
+        SessionSkeletonStore::load_from_stroma_engine(&engine1, Uuid::from_u128(1))
+            .await
+            .expect("load session store"),
+    );
+    let broker1 = Broker::new(engine1.clone(), short_lease_broker_config(), None);
+
+    let (mut first, first_task, dir, _broker) =
+        open_protocol_connection_for_broker(restart_settings(store1), broker1.clone(), dir).await;
+    let hello_ok = handshake_with_resume(&mut first, None).await;
+    assert_eq!(hello_ok.resume_outcome, ResumeOutcome::New);
+    let sub_ok = framed_subscribe(&mut first, 2, "e2e.restart", None, false).await;
+    framed_publish(&mut first, 3, "e2e.restart", None, b"pending").await;
+
+    // Receive the delivery but deliberately leave it unacked (inflight).
+    let delivered = recv_delivery_for_topic(&mut first, "e2e.restart").await;
+    assert_eq!(delivered.payload, b"pending");
+    // Fence the skeleton persist.
+    assert_connection_still_responds(&mut first).await;
+
+    let resume = ResumeIdentity {
+        owner_id: hello_ok.owner_id,
+        client_id: hello_ok.client_id,
+        resume_token: hello_ok.resume_token,
+    };
+
+    // Restart the broker for real: drop the connection and broker, shut down
+    // the engine, drop it (the flock releases), then reopen the same data dir.
+    drop(first);
+    first_task.await.unwrap().unwrap();
+    drop(broker1);
+    engine1.shutdown().await.expect("engine shutdown");
+    drop(engine1);
+
+    let engine2 = StromaEngine::open(
+        &dir.root,
+        StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+        SnapshotConfig::default(),
+    )
+    .await
+    .expect("reopen engine");
+    let store2 = Arc::new(
+        SessionSkeletonStore::load_from_stroma_engine(&engine2, Uuid::from_u128(2))
+            .await
+            .expect("reload session store"),
+    );
+    let broker2 = Broker::new(engine2.clone(), short_lease_broker_config(), None);
+
+    let (mut second, second_task, dir, _broker) =
+        open_protocol_connection_for_broker(restart_settings(store2), broker2, dir).await;
+    let restart_ok = handshake_with_resume(&mut second, Some(resume)).await;
+    assert_eq!(restart_ok.resume_outcome, ResumeOutcome::ResumedAfterRestart);
+
+    // Reconcile the subscription: the fresh session has none, so the manual-ack
+    // sub on the still-owned queue is advised to recreate.
+    second
+        .send(
+            try_encode(
+                Op::ReconcileClient,
+                3,
+                &ReconcileClient {
+                    policy: ReconcilePolicy::Conservative,
+                    subscriptions: vec![ReconcileSubscription {
+                        sub_id: sub_ok.sub_id,
+                        topic: "e2e.restart".into(),
+                        group: None,
+                        partition: Partition::new(0),
+                        auto_ack: false,
+                        prefetch: 1,
+                        consumer_group: None,
+                        consumer_target: None,
+                        member_id: None,
+                    }],
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let frame = recv_frame_expect(&mut second, Op::ReconcileResult).await;
+    let result: ReconcileResult = try_decode(&frame).unwrap();
+    assert_eq!(result.subscriptions[0].action, ReconcileAction::RecreateClientSide);
+
+    // The client re-subscribes (what a real client does on a recreate), and the
+    // unacked message redelivers once its pre-restart lease expires.
+    let resub_ok = framed_subscribe(&mut second, 4, "e2e.restart", None, false).await;
+    assert_eq!(resub_ok.topic, "e2e.restart");
+    let redelivered = recv_delivery_for_topic(&mut second, "e2e.restart").await;
+    assert_eq!(redelivered.payload, b"pending", "unacked work redelivers after restart");
+
+    drop(second);
+    second_task.await.unwrap().unwrap();
+    engine2.shutdown().await.ok();
+    drop(dir);
+}
+
+#[tokio::test]
 async fn conservative_reconcile_drops_server_only_subscription() {
     let settings = ConnectionSettings::new(Some(60)).with_reconnect_grace_ms(Some(1_000));
     let (mut framed, task, dir, broker) =

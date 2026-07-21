@@ -460,6 +460,21 @@ subsection added (#105), and the support matrix rows updated (typed close
 + auto-resubscribe done across all five, the stale "no typed reason yet"
 row removed).
 
+RESTART-RESUME HARDENING (post-brick-4, deliberate multi-level tests):
+store level - owner_id_persists_across_reload, upsert_lookup_and_ttl (now
+with a real elapsed-time expiry assertion), remove_drops, skeletons_
+survive_a_reload. Handler level - resume_across_restart_honors_a_durable_
+skeleton, resume_with_a_missing_skeleton_stays_not_found,
+restart_resume_disabled_by_zero_ttl, clean_disconnect_forgets_the_
+skeleton, owner_identity_persists_across_a_real_engine_restart (a genuine
+engine shutdown + on-disk reopen). END TO END - resume_across_a_real_
+restart_redelivers_unacked_work: real wire frames + real durable storage,
+a client subscribes and receives an unacked message, the broker restarts
+for real (StromaEngine::shutdown + reopen on the same data dir; the
+keratin flock releases on drop), the client resumes ResumedAfterRestart,
+reconciles into a recreate, re-subscribes, and the unacked message
+redelivers per at-least-once. This is the "prove it end to end" test.
+
 STILL DEFERRED: #104 stale-tag MARKING (the client side). The broker
 already redelivers per at-least-once and the typed Disconnected/restart
 outcome tells a client its tags are dead; the focused client-side work
