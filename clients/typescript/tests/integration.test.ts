@@ -25,8 +25,9 @@ import {
 } from "../src/protocol.js";
 import { Client, ClientOptions, QueueConfig, type Catalogue } from "../src/client.js";
 import type { SubscribeStream } from "../src/wire.js";
-import { BrokenPipeError, DisconnectionError, RedirectError, ServerError } from "../src/errors.js";
+import { BrokenPipeError, DisconnectionError, RedirectError, ServerError, SubscriptionClosedError } from "../src/errors.js";
 import { NewMessage } from "../src/message.js";
+import { REASON_CODES } from "../src/wire.js";
 import { fnv1a } from "../src/internal/topology.js";
 
 // The wire format carries identity fields as raw 16-byte UUIDs, so the fake
@@ -2239,6 +2240,87 @@ test("retryable connection error still reconnects", async () => {
     await client.fetchTopology();
     assert.equal(hellos, 2);
     assert.equal(broker.openConnections, 1);
+
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
+test("subscription surfaces a typed close reason from a SubscriptionClosed frame", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  let subId = 0n;
+  try {
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      } else if (f.opcode === Op.Subscribe) {
+        const sub = decodeFrameBody<SubscribeMsg>(f);
+        subId = 71n;
+        broker.send(
+          s,
+          buildFrame(Op.SubscribeOk, f.requestId, {
+            sub_id: subId,
+            topic: sub.topic,
+            group: sub.group,
+            partition: 0,
+            prefetch: sub.prefetch,
+          }),
+        );
+        // Deliver one message, then close the subscription with a terminal
+        // reason (the topic was deleted).
+        broker.send(
+          s,
+          buildFrame(Op.Deliver, 0n, {
+            sub_id: subId,
+            topic: sub.topic,
+            group: sub.group,
+            partition: 0,
+            offset: 0n,
+            delivery_tag: { epoch: 1n },
+            published: 0n,
+            publish_received: 0n,
+            content_type: null,
+            headers: {},
+            payload: new Uint8Array([1]),
+          }),
+        );
+        broker.send(
+          s,
+          buildFrame(Op.SubscriptionClosed, 0n, {
+            sub_id: subId,
+            code: REASON_CODES.topicDeleted,
+            message: "the queue was deleted",
+          }),
+        );
+      }
+    };
+
+    // Default options (supervision on): a terminal reason must stop the
+    // supervisor and surface, not trigger an endless re-subscribe.
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    const sub = await client.subscribe("restart.jobs").sub();
+
+    const withTimeout = <T>(p: Promise<T>, label: string): Promise<T> =>
+      Promise.race([
+        p,
+        new Promise<T>((_, reject) =>
+          setTimeout(() => reject(new Error(`timeout: ${label}`)), 5_000),
+        ),
+      ]);
+
+    // The buffered delivery arrives first.
+    const first = await withTimeout(sub.recv(), "first delivery");
+    assert.ok(first);
+    await first!.complete();
+
+    // Then the typed terminal close surfaces.
+    await assert.rejects(
+      () => withTimeout(sub.recv(), "terminal close"),
+      (err: unknown) =>
+        err instanceof SubscriptionClosedError && err.code === REASON_CODES.topicDeleted,
+    );
 
     await client.shutdown();
   } finally {

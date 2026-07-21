@@ -14,6 +14,7 @@ import {
   RedirectError,
   retryAdvice,
   ServerError,
+  SubscriptionClosedError,
   TlsRequiredByBrokerError,
   UnexpectedError,
 } from "./errors.js";
@@ -31,6 +32,7 @@ import {
   type DeliveryTag,
   type ErrorMsg,
   type GoingAwayMsg,
+  type SubscriptionClosedMsg,
   type Hello,
   type HelloOk,
   type NackMsg,
@@ -171,9 +173,12 @@ function applyReconcileResult(
     if (!client) continue;
 
     if (item.action !== "keep") {
+      // Carry the typed reason to the delivery leg. A supervised subscription
+      // treats a recreate (and other non-terminal reasons) as a cue to
+      // re-subscribe; a terminal reason surfaces to the consumer.
       const registered = registry.get(client.sub_id);
       registered?.delivery.queue.close(
-        new DisconnectionError(`subscription was not kept after reconnect: ${item.reason}`),
+        new SubscriptionClosedError(item.code, item.reason),
       );
       registry.delete(client.sub_id);
       continue;
@@ -1072,6 +1077,24 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
           } catch {
             // A listener throwing must not break frame processing.
           }
+        }
+        return;
+      }
+
+      case Op.SubscriptionClosed: {
+        // The broker ended one subscription (topic deleted, ownership moved,
+        // cohort removal) while the connection stays up. Close its delivery
+        // leg with the typed reason so the stream never just goes silent - a
+        // supervised subscription re-subscribes on a non-terminal reason, a
+        // terminal one surfaces to the consumer.
+        const closed = decodeFrameBody<SubscriptionClosedMsg>(frame);
+        const sub = subs.get(closed.sub_id);
+        if (sub) {
+          sub.delivery.queue.close(
+            new SubscriptionClosedError(closed.code, closed.message),
+          );
+          subs.delete(closed.sub_id);
+          subscriptionRegistry.delete(closed.sub_id);
         }
         return;
       }

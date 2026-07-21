@@ -77,6 +77,15 @@ export class BoundedQueue<T> implements AsyncIterable<T> {
     });
   }
 
+  /**
+   * The error the queue was closed with, if any. `recv()` keeps returning
+   * `null` on close, so a caller that wants the typed close reason reads this
+   * after `recv()` yields `null`.
+   */
+  closeError(): Error | null {
+    return this.#closeError;
+  }
+
   #wakeOneSender(): void {
     if (this.#pendingSenders.length === 0) return;
     if (this.#buffer.length >= this.#capacity) return;

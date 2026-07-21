@@ -36,6 +36,7 @@ import type {
   SubscribeMsg,
   SubscribeOkMsg,
   GoingAwayMsg,
+  SubscriptionClosedMsg,
   StreamTopologyEntryMsg,
   TopologyOkMsg,
   TopologyRequestMsg,
@@ -378,6 +379,14 @@ export function encodeBody(op: Op, value: unknown): Uint8Array {
       const v = value as TopologyUpdateAckMsg;
       return wire.encodeTopologyUpdateAckBody({ generation: v.generation });
     }
+    case Op.SubscriptionClosed: {
+      const v = value as SubscriptionClosedMsg;
+      return wire.encodeSubscriptionClosedBody({
+        subId: v.sub_id,
+        code: v.code,
+        message: v.message,
+      });
+    }
     case Op.Redirect: {
       const v = value as RedirectMsg;
       return wire.encodeRedirectBody({
@@ -590,6 +599,14 @@ export function decodeBody(op: Op, payload: Uint8Array): unknown {
     case Op.GoingAway: {
       const w = wire.decodeGoingAwayBody(payload);
       return { grace_ms: w.graceMs, message: w.message } satisfies GoingAwayMsg;
+    }
+    case Op.SubscriptionClosed: {
+      const w = wire.decodeSubscriptionClosedBody(payload);
+      return {
+        sub_id: w.subId,
+        code: w.code,
+        message: w.message,
+      } satisfies SubscriptionClosedMsg;
     }
     case Op.Redirect: {
       const w = wire.decodeRedirectBody(payload);

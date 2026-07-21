@@ -2,8 +2,10 @@ import {
   BrokenPipeError,
   DeserializationError,
   FibrilError,
+  SubscriptionClosedError,
   isTransientError,
 } from "./errors.js";
+import { REASON_CODES } from "./wire.js";
 import { contentTypeHeader, deserializeByContentType } from "./message.js";
 import type { DeliveryTag, SubscribeMsg } from "./protocol.js";
 import type { StreamStart, SubscribeStream } from "./wire.js";
@@ -330,10 +332,32 @@ interface SupervisorClient {
   _isShuttingDown(): boolean;
   _superviseSubscriptions(): boolean;
   _superviseIntervalMs(): number;
+  _autoResubscribe(): boolean;
   _refreshTopologyThrottled(): Promise<boolean>;
   _isTopicMissing(topic: string, group: string | null): boolean;
   _ownerEndpoint(topic: string, partition: number, group: string | null): string | null;
   _partitionSet(topic: string, group: string | null): number[];
+}
+
+/**
+ * Whether a typed close ends the subscription (the supervisor stops and
+ * surfaces it) rather than triggering a re-subscribe. Topic deletion, a
+ * server error, and the reserved lag close are terminal; a recreate is
+ * terminal only when the user opted out of auto-resubscribe. Everything else
+ * (an owner move, a broker drain, a recreate under the default) is the
+ * supervisor's cue to re-subscribe.
+ */
+function isTerminalClose(code: number, autoResubscribe: boolean): boolean {
+  switch (code) {
+    case REASON_CODES.topicDeleted:
+    case REASON_CODES.serverError:
+    case REASON_CODES.lagged:
+      return true;
+    case REASON_CODES.recreate:
+      return !autoResubscribe;
+    default:
+      return false;
+  }
 }
 
 /**
@@ -426,12 +450,21 @@ class PartitionSupervisor<R> {
           break;
         }
       }
+      // A typed close that ends the subscription (topic deleted, server error,
+      // or a recreate the user opted out of) stops the supervisor and carries
+      // the reason to the consumer instead of re-subscribing.
+      const closeErr = this.#partQueue.closeError();
+      const terminal =
+        closeErr instanceof SubscriptionClosedError &&
+        isTerminalClose(closeErr.code, this.client._autoResubscribe());
       if (
         this.#stopped ||
         this.client._isShuttingDown() ||
-        !this.client._superviseSubscriptions()
+        !this.client._superviseSubscriptions() ||
+        terminal
       ) {
         this.#clearTimer();
+        if (terminal) this.merged.close(closeErr);
         return;
       }
       if (!(await this.#resubscribeWithBackoff())) {
@@ -519,6 +552,11 @@ class FanIn<R> {
 
   async recv(): Promise<Tagged<R> | null> {
     return this.#merged.recv();
+  }
+
+  /** The typed close reason, if the subscription ended with one. */
+  closeError(): Error | null {
+    return this.#merged.closeError();
   }
 
   close(): void {
@@ -624,10 +662,19 @@ export class Subscription implements AsyncIterable<InflightMessage> {
     this.#fanIn = fanIn;
   }
 
-  /** Receive the next message, or `null` if the subscription is closed cleanly. */
+  /**
+   * Receive the next message, or `null` if the subscription was closed
+   * cleanly (a user `close()`). Throws a {@link SubscriptionClosedError} with
+   * the typed reason when the broker or a reconcile verdict ended it (topic
+   * deleted, server error, an opted-out recreate).
+   */
   async recv(): Promise<InflightMessage | null> {
     const item = await this.#fanIn.recv();
-    if (item === null) return null;
+    if (item === null) {
+      const err = this.#fanIn.closeError();
+      if (err) throw err;
+      return null;
+    }
     return new InflightMessage(item.engine, item.raw);
   }
 
@@ -659,10 +706,18 @@ export class AutoAckedSubscription implements AsyncIterable<Message> {
     this.#fanIn = fanIn;
   }
 
-  /** Receive the next message, or `null` if the subscription is closed cleanly. */
+  /**
+   * Receive the next message, or `null` if the subscription was closed
+   * cleanly (a user `close()`). Throws a {@link SubscriptionClosedError} with
+   * the typed reason when the broker or a reconcile verdict ended it.
+   */
   async recv(): Promise<Message | null> {
     const item = await this.#fanIn.recv();
-    if (item === null) return null;
+    if (item === null) {
+      const err = this.#fanIn.closeError();
+      if (err) throw err;
+      return null;
+    }
     return new Message(item.raw);
   }
 

@@ -127,6 +127,12 @@ export interface ClientOptionsInit {
   autoReconnectAttempts?: number;
   /** Subscription reconciliation policy used after a resumed reconnect. */
   reconnectReconcilePolicy?: ReconcilePolicy;
+  /**
+   * Whether a supervised subscription silently re-subscribes when the broker
+   * advises a safe recreate (the default). Off, a recreate ends the
+   * subscription with the typed close reason instead.
+   */
+  autoResubscribe?: boolean;
   /** Maximum owner redirects to follow for a single confirmed publish. */
   maxRedirects?: number;
   /**
@@ -174,6 +180,7 @@ export class ClientOptions {
   readonly resumeIdentity: ResumeIdentity | undefined;
   readonly autoReconnectAttempts: number;
   readonly reconnectReconcilePolicy: ReconcilePolicy;
+  readonly autoResubscribe: boolean;
   readonly maxRedirects: number;
   readonly publishTimeoutMs: number;
   readonly topologyRefreshCooldownMs: number;
@@ -193,6 +200,7 @@ export class ClientOptions {
     this.resumeIdentity = init.resumeIdentity;
     this.autoReconnectAttempts = init.autoReconnectAttempts ?? 1;
     this.reconnectReconcilePolicy = init.reconnectReconcilePolicy ?? "conservative";
+    this.autoResubscribe = init.autoResubscribe ?? true;
     this.maxRedirects = init.maxRedirects ?? 3;
     this.publishTimeoutMs = init.publishTimeoutMs ?? 30_000;
     this.topologyRefreshCooldownMs = init.topologyRefreshCooldownMs ?? 1_000;
@@ -213,6 +221,7 @@ export class ClientOptions {
       resumeIdentity: this.resumeIdentity,
       autoReconnectAttempts: this.autoReconnectAttempts,
       reconnectReconcilePolicy: this.reconnectReconcilePolicy,
+      autoResubscribe: this.autoResubscribe,
       maxRedirects: this.maxRedirects,
       publishTimeoutMs: this.publishTimeoutMs,
       topologyRefreshCooldownMs: this.topologyRefreshCooldownMs,
@@ -345,6 +354,15 @@ export class ClientOptions {
    */
   withReconnectReconcilePolicy(policy: ReconcilePolicy): ClientOptions {
     return this.#copy({ reconnectReconcilePolicy: policy });
+  }
+
+  /**
+   * Return a copy toggling whether a supervised subscription silently
+   * re-subscribes on a recreate verdict (default on). Off, a recreate ends
+   * the subscription with the typed close reason.
+   */
+  withAutoResubscribe(enabled: boolean): ClientOptions {
+    return this.#copy({ autoResubscribe: enabled });
   }
 
   /**
@@ -1547,6 +1565,11 @@ provide one with withTlsClientCert(certPath, keyPath)`,
   /** @internal Whether subscriptions should ride through a failover. */
   _superviseSubscriptions(): boolean {
     return this.#opts.superviseSubscriptions;
+  }
+
+  /** @internal Whether a supervised subscription auto-resubscribes on recreate. */
+  _autoResubscribe(): boolean {
+    return this.#opts.autoResubscribe;
   }
 
   /** @internal How often a supervised subscription re-checks its owner. */

@@ -79,6 +79,24 @@ export class BrokenPipeError extends FibrilError {
 }
 
 /**
+ * A subscription ended with a typed reason instead of a silent stop. Thrown
+ * from the subscription's iterator (or `recv`) when the broker or a reconcile
+ * verdict closes it - a topic deletion, an ownership move that could not be
+ * migrated, a broker shutdown, a recreate the client opted out of, or a
+ * server error. A clean user-initiated `close()` ends the iteration without
+ * this error.
+ */
+export class SubscriptionClosedError extends FibrilError {
+  override readonly name = "SubscriptionClosedError";
+  /** Machine-readable reason code (see `REASON_CODES`). */
+  readonly code: number;
+  constructor(code: number, message: string) {
+    super(message);
+    this.code = code;
+  }
+}
+
+/**
  * Server returned a structured error in response to a request.
  */
 export class ServerError extends FibrilError {
