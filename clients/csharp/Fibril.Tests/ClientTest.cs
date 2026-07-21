@@ -48,7 +48,7 @@ public class ClientTest
 
         // A delivery carrying those bytes decodes back to the record.
         var deliver = new Deliver { Topic = "t", Payload = message.Payload, ContentType = message.ContentType };
-        var delivery = new Delivery(deliver, 0, false, null!);
+        var delivery = new Delivery(deliver, 0, false, null!, 0);
         var point = delivery.Json<Point>();
         Assert.Equal(1, point!.X);
         Assert.Equal(2, point.Y);

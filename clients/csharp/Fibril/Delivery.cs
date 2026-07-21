@@ -30,9 +30,15 @@ public readonly struct Delivery
     internal DeliveryTag Tag { get; }
     internal ulong SubId { get; }
     internal ulong ReqId { get; }   // the DELIVER frame id, reused when settling
-    private readonly Engine _engine; // the connection this arrived on
 
-    internal Delivery(Deliver d, ulong reqId, bool autoAck, Engine engine)
+    // Settlement routes through the connection's persistent settle router, keyed by
+    // the durable coordinates and the incarnation this delivery arrived on - not the
+    // engine it arrived on. So an ack after a reconnect reaches the current engine,
+    // or throws StaleDeliveryException if a non-resumed reconnect replaced the session.
+    private readonly SettleContext _settle;
+    private readonly long _incarnation;
+
+    internal Delivery(Deliver d, ulong reqId, bool autoAck, SettleContext settle, long incarnation)
     {
         Topic = d.Topic;
         Group = d.Group;
@@ -47,7 +53,8 @@ public readonly struct Delivery
         SubId = d.SubId;
         AutoAck = autoAck;
         ReqId = reqId;
-        _engine = engine;
+        _settle = settle;
+        _incarnation = incarnation;
     }
 
     /// <summary>The delivery payload as a UTF-8 string.</summary>
@@ -66,27 +73,32 @@ public readonly struct Delivery
         }
     }
 
-    /// <summary>Settles this delivery as processed, on the connection it arrived on.</summary>
-    public void Complete() => _engine.Complete(this);
+    /// <summary>
+    /// Settles this delivery as processed, routing to whatever engine is currently
+    /// live for the connection. A non-resumed reconnect throws
+    /// <see cref="StaleDeliveryException"/> (the message redelivers instead).
+    /// </summary>
+    public void Complete() => _settle.CurrentOrStale(_incarnation).Complete(this);
 
     /// <summary>Requeues this delivery immediately for redelivery.</summary>
-    public void Retry() => _engine.Nack(this, true, null);
+    public void Retry() => _settle.CurrentOrStale(_incarnation).Nack(this, true, null);
 
     /// <summary>
     /// Settles this delivery as a terminal failure: not requeued, so it is
     /// dead-lettered or dropped per the queue's policy.
     /// </summary>
-    public void Fail() => _engine.Nack(this, false, null);
+    public void Fail() => _settle.CurrentOrStale(_incarnation).Nack(this, false, null);
 
     /// <summary>Requeues this delivery for redelivery no sooner than <paramref name="delay"/> from now.</summary>
     public void RetryAfter(TimeSpan delay)
     {
+        var engine = _settle.CurrentOrStale(_incarnation);
         var notBefore = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + (long)delay.TotalMilliseconds;
         if (notBefore < 0)
         {
             notBefore = 0;
         }
-        _engine.Nack(this, true, (ulong)notBefore);
+        engine.Nack(this, true, (ulong)notBefore);
     }
 }
 
@@ -290,7 +302,9 @@ internal sealed partial class Engine
         {
             return; // delivery for a sub we no longer track
         }
-        var delivery = new Delivery(d, f.RequestId, s.AutoAck, this);
+        // Stamp this engine's incarnation, captured once, so a later settle routes to
+        // the current engine (or goes stale) without depending on this engine.
+        var delivery = new Delivery(d, f.RequestId, s.AutoAck, _settle, Incarnation);
         s.Channel.Writer.TryWrite(delivery);
     }
 }

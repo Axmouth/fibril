@@ -50,6 +50,13 @@ internal sealed class EngineOptions
     public ReconcileRegistry? Reconcile { get; init; }
 
     /// <summary>
+    /// The endpoint's persistent settle router, shared across the reconnects of this
+    /// endpoint's engine so a held delivery settles against the current engine. Null
+    /// (standalone ConnectAsync) gets a fresh one per engine.
+    /// </summary>
+    public SettleContext? Settle { get; init; }
+
+    /// <summary>
     /// Called on the actor for each broker topology push. Applies the snapshot and
     /// returns the generation the client now reflects, which the engine acks so the
     /// broker can fence a repartition cutover.
@@ -147,12 +154,19 @@ internal sealed partial class Engine : IAsyncDisposable
     public ResumeIdentity ResumeIdentity { get; private set; } = new(Uuid.Zero, Uuid.Zero, Uuid.Zero);
     public ResumeOutcome ResumeOutcome { get; private set; }
 
-    private Engine(Stream stream, TcpClient? tcp, EngineOptions opts, ulong nextId, Dictionary<ulong, SubState>? restoredSubs)
+    // The connection's persistent settle router, and the incarnation this engine
+    // stamps on every manual delivery it hands out (captured once, never re-read).
+    private readonly SettleContext _settle;
+    internal long Incarnation { get; }
+
+    private Engine(Stream stream, TcpClient? tcp, EngineOptions opts, ulong nextId, Dictionary<ulong, SubState>? restoredSubs, SettleContext settle, long incarnation)
     {
         _stream = stream;
         _tcp = tcp;
         _opts = opts;
         _nextId = nextId;
+        _settle = settle;
+        Incarnation = incarnation;
         _lastSeen = DateTime.UtcNow;
         if (restoredSubs is not null)
         {
@@ -299,11 +313,21 @@ internal sealed partial class Engine : IAsyncDisposable
             }
         }
 
-        var engine = new Engine(stream, tcp, opts, nextId, restoredSubs)
+        // Reserve this engine's incarnation before its loops start delivering: a
+        // resumed session keeps the current one so held deliveries still settle, any
+        // other outcome takes a fresh one so they go stale. Standalone ConnectAsync
+        // (no client) gets its own settle router.
+        var settle = opts.Settle ?? new SettleContext();
+        var incarnation = settle.Reserve(helloOk.Outcome != ResumeOutcome.Resumed);
+
+        var engine = new Engine(stream, tcp, opts, nextId, restoredSubs, settle, incarnation)
         {
             ResumeIdentity = new ResumeIdentity(helloOk.OwnerId, helloOk.ClientId, helloOk.ResumeToken),
             ResumeOutcome = helloOk.Outcome,
         };
+        // Bind before the actor loop starts (so no delivery is processed before the
+        // binding exists) so settlement routes to this live engine.
+        settle.Bind(incarnation, engine);
         engine._readTask = engine.ReadLoopAsync(engine._lifetime.Token);
         engine._heartbeatTask = engine.HeartbeatLoopAsync(engine._lifetime.Token);
         engine._runTask = engine.RunAsync();

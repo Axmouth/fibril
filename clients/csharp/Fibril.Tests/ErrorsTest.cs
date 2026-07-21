@@ -33,6 +33,14 @@ public class ErrorsTest
         Assert.False(Retry.IsRetryable(new UnexpectedException("protocol violation")));
     }
 
+    // A stale delivery redelivers on its own, so retrying the settle is pointless.
+    [Fact]
+    public void StaleDeliveryDoesNotRetry()
+    {
+        Assert.Equal(RetryAdvice.DoNotRetry, Retry.Advise(new StaleDeliveryException()));
+        Assert.False(Retry.IsRetryable(new StaleDeliveryException()));
+    }
+
     [Fact]
     public void RetryWalksInnerExceptionChain()
     {
@@ -78,7 +86,7 @@ public class ErrorsTest
     {
         var delivery = new Delivery(
             new Deliver { Payload = System.Text.Encoding.UTF8.GetBytes("not json") },
-            0UL, false, null!);
+            0UL, false, null!, 0);
         var ex = Assert.Throws<DeserializationException>(
             () => delivery.Json<Dictionary<string, object>>());
         AssertContainsAll(ex.Message, MustContain("decode_malformed_body"));

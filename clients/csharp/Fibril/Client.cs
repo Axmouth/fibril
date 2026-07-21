@@ -109,6 +109,9 @@ public sealed partial class Client : IAsyncDisposable
     private readonly object _reconcileLock = new();
     private readonly Dictionary<string, ReconcileRegistry> _reconcile = new();
 
+    private readonly object _settleLock = new();
+    private readonly Dictionary<string, SettleContext> _settle = new();
+
     private Client(string bootstrapEndpoint, ClientOptions opts)
     {
         _opts = opts;
@@ -141,6 +144,7 @@ public sealed partial class Client : IAsyncDisposable
         Resume = resume,
         Tls = _opts.Tls,
         Reconcile = ReconcileFor(endpoint),
+        Settle = SettleFor(endpoint),
         OnTopologyUpdate = _topo.ApplyPush,
         OnAssignmentChanged = _opts.OnAssignmentChanged is null
             ? null
@@ -159,6 +163,22 @@ public sealed partial class Client : IAsyncDisposable
                 _reconcile[endpoint] = registry;
             }
             return registry;
+        }
+    }
+
+    // The endpoint's settle router, created on first use and shared across the
+    // reconnects of that endpoint's engine so a held delivery settles against the
+    // current engine (or goes stale after a non-resumed reconnect).
+    private SettleContext SettleFor(string endpoint)
+    {
+        lock (_settleLock)
+        {
+            if (!_settle.TryGetValue(endpoint, out var settle))
+            {
+                settle = new SettleContext();
+                _settle[endpoint] = settle;
+            }
+            return settle;
         }
     }
 

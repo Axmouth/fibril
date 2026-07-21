@@ -53,6 +53,23 @@ public sealed class BrokenPipeException : FibrilException
     }
 }
 
+/// <summary>
+/// Settling a delivery whose connection was replaced by a non-resumed reconnect
+/// (or a broker restart). The delivery tag was minted by the superseded session
+/// and is dead server-side, so no settle frame is sent. The message is not lost:
+/// it redelivers on the current subscription per at-least-once. Distinct from
+/// <see cref="BrokenPipeException"/> (the connection is down, retry) - a stale
+/// delivery must NOT be retried, since re-settling would only report stale again
+/// while the message arrives afresh.
+/// </summary>
+public sealed class StaleDeliveryException : FibrilException
+{
+    public StaleDeliveryException()
+        : base("delivery is stale: its connection was replaced, the message will redeliver")
+    {
+    }
+}
+
 /// <summary>A protocol violation or an otherwise unexpected state.</summary>
 public sealed class UnexpectedException : FibrilException
 {
@@ -210,6 +227,11 @@ public static class Retry
             {
                 return RetryAdvice.Retry;
             }
+            return RetryAdvice.DoNotRetry;
+        }
+        // A stale delivery redelivers on its own; retrying the settle is pointless.
+        if (FirstOfType<StaleDeliveryException>(err) is not null)
+        {
             return RetryAdvice.DoNotRetry;
         }
         return RetryAdvice.DoNotRetry;
