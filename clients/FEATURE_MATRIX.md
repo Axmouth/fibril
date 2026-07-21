@@ -95,6 +95,7 @@ the same durable name tracks an independent cursor per partition.
 | Disable automatic reconnect | done | done | done | no | no |
 | Typed subscription close reason on the receive surface | done | done | done | done | done |
 | Auto-resubscribe on a recreate verdict (opt-out) | done | done | done | done | done |
+| Stale-delivery settlement: typed error + route to current engine <sup>22</sup> | done | done | no | no | no |
 
 ## Cluster routing
 
@@ -247,6 +248,17 @@ fans in across channels by a topic glob, driven by the cluster topology.
     hang. Rust and Python bound it with a client-level `publish_timeout_ms` option;
     Go and C# with the per-call `context`/`CancellationToken`; TypeScript with a
     retry-state deadline.
+22. Settling a manual delivery held across a reconnect routes to whatever engine is
+    currently live for the connection, keyed by the durable
+    `(topic, group, partition, tag)` and the connection incarnation the delivery
+    arrived on - not the engine it arrived on. A non-resumed reconnect (or a broker
+    restart) bumps the incarnation, so a held delivery settles to a typed
+    stale-delivery error (`StaleDelivery` in Rust, `StaleDeliveryError` in TS) and
+    sends no frame; the message redelivers on the current subscription. A resumed
+    reconnect keeps the incarnation, so the settle routes to the new engine and the
+    still-valid tag is accepted. Classified do-not-retry. Python, Go, and C# pin the
+    delivery to its origin engine today (a held settle silently drops or reports a
+    generic broken pipe); parity is tracked in FOLLOWUPS.
 
 See the repo-root `FOLLOWUPS.md` "Clients" section for the brick-by-brick plan
 behind these rows.

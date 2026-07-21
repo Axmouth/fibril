@@ -12,6 +12,20 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- Stale-delivery settlement. Settling a manual delivery held across a
+  reconnect now routes to whatever connection is currently live, keyed by the
+  durable `(topic, group, partition, tag)` and the connection incarnation the
+  delivery arrived on - not the socket it happened to arrive on. A non-resumed
+  reconnect (or a broker restart) bumps the incarnation, so a held delivery
+  settles to a typed stale-delivery error and sends no frame: the message
+  redelivers on the current subscription per at-least-once, and the caller can
+  tell "this tag is dead, it will redeliver" (do-not-retry) from "the
+  connection is down, retry". A resumed reconnect keeps the incarnation, so the
+  held delivery still settles, now through the new connection, and the
+  still-valid tag is accepted. Shipped in the Rust reference client
+  (`FibrilError::StaleDelivery`) and the TypeScript client
+  (`StaleDeliveryError`); the other clients still pin a held delivery to its
+  origin connection and are being brought to parity.
 - Durable resume across a broker restart. A broker now persists a small
   skeleton of each resumable session (its owner identity, client id, resume
   token, and subscription set) to the node's durable store, so a fast

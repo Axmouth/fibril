@@ -18,12 +18,7 @@ export {
   type PatternSource,
   type PatternMessage,
 } from "./routing.js";
-export {
-  NewMessage,
-  isReservedHeaderKey,
-  type HeadersInit,
-  type Publishable,
-} from "./message.js";
+export { NewMessage, isReservedHeaderKey, type HeadersInit, type Publishable } from "./message.js";
 export {
   Publisher,
   ReliablePublisher,
@@ -45,6 +40,7 @@ export {
   DeserializationError,
   SerializationError,
   BrokenPipeError,
+  StaleDeliveryError,
   RedirectError,
   ServerError,
   SubscriptionClosedError,

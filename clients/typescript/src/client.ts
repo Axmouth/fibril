@@ -1,13 +1,10 @@
 import { connect as netConnect, isIP, type Socket } from "node:net";
-import {
-  connect as tlsConnect,
-  type DetailedPeerCertificate,
-  type TLSSocket,
-} from "node:tls";
+import { connect as tlsConnect, type DetailedPeerCertificate, type TLSSocket } from "node:tls";
 import { readFileSync } from "node:fs";
 import { createHash, X509Certificate } from "node:crypto";
 import {
   Engine,
+  SettleContext,
   WRITE_COALESCE_BYTES,
   WRITE_COALESCE_COUNT,
   WRITE_COALESCE_WINDOW_MS,
@@ -33,12 +30,7 @@ import { Publisher } from "./publisher.js";
 import { SubscriptionBuilder, StreamSubscriptionBuilder } from "./subscription.js";
 import { RoutingClient } from "./routing.js";
 import { TopologyCache, routePartition, type Route, type RoundRobin } from "./internal/topology.js";
-import type {
-  DeclarePlexus,
-  StreamDurability,
-  StreamRetention,
-  SubscribeStream,
-} from "./wire.js";
+import type { DeclarePlexus, StreamDurability, StreamRetention, SubscribeStream } from "./wire.js";
 import type {
   AssignmentChangedMsg,
   AuthMsg,
@@ -536,7 +528,14 @@ export class StreamConfig {
     this.replicationFactorValue = replicationFactor;
   }
 
-  #with(patch: Partial<{ partitionCount: number | null; durability: StreamDurability; retention: StreamRetention; replicationFactor: number | null }>): StreamConfig {
+  #with(
+    patch: Partial<{
+      partitionCount: number | null;
+      durability: StreamDurability;
+      retention: StreamRetention;
+      replicationFactor: number | null;
+    }>,
+  ): StreamConfig {
     return new StreamConfig(
       this.topic,
       patch.partitionCount ?? this.partitionCount,
@@ -611,9 +610,10 @@ export interface ReconnectOutcome {
   resumeOutcome: ResumeOutcome;
 }
 
-function parseAddress(
-  address: string | { host: string; port: number },
-): { host: string; port: number } {
+function parseAddress(address: string | { host: string; port: number }): {
+  host: string;
+  port: number;
+} {
   if (typeof address === "object") return address;
   // Accept "host:port" or "[ipv6]:port".
   const ipv6Match = /^\[([^\]]+)\]:(\d+)$/.exec(address);
@@ -670,9 +670,7 @@ function openSocket(host: string, port: number, tls?: TlsOptions): Promise<Socke
 function normalizeFingerprint(raw: string): string {
   const hex = raw.replace(/[:\s]/g, "").toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(hex)) {
-    throw new TlsConfigError(
-      "tls caFingerprint must be 64 hex digits (SHA-256, colons optional)",
-    );
+    throw new TlsConfigError("tls caFingerprint must be 64 hex digits (SHA-256, colons optional)");
   }
   return hex;
 }
@@ -754,11 +752,7 @@ const CERT_ERROR_CODES = new Set([
  * closes on sighting a ClientHello), certificate failures are trust
  * configuration, everything else stays a generic handshake error.
  */
-function classifyTlsError(
-  err: NodeJS.ErrnoException,
-  host: string,
-  port: number,
-): FibrilError {
+function classifyTlsError(err: NodeJS.ErrnoException, host: string, port: number): FibrilError {
   const code = err.code ?? "";
   if (isCertificateRequired(err)) {
     return new TlsClientCertificateRequiredError(
@@ -767,10 +761,7 @@ with withTlsClientCert(certPath, keyPath). Deployment-CA certificates are \
 issued with fibrilctl cert issue`,
     );
   }
-  if (
-    code === "ECONNRESET" ||
-    /disconnected before secure TLS connection/i.test(err.message)
-  ) {
+  if (code === "ECONNRESET" || /disconnected before secure TLS connection/i.test(err.message)) {
     return new TlsNotSupportedByBrokerError(`${host}:${port}`);
   }
   if (CERT_ERROR_CODES.has(code)) {
@@ -799,9 +790,7 @@ function openTlsSocket(host: string, port: number, tls: TlsOptions): Promise<Soc
       ca = readFileSync(tls.caPath);
     } catch (err) {
       return Promise.reject(
-        new TlsConfigError(
-          `failed to read tls caPath ${tls.caPath}: ${(err as Error).message}`,
-        ),
+        new TlsConfigError(`failed to read tls caPath ${tls.caPath}: ${(err as Error).message}`),
       );
     }
   }
@@ -875,9 +864,14 @@ function openTlsSocket(host: string, port: number, tls: TlsOptions): Promise<Soc
 
 class EngineSlot {
   #engine: Engine;
+  /** The bootstrap connection's persistent settle router, shared across every
+   * engine this slot swaps through so a held delivery settles against the
+   * current one. Handed to each bootstrap `Engine.start`. */
+  readonly settle: SettleContext;
 
-  constructor(engine: Engine) {
+  constructor(engine: Engine, settle: SettleContext) {
     this.#engine = engine;
+    this.settle = settle;
   }
 
   current(): Engine {
@@ -899,6 +893,9 @@ class EngineSlot {
 class PooledConnection {
   #engine: Engine | null = null;
   #connecting: Promise<Engine> | null = null;
+  // This pooled owner's persistent settle router, shared across its reconnects
+  // so a held delivery settles against the current engine (or goes stale).
+  readonly #settle = new SettleContext();
 
   constructor(
     private readonly host: string,
@@ -918,6 +915,7 @@ class PooledConnection {
         const engine = await Engine.start(
           socket,
           this.opts,
+          this.#settle,
           new Map(),
           this.onAssignmentChanged,
           this.onTopologyUpdate,
@@ -952,10 +950,7 @@ provide one with withTlsClientCert(certPath, keyPath)`,
  * failed-over owner's stale connection is gone. A full topology view (refresh or
  * push) is authoritative about the live owner set.
  */
-function prunePoolToTopology(
-  cache: TopologyCache,
-  pool: Map<string, PooledConnection>,
-): void {
+function prunePoolToTopology(cache: TopologyCache, pool: Map<string, PooledConnection>): void {
   const live = cache.endpoints();
   for (const [endpoint, conn] of pool) {
     if (!live.has(endpoint)) {
@@ -1173,6 +1168,7 @@ export class Client {
     address: { host: string; port: number },
     opts: ClientOptions,
     engine: Engine,
+    settle: SettleContext,
     subscriptions: SubscriptionRegistry,
     assignmentListeners: Set<(event: AssignmentChangedMsg) => void>,
     goingAwayListeners: Set<(notice: GoingAwayMsg) => void>,
@@ -1182,7 +1178,7 @@ export class Client {
   ) {
     this.#address = address;
     this.#opts = opts;
-    this.#engine = new EngineSlot(engine);
+    this.#engine = new EngineSlot(engine, settle);
     this.#subscriptions = subscriptions;
     this.#assignmentListeners = assignmentListeners;
     this.#goingAwayListeners = goingAwayListeners;
@@ -1291,11 +1287,13 @@ export class Client {
       refreshCatalogue(t, catalogueState);
       return generation;
     };
+    const settle = new SettleContext();
     let engine: Engine;
     try {
       engine = await Engine.start(
         socket,
         opts,
+        settle,
         subscriptions,
         emitAssignment,
         onTopologyUpdate,
@@ -1310,14 +1308,13 @@ provide one with withTlsClientCert(certPath, keyPath)`,
         );
       }
       if (err instanceof FibrilError) throw err;
-      throw new DisconnectionError(
-        `Engine failed to start: ${(err as Error).message}`,
-      );
+      throw new DisconnectionError(`Engine failed to start: ${(err as Error).message}`);
     }
     return new Client(
       addr,
       opts,
       engine,
+      settle,
       subscriptions,
       assignmentListeners,
       goingAwayListeners,
@@ -1349,6 +1346,7 @@ provide one with withTlsClientCert(certPath, keyPath)`,
       engine = await Engine.start(
         socket,
         this.#opts.withResumeIdentity(oldEngine.resumeIdentity),
+        this.#engine.settle,
         this.#subscriptions,
         this.#emitAssignment,
         this.#onTopologyUpdate,
@@ -1357,9 +1355,7 @@ provide one with withTlsClientCert(certPath, keyPath)`,
     } catch (err) {
       socket.destroy();
       if (err instanceof FibrilError) throw err;
-      throw new DisconnectionError(
-        `Engine failed to start: ${(err as Error).message}`,
-      );
+      throw new DisconnectionError(`Engine failed to start: ${(err as Error).message}`);
     }
     this.#engine.replace(engine);
     this.#userShutdown = false;
@@ -1460,7 +1456,9 @@ provide one with withTlsClientCert(certPath, keyPath)`,
    * snapshot. In standalone mode the broker returns an empty topology and the
    * client keeps using its direct connection.
    */
-  async fetchTopology(filter: { topic?: string | null; group?: string | null } = {}): Promise<TopologyOkMsg> {
+  async fetchTopology(
+    filter: { topic?: string | null; group?: string | null } = {},
+  ): Promise<TopologyOkMsg> {
     const topology = await (await this._engineForOperation()).fetchTopology(filter);
     this.#topology.replace(topology);
     this.#topology.lastRefreshMs = Date.now();
@@ -1604,7 +1602,12 @@ provide one with withTlsClientCert(certPath, keyPath)`,
     const reply = deferred<SubscribeResult<InternalInflight>>();
     const fullReq = this.#withCohortMember(req);
     const engine = await this._engineFor(fullReq.topic, fullReq.partition ?? 0, fullReq.group);
-    await engine.submit({ type: "subscribe", req: fullReq, supervised: this.#opts.superviseSubscriptions, reply });
+    await engine.submit({
+      type: "subscribe",
+      req: fullReq,
+      supervised: this.#opts.superviseSubscriptions,
+      reply,
+    });
     const result = await reply.promise;
     this.#captureCohortMember(fullReq, result.memberId);
     return { engine, queue: result.queue };
@@ -1615,7 +1618,12 @@ provide one with withTlsClientCert(certPath, keyPath)`,
     const reply = deferred<SubscribeResult<InternalDelivered>>();
     const fullReq = this.#withCohortMember(req);
     const engine = await this._engineFor(fullReq.topic, fullReq.partition ?? 0, fullReq.group);
-    await engine.submit({ type: "subscribeAutoAck", req: fullReq, supervised: this.#opts.superviseSubscriptions, reply });
+    await engine.submit({
+      type: "subscribeAutoAck",
+      req: fullReq,
+      supervised: this.#opts.superviseSubscriptions,
+      reply,
+    });
     const result = await reply.promise;
     this.#captureCohortMember(fullReq, result.memberId);
     return { engine, queue: result.queue };
@@ -1640,7 +1648,9 @@ provide one with withTlsClientCert(certPath, keyPath)`,
    */
   async declareQueue(config: QueueConfig): Promise<void> {
     const reply = deferred<void>();
-    await (await this._engineForOperation()).submit({
+    await (
+      await this._engineForOperation()
+    ).submit({
       type: "declareQueue",
       req: config.toWire(),
       reply,
@@ -1654,7 +1664,9 @@ provide one with withTlsClientCert(certPath, keyPath)`,
    */
   async declarePlexus(config: StreamConfig): Promise<void> {
     const reply = deferred<void>();
-    await (await this._engineForOperation()).submit({
+    await (
+      await this._engineForOperation()
+    ).submit({
       type: "declarePlexus",
       req: config.toWire(),
       reply,
@@ -1666,7 +1678,9 @@ provide one with withTlsClientCert(certPath, keyPath)`,
    * @internal Subscribe once to a stream partition (manual ack). The supervisor
    * calls this to (re)attach to the partition's current owner.
    */
-  async _subscribeStreamManualOnce(req: SubscribeStream): Promise<SubscribeHandle<InternalInflight>> {
+  async _subscribeStreamManualOnce(
+    req: SubscribeStream,
+  ): Promise<SubscribeHandle<InternalInflight>> {
     const reply = deferred<SubscribeResult<InternalInflight>>();
     const engine = await this._engineFor(req.topic, req.partition, null);
     await engine.submit({ type: "subscribeStream", req, reply });
@@ -1675,7 +1689,9 @@ provide one with withTlsClientCert(certPath, keyPath)`,
   }
 
   /** @internal Auto-ack counterpart of _subscribeStreamManualOnce. */
-  async _subscribeStreamAutoOnce(req: SubscribeStream): Promise<SubscribeHandle<InternalDelivered>> {
+  async _subscribeStreamAutoOnce(
+    req: SubscribeStream,
+  ): Promise<SubscribeHandle<InternalDelivered>> {
     const reply = deferred<SubscribeResult<InternalDelivered>>();
     const engine = await this._engineFor(req.topic, req.partition, null);
     await engine.submit({ type: "subscribeStreamAutoAck", req, reply });

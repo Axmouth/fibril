@@ -13,6 +13,7 @@ import {
   COMPLIANCE_STRING,
   Op,
   PROTOCOL_V1,
+  type AckMsg,
   type AssignmentChangedMsg,
   type DeclareQueueMsg,
   type Hello,
@@ -25,7 +26,14 @@ import {
 } from "../src/protocol.js";
 import { Client, ClientOptions, QueueConfig, type Catalogue } from "../src/client.js";
 import type { SubscribeStream } from "../src/wire.js";
-import { BrokenPipeError, DisconnectionError, RedirectError, ServerError, SubscriptionClosedError } from "../src/errors.js";
+import {
+  BrokenPipeError,
+  DisconnectionError,
+  RedirectError,
+  ServerError,
+  StaleDeliveryError,
+  SubscriptionClosedError,
+} from "../src/errors.js";
 import { NewMessage } from "../src/message.js";
 import { REASON_CODES } from "../src/wire.js";
 import { fnv1a } from "../src/internal/topology.js";
@@ -169,9 +177,7 @@ test("client reconnect offers previous resume identity", async () => {
 
     const client = await Client.connect(
       `127.0.0.1:${broker.port}`,
-      new ClientOptions({ superviseSubscriptions: false }).withReconnectReconcilePolicy(
-        "restore",
-      ),
+      new ClientOptions({ superviseSubscriptions: false }).withReconnectReconcilePolicy("restore"),
     );
     const outcome = await client.reconnect();
 
@@ -325,9 +331,7 @@ test("client sends active subscriptions during reconnect reconciliation", async 
 
     const client = await Client.connect(
       `127.0.0.1:${broker.port}`,
-      new ClientOptions({ superviseSubscriptions: false }).withReconnectReconcilePolicy(
-        "restore",
-      ),
+      new ClientOptions({ superviseSubscriptions: false }).withReconnectReconcilePolicy("restore"),
     );
     const sub = await client.subscribe("jobs").group("workers").sub();
     const outcome = await client.reconnect();
@@ -932,6 +936,197 @@ test("client subscribes and receives a delivery", async () => {
         "expected an Ack frame to be received by broker",
       );
     }
+    sub.close();
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
+// #104 acceptance A1: a delivery held across a NON-resumed reconnect settles to a
+// typed StaleDeliveryError and sends no frame. The message redelivers on the
+// current subscription per at-least-once.
+test("a manual delivery held across a non-resumed reconnect settles stale", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        const h = decodeFrameBody<Hello>(f);
+        // The reconnect resolves NON-resumed: the prior server session (and its
+        // delivery tags) was replaced.
+        broker.send(
+          s,
+          buildFrame(
+            Op.HelloOk,
+            f.requestId,
+            helloOk(h.resume ? { resume_outcome: "resume_rejected" } : {}),
+          ),
+        );
+      } else if (f.opcode === Op.Subscribe) {
+        const sub = decodeFrameBody<SubscribeMsg>(f);
+        broker.send(
+          s,
+          buildFrame(Op.SubscribeOk, f.requestId, {
+            sub_id: 55n,
+            topic: sub.topic,
+            group: sub.group,
+            partition: 0,
+            prefetch: sub.prefetch,
+          }),
+        );
+        broker.send(
+          s,
+          buildFrame(Op.Deliver, 0n, {
+            sub_id: 55n,
+            topic: sub.topic,
+            group: sub.group,
+            partition: 0,
+            offset: 1n,
+            delivery_tag: { epoch: 42n },
+            published: 1n,
+            publish_received: 2n,
+            content_type: null,
+            headers: {},
+            payload: new Uint8Array([1, 2, 3]),
+          }),
+        );
+      } else if (f.opcode === Op.ReconcileClient) {
+        // The fresh session has no memory of the subscription.
+        broker.send(s, buildFrame(Op.ReconcileResult, f.requestId, { subscriptions: [] }));
+      }
+    };
+
+    const client = await Client.connect(
+      `127.0.0.1:${broker.port}`,
+      new ClientOptions({ superviseSubscriptions: false }).withReconnectReconcilePolicy("restore"),
+    );
+    const sub = await client.subscribe("jobs").group("workers").sub();
+    const held = await sub.recv();
+    assert.ok(held);
+    assert.equal(held.deliveryTag.epoch, 42n);
+
+    const acksBefore = broker.received.filter((fr) => fr.opcode === Op.Ack).length;
+    const outcome = await client.reconnect();
+    assert.equal(outcome.resumeOutcome, "resume_rejected");
+
+    await assert.rejects(held.complete(), (err) => err instanceof StaleDeliveryError);
+
+    // No settle frame reached the broker on either connection.
+    await new Promise((r) => setTimeout(r, 20));
+    const acksAfter = broker.received.filter((fr) => fr.opcode === Op.Ack).length;
+    assert.equal(acksAfter, acksBefore, "a stale settle must send no ack");
+
+    sub.close();
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
+// #104 acceptance A2 (and A3): a delivery held across a RESUMED reconnect settles
+// to the CURRENT engine and the broker accepts it - the tag is still valid on the
+// same session. Settlement is keyed by (topic, group, partition, tag), so a
+// reconcile that re-keyed the server sub id does not matter.
+test("a manual delivery held across a resumed reconnect settles to the current engine", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    let resumeSocket: Socket | null = null;
+    let ackSocket: Socket | null = null;
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        const h = decodeFrameBody<Hello>(f);
+        if (h.resume) resumeSocket = s;
+        broker.send(
+          s,
+          buildFrame(
+            Op.HelloOk,
+            f.requestId,
+            helloOk(h.resume ? { resume_outcome: "resumed" } : {}),
+          ),
+        );
+      } else if (f.opcode === Op.Subscribe) {
+        const sub = decodeFrameBody<SubscribeMsg>(f);
+        broker.send(
+          s,
+          buildFrame(Op.SubscribeOk, f.requestId, {
+            sub_id: 55n,
+            topic: sub.topic,
+            group: sub.group,
+            partition: 0,
+            prefetch: sub.prefetch,
+          }),
+        );
+        broker.send(
+          s,
+          buildFrame(Op.Deliver, 0n, {
+            sub_id: 55n,
+            topic: sub.topic,
+            group: sub.group,
+            partition: 0,
+            offset: 1n,
+            delivery_tag: { epoch: 42n },
+            published: 1n,
+            publish_received: 2n,
+            content_type: null,
+            headers: {},
+            payload: new Uint8Array([1, 2, 3]),
+          }),
+        );
+      } else if (f.opcode === Op.ReconcileClient) {
+        // Keep, but re-keyed to a new server sub id - settlement must not depend on it.
+        const clientSub = {
+          sub_id: 55n,
+          topic: "jobs",
+          group: "workers",
+          partition: 0,
+          auto_ack: false,
+          prefetch: 1,
+        };
+        broker.send(
+          s,
+          buildFrame(Op.ReconcileResult, f.requestId, {
+            subscriptions: [
+              {
+                client: clientSub,
+                server: { ...clientSub, sub_id: 66n },
+                action: "keep",
+                reason: "server_id_changed",
+              },
+            ],
+          }),
+        );
+      } else if (f.opcode === Op.Ack) {
+        ackSocket = s;
+      }
+    };
+
+    const client = await Client.connect(
+      `127.0.0.1:${broker.port}`,
+      new ClientOptions({ superviseSubscriptions: false }).withReconnectReconcilePolicy("restore"),
+    );
+    const sub = await client.subscribe("jobs").group("workers").sub();
+    const held = await sub.recv();
+    assert.ok(held);
+
+    const outcome = await client.reconnect();
+    assert.equal(outcome.resumeOutcome, "resumed");
+
+    // Settling the held delivery succeeds - no StaleDeliveryError.
+    await held.complete();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const ack = broker.received.find((fr) => fr.opcode === Op.Ack);
+    assert.ok(ack, "expected an ack after a resumed reconnect");
+    const ackMsg = decodeFrameBody<AckMsg>(ack);
+    assert.equal(ackMsg.topic, "jobs");
+    assert.equal(ackMsg.group, "workers");
+    assert.equal(ackMsg.tags[0].epoch, 42n);
+    // The ack routed to the CURRENT (second) connection, not the replaced one.
+    assert.ok(resumeSocket);
+    assert.equal(ackSocket, resumeSocket);
+
     sub.close();
     await client.shutdown();
   } finally {
@@ -1748,9 +1943,7 @@ test("owner restart: reconnect into a fresh session still reconciles subscriptio
 
     const client = await Client.connect(
       `127.0.0.1:${broker.port}`,
-      new ClientOptions({ superviseSubscriptions: false }).withReconnectReconcilePolicy(
-        "restore",
-      ),
+      new ClientOptions({ superviseSubscriptions: false }).withReconnectReconcilePolicy("restore"),
     );
     const sub = await client.subscribe("jobs").sub();
     const outcome = await client.reconnect();
