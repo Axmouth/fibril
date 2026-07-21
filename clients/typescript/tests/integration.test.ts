@@ -943,9 +943,9 @@ test("client subscribes and receives a delivery", async () => {
   }
 });
 
-// #104 acceptance A1: a delivery held across a NON-resumed reconnect settles to a
-// typed StaleDeliveryError and sends no frame. The message redelivers on the
-// current subscription per at-least-once.
+// A delivery held across a NON-resumed reconnect settles to a typed
+// StaleDeliveryError and sends no frame. The message redelivers on the current
+// subscription per at-least-once.
 test("a manual delivery held across a non-resumed reconnect settles stale", async () => {
   const broker = new FakeBroker();
   await broker.start();
@@ -1024,10 +1024,10 @@ test("a manual delivery held across a non-resumed reconnect settles stale", asyn
   }
 });
 
-// #104 acceptance A2 (and A3): a delivery held across a RESUMED reconnect settles
-// to the CURRENT engine and the broker accepts it - the tag is still valid on the
-// same session. Settlement is keyed by (topic, group, partition, tag), so a
-// reconcile that re-keyed the server sub id does not matter.
+// A delivery held across a RESUMED reconnect settles to the CURRENT engine and
+// the broker accepts it - the tag is still valid on the same session. Settlement
+// is keyed by (topic, group, partition, tag), so a reconcile that re-keyed the
+// server sub id does not matter.
 test("a manual delivery held across a resumed reconnect settles to the current engine", async () => {
   const broker = new FakeBroker();
   await broker.start();

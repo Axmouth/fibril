@@ -28,6 +28,7 @@ from .errors import (
     FibrilError,
     RedirectError,
     ServerError,
+    StaleDeliveryError,
     SubscriptionClosedError,
     TlsRequiredByBrokerError,
     UnexpectedError,
@@ -97,6 +98,15 @@ class Inflight(Delivered):
 
     deliver_request_id: int = 0
     sub_id: int = 0
+    # Durable settle coordinates + the connection incarnation this delivery
+    # arrived on, captured at delivery. Settling routes by these (through the
+    # current engine) instead of the origin engine's sub map, so a reconnect
+    # that re-keyed the subscription still settles - and a non-resumed reconnect
+    # makes a held delivery stale.
+    topic: str = ""
+    group: Optional[str] = None
+    partition: int = 0
+    incarnation: int = 0
 
 
 @dataclass
@@ -140,6 +150,59 @@ from .internal.bounded_queue import BoundedQueue  # noqa: E402  (after type alia
 SubscriptionRegistry = dict[int, _Registered]
 
 
+class SettleContext:
+    """Routes a manual settle to whatever engine is currently live for a connection.
+
+    One per persistent connection (the bootstrap owner and each pooled owner),
+    outliving every engine it swaps through, so a delivery held across a reconnect
+    settles against the current engine rather than the dead one it arrived on -
+    keyed by the connection incarnation the delivery arrived on. A non-resumed
+    reconnect allocates a fresh incarnation, so a delivery from the replaced
+    session settles to ``StaleDeliveryError``; a resumed reconnect keeps the
+    incarnation, so a held delivery still settles through the new engine. Mirrors
+    the reference client's ``SettleContext`` (crates/client).
+    """
+
+    def __init__(self) -> None:
+        self._current: Optional[tuple[int, "Engine"]] = None
+        self._next_incarnation = 0
+
+    def reserve(self, fresh_session: bool) -> int:
+        """Reserve the incarnation a (re)connecting engine stamps on its deliveries.
+
+        Called before the engine's read loop can deliver. A fresh session (a
+        non-resumed reconnect, or the first connect) claims a new incarnation so
+        deliveries held from the replaced session go stale; a resumed session
+        reuses the current one so they still settle. The engine captures the
+        returned value once and never re-reads it, so a late delivery on a
+        superseded engine keeps its own (now stale) stamp.
+        """
+        if fresh_session or self._current is None:
+            incarnation = self._next_incarnation
+            self._next_incarnation += 1
+            return incarnation
+        return self._current[0]
+
+    def bind(self, incarnation: int, engine: "Engine") -> None:
+        """Point settlement at an engine once it exists, under its reserved incarnation."""
+        self._current = (incarnation, engine)
+
+    def current_or_stale(self, incarnation: int) -> "Engine":
+        """The live engine for a delivery stamped at ``incarnation``.
+
+        Raises ``StaleDeliveryError`` if the incarnation has moved on (the session
+        was replaced) - the caller sends no frame, the message redelivers - or
+        ``BrokenPipeError`` if there is no live engine at all.
+        """
+        current = self._current
+        if current is None:
+            raise BrokenPipeError()
+        cur_incarnation, engine = current
+        if incarnation != cur_incarnation:
+            raise StaleDeliveryError()
+        return engine
+
+
 class Engine:
     """A single live connection to one broker endpoint."""
 
@@ -152,6 +215,8 @@ class Engine:
         resume_identity: wire.ResumeIdentity,
         resume_outcome: wire.ResumeOutcome,
         restored: dict[int, _SubState],
+        settle_ctx: SettleContext,
+        incarnation: int,
         on_assignment_changed: Optional[object] = None,
         on_topology_update: Optional[object] = None,
         on_going_away: Optional[object] = None,
@@ -162,6 +227,10 @@ class Engine:
         self._registry = registry
         self.resume_identity = resume_identity
         self.resume_outcome = resume_outcome
+        # The persistent settle router for this connection, and the incarnation
+        # this engine stamps on every manual delivery it hands out.
+        self.settle_ctx = settle_ctx
+        self._incarnation = incarnation
         self._on_assignment_changed = on_assignment_changed
         self._on_topology_update = on_topology_update
         self._on_going_away = on_going_away
@@ -199,6 +268,7 @@ class Engine:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
         opts: EngineOptions,
+        settle_ctx: SettleContext,
         registry: Optional[SubscriptionRegistry] = None,
         on_assignment_changed: Optional[object] = None,
         on_topology_update: Optional[object] = None,
@@ -286,7 +356,13 @@ class Engine:
             assert isinstance(result, wire.ReconcileResult)
             restored = _apply_reconcile_result(registry, result)
 
-        return cls(
+        # Reserve this engine's incarnation before its read loop can deliver: a
+        # resumed session keeps the current one so held deliveries still settle,
+        # any other outcome takes a fresh one so they go stale. The engine stamps
+        # this exact value on every delivery (never a live re-read).
+        incarnation = settle_ctx.reserve(hello.resume_outcome != "resumed")
+
+        engine = cls(
             reader,
             writer,
             opts,
@@ -294,10 +370,16 @@ class Engine:
             resume_identity,
             hello.resume_outcome,
             restored,
+            settle_ctx,
+            incarnation,
             on_assignment_changed,
             on_topology_update,
             on_going_away,
         )
+        # Bind before returning (and before the read loop, not yet scheduled onto
+        # the running loop, can process a delivery) so settlement routes here.
+        settle_ctx.bind(incarnation, engine)
+        return engine
 
     def shutdown(self) -> None:
         """Tear the connection down and fail every pending operation."""
@@ -425,11 +507,18 @@ class Engine:
         assert isinstance(result, SubscribeResult)
         return result
 
-    async def ack(self, sub_id: int, tag: wire.DeliveryTag, request_id: int) -> None:
-        sub = self._subs.get(sub_id)
-        if sub is None:
-            return
-        msg = wire.Ack(topic=sub.topic, group=sub.group, partition=sub.partition, tags=[tag])
+    async def ack(
+        self,
+        topic: str,
+        group: Optional[str],
+        partition: int,
+        tag: wire.DeliveryTag,
+        request_id: int,
+    ) -> None:
+        # Built from the delivery's own durable coordinates (carried on the
+        # InflightMessage), not a sub-map lookup - so a reconnect that re-keyed
+        # the subscription still settles correctly.
+        msg = wire.Ack(topic=topic, group=group, partition=partition, tags=[tag])
         # Acks are fire-and-forget (no reply awaited), so they coalesce like
         # unconfirmed publishes. A lost ack on a severed connection just redelivers,
         # which is already the at-least-once guarantee.
@@ -438,19 +527,18 @@ class Engine:
 
     async def nack(
         self,
-        sub_id: int,
+        topic: str,
+        group: Optional[str],
+        partition: int,
         tag: wire.DeliveryTag,
         requeue: bool,
         not_before: Optional[int],
         request_id: int,
     ) -> None:
-        sub = self._subs.get(sub_id)
-        if sub is None:
-            return
         msg = wire.Nack(
-            topic=sub.topic,
-            group=sub.group,
-            partition=sub.partition,
+            topic=topic,
+            group=group,
+            partition=partition,
             tags=[tag],
             requeue=requeue,
             not_before=not_before,
@@ -794,6 +882,13 @@ class Engine:
                 offset=d.offset,
                 deliver_request_id=frame.request_id,
                 sub_id=d.sub_id,
+                # Durable settle coordinates + this engine's incarnation, captured
+                # now so a later settle routes to the current engine (or goes
+                # stale) without depending on this engine's sub map.
+                topic=sub.topic,
+                group=sub.group,
+                partition=sub.partition,
+                incarnation=self._incarnation,
             )
         try:
             await sub.queue.send(item)  # prefetch backpressure
