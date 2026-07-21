@@ -8,3 +8,4 @@ pub mod client;
 pub mod handler;
 pub mod replication;
 pub mod replication_stream;
+pub mod session_store;

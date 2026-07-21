@@ -1251,8 +1251,7 @@ impl ExclusiveGroupRouter {
                 let mut members: Vec<CohortMemberCoverage> = members
                     .iter()
                     .map(|(member, parts)| {
-                        let mut partitions: Vec<u32> =
-                            parts.keys().map(|p| p.id()).collect();
+                        let mut partitions: Vec<u32> = parts.keys().map(|p| p.id()).collect();
                         partitions.sort_unstable();
                         CohortMemberCoverage {
                             member: member.clone(),
@@ -3249,8 +3248,7 @@ impl<
     ) -> Result<DestroyOutcome, BrokerError> {
         // Drop the local loop state so the delivery loop stops referencing it.
         self.queues.retain(|qk, qs| {
-            let retiring =
-                qk.tp == topic && qk.part.id() == part && qk.group.as_deref() == group;
+            let retiring = qk.tp == topic && qk.part.id() == part && qk.group.as_deref() == group;
             if retiring {
                 for consumer in qs.consumers.iter() {
                     consumer.value().close(ConsumerCloseCause::OwnerMoved);

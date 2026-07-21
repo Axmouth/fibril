@@ -29,11 +29,10 @@ use fibril_broker::{
     },
     queue_engine::{
         Deliverable, DestroyOutcome, DiskUsedBreakdownEntry, EvictOutcome,
-        FollowerStateCheckpointInstall, InspectMode,
-        IoError, KeratinAppendCompletion, Message, MessageHeaders, OwnerReplicationBatch,
-        OwnerReplicationRead, OwnerStateCheckpoint, QueueEngine, QueuePromotionOutcome,
-        ReplayDeadLetterOutcome, ReplayDeadLettersReport, SettleRequest as EngineSettleRequest,
-        StromaEngine,
+        FollowerStateCheckpointInstall, InspectMode, IoError, KeratinAppendCompletion, Message,
+        MessageHeaders, OwnerReplicationBatch, OwnerReplicationRead, OwnerStateCheckpoint,
+        QueueEngine, QueuePromotionOutcome, ReplayDeadLetterOutcome, ReplayDeadLettersReport,
+        SettleRequest as EngineSettleRequest, StromaEngine,
     },
     test_util::TestState,
 };
@@ -3325,7 +3324,17 @@ async fn owner_replication_read_serves_coordination_declared_stream() {
         .unwrap();
 
     let records = broker
-        .read_owner_replication_records("events", Partition::new(0), None, 0, 0, 10, 10, usize::MAX, 0)
+        .read_owner_replication_records(
+            "events",
+            Partition::new(0),
+            None,
+            0,
+            0,
+            10,
+            10,
+            usize::MAX,
+            0,
+        )
         .await
         .expect("stream owner must serve replication reads");
     // Reaching here is the regression: the guard admitted the stream
@@ -3334,7 +3343,17 @@ async fn owner_replication_read_serves_coordination_declared_stream() {
 
     // The queue guard still rejects topics owned by neither table.
     let err = broker
-        .read_owner_replication_records("plain", Partition::new(0), None, 0, 0, 10, 10, usize::MAX, 0)
+        .read_owner_replication_records(
+            "plain",
+            Partition::new(0),
+            None,
+            0,
+            0,
+            10,
+            10,
+            usize::MAX,
+            0,
+        )
         .await
         .expect_err("unowned topic unexpectedly served");
     assert!(matches!(err, BrokerError::NotOwner { .. }));

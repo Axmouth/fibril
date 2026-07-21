@@ -530,7 +530,7 @@ Conditions and limits:
 - Operations already in flight when the socket fails are not replayed.
 - Active subscriptions still need application-level handling when resume is rejected or reconciliation reports a mismatch.
 - Late settlements after a short disconnect are accepted only when the client explicitly resumes before grace expires.
-- Broker process restart reconciliation is not implemented. Current reconnect grace depends on the broker process keeping dormant connection state in memory.
+- Broker process restart reconciliation is implemented for resumable sessions: the broker persists a small session skeleton (owner identity, client id, resume token, subscription set) to its durable store, so a restart within `connection.resume_session_restart_ttl_ms` (default 60s, `0` disables) lets a client resume and reconcile rather than being rejected. The handshake reports `resumed_after_restart` for this case. Messages redeliver per at-least-once and delivery tags still die with the process (the client marks held deliveries stale on a non-resumed outcome). Live-process reconnect grace still depends on in-memory dormant connection state as before.
 
 ## Benchmarks and Operational Scripts
 
