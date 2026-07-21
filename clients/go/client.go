@@ -41,6 +41,10 @@ type ClientOptions struct {
 	// ReconcilePolicy governs how the broker reconciles a client's non-supervised
 	// subscriptions after a reconnect ("" defaults to restoring them).
 	ReconcilePolicy ReconcilePolicy
+	// DisableAutoResubscribe, when set, makes a recreate verdict end a
+	// supervised subscription with the typed close reason instead of silently
+	// re-subscribing. The zero value keeps auto-resubscribe on (the default).
+	DisableAutoResubscribe bool
 	// RetryBackoff is the pause before retrying an op after a transient failure
 	// (0 uses a sensible default).
 	RetryBackoff time.Duration

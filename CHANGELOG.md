@@ -43,8 +43,10 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   `withAutoResubscribe(false)` opts out of silent recreate. The Python
   client mirrors it: a subscription iterator raises a typed
   `SubscriptionClosedError` on a broker or reconcile close, and
-  `ClientOptions(auto_resubscribe=False)` opts out. The remaining two
-  clients (Go, C#) follow in later changes.
+  `ClientOptions(auto_resubscribe=False)` opts out. The Go client exposes
+  the reason through a `CloseReason()` accessor on the subscription (read
+  after its `Deliveries` channel closes), with `DisableAutoResubscribe` to
+  opt out. The C# client follows in a later change.
 
 - The typed subscription lifecycle, server half. The wire grew a
   machine-readable reason taxonomy: reconcile results carry a tagged code

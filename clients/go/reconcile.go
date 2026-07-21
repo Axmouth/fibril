@@ -22,6 +22,7 @@ type reconcileEntry struct {
 	sub     reconcileSubscription
 	ch      chan Delivery
 	autoAck bool
+	reason  *closeReasonCell
 }
 
 func newReconcileRegistry(policy ReconcilePolicy) *reconcileRegistry {
@@ -31,9 +32,9 @@ func newReconcileRegistry(policy ReconcilePolicy) *reconcileRegistry {
 	return &reconcileRegistry{policy: policy, subs: map[uint64]*reconcileEntry{}}
 }
 
-func (r *reconcileRegistry) register(sub reconcileSubscription, ch chan Delivery, autoAck bool) {
+func (r *reconcileRegistry) register(sub reconcileSubscription, ch chan Delivery, autoAck bool, reason *closeReasonCell) {
 	r.mu.Lock()
-	r.subs[sub.SubID] = &reconcileEntry{sub: sub, ch: ch, autoAck: autoAck}
+	r.subs[sub.SubID] = &reconcileEntry{sub: sub, ch: ch, autoAck: autoAck, reason: reason}
 	r.mu.Unlock()
 }
 
@@ -82,20 +83,26 @@ func (r *reconcileRegistry) applyResult(res reconcileResult) map[uint64]*subStat
 				newID = sr.Server.SubID
 			}
 			e.sub.SubID = newID
-			restored[newID] = &subState{ch: e.ch, autoAck: e.autoAck, preserve: true}
+			restored[newID] = &subState{ch: e.ch, autoAck: e.autoAck, preserve: true, reason: e.reason}
 			next[newID] = e
 		default:
-			// close_client_side / close_server_side, and for now also
-			// recreate_client_side: the server has no live subscription
-			// behind this channel, so keeping it open would strand the
-			// consumer. Auto-resubscribe on recreate arrives with the typed
-			// subscription lifecycle.
+			// close_client_side / close_server_side / recreate_client_side:
+			// the server has no live subscription behind this channel. Stamp
+			// the typed reason then close - a supervised subscription treats a
+			// recreate (and other non-terminal reasons) as a cue to
+			// re-subscribe, a terminal one surfaces to the consumer.
+			if e.reason != nil {
+				e.reason.set(sr.Code, sr.Reason)
+			}
 			close(e.ch)
 		}
 	}
 	// A subscription the broker did not mention is gone; end its consumer.
 	for id, e := range r.subs {
 		if !visited[id] {
+			if e.reason != nil {
+				e.reason.set(ReasonServerError, "subscription no longer present after reconnect")
+			}
 			close(e.ch)
 		}
 	}
