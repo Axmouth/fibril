@@ -18,6 +18,41 @@ public class ClientTest
     }
 
     [Fact]
+    public async Task ReconnectReturnsResumeOutcome()
+    {
+        await using var broker = new FakeBroker { ResumeOutcome = ResumeOutcome.Resumed };
+        await using var client = await Client.ConnectAsync(broker.Address, new ClientOptions { ClientName = "t", HeartbeatInterval = TimeSpan.FromHours(1) }, Timeout());
+
+        var outcome = await client.ReconnectAsync(Timeout());
+
+        Assert.Equal(ResumeOutcome.Resumed, outcome);
+        Assert.Equal(2, broker.Connections); // the initial connect plus the forced reconnect
+    }
+
+    [Fact]
+    public async Task DisableAutoReconnectSurfacesCloseError()
+    {
+        await using var broker = new FakeBroker { DropAfterFirstPublish = true };
+        await using var client = await Client.ConnectAsync(broker.Address, new ClientOptions { ClientName = "t", HeartbeatInterval = TimeSpan.FromHours(1), AutoReconnect = false }, Timeout());
+
+        var publisher = client.Publisher("t");
+        await publisher.PublishConfirmedAsync(Message.Text("a"), Timeout());
+
+        // The broker dropped the connection. Once the client notices, the next publish
+        // must fail rather than reconnect.
+        var ct = Timeout();
+        await Assert.ThrowsAnyAsync<FibrilException>(async () =>
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                await publisher.PublishConfirmedAsync(Message.Text("b"), ct);
+                await Task.Delay(20, ct);
+            }
+        });
+        Assert.Equal(1, broker.Connections); // no reconnect was attempted
+    }
+
+    [Fact]
     public async Task SubscribeYieldsDeliveries()
     {
         await using var broker = new FakeBroker { PushDeliveryOnSubscribe = true };

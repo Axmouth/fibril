@@ -258,6 +258,11 @@ internal sealed class FakeBroker : IAsyncDisposable
     /// <summary>Whether an op has been received so far (no waiting).</summary>
     public bool Received(Op op) => _received.Contains(op);
 
+    private int _connections;
+
+    /// <summary>How many connections the broker has accepted.</summary>
+    public int Connections => Volatile.Read(ref _connections);
+
     public async Task<bool> WaitForAsync(Op op, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
@@ -275,10 +280,28 @@ internal sealed class FakeBroker : IAsyncDisposable
     {
         try
         {
-            // Accept in a loop so a reconnect after a drop is served on a fresh connection.
+            // Accept in a loop and handle each connection concurrently, so a live
+            // connection does not block a second one (e.g. an explicit reconnect
+            // while the first is still up).
             while (!ct.IsCancellationRequested)
             {
-                using var client = await _listener.AcceptTcpClientAsync(ct);
+                var client = await _listener.AcceptTcpClientAsync(ct);
+                Interlocked.Increment(ref _connections);
+                _ = HandleClientAsync(client, ct);
+            }
+        }
+        catch (Exception)
+        {
+            // Listener stopped or client gone: the test is finishing.
+        }
+    }
+
+    private async Task HandleClientAsync(TcpClient client, CancellationToken ct)
+    {
+        try
+        {
+            using (client)
+            {
                 Stream stream = client.GetStream();
                 if (ServerCertificate is not null)
                 {
@@ -303,7 +326,7 @@ internal sealed class FakeBroker : IAsyncDisposable
         }
         catch (Exception)
         {
-            // Listener stopped or client gone: the test is finishing.
+            // Connection closed or the test is finishing.
         }
     }
 

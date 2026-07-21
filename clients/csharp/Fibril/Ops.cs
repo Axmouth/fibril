@@ -5,8 +5,8 @@ namespace Fibril;
 // layouts are byte-for-byte pinned by the shared vectors in
 // clients/wire_vectors.json. Option fields are C# nullables (null = none).
 
-/// <summary>The handshake outcome the broker reports.</summary>
-internal enum ResumeOutcome : byte
+/// <summary>The handshake outcome the broker reports, returned from <see cref="Client.ReconnectAsync"/>.</summary>
+public enum ResumeOutcome : byte
 {
     New = 0,
     Resumed = 1,

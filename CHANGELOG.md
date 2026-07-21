@@ -12,6 +12,14 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- Explicit reconnect and a disable-auto-reconnect knob in the Go and C# clients,
+  bringing them to parity with the others. `Reconnect(ctx)` (Go) and
+  `ReconnectAsync(ct)` (C#) force a fresh bootstrap connection, offering the prior
+  resume identity, and return the broker's resume outcome so a caller can tell a
+  genuine resume from a fresh session. `DisableAutoReconnect` (Go) and
+  `AutoReconnect = false` (C#) stop the client from transparently redialing a
+  dropped connection before an operation - the closed connection surfaces its
+  close error instead.
 - Stale-delivery settlement. Settling a manual delivery held across a
   reconnect now routes to whatever connection is currently live, keyed by the
   durable `(topic, group, partition, tag)` and the connection incarnation the

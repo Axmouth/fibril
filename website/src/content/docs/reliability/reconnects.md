@@ -61,9 +61,9 @@ and make one conservative automatic reconnect attempt before a new publish,
 subscribe, or declare operation when the previous engine is already known to be
 closed. A connection is *known to be closed* when a socket read or write fails,
 the peer sends EOF, an expected heartbeat is missed, or the TLS layer reports a
-fatal alert. Rust, TypeScript, and Python additionally expose an explicit
-`reconnect()` you can call yourself (see the support matrix below); Go and C#
-reconnect only automatically.
+fatal alert. Every client also exposes an explicit `reconnect()` you can call
+yourself and a knob to disable the automatic attempt (see the support matrix
+below).
 
 Publisher handles created from a client use the latest connection engine after
 explicit or automatic reconnect. New subscriptions created after reconnect also
@@ -168,15 +168,18 @@ yet, so rather than name clients inline this is the support matrix:
 | Typed subscription close reason on the receive surface | yes | yes | yes | yes | yes |
 | Auto-resubscribe on a broker-advised recreate (opt-out) | yes | yes | yes | yes | yes |
 | No replay of in-flight operations | yes | yes | yes | yes | yes |
-| Explicit `reconnect()` returning the handshake outcome | yes | yes | yes | no | no |
-| Disable automatic reconnect | yes | yes | yes | no | no |
+| Explicit `reconnect()` returning the handshake outcome | yes | yes | yes | yes | yes |
+| Disable automatic reconnect | yes | yes | yes | yes | yes |
 
-Where an explicit `reconnect()` is available it returns the broker handshake
-outcome. Use it to tell whether the broker actually resumed the previous logical
-connection or started a fresh one. If the outcome is not `resumed`, treat old
-subscriptions and unsettled local work as unsafe to continue without a fresh
-application-level decision. Go and C# perform the same one-attempt automatic
-reconnect but do not surface an explicit call or a disable knob today.
+The explicit `reconnect()` returns the broker handshake outcome. Use it to tell
+whether the broker actually resumed the previous logical connection or started a
+fresh one. If the outcome is not `resumed`, treat old subscriptions and unsettled
+local work as unsafe to continue without a fresh application-level decision. The
+method is `reconnect()` in Rust, TypeScript, and Python, `Reconnect(ctx)` in Go,
+and `ReconnectAsync(ct)` in C#. Disabling the automatic attempt makes a closed
+connection surface its close error before the next operation instead of silently
+redialing (`disable_auto_reconnect()` / `autoReconnectAttempts(0)` in the earlier
+clients, `DisableAutoReconnect` in Go, `AutoReconnect = false` in C#).
 
 Automatic reconnect is intentionally small everywhere: one attempt before a new
 operation, not an unbounded background loop.

@@ -45,6 +45,11 @@ type ClientOptions struct {
 	// supervised subscription with the typed close reason instead of silently
 	// re-subscribing. The zero value keeps auto-resubscribe on (the default).
 	DisableAutoResubscribe bool
+	// DisableAutoReconnect, when set, stops the client from transparently
+	// redialing a dropped bootstrap connection before an operation: a closed
+	// connection surfaces its close error instead. The zero value keeps
+	// auto-reconnect on (the default). Reconnect always redials regardless.
+	DisableAutoReconnect bool
 	// RetryBackoff is the pause before retrying an op after a transient failure
 	// (0 uses a sensible default).
 	RetryBackoff time.Duration
@@ -431,15 +436,48 @@ func (c *Client) bootstrapEngine(ctx context.Context) (*Engine, error) {
 	if c.closed.Load() {
 		return nil, &BrokenPipeError{Message: "client shut down"}
 	}
-	opts := c.engineOpts(c.bootstrapEndpoint)
-	resume := c.bootstrap.ResumeIdentity
-	opts.Resume = &resume
-	ne, err := Connect(ctx, c.bootstrapEndpoint, opts)
+	// With auto-reconnect off, surface why the connection closed rather than
+	// redialing under the caller. Reconnect is the explicit way back.
+	if c.opts.DisableAutoReconnect {
+		return nil, c.bootstrap.err()
+	}
+	ne, err := c.dialBootstrap(ctx, c.bootstrap)
 	if err != nil {
 		return nil, err
 	}
 	c.bootstrap = ne
 	return ne, nil
+}
+
+// dialBootstrap opens a fresh bootstrap connection, offering the prior session's
+// resume identity so the broker (and the endpoint's reconcile registry and settle
+// router) can restore state. The caller holds bootstrapMu.
+func (c *Client) dialBootstrap(ctx context.Context, old *Engine) (*Engine, error) {
+	opts := c.engineOpts(c.bootstrapEndpoint)
+	resume := old.ResumeIdentity
+	opts.Resume = &resume
+	return Connect(ctx, c.bootstrapEndpoint, opts)
+}
+
+// Reconnect forces a fresh bootstrap connection, offering the previous session's
+// resume identity, and returns the broker's resume outcome. ResumeResumed means
+// the server-side session was reattached; any other outcome means the broker
+// treated the connection as fresh. Existing publishers use the new connection;
+// active non-supervised subscriptions reconcile, and supervised ones re-subscribe.
+func (c *Client) Reconnect(ctx context.Context) (ResumeOutcome, error) {
+	c.bootstrapMu.Lock()
+	defer c.bootstrapMu.Unlock()
+	if c.closed.Load() {
+		return "", &BrokenPipeError{Message: "client shut down"}
+	}
+	old := c.bootstrap
+	ne, err := c.dialBootstrap(ctx, old)
+	if err != nil {
+		return "", err
+	}
+	c.bootstrap = ne
+	old.Shutdown()
+	return ne.ResumeOutcome, nil
 }
 
 // engineFor returns the engine for an endpoint, opening and pooling one if
