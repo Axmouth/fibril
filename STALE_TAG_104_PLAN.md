@@ -60,11 +60,13 @@ Each applies to EVERY client (Rust done, then TS, Python, Go, C#).
 
 ## Verification (Rust reference)
 
-- A1: `settling_a_stale_delivery_returns_stale_error` (unit),
+- A1: `settling_a_stale_delivery_returns_stale_error` (unit: a fresh rebind
+  bumps the incarnation, the held delivery keeps its own stamp and goes stale),
   `held_delivery_becomes_stale_across_a_non_resumed_reconnect` (integration,
   real TCP mock + reconnect).
 - A2: `settling_within_the_same_incarnation_routes_to_current_engine` (unit:
-  rebind to a new engine, same incarnation, ack routes to the new engine).
+  a resumed rebind keeps the incarnation - asserted equal - and the ack routes
+  to the new engine).
 - A3: covered by A2's routing (settlement carries topic/partition, not sub id)
   and the reconnect integration test.
 - A4: `StaleDelivery` is a distinct `FibrilError` variant, classified
