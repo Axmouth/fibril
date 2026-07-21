@@ -102,6 +102,10 @@ class ClientOptions:
     resume_identity: Optional[wire.ResumeIdentity] = None
     auto_reconnect_attempts: int = 1
     reconnect_reconcile_policy: wire.ReconcilePolicy = "conservative"
+    #: Whether a supervised subscription silently re-subscribes when the broker
+    #: advises a safe recreate (the default). Off, a recreate ends the
+    #: subscription with the typed close reason instead.
+    auto_resubscribe: bool = True
     max_redirects: int = 3
     publish_timeout_ms: int = 30_000
     topology_refresh_cooldown_ms: int = 1_000
@@ -1069,6 +1073,9 @@ class Client:
 
     def supervise_subscriptions(self) -> bool:
         return self._opts.supervise_subscriptions
+
+    def auto_resubscribe(self) -> bool:
+        return self._opts.auto_resubscribe
 
     def supervise_interval_ms(self) -> int:
         return self._opts.subscription_supervise_interval_ms

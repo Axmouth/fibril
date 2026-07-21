@@ -51,6 +51,7 @@ _ENCODERS: dict[Op, _Encoder] = {
     Op.TOPOLOGY_UPDATE: wire.encode_topology_update_body,
     Op.TOPOLOGY_UPDATE_ACK: wire.encode_topology_update_ack_body,
     Op.GOING_AWAY: wire.encode_going_away_body,
+    Op.SUBSCRIPTION_CLOSED: wire.encode_subscription_closed_body,
     Op.REDIRECT: wire.encode_redirect_body,
 }
 
@@ -80,6 +81,7 @@ _DECODERS: dict[Op, _Decoder] = {
     Op.TOPOLOGY_UPDATE: wire.decode_topology_update_body,
     Op.TOPOLOGY_UPDATE_ACK: wire.decode_topology_update_ack_body,
     Op.GOING_AWAY: wire.decode_going_away_body,
+    Op.SUBSCRIPTION_CLOSED: wire.decode_subscription_closed_body,
     Op.REDIRECT: wire.decode_redirect_body,
 }
 

@@ -69,4 +69,8 @@ class Op(IntEnum):
     # shutdown or upgrade. The client settles in-flight work and reconnects.
     GOING_AWAY = 103
 
+    # Server push that one subscription ended (topic deleted, ownership moved,
+    # cohort removal) while the connection stays up, with a typed reason.
+    SUBSCRIPTION_CLOSED = 104
+
     ERROR = 255

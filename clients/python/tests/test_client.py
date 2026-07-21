@@ -132,6 +132,44 @@ async def test_auto_ack_subscription_delivers(broker: FakeBroker) -> None:
         await client.shutdown()
 
 
+async def test_subscription_closed_frame_surfaces_typed_reason(broker: FakeBroker) -> None:
+    from fibril.codec import build_frame
+    from fibril.errors import SubscriptionClosedError
+    from fibril.frames import encode_body
+    from fibril.protocol import Op
+
+    broker.deliver_on_subscribe = [b"last"]
+    client = await _connect(broker)
+    try:
+        sub = await client.subscribe("restart.jobs").sub()
+
+        # The buffered delivery arrives first.
+        first = await asyncio.wait_for(sub.recv(), timeout=1)
+        assert first is not None
+        await first.complete()
+
+        # The broker ends the subscription (topic deleted) - a terminal reason,
+        # so the supervisor stops and surfaces it rather than re-subscribing.
+        await broker.push(
+            build_frame(
+                Op.SUBSCRIPTION_CLOSED,
+                0,
+                encode_body(
+                    Op.SUBSCRIPTION_CLOSED,
+                    wire.SubscriptionClosed(
+                        sub_id=1, code=wire.REASON_TOPIC_DELETED, message="the queue was deleted"
+                    ),
+                ),
+            )
+        )
+
+        with pytest.raises(SubscriptionClosedError) as excinfo:
+            await asyncio.wait_for(sub.recv(), timeout=2)
+        assert excinfo.value.code == wire.REASON_TOPIC_DELETED
+    finally:
+        await client.shutdown()
+
+
 async def test_manual_ack_subscription_completes(broker: FakeBroker) -> None:
     broker.deliver_on_subscribe = [b"task"]
     client = await _connect(broker)
