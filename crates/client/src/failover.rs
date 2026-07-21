@@ -114,6 +114,7 @@ impl FibrilError {
             FibrilError::DeserializationFailure { .. }
             | FibrilError::SerializationFailure { .. }
             | FibrilError::InvalidName { .. }
+            | FibrilError::StaleDelivery
             | FibrilError::Unexpected { .. } => RetryAdvice::DoNotRetry,
             // TLS mismatches and trust failures are configuration problems on
             // one side or the other. Retrying with the same options cannot

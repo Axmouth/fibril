@@ -42,7 +42,7 @@ use std::{
     str::FromStr,
     sync::{
         Arc, RwLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Instant,
 };
@@ -215,6 +215,12 @@ pub enum FibrilError {
     /// The user-facing handle can no longer reach the connection engine.
     #[error("Connection to the Client was severed, reconnection is advised")]
     BrokenPipe,
+    /// The delivery was received on a connection incarnation that a
+    /// non-resumed reconnect (or a broker restart) has replaced, so its
+    /// delivery tag is dead server-side. Settling it is a no-op; the message
+    /// redelivers on the current subscription per at-least-once.
+    #[error("delivery is stale: its connection was replaced, the message will redeliver")]
+    StaleDelivery,
     /// The broker rejected a request with a structured error response.
     #[error("Server returned error code {code}: {msg}")]
     Failure { code: u16, msg: String },
@@ -970,22 +976,6 @@ impl Publisher {
     }
 }
 
-#[doc(hidden)]
-pub enum SettleRequest {
-    Ack {
-        tag: DeliveryTag,
-        request_id: u64,
-        response: oneshot::Sender<Result<(), FibrilError>>,
-    },
-    Nack {
-        tag: DeliveryTag,
-        requeue: bool,
-        not_before: Option<UnixMillis>,
-        request_id: u64,
-        response: oneshot::Sender<Result<(), FibrilError>>,
-    },
-}
-
 /// Type accepted as a delayed publish interval.
 ///
 /// A relative delay. Implemented only for [`std::time::Duration`] so the unit is
@@ -1031,42 +1021,66 @@ pub struct InflightMessage {
     pub payload: Vec<u8>,
     #[doc(hidden)]
     pub request_id: u64,
-    settle: oneshot::Sender<SettleRequest>,
+    /// Durable settle routing: the partition the delivery came from and the
+    /// connection incarnation it was received on. Settlement is keyed by
+    /// `(topic, group, partition, tag)` and sent to whatever engine is
+    /// currently live for this connection, so a delivery held across a resumed
+    /// reconnect still settles. A non-resumed reconnect bumps the incarnation,
+    /// so settling a held delivery then returns [`FibrilError::StaleDelivery`].
+    topic: String,
+    group: Option<String>,
+    partition: Partition,
+    incarnation: u64,
+    settle: Arc<SettleContext>,
 }
 
 impl InflightMessage {
+    async fn settle_with(&self, cmd: Command) -> FibrilResult<()> {
+        self.settle.settle(self.incarnation, cmd).await
+    }
+
+    fn as_message(&self) -> Message {
+        Message {
+            delivery_tag: self.delivery_tag,
+            published: self.published,
+            publish_received: self.publish_received,
+            headers: self.headers.clone(),
+            content_type: self.content_type.clone(),
+            payload: self.payload.clone(),
+        }
+    }
+
+    fn ack_command(&self) -> Command {
+        Command::Ack {
+            topic: self.topic.clone(),
+            group: self.group.clone(),
+            partition: self.partition,
+            delivery_tag: self.delivery_tag,
+            request_id: self.request_id,
+        }
+    }
+
+    fn nack_command(&self, requeue: bool, not_before: Option<UnixMillis>) -> Command {
+        Command::Nack {
+            topic: self.topic.clone(),
+            group: self.group.clone(),
+            partition: self.partition,
+            delivery_tag: self.delivery_tag,
+            requeue,
+            not_before,
+            request_id: self.request_id,
+        }
+    }
+
     /// Acknowledge successful processing and return the settled message.
     ///
     /// After this succeeds, the broker can advance the queue's settled
-    /// frontier when earlier messages are also settled.
+    /// frontier when earlier messages are also settled. Returns
+    /// [`FibrilError::StaleDelivery`] if the connection was replaced by a
+    /// non-resumed reconnect (the message redelivers).
     pub async fn complete(self) -> FibrilResult<Message> {
-        let InflightMessage {
-            delivery_tag,
-            published,
-            publish_received,
-            headers,
-            content_type,
-            payload,
-            request_id,
-            settle,
-        } = self;
-        let (tx, rx) = oneshot::channel();
-        settle
-            .send(SettleRequest::Ack {
-                tag: delivery_tag,
-                request_id,
-                response: tx,
-            })
-            .map_err(|_e| FibrilError::BrokenPipe)?;
-        rx.await.map_err(|_| FibrilError::BrokenPipe)??;
-        Ok(Message {
-            delivery_tag,
-            published,
-            publish_received,
-            headers,
-            content_type,
-            payload,
-        })
+        self.settle_with(self.ack_command()).await?;
+        Ok(self.as_message())
     }
 
     /// Negatively acknowledge without requeueing.
@@ -1074,102 +1088,22 @@ impl InflightMessage {
     /// Depending on queue configuration, the broker may drop or dead-letter the
     /// message.
     pub async fn fail(self) -> FibrilResult<Message> {
-        let InflightMessage {
-            delivery_tag,
-            published,
-            publish_received,
-            headers,
-            content_type,
-            payload,
-            request_id,
-            settle,
-        } = self;
-        let (tx, rx) = oneshot::channel();
-        settle
-            .send(SettleRequest::Nack {
-                tag: delivery_tag,
-                requeue: false,
-                not_before: None,
-                request_id,
-                response: tx,
-            })
-            .map_err(|_e| FibrilError::BrokenPipe)?;
-        rx.await.map_err(|_| FibrilError::BrokenPipe)??;
-        Ok(Message {
-            delivery_tag,
-            published,
-            publish_received,
-            headers,
-            content_type,
-            payload,
-        })
+        self.settle_with(self.nack_command(false, None)).await?;
+        Ok(self.as_message())
     }
 
     /// Negatively acknowledge and make the message eligible for redelivery.
     pub async fn retry(self) -> FibrilResult<Message> {
-        let InflightMessage {
-            delivery_tag,
-            published,
-            publish_received,
-            headers,
-            content_type,
-            payload,
-            request_id,
-            settle,
-        } = self;
-        let (tx, rx) = oneshot::channel();
-        settle
-            .send(SettleRequest::Nack {
-                tag: delivery_tag,
-                requeue: true,
-                not_before: None,
-                request_id,
-                response: tx,
-            })
-            .map_err(|_e| FibrilError::BrokenPipe)?;
-        rx.await.map_err(|_| FibrilError::BrokenPipe)??;
-        Ok(Message {
-            delivery_tag,
-            published,
-            publish_received,
-            headers,
-            content_type,
-            payload,
-        })
+        self.settle_with(self.nack_command(true, None)).await?;
+        Ok(self.as_message())
     }
 
     /// Negatively acknowledge and retry after a delay.
     ///
     pub async fn retry_after(self, delay: impl Delayable) -> FibrilResult<Message> {
-        let InflightMessage {
-            delivery_tag,
-            published,
-            publish_received,
-            headers,
-            content_type,
-            payload,
-            request_id,
-            settle,
-        } = self;
-        let (tx, rx) = oneshot::channel();
-        settle
-            .send(SettleRequest::Nack {
-                tag: delivery_tag,
-                requeue: true,
-                not_before: Some(delay.deadline()),
-                request_id,
-                response: tx,
-            })
-            .map_err(|_e| FibrilError::BrokenPipe)?;
-        rx.await.map_err(|_| FibrilError::BrokenPipe)??;
-        Ok(Message {
-            delivery_tag,
-            published,
-            publish_received,
-            headers,
-            content_type,
-            payload,
-        })
+        self.settle_with(self.nack_command(true, Some(delay.deadline())))
+            .await?;
+        Ok(self.as_message())
     }
 
     /// Return the message content type, if present.
@@ -3437,6 +3371,10 @@ struct EngineSlot {
     /// Defaulted to an empty weak for slots built around a pre-made engine (tests
     /// and the in-memory path), which never run a network reader loop.
     topology_sink: std::sync::Weak<ClientShared>,
+    /// Durable settlement routing shared across every engine incarnation this
+    /// slot runs, so a delivery settles to the current engine and a non-resumed
+    /// reconnect marks held deliveries stale.
+    settle_ctx: Arc<SettleContext>,
 }
 
 impl EngineSlot {
@@ -3450,6 +3388,7 @@ impl EngineSlot {
         engine: Arc<EngineHandle>,
         assignment_tx: broadcast::Sender<AssignmentEvent>,
         cohort_member_id: Arc<std::sync::OnceLock<Uuid>>,
+        settle_ctx: Arc<SettleContext>,
     ) -> Self {
         Self {
             address,
@@ -3461,6 +3400,7 @@ impl EngineSlot {
             assignment_tx,
             cohort_member_id,
             topology_sink: std::sync::Weak::new(),
+            settle_ctx,
         }
     }
 
@@ -3480,6 +3420,7 @@ impl EngineSlot {
         // not force a socket write every few 1KB frames, which would defeat the
         // engine's own publish-flush batching (PUBLISH_FLUSH_MESSAGES / _BYTES).
         framed.set_backpressure_boundary(PUBLISH_FLUSH_BYTES);
+        let settle_ctx = Arc::new(SettleContext::new());
         let engine = start_engine(
             framed,
             opts.clone(),
@@ -3487,6 +3428,7 @@ impl EngineSlot {
             assignment_tx.clone(),
             cohort_member_id.clone(),
             topology_sink.clone(),
+            settle_ctx.clone(),
         )
         .await
         .map_err(|err| tls::refine_post_connect_error(err, opts.tls.as_ref(), &address))?;
@@ -3498,6 +3440,7 @@ impl EngineSlot {
             engine,
             assignment_tx,
             cohort_member_id,
+            settle_ctx,
         );
         slot.topology_sink = topology_sink;
         Ok(slot)
@@ -3532,12 +3475,23 @@ impl EngineSlot {
             self.assignment_tx.clone(),
             self.cohort_member_id.clone(),
             self.topology_sink.clone(),
+            self.settle_ctx.clone(),
         )
         .await
         .map_err(|err| tls::refine_post_connect_error(err, tls_opts.as_ref(), &self.address))?;
         let outcome = ReconnectOutcome {
             resume_outcome: new_engine.resume_outcome,
         };
+
+        // A non-resumed reconnect (or a broker restart reported as
+        // resumed-after-restart) replaced the server-side session, so every
+        // delivery tag from the old incarnation is dead. Bump the incarnation
+        // so settling a held delivery returns StaleDelivery. A plain Resumed
+        // outcome keeps the incarnation, so held deliveries still settle within
+        // grace (their tags remain valid on the same session).
+        if new_engine.resume_outcome != ResumeOutcome::Resumed {
+            self.settle_ctx.invalidate();
+        }
 
         self.replace(new_engine);
         self.user_shutdown.store(false, Ordering::Release);
@@ -3695,17 +3649,86 @@ enum Command {
         reply: oneshot::Sender<FibrilResult<TopologyOk>>,
     },
     Ack {
-        sub_id: u64,
+        topic: String,
+        group: Option<String>,
+        partition: Partition,
         delivery_tag: DeliveryTag,
         request_id: u64,
     },
     Nack {
-        sub_id: u64,
+        topic: String,
+        group: Option<String>,
+        partition: Partition,
         delivery_tag: DeliveryTag,
         requeue: bool,
         not_before: Option<UnixMillis>,
         request_id: u64,
     },
+}
+
+/// Routes a delivery's settlement to the connection's CURRENT engine, keyed by
+/// the durable `(topic, group, partition, tag)` rather than a per-delivery
+/// channel tied to the receiving engine. It is created once per connection slot
+/// and outlives every engine incarnation, so:
+///
+/// - a delivery held across a RESUMED reconnect settles through the new engine
+///   (its tag is still valid server-side, within grace), and
+/// - a NON-RESUMED reconnect (or a broker restart) bumps the incarnation, so a
+///   held delivery settles to [`FibrilError::StaleDelivery`] and its message
+///   redelivers on the current subscription instead.
+struct SettleContext {
+    /// The current engine's command sender, swapped in on every (re)connect.
+    current_tx: arc_swap::ArcSwapOption<mpsc::Sender<Command>>,
+    /// The live connection incarnation. Deliveries carry the value in effect
+    /// when they arrived; a non-resumed reconnect increments it.
+    incarnation: AtomicU64,
+}
+
+impl std::fmt::Debug for SettleContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SettleContext")
+            .field("incarnation", &self.incarnation())
+            .finish_non_exhaustive()
+    }
+}
+
+impl SettleContext {
+    fn new() -> Self {
+        Self {
+            current_tx: arc_swap::ArcSwapOption::empty(),
+            incarnation: AtomicU64::new(0),
+        }
+    }
+
+    /// Point settlement at a newly (re)connected engine.
+    fn bind(&self, tx: mpsc::Sender<Command>) {
+        self.current_tx.store(Some(Arc::new(tx)));
+    }
+
+    fn incarnation(&self) -> u64 {
+        self.incarnation.load(Ordering::Acquire)
+    }
+
+    /// Advance the incarnation so every outstanding delivery becomes stale.
+    /// Called on a non-resumed reconnect, where the server-side session (and
+    /// its delivery tags) was replaced.
+    fn invalidate(&self) {
+        self.incarnation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Settle a delivery received at `incarnation`. Returns
+    /// [`FibrilError::StaleDelivery`] if the incarnation has moved on, else
+    /// routes the settle to the current engine.
+    async fn settle(&self, incarnation: u64, cmd: Command) -> FibrilResult<()> {
+        if incarnation != self.incarnation() {
+            return Err(FibrilError::StaleDelivery);
+        }
+        let tx = self
+            .current_tx
+            .load_full()
+            .ok_or(FibrilError::BrokenPipe)?;
+        tx.send(cmd).await.map_err(|_| FibrilError::BrokenPipe)
+    }
 }
 
 #[derive(Debug)]
@@ -3892,6 +3915,7 @@ where
 
 // TODO: Further reconnection attempts logic
 // TODO: Better handle frame send errors, which currently just get swallowed. These errors indicate a broken connection and should trigger cleanup and reconnection logic.
+#[allow(clippy::too_many_arguments)]
 async fn start_engine<S>(
     mut framed: Framed<S, ProtoCodec>,
     opts: ClientOptions,
@@ -3899,6 +3923,7 @@ async fn start_engine<S>(
     assignment_tx: broadcast::Sender<AssignmentEvent>,
     cohort_member_id: Arc<std::sync::OnceLock<Uuid>>,
     topology_sink: std::sync::Weak<ClientShared>,
+    settle_ctx: Arc<SettleContext>,
 ) -> FibrilResult<Arc<EngineHandle>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -4057,6 +4082,10 @@ where
     }
 
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<Command>(8192);
+    // Point settlement at this newly (re)connected engine. Deliveries stamp the
+    // current incarnation; a non-resumed reconnect bumps it (handled by the
+    // caller) so held deliveries from a replaced session settle to StaleDelivery.
+    settle_ctx.bind(cmd_tx.clone());
     let close_reason = Arc::new(std::sync::Mutex::new(None::<FibrilError>));
     let handle = Arc::new(EngineHandle {
         tx: cmd_tx.clone(),
@@ -4320,29 +4349,28 @@ where
                         waiters.insert(req_id, Waiter::Topology(reply));
                         send_or_die!(framed, Op::Topology, req_id, &TopologyRequest::default(), fatal_error)
                     }
-                    Command::Ack { sub_id, delivery_tag, request_id } => {
-                        if let Some(sub) = subs.get(&sub_id) {
-                            let ack = Ack {
-                                topic: sub.topic.clone(),
-                                group: sub.group.clone(),
-                                partition: sub.partition,
-                                tags: vec![delivery_tag],
-                            };
-                            send_encoded_or_die!(framed, wire::encode_ack(request_id, &ack), fatal_error)
-                        }
+                    Command::Ack { topic, group, partition, delivery_tag, request_id } => {
+                        // Settlement is keyed by (topic, group, partition, tag),
+                        // not the client sub id, so it routes correctly even
+                        // after a reconnect re-keyed the subscription.
+                        let ack = Ack {
+                            topic,
+                            group,
+                            partition,
+                            tags: vec![delivery_tag],
+                        };
+                        send_encoded_or_die!(framed, wire::encode_ack(request_id, &ack), fatal_error)
                     }
-                    Command::Nack { sub_id, delivery_tag, requeue, not_before, request_id } => {
-                        if let Some(sub) = subs.get(&sub_id) {
-                            let nack = Nack {
-                                topic: sub.topic.clone(),
-                                group: sub.group.clone(),
-                                partition: sub.partition,
-                                tags: vec![delivery_tag],
-                                requeue,
-                                not_before,
-                            };
-                            send_encoded_or_die!(framed, wire::encode_nack(request_id, &nack), fatal_error)
-                        }
+                    Command::Nack { topic, group, partition, delivery_tag, requeue, not_before, request_id } => {
+                        let nack = Nack {
+                            topic,
+                            group,
+                            partition,
+                            tags: vec![delivery_tag],
+                            requeue,
+                            not_before,
+                        };
+                        send_encoded_or_die!(framed, wire::encode_nack(request_id, &nack), fatal_error)
                     }
                     }
                     drained += 1;
@@ -4408,7 +4436,13 @@ where
                             if let Some(sub) = subs.get(&d.sub_id).cloned() {
                                 match sub.delivery {
                                     SubDelivery::Manual(tx, _) => {
-                                        let (ack_tx, ack_rx) = oneshot::channel();
+                                        // Stamp the delivery with its durable
+                                        // settle routing (topic/group/partition
+                                        // + tag) and the current connection
+                                        // incarnation. Settling later routes to
+                                        // whatever engine is live then, or
+                                        // returns StaleDelivery if a non-resumed
+                                        // reconnect has moved the incarnation on.
                                         let msg = InflightMessage {
                                             delivery_tag: d.delivery_tag,
                                             published: d.published,
@@ -4416,56 +4450,15 @@ where
                                             content_type: d.content_type,
                                             headers: d.headers,
                                             payload: d.payload,
-                                            settle: ack_tx,
                                             request_id: frame.request_id,
+                                            topic: sub.topic.clone(),
+                                            group: sub.group.clone(),
+                                            partition: sub.partition,
+                                            incarnation: settle_ctx.incarnation(),
+                                            settle: settle_ctx.clone(),
                                         };
 
-                                        if tx.send(msg).await.is_ok() {
-                                            let cmd_tx = cmd_tx.clone();
-                                            let shutdown_acks = shutdown_acks.clone();
-                                            let sub_id = d.sub_id;
-
-                                            tokio::spawn(async move {
-                                                // TODO: add timeout or use a shared queue, or have server handle timeout and add proper handling of relevant error
-
-                                                tokio::select! {
-                                                    Ok(settle_request) = ack_rx => {
-                                                        match settle_request {
-                                                            // TODO: Find way to notify of engine disconnection if this happens.
-                                                            SettleRequest::Ack { tag, request_id, response } => {
-                                                                let res = cmd_tx.send(Command::Ack {
-                                                                    sub_id,
-                                                                    delivery_tag: tag,
-                                                                    request_id,
-                                                                }).await;
-                                                                if let Err(_err) = res {
-                                                                    let _ = response.send(Err(FibrilError::BrokenPipe));
-                                                                } else {
-                                                                    let _ = response.send(Ok(()));
-                                                                }
-                                                            }
-                                                            SettleRequest::Nack { tag, requeue, not_before, request_id, response } => {
-                                                                let res = cmd_tx.send(Command::Nack {
-                                                                    sub_id,
-                                                                    delivery_tag: tag,
-                                                                    requeue,
-                                                                    not_before,
-                                                                    request_id,
-                                                                }).await;
-                                                                if let Err(_err) = res {
-                                                                    let _ = response.send(Err(FibrilError::BrokenPipe));
-                                                                } else {
-                                                                    let _ = response.send(Ok(()));
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                    _ = shutdown_acks.notified() => {
-                                                        // engine is shutting down
-                                                    }
-                                                }
-                                            });
-                                        } else {
+                                        if tx.send(msg).await.is_err() {
                                             tracing::warn!("Subscription receiver dropped");
                                             subs.remove(&d.sub_id);
                                             if let Ok(mut registry) = subscription_registry.write() {
@@ -5726,10 +5719,10 @@ mod tests {
         ));
     }
 
-    fn engine_with_command_rx() -> (Arc<EngineHandle>, mpsc::Receiver<Command>) {
+    fn engine_with_command_rx() -> (Arc<EngineHandle>, mpsc::Receiver<Command>, Arc<SettleContext>) {
         let (tx, rx) = mpsc::channel(8);
         let engine = Arc::new(EngineHandle {
-            tx,
+            tx: tx.clone(),
             shutdown: Arc::new(Notify::new()),
             close_reason: Arc::new(std::sync::Mutex::new(None)),
             resume_identity: ResumeIdentity {
@@ -5739,8 +5732,10 @@ mod tests {
             },
             resume_outcome: ResumeOutcome::New,
         });
+        let settle_ctx = Arc::new(SettleContext::new());
+        settle_ctx.bind(tx);
 
-        (engine, rx)
+        (engine, rx, settle_ctx)
     }
 
     fn client_with_command_rx() -> (Client, mpsc::Receiver<Command>) {
@@ -5750,7 +5745,7 @@ mod tests {
     fn client_with_options_and_command_rx(
         opts: ClientOptions,
     ) -> (Client, mpsc::Receiver<Command>) {
-        let (engine, rx) = engine_with_command_rx();
+        let (engine, rx, settle_ctx) = engine_with_command_rx();
         let address = "127.0.0.1:0".to_string();
         let user_shutdown = Arc::new(AtomicBool::new(false));
         let (assignment_tx, _) = broadcast::channel(ASSIGNMENT_EVENT_CAPACITY);
@@ -5763,6 +5758,7 @@ mod tests {
             engine,
             assignment_tx.clone(),
             cohort_member_id.clone(),
+            settle_ctx,
         ));
         let mut pool = HashMap::new();
         pool.insert(address.clone(), slot);
@@ -5813,7 +5809,7 @@ mod tests {
         let bootstrap_addr = client.shared.bootstrap[0].clone();
 
         let make_slot = |addr: String| -> Arc<EngineSlot> {
-            let (engine, _rx) = engine_with_command_rx();
+            let (engine, _rx, settle_ctx) = engine_with_command_rx();
             Arc::new(EngineSlot::from_engine(
                 addr,
                 ClientOptions::new(),
@@ -5822,6 +5818,7 @@ mod tests {
                 engine,
                 broadcast::channel(ASSIGNMENT_EVENT_CAPACITY).0,
                 Arc::new(std::sync::OnceLock::new()),
+                settle_ctx,
             ))
         };
 
@@ -5876,7 +5873,7 @@ mod tests {
     async fn existing_publisher_uses_replaced_engine_slot() {
         let (client, mut old_rx) = client_with_command_rx();
         let publisher = client.publisher("jobs").unwrap();
-        let (new_engine, mut new_rx) = engine_with_command_rx();
+        let (new_engine, mut new_rx, _new_settle_ctx) = engine_with_command_rx();
 
         let slot = client.shared.pool.read().values().next().unwrap().clone();
         slot.replace(new_engine);
@@ -6526,6 +6523,162 @@ mod tests {
         // And delivery resumes on the re-established subscription.
         let msg = sub.recv().await.delivery().unwrap();
         assert_eq!(msg.payload, b"after-restart");
+
+        client.shutdown().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn held_delivery_becomes_stale_across_a_non_resumed_reconnect() {
+        // A delivery received on the first connection, held unacked across a
+        // non-resumed (rejected) reconnect, settles to StaleDelivery instead of
+        // silently no-opping - the tag is dead server-side and the message
+        // redelivers on the fresh session.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let owner_id = uuid::Uuid::new_v4();
+            let client_id = uuid::Uuid::new_v4();
+            let resume_token = uuid::Uuid::new_v4();
+
+            let (first, _) = listener.accept().await.unwrap();
+            let mut first = Framed::new(first, ProtoCodec);
+            let hello = first.next().await.unwrap().unwrap();
+            first
+                .send(
+                    try_encode(
+                        Op::HelloOk,
+                        hello.request_id,
+                        &HelloOk {
+                            protocol_version: PROTOCOL_V1,
+                            owner_id,
+                            client_id,
+                            resume_token,
+                            resume_outcome: ResumeOutcome::New,
+                            server_name: "fake".into(),
+                            compliance: COMPLIANCE_STRING.into(),
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            let subscribe = first.next().await.unwrap().unwrap();
+            let req: Subscribe = try_decode(&subscribe).unwrap();
+            first
+                .send(
+                    try_encode(
+                        Op::SubscribeOk,
+                        subscribe.request_id,
+                        &SubscribeOk {
+                            sub_id: 77,
+                            topic: req.topic,
+                            group: req.group,
+                            partition: Partition::new(0),
+                            prefetch: req.prefetch,
+                            consumer_group: None,
+                            consumer_target: None,
+                            member_id: None,
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            first
+                .send(
+                    wire::encode_deliver(
+                        5,
+                        &Deliver {
+                            sub_id: 77,
+                            topic: "jobs".into(),
+                            group: None,
+                            partition: Partition::new(0),
+                            offset: 1,
+                            delivery_tag: DeliveryTag { epoch: 111 },
+                            published: 1,
+                            publish_received: 2,
+                            content_type: None,
+                            headers: HashMap::new(),
+                            payload: b"held".to_vec(),
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            // Reconnect: fresh broker, resume rejected (a non-resumed outcome).
+            let (second, _) = listener.accept().await.unwrap();
+            let mut second = Framed::new(second, ProtoCodec);
+            let hello = second.next().await.unwrap().unwrap();
+            second
+                .send(
+                    try_encode(
+                        Op::HelloOk,
+                        hello.request_id,
+                        &HelloOk {
+                            protocol_version: PROTOCOL_V1,
+                            owner_id,
+                            client_id,
+                            resume_token,
+                            resume_outcome: ResumeOutcome::ResumeRejected,
+                            server_name: "fake".into(),
+                            compliance: COMPLIANCE_STRING.into(),
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            // The client reconciles; respond so the reconnect completes.
+            let reconcile = second.next().await.unwrap().unwrap();
+            assert_eq!(reconcile.opcode, Op::ReconcileClient as u16);
+            second
+                .send(
+                    try_encode(
+                        Op::ReconcileResult,
+                        reconcile.request_id,
+                        &ReconcileResult {
+                            subscriptions: vec![ReconcileSubscriptionResult {
+                                client: None,
+                                server: None,
+                                action: ReconcileAction::CloseClientSide,
+                                code: ReasonCode::ServerMissing,
+                                reason: "server_missing".into(),
+                            }],
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            // Keep the connection open so a settle would reach us if sent.
+            let _ = second.next().await;
+        });
+
+        let mut client = ClientOptions::new()
+            .disable_topology_warm()
+            .connect(addr)
+            .await
+            .unwrap();
+        let mut sub = client.subscribe("jobs").unwrap().sub().await.unwrap();
+
+        // Receive the delivery on the first connection but hold it unacked.
+        let held = sub.recv().await.delivery().unwrap();
+        assert_eq!(held.payload, b"held");
+
+        // Force a non-resumed reconnect.
+        let outcome = client.reconnect().await.unwrap();
+        assert_eq!(outcome.resume_outcome, ResumeOutcome::ResumeRejected);
+
+        // Settling the held delivery now reports it stale.
+        assert!(matches!(
+            held.complete().await,
+            Err(FibrilError::StaleDelivery)
+        ));
 
         client.shutdown().await;
         server.await.unwrap();
@@ -7313,10 +7466,13 @@ mod tests {
         drop(keep_open);
     }
 
-    #[tokio::test]
-    async fn retry_after_sends_delayed_nack() {
-        let (settle_tx, settle_rx) = oneshot::channel();
-        let msg = InflightMessage {
+    /// Build a standalone inflight message wired to a fresh settle context, for
+    /// unit-testing the settle helpers.
+    fn inflight_for_test(
+        settle_ctx: Arc<SettleContext>,
+        incarnation: u64,
+    ) -> InflightMessage {
+        InflightMessage {
             delivery_tag: DeliveryTag { epoch: 7 },
             published: 1,
             publish_received: 2,
@@ -7324,38 +7480,88 @@ mod tests {
             content_type: None,
             payload: b"later".to_vec(),
             request_id: 42,
-            settle: settle_tx,
-        };
+            topic: "jobs".into(),
+            group: None,
+            partition: Partition::new(0),
+            incarnation,
+            settle: settle_ctx,
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_after_sends_delayed_nack() {
+        let (tx, mut rx) = mpsc::channel::<Command>(4);
+        let settle_ctx = Arc::new(SettleContext::new());
+        settle_ctx.bind(tx);
+        let msg = inflight_for_test(settle_ctx, 0);
 
         let before = unix_millis();
-        let task =
-            tokio::spawn(
-                async move { msg.retry_after(std::time::Duration::from_millis(250)).await },
-            );
-        let req = settle_rx.await.unwrap();
+        let settled = msg
+            .retry_after(std::time::Duration::from_millis(250))
+            .await
+            .unwrap();
         let after = unix_millis();
+        assert_eq!(settled.payload, b"later".to_vec());
 
-        match req {
-            SettleRequest::Nack {
-                tag,
+        match rx.recv().await.unwrap() {
+            Command::Nack {
+                topic,
+                delivery_tag,
                 requeue,
                 not_before,
                 request_id,
-                response,
+                ..
             } => {
-                assert_eq!(tag, DeliveryTag { epoch: 7 });
+                assert_eq!(topic, "jobs");
+                assert_eq!(delivery_tag, DeliveryTag { epoch: 7 });
                 assert!(requeue);
                 let not_before = not_before.expect("retry_after should set a deadline");
                 assert!(not_before >= before + 250);
                 assert!(not_before <= after + 250);
                 assert_eq!(request_id, 42);
-                response.send(Ok(())).unwrap();
             }
-            SettleRequest::Ack { .. } => panic!("expected delayed nack, got ack"),
+            other => panic!("expected delayed nack, got {other:?}"),
         }
+    }
 
-        let settled = task.await.unwrap().unwrap();
-        assert_eq!(settled.payload, b"later".to_vec());
+    #[tokio::test]
+    async fn settling_a_stale_delivery_returns_stale_error() {
+        // A delivery received at incarnation 0, then the connection is replaced
+        // (incarnation bumped). Settling it reports StaleDelivery and sends no
+        // command - the message will redeliver on the current subscription.
+        let (tx, mut rx) = mpsc::channel::<Command>(4);
+        let settle_ctx = Arc::new(SettleContext::new());
+        settle_ctx.bind(tx);
+        let msg = inflight_for_test(settle_ctx.clone(), 0);
+
+        settle_ctx.invalidate(); // a non-resumed reconnect happened
+
+        assert!(matches!(
+            msg.complete().await,
+            Err(FibrilError::StaleDelivery)
+        ));
+        // No settle command was sent.
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn settling_within_the_same_incarnation_routes_to_current_engine() {
+        // A delivery whose incarnation still matches settles, even if the engine
+        // was replaced by a RESUMED reconnect (the ctx is rebound to the new
+        // engine but the incarnation is unchanged).
+        let (_old_tx, mut old_rx) = mpsc::channel::<Command>(4);
+        let settle_ctx = Arc::new(SettleContext::new());
+        settle_ctx.bind(_old_tx);
+        let msg = inflight_for_test(settle_ctx.clone(), 0);
+
+        // Resumed reconnect: rebind to a new engine, incarnation unchanged.
+        let (new_tx, mut new_rx) = mpsc::channel::<Command>(4);
+        settle_ctx.bind(new_tx);
+
+        msg.complete().await.expect("resumed-incarnation settle should succeed");
+        // The ack routed to the CURRENT (new) engine, not the old one.
+        assert!(matches!(new_rx.recv().await.unwrap(), Command::Ack { .. }));
+        assert!(old_rx.try_recv().is_err());
     }
 
     #[test]
