@@ -8,8 +8,8 @@ use crate::{
     Ack, AdvertisedAddress, AssignmentChanged, Auth, ContentType, DeclarePlexus, DeclarePlexusOk,
     DeclareQueue, DeclareQueueOk, Deliver, DeliveryTag, ErrorMsg, GoingAway, Hello, HelloOk, Nack,
     Op, PROTOCOL_V1, Partition, Publish, PublishDelayed, PublishOk, QueueDlqPolicy,
-    QueueTopologyEntry, ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult,
-    ReconcileServer, ReconcileSubscription, ReconcileSubscriptionResult, Redirect,
+    QueueTopologyEntry, ReasonCode, ReconcileAction, ReconcileClient, ReconcilePolicy,
+    ReconcileResult, ReconcileServer, ReconcileSubscription, ReconcileSubscriptionResult, Redirect,
     ReplicationApply, ReplicationApplyOk, ReplicationCheckpointExport,
     ReplicationCheckpointExportOk, ReplicationCheckpointInstall, ReplicationCheckpointInstallOk,
     ReplicationCheckpointRequired, ReplicationEventApplyBatch, ReplicationEventRead,
@@ -17,7 +17,8 @@ use crate::{
     ReplicationMessageRecord, ReplicationRead, ReplicationReadOk, ReplicationStateCheckpoint,
     ReplicationStreamEnd, ReplicationStreamProgress, ReplicationStreamReset,
     ReplicationStreamStart, ResumeIdentity, ResumeOutcome, StreamDurability, StreamRetention,
-    StreamStart, StreamTopologyEntry, Subscribe, SubscribeOk, SubscribeStream, TopologyOk,
+    StreamStart, StreamTopologyEntry, Subscribe, SubscribeOk, SubscribeStream, SubscriptionClosed,
+    TopologyOk,
     TopologyRequest, TopologyUpdateAck, frame::Frame,
 };
 
@@ -727,6 +728,30 @@ pub fn decode_going_away(frame: &Frame) -> WireResult<GoingAway> {
     Ok(GoingAway { grace_ms, message })
 }
 
+pub fn encode_subscription_closed(
+    request_id: u64,
+    closed: &SubscriptionClosed,
+) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FSC1");
+    out.put_u64(closed.sub_id);
+    out.put_u16(closed.code.to_u16());
+    put_str(&mut out, &closed.message)?;
+    Ok(frame(Op::SubscriptionClosed, request_id, out.freeze()))
+}
+
+pub fn decode_subscription_closed(frame: &Frame) -> WireResult<SubscriptionClosed> {
+    expect_op(frame, Op::SubscriptionClosed)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FSC1", "subscription closed")?;
+    let closed = SubscriptionClosed {
+        sub_id: reader.u64()?,
+        code: ReasonCode::from_u16(reader.u16()?),
+        message: reader.str()?.to_owned(),
+    };
+    reader.finish()?;
+    Ok(closed)
+}
+
 pub fn encode_redirect(request_id: u64, redirect: &Redirect) -> WireResult<Frame> {
     let mut out = payload_builder(b"FRD1");
     put_queue_key(
@@ -805,6 +830,12 @@ pub fn encode_reconcile_result(request_id: u64, result: &ReconcileResult) -> Wir
         put_reconcile_action(&mut out, sub.action);
         put_str(&mut out, &sub.reason)?;
     }
+    // Tagged codes ride as a tail array parallel to the subscriptions, one
+    // u16 each. A decoder reading a broker from before the taxonomy finds no
+    // tail and defaults every code to Unspecified.
+    for sub in &result.subscriptions {
+        out.put_u16(sub.code.to_u16());
+    }
     Ok(frame(Op::ReconcileResult, request_id, out.freeze()))
 }
 
@@ -819,8 +850,14 @@ pub fn decode_reconcile_result(frame: &Frame) -> WireResult<ReconcileResult> {
             client: reader.optional_reconcile_subscription()?,
             server: reader.optional_reconcile_subscription()?,
             action: reader.reconcile_action()?,
+            code: ReasonCode::Unspecified,
             reason: reader.str()?.to_owned(),
         });
+    }
+    if reader.remaining() > 0 {
+        for sub in subscriptions.iter_mut() {
+            sub.code = ReasonCode::from_u16(reader.u16()?);
+        }
     }
     reader.finish()?;
     Ok(ReconcileResult { subscriptions })
@@ -1410,6 +1447,7 @@ fn put_resume_outcome(out: &mut BytesMut, outcome: ResumeOutcome) {
         ResumeOutcome::Resumed => 1,
         ResumeOutcome::ResumeNotFound => 2,
         ResumeOutcome::ResumeRejected => 3,
+        ResumeOutcome::ResumedAfterRestart => 4,
     });
 }
 
@@ -1879,6 +1917,7 @@ impl<'a> Reader<'a> {
             1 => Ok(ResumeOutcome::Resumed),
             2 => Ok(ResumeOutcome::ResumeNotFound),
             3 => Ok(ResumeOutcome::ResumeRejected),
+            4 => Ok(ResumeOutcome::ResumedAfterRestart),
             value => Err(WireError::UnknownTag {
                 context: "resume outcome",
                 value,
@@ -2724,6 +2763,86 @@ mod tests {
         let frame = encode_going_away(7, &notice).unwrap();
         assert_eq!(frame.opcode, Op::GoingAway as u16);
         assert_eq!(decode_going_away(&frame).unwrap(), notice);
+    }
+
+    #[test]
+    fn subscription_closed_roundtrip() {
+        let closed = SubscriptionClosed {
+            sub_id: 11,
+            code: ReasonCode::OwnerMoved,
+            message: "partition 3 moved to another broker".into(),
+        };
+        let frame = encode_subscription_closed(7, &closed).unwrap();
+        assert_eq!(frame.opcode, Op::SubscriptionClosed as u16);
+        assert_eq!(decode_subscription_closed(&frame).unwrap(), closed);
+    }
+
+    #[test]
+    fn subscription_closed_preserves_unknown_codes() {
+        // A code minted by a newer peer survives decode verbatim instead of
+        // failing, so adding codes later never breaks an older decoder.
+        let closed = SubscriptionClosed {
+            sub_id: 1,
+            code: ReasonCode::Other(9001),
+            message: "from the future".into(),
+        };
+        let frame = encode_subscription_closed(1, &closed).unwrap();
+        assert_eq!(decode_subscription_closed(&frame).unwrap().code, ReasonCode::Other(9001));
+    }
+
+    #[test]
+    fn reconcile_result_codes_roundtrip_and_default_when_absent() {
+        let result = ReconcileResult {
+            subscriptions: vec![
+                ReconcileSubscriptionResult {
+                    client: None,
+                    server: None,
+                    action: ReconcileAction::Keep,
+                    code: ReasonCode::Matched,
+                    reason: "matched".into(),
+                },
+                ReconcileSubscriptionResult {
+                    client: None,
+                    server: None,
+                    action: ReconcileAction::CloseClientSide,
+                    code: ReasonCode::ServerMissing,
+                    reason: "server_missing".into(),
+                },
+            ],
+        };
+        let frame = encode_reconcile_result(3, &result).unwrap();
+        assert_eq!(decode_reconcile_result(&frame).unwrap(), result);
+
+        // A frame from a broker predating the taxonomy carries no code tail.
+        // Strip the two u16 codes off the payload and every code must default
+        // to Unspecified while the rest decodes unchanged.
+        let mut old = frame.clone();
+        old.payload = old.payload.slice(..old.payload.len() - 4);
+        let decoded = decode_reconcile_result(&old).unwrap();
+        assert_eq!(decoded.subscriptions.len(), 2);
+        assert!(decoded
+            .subscriptions
+            .iter()
+            .all(|sub| sub.code == ReasonCode::Unspecified));
+        assert_eq!(decoded.subscriptions[1].reason, "server_missing");
+    }
+
+    #[test]
+    fn resume_outcome_resumed_after_restart_roundtrips() {
+        let hello_ok = HelloOk {
+            protocol_version: PROTOCOL_V1,
+            owner_id: Uuid::from_bytes([1; 16]),
+            client_id: Uuid::from_bytes([2; 16]),
+            resume_token: Uuid::from_bytes([3; 16]),
+            resume_outcome: ResumeOutcome::ResumedAfterRestart,
+            server_name: "srv".into(),
+            compliance: "v=1".into(),
+        };
+        let frame = encode_hello_ok(1, &hello_ok).unwrap();
+        assert_eq!(
+            decode_hello_ok(&frame).unwrap().resume_outcome,
+            ResumeOutcome::ResumedAfterRestart
+        );
     }
 
     #[test]
