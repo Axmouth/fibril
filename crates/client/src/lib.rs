@@ -1034,42 +1034,66 @@ pub struct InflightMessage {
     settle: Arc<SettleContext>,
 }
 
+/// How a delivery is being settled, passed to the single consuming
+/// [`InflightMessage::settle`].
+enum Settlement {
+    Ack,
+    Nack {
+        requeue: bool,
+        not_before: Option<UnixMillis>,
+    },
+}
+
 impl InflightMessage {
-    async fn settle_with(&self, cmd: Command) -> FibrilResult<()> {
-        self.settle.settle(self.incarnation, cmd).await
-    }
-
-    fn as_message(&self) -> Message {
-        Message {
-            delivery_tag: self.delivery_tag,
-            published: self.published,
-            publish_received: self.publish_received,
-            headers: self.headers.clone(),
-            content_type: self.content_type.clone(),
-            payload: self.payload.clone(),
-        }
-    }
-
-    fn ack_command(&self) -> Command {
-        Command::Ack {
-            topic: self.topic.clone(),
-            group: self.group.clone(),
-            partition: self.partition,
-            delivery_tag: self.delivery_tag,
-            request_id: self.request_id,
-        }
-    }
-
-    fn nack_command(&self, requeue: bool, not_before: Option<UnixMillis>) -> Command {
-        Command::Nack {
-            topic: self.topic.clone(),
-            group: self.group.clone(),
-            partition: self.partition,
-            delivery_tag: self.delivery_tag,
-            requeue,
-            not_before,
-            request_id: self.request_id,
-        }
+    /// Consume the delivery: build its settle command from the moved routing
+    /// fields, route it to the connection's current engine (or return
+    /// [`FibrilError::StaleDelivery`] if a non-resumed reconnect has replaced
+    /// the session), and return the message with its body moved out (no copy).
+    async fn settle(self, kind: Settlement) -> FibrilResult<Message> {
+        let InflightMessage {
+            delivery_tag,
+            published,
+            publish_received,
+            headers,
+            content_type,
+            payload,
+            request_id,
+            topic,
+            group,
+            partition,
+            incarnation,
+            settle,
+        } = self;
+        let cmd = match kind {
+            Settlement::Ack => Command::Ack {
+                topic,
+                group,
+                partition,
+                delivery_tag,
+                request_id,
+            },
+            Settlement::Nack {
+                requeue,
+                not_before,
+            } => Command::Nack {
+                topic,
+                group,
+                partition,
+                delivery_tag,
+                requeue,
+                not_before,
+                request_id,
+            },
+        };
+        settle.settle(incarnation, cmd).await?;
+        Ok(Message {
+            delivery_tag,
+            published,
+            publish_received,
+            headers,
+            content_type,
+            payload,
+        })
     }
 
     /// Acknowledge successful processing and return the settled message.
@@ -1079,8 +1103,7 @@ impl InflightMessage {
     /// [`FibrilError::StaleDelivery`] if the connection was replaced by a
     /// non-resumed reconnect (the message redelivers).
     pub async fn complete(self) -> FibrilResult<Message> {
-        self.settle_with(self.ack_command()).await?;
-        Ok(self.as_message())
+        self.settle(Settlement::Ack).await
     }
 
     /// Negatively acknowledge without requeueing.
@@ -1088,22 +1111,30 @@ impl InflightMessage {
     /// Depending on queue configuration, the broker may drop or dead-letter the
     /// message.
     pub async fn fail(self) -> FibrilResult<Message> {
-        self.settle_with(self.nack_command(false, None)).await?;
-        Ok(self.as_message())
+        self.settle(Settlement::Nack {
+            requeue: false,
+            not_before: None,
+        })
+        .await
     }
 
     /// Negatively acknowledge and make the message eligible for redelivery.
     pub async fn retry(self) -> FibrilResult<Message> {
-        self.settle_with(self.nack_command(true, None)).await?;
-        Ok(self.as_message())
+        self.settle(Settlement::Nack {
+            requeue: true,
+            not_before: None,
+        })
+        .await
     }
 
     /// Negatively acknowledge and retry after a delay.
     ///
     pub async fn retry_after(self, delay: impl Delayable) -> FibrilResult<Message> {
-        self.settle_with(self.nack_command(true, Some(delay.deadline())))
-            .await?;
-        Ok(self.as_message())
+        self.settle(Settlement::Nack {
+            requeue: true,
+            not_before: Some(delay.deadline()),
+        })
+        .await
     }
 
     /// Return the message content type, if present.
@@ -3483,16 +3514,9 @@ impl EngineSlot {
             resume_outcome: new_engine.resume_outcome,
         };
 
-        // A non-resumed reconnect (or a broker restart reported as
-        // resumed-after-restart) replaced the server-side session, so every
-        // delivery tag from the old incarnation is dead. Bump the incarnation
-        // so settling a held delivery returns StaleDelivery. A plain Resumed
-        // outcome keeps the incarnation, so held deliveries still settle within
-        // grace (their tags remain valid on the same session).
-        if new_engine.resume_outcome != ResumeOutcome::Resumed {
-            self.settle_ctx.invalidate();
-        }
-
+        // The settle incarnation was already advanced (for a non-resumed
+        // outcome) and rebound inside start_engine, as one ordered transition
+        // before the new reader loop could deliver.
         self.replace(new_engine);
         self.user_shutdown.store(false, Ordering::Release);
         old_engine.shutdown.notify_waiters();
@@ -4082,9 +4106,15 @@ where
     }
 
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<Command>(8192);
-    // Point settlement at this newly (re)connected engine. Deliveries stamp the
-    // current incarnation; a non-resumed reconnect bumps it (handled by the
-    // caller) so held deliveries from a replaced session settle to StaleDelivery.
+    // Retarget settlement at this newly (re)connected engine as one ordered
+    // transition, before the reader loop below can deliver anything: a
+    // non-resumed outcome first invalidates the prior incarnation (so held
+    // deliveries from the replaced session settle to StaleDelivery), then the
+    // current tx is bound so new deliveries route here. A Resumed outcome keeps
+    // the incarnation, so deliveries held across the reconnect still settle.
+    if resume_outcome != ResumeOutcome::Resumed {
+        settle_ctx.invalidate();
+    }
     settle_ctx.bind(cmd_tx.clone());
     let close_reason = Arc::new(std::sync::Mutex::new(None::<FibrilError>));
     let handle = Arc::new(EngineHandle {
@@ -4099,7 +4129,6 @@ where
     let subscription_registry = subscriptions.clone();
 
     let shutdown_engine = shutdown.clone();
-    let shutdown_acks = shutdown.clone();
 
     // heartbeat task
     let heartbeat_secs = opts
@@ -4434,7 +4463,8 @@ where
                                 }
                             };
                             if let Some(sub) = subs.get(&d.sub_id).cloned() {
-                                match sub.delivery {
+                                let SubState { topic: sub_topic, group: sub_group, partition: sub_partition, delivery: sub_delivery } = sub;
+                                match sub_delivery {
                                     SubDelivery::Manual(tx, _) => {
                                         // Stamp the delivery with its durable
                                         // settle routing (topic/group/partition
@@ -4451,9 +4481,9 @@ where
                                             headers: d.headers,
                                             payload: d.payload,
                                             request_id: frame.request_id,
-                                            topic: sub.topic.clone(),
-                                            group: sub.group.clone(),
-                                            partition: sub.partition,
+                                            topic: sub_topic,
+                                            group: sub_group,
+                                            partition: sub_partition,
                                             incarnation: settle_ctx.incarnation(),
                                             settle: settle_ctx.clone(),
                                         };
