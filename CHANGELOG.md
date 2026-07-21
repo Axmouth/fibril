@@ -22,10 +22,9 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   tell "this tag is dead, it will redeliver" (do-not-retry) from "the
   connection is down, retry". A resumed reconnect keeps the incarnation, so the
   held delivery still settles, now through the new connection, and the
-  still-valid tag is accepted. Shipped in the Rust reference client
-  (`FibrilError::StaleDelivery`) and the TypeScript, Python, and Go clients
-  (`StaleDeliveryError`); the C# client still pins a held delivery to its origin
-  connection and is being brought to parity.
+  still-valid tag is accepted. Shipped across all clients: `StaleDelivery` in the
+  Rust reference client, `StaleDeliveryError` in TypeScript, Python, and Go, and
+  `StaleDeliveryException` in C#, each classified do-not-retry.
 - Durable resume across a broker restart. A broker now persists a small
   skeleton of each resumable session (its owner identity, client id, resume
   token, and subscription set) to the node's durable store, so a fast

@@ -16,6 +16,13 @@ public class EngineTest
         HeartbeatInterval = TimeSpan.FromHours(1), // no heartbeat noise in tests
     };
 
+    private static EngineOptions Opts(SettleContext settle) => new()
+    {
+        ClientName = "csharp-test",
+        HeartbeatInterval = TimeSpan.FromHours(1),
+        Settle = settle,
+    };
+
     private static CancellationToken Timeout(int seconds = 5) => new CancellationTokenSource(TimeSpan.FromSeconds(seconds)).Token;
 
     [Fact]
@@ -58,6 +65,67 @@ public class EngineTest
         Assert.NotNull(got);
         Assert.Equal("hello", got!.Value.Text());
         Assert.True(await broker.WaitForAsync(Op.Ack, Timeout()));
+    }
+
+    // A delivery held across a NON-resumed reconnect settles to a
+    // StaleDeliveryException and sends no frame. The message redelivers per
+    // at-least-once.
+    [Fact]
+    public async Task HeldDeliveryGoesStaleAcrossNonResumedReconnect()
+    {
+        var settle = new SettleContext();
+        await using var broker1 = new FakeBroker { PushDeliveryOnSubscribe = true };
+        await using var e1 = await Engine.ConnectAsync(broker1.Address, Opts(settle), Timeout());
+        var sub = await e1.SubscribeAsync(new SubscribeFrame { Topic = "t", Prefetch = 8 }, noReconcile: true, Timeout());
+
+        Delivery? held = null;
+        await foreach (var d in sub.Deliveries(Timeout()))
+        {
+            held = d;
+            break;
+        }
+        Assert.NotNull(held);
+
+        // A non-resumed reconnect: a fresh engine binds the SAME settle context and
+        // claims a new incarnation, so the held delivery goes stale.
+        await using var broker2 = new FakeBroker();
+        await using var e2 = await Engine.ConnectAsync(broker2.Address, Opts(settle), Timeout());
+
+        Assert.Throws<StaleDeliveryException>(() => held!.Value.Complete());
+        // No settle frame reached either broker.
+        Assert.False(broker1.Received(Op.Ack));
+        Assert.False(broker2.Received(Op.Ack));
+    }
+
+    // A delivery held across a RESUMED reconnect settles to the CURRENT engine.
+    // Settlement is keyed by (topic, group, partition, tag), not the client sub id.
+    [Fact]
+    public async Task HeldDeliverySettlesToCurrentEngineAcrossResumedReconnect()
+    {
+        var settle = new SettleContext();
+        await using var broker1 = new FakeBroker { PushDeliveryOnSubscribe = true };
+        await using var e1 = await Engine.ConnectAsync(broker1.Address, Opts(settle), Timeout());
+        var sub = await e1.SubscribeAsync(new SubscribeFrame { Topic = "t", Prefetch = 8 }, noReconcile: true, Timeout());
+
+        Delivery? held = null;
+        await foreach (var d in sub.Deliveries(Timeout()))
+        {
+            held = d;
+            break;
+        }
+        Assert.NotNull(held);
+
+        // A resumed reconnect keeps the incarnation, so the held delivery still
+        // settles - through the new engine.
+        await using var broker2 = new FakeBroker { ResumeOutcome = ResumeOutcome.Resumed };
+        await using var e2 = await Engine.ConnectAsync(broker2.Address, Opts(settle), Timeout());
+
+        // Drop the ORIGIN engine: settling must route to the current one anyway.
+        await e1.ShutdownAsync();
+
+        held!.Value.Complete();
+        Assert.True(await broker2.WaitForAsync(Op.Ack, Timeout()));
+        Assert.False(broker1.Received(Op.Ack));
     }
 
     [Fact]
@@ -128,6 +196,9 @@ internal sealed class FakeBroker : IAsyncDisposable
     public bool PushDeliveryOnSubscribe { get; init; }
     public bool PushCloseOnSubscribe { get; init; }
 
+    /// <summary>The resume outcome returned in HELLO_OK. Set to Resumed to script a resumed reconnect.</summary>
+    public ResumeOutcome ResumeOutcome { get; init; } = ResumeOutcome.New;
+
     /// <summary>When set, the first publish is answered with a redirect to this endpoint.</summary>
     public string? RedirectPublishTo { get; init; }
 
@@ -183,6 +254,9 @@ internal sealed class FakeBroker : IAsyncDisposable
         Address = ((IPEndPoint)_listener.LocalEndpoint).ToString();
         _serve = ServeAsync(_cts.Token);
     }
+
+    /// <summary>Whether an op has been received so far (no waiting).</summary>
+    public bool Received(Op op) => _received.Contains(op);
 
     public async Task<bool> WaitForAsync(Op op, CancellationToken ct)
     {
@@ -243,7 +317,7 @@ internal sealed class FakeBroker : IAsyncDisposable
             {
                 case Op.Hello:
                     await WriteAsync(stream, Op.HelloOk, f.RequestId, WireOps.EncodeHelloOk(new HelloOk(
-                        Protocol.V1, Uuid.Fill(9), Uuid.Fill(8), Uuid.Fill(7), ResumeOutcome.New, "fake", Protocol.ComplianceString)), ct);
+                        Protocol.V1, Uuid.Fill(9), Uuid.Fill(8), Uuid.Fill(7), ResumeOutcome, "fake", Protocol.ComplianceString)), ct);
                     break;
                 case Op.Auth:
                     await WriteAsync(stream, Op.AuthOk, f.RequestId, Array.Empty<byte>(), ct);

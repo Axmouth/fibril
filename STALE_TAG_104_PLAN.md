@@ -125,13 +125,19 @@ Per-client placement (the persistent context's home):
   RetryAfter route via `currentOrStale`. New `StaleDeliveryError` (do-not-retry).
   Tests in delivery_test.go: A1 stale, A2/A3 route-to-current (origin dropped), A4
   classification. go vet + full suite green.
-- C#: no slot - `Client._bootstrap` + `_pool`; the per-endpoint `ReconcileRegistry`
-  is the natural home. `Delivery` (readonly struct) already carries the tuple; add
-  incarnation + context ref and change the settle methods from void so they can
-  surface StaleDelivery.
+- C#: DONE. Added a `SettleContext` (Fibril/SettleContext.cs, volatile binding +
+  Interlocked counter) held per-endpoint by the `Client` (a `_settle` map beside
+  `_reconcile`) and threaded via `EngineOptions.Settle`; standalone `ConnectAsync`
+  gets a fresh one. `StartAsync` reserves the incarnation from the resume outcome
+  and binds before the actor loop starts, `HandleDeliver` stamps the context +
+  incarnation on the `Delivery` (readonly struct, already carried the tuple), and
+  the settle methods route via `CurrentOrStale` (now throwing on stale instead of
+  silently dropping). New `StaleDeliveryException` (do-not-retry). Tests in
+  EngineTest.cs (A1 stale, A2/A3 route-to-current with origin dropped) + ErrorsTest
+  (A4). Full suite (74) green.
 
-Acceptance criteria A1-A7 apply per client; each needs A1 + A2 at unit level and
-one reconnect integration test proving A1 (matching the Rust reference tests).
+Acceptance criteria A1-A7 apply per client; each has A1 + A2 (engine/integration
+level) and the retry classification (A4). ALL FIVE CLIENTS DONE.
 
 ## Multi-angle review
 
