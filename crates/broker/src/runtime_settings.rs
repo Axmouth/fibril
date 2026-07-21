@@ -292,6 +292,11 @@ pub struct ConnectionRuntimeSettings {
     /// during a drain, in coordinated mode. Only caps how long the drain
     /// call waits: reactive failover stays the backstop either way.
     pub drain_handoff_timeout_ms: Option<u64>,
+    /// How stale a persisted session skeleton a restarted broker will honor
+    /// (ms). Within this window a resume after restart succeeds and
+    /// reconciles, past it (or `0`) it reports not-found. Live-process
+    /// dormancy stays governed by `reconnect_grace_ms`.
+    pub resume_session_restart_ttl_ms: Option<u64>,
 }
 
 /// Default drain handoff wait when the runtime setting is unset.
@@ -707,6 +712,7 @@ mod tests {
             connection: ConnectionRuntimeSettings {
                 reconnect_grace_ms: Some(8),
                 drain_handoff_timeout_ms: None,
+                resume_session_restart_ttl_ms: None,
             },
             replication: ReplicationRuntimeSettings::default(),
             partitioning: PartitioningRuntimeSettings::default(),
@@ -747,6 +753,7 @@ mod tests {
             connection: ConnectionRuntimeSettings {
                 reconnect_grace_ms: Some(17),
                 drain_handoff_timeout_ms: None,
+                resume_session_restart_ttl_ms: None,
             },
             replication: ReplicationRuntimeSettings::default(),
             partitioning: PartitioningRuntimeSettings::default(),

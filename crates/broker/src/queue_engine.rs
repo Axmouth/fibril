@@ -6,17 +6,16 @@ use fibril_metrics::QueuesStateSnapshot;
 use fibril_util::{UnixMillis, unix_millis};
 use std::collections::HashSet;
 use stroma_core::{
-    AckEventMeta, CompletionPair, GlobalStore, NackEventMeta, PublishItem, StromaDebugSnapshot,
-    StromaMetrics,
+    AckEventMeta, CompletionPair, NackEventMeta, PublishItem, StromaDebugSnapshot, StromaMetrics,
 };
 pub use stroma_core::{
     AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, DestroyOutcome, DiskUsedBreakdownEntry,
-    EnqueuedStreamAppend,
-    EvictOutcome, FollowerStateCheckpointInstall, FollowerStateCheckpointInstallOutcome, GlobalDLQ,
-    GlobalDlqSnapshot, GlobalDlqUpdateOutcome, InspectMode, IoError, KDurability,
+    EnqueuedStreamAppend, EvictOutcome, FollowerStateCheckpointInstall,
+    FollowerStateCheckpointInstallOutcome, GlobalDLQ, GlobalDlqSnapshot, GlobalDlqUpdateOutcome,
+    GlobalKey, GlobalStore, GlobalValue, InspectMode, IoError, KDurability,
     KeratinAppendCompletion, KeratinConfig, Message, MessageContentType, MessageHeaders,
     MessageInspectionPage, MessageInspectionStatus, OwnerReplicationBatch, OwnerReplicationRead,
-    OwnerStateCheckpoint, PartitionKind, QuarantineInfo, QueueInspectionState,
+    OwnerStateCheckpoint, PartitionKind, PutOutcome, QuarantineInfo, QueueInspectionState,
     QueuePromotionOutcome, RecoveryMismatchPolicy, ReplicatedAppendOutcome, ReplicatedEventBatch,
     ReplicatedMessageBatch, ReplicatedQueueApplyOutcome, RetentionConfig, SnapshotConfig, Stroma,
     StromaError, StromaEvent, StromaKeratinConfig,

@@ -31,8 +31,7 @@ use fibril_protocol::v1::{
     DeclareQueueOk, Deliver, ERR_CONFLICT, ERR_INVALID, ErrorMsg, HEADER_SPECULATIVE, Hello,
     HelloOk, Nack, Op, PROTOCOL_V1, Publish, PublishDelayed, QueueDlqPolicy, QueueTopologyEntry,
     ReasonCode, ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult,
-    ReconcileSubscription,
-    ReplicationApply, ReplicationApplyOk, ReplicationCheckpointExport,
+    ReconcileSubscription, ReplicationApply, ReplicationApplyOk, ReplicationCheckpointExport,
     ReplicationCheckpointExportOk, ReplicationCheckpointInstall, ReplicationCheckpointInstallOk,
     ReplicationCheckpointRequired, ReplicationEventApplyBatch, ReplicationEventRead,
     ReplicationEventRecord, ReplicationMessageApplyBatch, ReplicationMessageRead,
@@ -249,91 +248,91 @@ async fn start_checkpoint_required_owner_server(
     let addr = listener.local_addr().unwrap();
     let server_task = tokio::spawn(async move {
         let served: anyhow::Result<()> = async move {
-        let (stream, _) = listener.accept().await?;
-        let mut conn = plain_conn(stream);
+            let (stream, _) = listener.accept().await?;
+            let mut conn = plain_conn(stream);
 
-        let frame = conn
-            .next()
-            .await
-            .ok_or_else(|| anyhow::anyhow!("client closed before hello"))??;
-        assert_eq!(frame.opcode, Op::Hello as u16);
-        conn.send(try_encode(
-            Op::HelloOk,
-            frame.request_id,
-            &HelloOk {
-                protocol_version: PROTOCOL_V1,
-                owner_id: Uuid::now_v7(),
-                client_id: Uuid::now_v7(),
-                resume_token: Uuid::now_v7(),
-                resume_outcome: ResumeOutcome::New,
-                server_name: "fake-owner".into(),
-                compliance: "test".into(),
-            },
-        )?)
-        .await?;
+            let frame = conn
+                .next()
+                .await
+                .ok_or_else(|| anyhow::anyhow!("client closed before hello"))??;
+            assert_eq!(frame.opcode, Op::Hello as u16);
+            conn.send(try_encode(
+                Op::HelloOk,
+                frame.request_id,
+                &HelloOk {
+                    protocol_version: PROTOCOL_V1,
+                    owner_id: Uuid::now_v7(),
+                    client_id: Uuid::now_v7(),
+                    resume_token: Uuid::now_v7(),
+                    resume_outcome: ResumeOutcome::New,
+                    server_name: "fake-owner".into(),
+                    compliance: "test".into(),
+                },
+            )?)
+            .await?;
 
-        while let Some(frame) = conn.next().await {
-            let frame = frame?;
-            match frame.opcode {
-                x if x == Op::ReplicationRead as u16 => {
-                    let read: ReplicationRead = try_decode(&frame)?;
-                    // This fake models an owner whose event log has been
-                    // compacted but whose messages are still available from
-                    // the checkpoint message offset.
-                    let response = if read.event_from < checkpoint.event_next_offset {
-                        ReplicationReadOk {
-                            messages: read_fake_message_batch(
-                                &checkpoint,
-                                &message_records,
-                                read.message_from,
-                                read.max_messages,
-                            ),
-                            events: ReplicationEventRead::CheckpointRequired(
-                                ReplicationCheckpointRequired {
-                                    epoch: checkpoint.event_epoch,
-                                    requested_offset: read.event_from,
-                                    head_offset: checkpoint.event_next_offset,
-                                    next_offset: checkpoint.event_next_offset,
-                                },
-                            ),
-                        }
-                    } else {
-                        ReplicationReadOk {
-                            messages: read_fake_message_batch(
-                                &checkpoint,
-                                &message_records,
-                                read.message_from,
-                                read.max_messages,
-                            ),
-                            events: read_fake_event_batch(
-                                &checkpoint,
-                                &event_records,
-                                read.event_from,
-                                read.max_events,
-                            ),
-                        }
-                    };
-                    conn.send(wire::encode_replication_read_ok(
-                        frame.request_id,
-                        &response,
-                    )?)
-                    .await?;
+            while let Some(frame) = conn.next().await {
+                let frame = frame?;
+                match frame.opcode {
+                    x if x == Op::ReplicationRead as u16 => {
+                        let read: ReplicationRead = try_decode(&frame)?;
+                        // This fake models an owner whose event log has been
+                        // compacted but whose messages are still available from
+                        // the checkpoint message offset.
+                        let response = if read.event_from < checkpoint.event_next_offset {
+                            ReplicationReadOk {
+                                messages: read_fake_message_batch(
+                                    &checkpoint,
+                                    &message_records,
+                                    read.message_from,
+                                    read.max_messages,
+                                ),
+                                events: ReplicationEventRead::CheckpointRequired(
+                                    ReplicationCheckpointRequired {
+                                        epoch: checkpoint.event_epoch,
+                                        requested_offset: read.event_from,
+                                        head_offset: checkpoint.event_next_offset,
+                                        next_offset: checkpoint.event_next_offset,
+                                    },
+                                ),
+                            }
+                        } else {
+                            ReplicationReadOk {
+                                messages: read_fake_message_batch(
+                                    &checkpoint,
+                                    &message_records,
+                                    read.message_from,
+                                    read.max_messages,
+                                ),
+                                events: read_fake_event_batch(
+                                    &checkpoint,
+                                    &event_records,
+                                    read.event_from,
+                                    read.max_events,
+                                ),
+                            }
+                        };
+                        conn.send(wire::encode_replication_read_ok(
+                            frame.request_id,
+                            &response,
+                        )?)
+                        .await?;
+                    }
+                    x if x == Op::ReplicationCheckpointExport as u16 => {
+                        let _: ReplicationCheckpointExport = try_decode(&frame)?;
+                        conn.send(try_encode(
+                            Op::ReplicationCheckpointExportOk,
+                            frame.request_id,
+                            &ReplicationCheckpointExportOk {
+                                checkpoint: checkpoint.clone(),
+                            },
+                        )?)
+                        .await?;
+                    }
+                    other => anyhow::bail!("unexpected fake owner opcode {other}"),
                 }
-                x if x == Op::ReplicationCheckpointExport as u16 => {
-                    let _: ReplicationCheckpointExport = try_decode(&frame)?;
-                    conn.send(try_encode(
-                        Op::ReplicationCheckpointExportOk,
-                        frame.request_id,
-                        &ReplicationCheckpointExportOk {
-                            checkpoint: checkpoint.clone(),
-                        },
-                    )?)
-                    .await?;
-                }
-                other => anyhow::bail!("unexpected fake owner opcode {other}"),
             }
-        }
-        Ok(())
+            Ok(())
         }
         .await;
         tolerate_peer_disconnect(served)
@@ -836,6 +835,160 @@ async fn queue_delete_closes_live_subscription_with_typed_reason() {
     assert_eq!(closed.sub_id, sub_ok.sub_id);
     assert_eq!(closed.code, ReasonCode::TopicDeleted);
     assert!(!closed.message.is_empty());
+
+    drop(framed);
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn resume_across_restart_honors_a_durable_skeleton() {
+    use fibril_protocol::v1::session_store::SessionSkeletonStore;
+
+    // One durable engine underneath (keratin's global store is fsync-durable
+    // by construction). A restart is modeled at the session layer: boot 2
+    // loads a FRESH session store + fresh resume registry from the same durable
+    // data, which is exactly the state a new process sees - the persisted
+    // owner id and skeletons, but no live in-memory sessions.
+    let (engine, dir) = open_test_engine().await;
+
+    // Boot 1.
+    let store1 = Arc::new(
+        SessionSkeletonStore::load_from_stroma_engine(&engine, Uuid::new_v4())
+            .await
+            .expect("load session store"),
+    );
+    let broker1 = Broker::new(engine.clone(), BrokerConfig::default(), None);
+    // A grace window so the clean disconnect below enters grace (session stays
+    // resumable) rather than immediately forgetting it. A real broker crash
+    // never runs the clean-disconnect cleanup at all, so the on-disk skeleton
+    // survives regardless; grace models the session still being alive at the
+    // moment the broker restarts. The window is long enough that its expiry
+    // timer never fires during the test.
+    let settings1 = ConnectionSettings::new(Some(60))
+        .with_reconnect_grace_ms(Some(30_000))
+        .with_resume_session_restart_ttl_ms(Some(60_000))
+        .with_session_store(store1);
+
+    let (mut first, first_task, dir, _broker) =
+        open_protocol_connection_for_broker(settings1, broker1, dir).await;
+    let hello_ok = handshake_with_resume(&mut first, None).await;
+    assert_eq!(hello_ok.resume_outcome, ResumeOutcome::New);
+    let sub_ok = framed_subscribe(&mut first, 2, "restart.jobs", None, false).await;
+    // Ping/pong fences the skeleton persist: the frame loop awaits the write
+    // before the next frame, so a Pong proves it landed durably.
+    assert_connection_still_responds(&mut first).await;
+
+    let resume = ResumeIdentity {
+        owner_id: hello_ok.owner_id,
+        client_id: hello_ok.client_id,
+        resume_token: hello_ok.resume_token,
+    };
+    drop(first);
+    first_task.await.unwrap().unwrap();
+
+    // Boot 2 ("restart"): fresh store + registry from the same durable data.
+    let store2 = Arc::new(
+        SessionSkeletonStore::load_from_stroma_engine(&engine, Uuid::new_v4())
+            .await
+            .expect("reload session store"),
+    );
+    // The persisted skeleton survived the restart.
+    assert!(
+        store2
+            .lookup(&hello_ok.client_id, &hello_ok.resume_token, 60_000)
+            .await
+            .is_some(),
+        "skeleton for client {} did not survive restart",
+        hello_ok.client_id,
+    );
+    let broker2 = Broker::new(engine.clone(), BrokerConfig::default(), None);
+    let settings2 = ConnectionSettings::new(Some(60))
+        .with_resume_session_restart_ttl_ms(Some(60_000))
+        .with_session_store(store2);
+    let (mut second, second_task, dir, _broker) =
+        open_protocol_connection_for_broker(settings2, broker2, dir).await;
+
+    // The client resumes with its cached identity. The restarted broker keeps
+    // its owner id (persisted), so the owner check passes, the live session is
+    // gone, and the durable skeleton upgrades not-found to resumed-after-restart.
+    let restart_ok = handshake_with_resume(&mut second, Some(resume)).await;
+    assert_eq!(
+        restart_ok.resume_outcome,
+        ResumeOutcome::ResumedAfterRestart
+    );
+    assert_eq!(restart_ok.client_id, hello_ok.client_id);
+
+    // And the client can reconcile its subscription set on the restored session
+    // (the fresh session is empty, so a manual-ack sub on an owned queue is
+    // advised to recreate).
+    second
+        .send(
+            try_encode(
+                Op::ReconcileClient,
+                3,
+                &ReconcileClient {
+                    policy: ReconcilePolicy::Conservative,
+                    subscriptions: vec![ReconcileSubscription {
+                        sub_id: sub_ok.sub_id,
+                        topic: "restart.jobs".into(),
+                        group: None,
+                        partition: Partition::new(0),
+                        auto_ack: false,
+                        prefetch: 1,
+                        consumer_group: None,
+                        consumer_target: None,
+                        member_id: None,
+                    }],
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let frame = recv_frame_expect(&mut second, Op::ReconcileResult).await;
+    let result: ReconcileResult = try_decode(&frame).unwrap();
+    assert_eq!(result.subscriptions.len(), 1);
+    assert_eq!(
+        result.subscriptions[0].action,
+        ReconcileAction::RecreateClientSide
+    );
+
+    drop(second);
+    second_task.await.unwrap().unwrap();
+    drop(dir);
+}
+
+#[tokio::test]
+async fn resume_with_a_missing_skeleton_stays_not_found() {
+    use fibril_protocol::v1::session_store::SessionSkeletonStore;
+
+    // A resume presenting the correct owner id but a client id the store never
+    // saw reports not-found (not resumed-after-restart), and a genuinely wrong
+    // owner stays rejected - the two outcomes the skeleton path must preserve.
+    let (broker, dir) = open_test_broker().await;
+    let store = Arc::new(
+        SessionSkeletonStore::load_from_stroma_engine(&broker.engine(), Uuid::new_v4())
+            .await
+            .expect("load session store"),
+    );
+    let owner_id = store.owner_id();
+    let settings = ConnectionSettings::new(Some(60))
+        .with_resume_session_restart_ttl_ms(Some(60_000))
+        .with_session_store(store);
+    let (mut framed, task, _dir, _broker) =
+        open_protocol_connection_for_broker(settings, broker, dir).await;
+
+    // Right owner, unknown client id: no skeleton, so not-found.
+    let outcome = handshake_with_resume(
+        &mut framed,
+        Some(ResumeIdentity {
+            owner_id,
+            client_id: Uuid::from_u128(0xdead),
+            resume_token: Uuid::from_u128(0xbeef),
+        }),
+    )
+    .await;
+    assert_eq!(outcome.resume_outcome, ResumeOutcome::ResumeNotFound);
 
     drop(framed);
     task.await.unwrap().unwrap();

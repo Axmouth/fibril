@@ -17,11 +17,11 @@ use fibril_protocol::v1::wire;
 use fibril_protocol::v1::{
     Ack, AdvertisedAddress, AssignmentChanged, Auth, ContentType, DeclarePlexus, DeclarePlexusOk,
     DeclareQueue, DeclareQueueOk, Deliver, DeliveryTag, ErrorMsg, GoingAway, Hello, HelloOk, Nack,
-    Partition, Publish, PublishDelayed, PublishOk, QueueDlqPolicy, QueueTopologyEntry,
-    ReasonCode, ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult,
-    ReconcileSubscription, ReconcileSubscriptionResult, Redirect, ResumeIdentity, ResumeOutcome,
-    StreamDurability, StreamRetention, StreamStart, StreamTopologyEntry, Subscribe, SubscribeOk,
-    SubscribeStream, SubscriptionClosed, TopologyOk, TopologyRequest, TopologyUpdateAck,
+    Partition, Publish, PublishDelayed, PublishOk, QueueDlqPolicy, QueueTopologyEntry, ReasonCode,
+    ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult, ReconcileSubscription,
+    ReconcileSubscriptionResult, Redirect, ResumeIdentity, ResumeOutcome, StreamDurability,
+    StreamRetention, StreamStart, StreamTopologyEntry, Subscribe, SubscribeOk, SubscribeStream,
+    SubscriptionClosed, TopologyOk, TopologyRequest, TopologyUpdateAck,
 };
 use serde_json::Value;
 use uuid::Uuid;

@@ -12,6 +12,20 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- Durable resume across a broker restart. A broker now persists a small
+  skeleton of each resumable session (its owner identity, client id, resume
+  token, and subscription set) to the node's durable store, so a fast
+  restart can honor a client's resume and reconcile its subscriptions
+  instead of rejecting it. Messages redeliver per at-least-once as before,
+  and delivery tags still die with the process (a resumed-after-restart
+  client marks its held deliveries stale). The handshake reports the new
+  `resumed_after_restart` outcome for this case, so a bare `resume_rejected`
+  now means a genuine identity mismatch. Bounded by
+  `connection.resume_session_restart_ttl_ms` (default 60s, `0` disables it);
+  live-process reconnect grace is unchanged. Broker-local and not
+  coordination-replicated: only the owning node can honor a session, and a
+  moved partition is already covered by the client's topology-driven
+  resubscribe.
 - The Rust client's typed subscription receive surface. `recv()` now returns
   a `SubEvent` - `Delivery(msg)` or `Closed(reason)` - so a subscription
   never just goes silent: it ends with a typed `CloseReason` (topic deleted,

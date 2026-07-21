@@ -12,6 +12,7 @@ use crate::v1::{
     AdvertisedAddress,
     frame::{Frame, ProtoCodec},
     helper::{ProtocolError, error_frame, try_decode, try_encode},
+    session_store::SessionSkeletonStore,
     wire::{self, WireError},
     *,
 };
@@ -21,8 +22,8 @@ use fibril_broker::{
     broker::{
         Broker, BrokerError, BrokerFollowerReplicationApply, BrokerOwnerReplicationRecords,
         ConsumerCloseCause, ConsumerConfig, ConsumerHandle, ConsumerLease,
-        ExclusiveAssignmentUpdate, PublisherHandle,
-        ReplicationResourceKind, SettleRequest, SettleType,
+        ExclusiveAssignmentUpdate, PublisherHandle, ReplicationResourceKind, SettleRequest,
+        SettleType,
     },
     queue_engine::{
         DLQDiscardPolicyWire, DeclareMeta, FollowerStateCheckpointInstall, GlobalDLQ, Message,
@@ -1512,8 +1513,7 @@ async fn install_stream_subscription(
     // re-attaching from its watermark after a lag eviction so delivery stays
     // contiguous per subscriber. The driver stamps why it stopped so the
     // delivery task can announce the close instead of ending silently.
-    let stream_end: Arc<std::sync::OnceLock<StreamSubEnd>> =
-        Arc::new(std::sync::OnceLock::new());
+    let stream_end: Arc<std::sync::OnceLock<StreamSubEnd>> = Arc::new(std::sync::OnceLock::new());
     let driver = tokio::spawn({
         let channel = channel.clone();
         let stream_end = stream_end.clone();
@@ -2001,9 +2001,44 @@ struct ResumeSessionRegistry {
 
 impl ResumeSessionRegistry {
     fn new() -> Self {
+        Self::with_owner_id(Uuid::new_v4())
+    }
+
+    /// Build a registry under a specific owner identity. Used with the durable
+    /// session store so a restarted broker keeps its owner id and a client's
+    /// cached resume identity still matches after a bounce.
+    fn with_owner_id(owner_id: Uuid) -> Self {
         Self {
-            owner_id: Uuid::new_v4(),
+            owner_id,
             sessions: dashmap::DashMap::new(),
+        }
+    }
+
+    /// Adopt a session identity restored from a durable skeleton after a
+    /// restart. Keeps the client's presented `client_id`/`resume_token` (so its
+    /// cached identity stays valid) but installs a FRESH, unauthenticated,
+    /// subscription-less logical connection: auth is re-done on the handshake
+    /// and subscriptions are re-driven by the client's reconcile. Returns a
+    /// `ResumedAfterRestart` resolution.
+    fn adopt_restart_session(&self, client_id: Uuid, resume_token: Uuid) -> ResumeResolution {
+        let logical = LogicalConnection::new(client_id);
+        self.sessions.insert(
+            client_id,
+            ResumeSession {
+                resume_token,
+                logical: logical.clone(),
+            },
+        );
+        tracing::info!(
+            client_id = %client_id,
+            owner_id = %self.owner_id,
+            "client resume honored across a broker restart"
+        );
+        ResumeResolution {
+            client_id,
+            resume_token,
+            outcome: ResumeOutcome::ResumedAfterRestart,
+            logical,
         }
     }
 
@@ -2109,28 +2144,32 @@ impl ResumeSessionRegistry {
         sent
     }
 
+    /// Returns whether the session was actually removed (still dormant at this
+    /// generation). A reconnect that bumped the generation leaves it live and
+    /// returns false, so the caller keeps the durable skeleton.
     fn forget_if_dormant(
         &self,
         client_id: Uuid,
         logical: &Arc<LogicalConnection>,
         generation: u64,
-    ) {
+    ) -> bool {
         if !logical.is_dormant_generation(generation) {
-            return;
+            return false;
         }
-        self.sessions.remove(&client_id);
+        self.sessions.remove(&client_id).is_some()
     }
 
+    /// Returns whether the session was actually removed (generation unchanged).
     fn forget_if_generation(
         &self,
         client_id: Uuid,
         logical: &Arc<LogicalConnection>,
         generation: u64,
-    ) {
+    ) -> bool {
         if logical.generation.load(Ordering::Acquire) != generation {
-            return;
+            return false;
         }
-        self.sessions.remove(&client_id);
+        self.sessions.remove(&client_id).is_some()
     }
 }
 
@@ -2145,6 +2184,7 @@ struct ResumeResolution {
 pub struct ConnectionRuntimeSettings {
     pub publisher_cache_idle_timeout_ms: Option<u64>,
     pub reconnect_grace_ms: Option<u64>,
+    pub resume_session_restart_ttl_ms: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -2152,6 +2192,9 @@ pub struct ConnectionSettings {
     pub heartbeat_interval: Option<u64>,
     runtime: Arc<ArcSwap<ConnectionRuntimeSettings>>,
     resume_sessions: Arc<ResumeSessionRegistry>,
+    /// Durable session skeletons, when configured. Absent for in-memory / test
+    /// paths (no store means no restart-resume, exactly as before #105).
+    session_store: Option<Arc<SessionSkeletonStore>>,
 }
 
 impl ConnectionSettings {
@@ -2160,12 +2203,30 @@ impl ConnectionSettings {
             heartbeat_interval,
             runtime: Arc::new(ArcSwap::from_pointee(ConnectionRuntimeSettings::default())),
             resume_sessions: Arc::new(ResumeSessionRegistry::new()),
+            session_store: None,
         }
+    }
+
+    /// Attach the durable session-skeleton store. Rebuilds the resume registry
+    /// under the store's persisted owner identity, so a restarted broker keeps
+    /// its owner id and clients resume across the bounce. Call before the
+    /// registry is used (at construction), never on a live settings object.
+    pub fn with_session_store(mut self, store: Arc<SessionSkeletonStore>) -> Self {
+        self.resume_sessions = Arc::new(ResumeSessionRegistry::with_owner_id(store.owner_id()));
+        self.session_store = Some(store);
+        self
     }
 
     pub fn with_reconnect_grace_ms(self, reconnect_grace_ms: Option<u64>) -> Self {
         let mut runtime = *self.runtime_snapshot();
         runtime.reconnect_grace_ms = reconnect_grace_ms;
+        self.update_runtime(runtime);
+        self
+    }
+
+    pub fn with_resume_session_restart_ttl_ms(self, ttl_ms: Option<u64>) -> Self {
+        let mut runtime = *self.runtime_snapshot();
+        runtime.resume_session_restart_ttl_ms = ttl_ms;
         self.update_runtime(runtime);
         self
     }
@@ -2183,6 +2244,75 @@ impl ConnectionSettings {
 
     pub fn runtime_snapshot(&self) -> Arc<ConnectionRuntimeSettings> {
         self.runtime.load_full()
+    }
+
+    /// Resolve a resume, consulting durable skeletons when the in-memory
+    /// registry has no live session. A restart adopts the persisted owner id,
+    /// so a post-restart resume passes the owner check and lands on
+    /// `ResumeNotFound` here (the live sessions map is empty). That is exactly
+    /// the case a valid skeleton upgrades to `ResumedAfterRestart`; a missing
+    /// or expired skeleton stays `ResumeNotFound`, and `ResumeRejected` still
+    /// means a genuine owner or token mismatch.
+    async fn resolve_resume(&self, resume: Option<ResumeIdentity>) -> ResumeResolution {
+        let resolution = self.resume_sessions.resolve(resume.clone());
+        if resolution.outcome != ResumeOutcome::ResumeNotFound {
+            return resolution;
+        }
+        let (Some(store), Some(identity)) = (self.session_store.as_ref(), resume) else {
+            return resolution;
+        };
+        let ttl_ms = self
+            .runtime_snapshot()
+            .resume_session_restart_ttl_ms
+            .unwrap_or_default();
+        if store
+            .lookup(&identity.client_id, &identity.resume_token, ttl_ms)
+            .await
+            .is_some()
+        {
+            return self
+                .resume_sessions
+                .adopt_restart_session(identity.client_id, identity.resume_token);
+        }
+        resolution
+    }
+
+    /// Persist a session's identity and current queue-subscription set to the
+    /// durable store, so a fast restart can resume it. Best-effort: a storage
+    /// error is logged and swallowed, never surfaced to the client (a lost
+    /// skeleton only costs a resume, never correctness). No-op without a store.
+    async fn persist_session_skeleton(&self, client_id: Uuid, logical: &Arc<LogicalConnection>) {
+        let Some(store) = self.session_store.as_ref() else {
+            return;
+        };
+        let resume_token = match self.resume_sessions.sessions.get(&client_id) {
+            Some(session) => session.resume_token,
+            None => return,
+        };
+        let subscriptions: Vec<ReconcileSubscription> = {
+            let state = logical.state.lock().await;
+            state
+                .subs
+                .iter()
+                .map(|((topic, _partition, group), sub)| {
+                    reconcile_subscription_from_state(topic, group.as_deref(), sub)
+                })
+                .collect()
+        };
+        if let Err(err) = store.upsert(client_id, resume_token, subscriptions).await {
+            tracing::warn!(client_id = %client_id, "failed to persist session skeleton: {err}");
+        }
+    }
+
+    /// Drop a session's durable skeleton (the session is truly gone). Best
+    /// effort, no-op without a store.
+    async fn forget_session_skeleton(&self, client_id: Uuid) {
+        let Some(store) = self.session_store.as_ref() else {
+            return;
+        };
+        if let Err(err) = store.remove(&client_id).await {
+            tracing::warn!(client_id = %client_id, "failed to drop session skeleton: {err}");
+        }
     }
 
     /// Announce a planned drain to every connected client (see [`GoingAway`]).
@@ -2591,13 +2721,11 @@ where
     }
 
     let resume = connection_settings
-        .resume_sessions
-        .resolve(hello.resume.clone());
+        .resolve_resume(hello.resume.clone())
+        .await;
     match resume.outcome {
         ResumeOutcome::New => tcp_stats.resume_new(),
-        ResumeOutcome::Resumed | ResumeOutcome::ResumedAfterRestart => {
-            tcp_stats.resume_accepted()
-        }
+        ResumeOutcome::Resumed | ResumeOutcome::ResumedAfterRestart => tcp_stats.resume_accepted(),
         ResumeOutcome::ResumeNotFound | ResumeOutcome::ResumeRejected => {
             tcp_stats.resume_rejected()
         }
@@ -3076,6 +3204,12 @@ where
                 frame_tx_high_prio
                     .send(try_encode(Op::ReconcileResult, frame.request_id, &result)?)
                     .await?;
+                // The reconciled set is authoritative for this session, so
+                // refresh the durable skeleton (also captures a restart-adopted
+                // session's first real subscription set).
+                connection_settings
+                    .persist_session_skeleton(client_id, &logical)
+                    .await;
             }
 
             // -------- REPLICATION READ --------------------------------------
@@ -3550,6 +3684,12 @@ where
                 frame_tx_high_prio
                     .send(try_encode(Op::SubscribeOk, frame.request_id, &sub_ok)?)
                     .await?;
+                // Persist the session's identity + subscription set so a fast
+                // restart can resume it. Cheap on the subscribe cold path, and
+                // best-effort by contract (never fails the subscribe).
+                connection_settings
+                    .persist_session_skeleton(client_id, &logical)
+                    .await;
             }
 
             // -------- TOPOLOGY ----------------------------------------------
@@ -3681,8 +3821,7 @@ where
                             break;
                         }
                         Err(err) => {
-                            let trace =
-                                format!("{:08x}", uuid::Uuid::now_v7().as_u128() as u32);
+                            let trace = format!("{:08x}", uuid::Uuid::now_v7().as_u128() as u32);
                             tracing::error!("Declare queue failed [trace {trace}]: {err}");
                             failure = Some((
                                 500,
@@ -3785,8 +3924,7 @@ where
                             break;
                         }
                         Err(err) => {
-                            let trace =
-                                format!("{:08x}", uuid::Uuid::now_v7().as_u128() as u32);
+                            let trace = format!("{:08x}", uuid::Uuid::now_v7().as_u128() as u32);
                             tracing::error!("Declare plexus failed [trace {trace}]: {err}");
                             failure = Some((
                                 500,
@@ -4333,7 +4471,7 @@ where
         let grace_ms = reconnect_grace_ms;
         let broker_for_cleanup = broker.clone();
         let logical_for_cleanup = logical.clone();
-        let resume_sessions = connection_settings.resume_sessions.clone();
+        let settings_for_cleanup = connection_settings.clone();
         let metrics_for_cleanup = tcp_stats.clone();
         tracing::info!(
             client_id = %logical.client_id,
@@ -4350,11 +4488,16 @@ where
                     "reconnect grace expired; cleaning up dormant connection"
                 );
                 cleanup_connection_state(broker_for_cleanup, logical_for_cleanup.clone()).await;
-                resume_sessions.forget_if_dormant(
+                let forgotten = settings_for_cleanup.resume_sessions.forget_if_dormant(
                     logical_for_cleanup.client_id,
                     &logical_for_cleanup,
                     transport_generation,
                 );
+                if forgotten {
+                    settings_for_cleanup
+                        .forget_session_skeleton(logical_for_cleanup.client_id)
+                        .await;
+                }
             }
         });
     }
@@ -4373,11 +4516,16 @@ where
 
     if !entered_grace {
         cleanup_connection_state(broker.clone(), logical.clone()).await;
-        connection_settings.resume_sessions.forget_if_generation(
+        let forgotten = connection_settings.resume_sessions.forget_if_generation(
             logical.client_id,
             &logical,
             transport_generation,
         );
+        if forgotten {
+            connection_settings
+                .forget_session_skeleton(logical.client_id)
+                .await;
+        }
     }
 
     tracing::debug!("[conn] EXIT handle_connection peer={:?}", peer_addr);

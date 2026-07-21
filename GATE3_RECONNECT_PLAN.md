@@ -406,6 +406,43 @@ is NOT in this brick - deferred to a focused follow-up (needs delivery
 incarnation stamping); the typed Disconnected close already tells a
 consumer the subscription died, which is the honest signal for now.
 
+Brick 4 DONE (#105 durable session skeletons). SessionSkeletonStore
+(crates/protocol/src/v1/session_store.rs) persists {owner_id, per-session
+client_id + resume_token + subscription set + updated_ms} as one
+rmp-envelope document under GlobalStore key fibril/resume_sessions (the
+broker-local durable store, mirroring UserStoreManager). The persisted
+owner_id is adopted at boot (ResumeSessionRegistry::with_owner_id), so a
+restarted broker keeps its identity and a client's cached resume passes
+the owner check. resolve now runs through
+ConnectionSettings::resolve_resume: in-memory resolve first, and a
+ResumeNotFound with a live skeleton (owner matched, session gone)
+upgrades to ResumedAfterRestart via adopt_restart_session (fresh
+unauthenticated logical connection keeping the client's id + token; auth
+re-done on the handshake, subscriptions re-driven by the client
+reconcile). Skeletons persisted after Subscribe and ReconcileClient
+frames, dropped only when a session is genuinely forgotten (forget_if_*
+return bool now). Setting resume_session_restart_ttl_ms wired end to end
+(config crate, broker + protocol ConnectionRuntimeSettings, fibril boot +
+watch loop, default 60s). Load failure degrades to no-restart-resume,
+never blocks boot (D5).
+
+Key insight from the tests: a clean client disconnect runs cleanup and
+correctly FORGETS the skeleton (that client is gone, no resume owed); a
+broker CRASH never runs cleanup, so the on-disk skeleton survives and the
+resume works. The restart test models the crash with a grace window so
+the clean disconnect enters grace instead of forgetting. Tests:
+resume_across_restart_honors_a_durable_skeleton,
+resume_with_a_missing_skeleton_stays_not_found, 4 session_store unit
+tests. Docs updated (configuration.md, implemented-surface.md restart
+line flipped). Design note: NOT persisted per incremental subscribe (the
+skeleton sub set is informational, the client reconcile is
+authoritative), so writes are ~1/session + 1/reconnect.
+
+RESUME AT BRICK 5: client-surface parity (TS/Py/Go/C# typed close +
+auto_resubscribe), FEATURE_MATRIX rows, #104 stale-tag (deferred from
+brick 3), the brick-3 auto-resubscribe-ON continuity test. Then brick 6
+docs (reconnects.md rewrite - the "not yet" section retires).
+
 ## Ratification record
 
 All decisions ratified 2026-07-21:

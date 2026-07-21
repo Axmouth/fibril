@@ -2,7 +2,6 @@
 //! standalone broker: create a user, authenticate with it via a client,
 //! rotate the password, then remove the user.
 
-
 use fibril_client::{ClientOptions, FibrilError};
 
 mod common;

@@ -50,6 +50,7 @@ use fibril_protocol::v1::handler::{
     ConnectionSettings, DeclareCoordinator, ProtocolServerError, TopologyAdoptionTracker,
     run_server as run_protocol_server,
 };
+use fibril_protocol::v1::session_store::SessionSkeletonStore;
 use fibril_protocol::v1::{
     AdvertisedAddress, Partition, QueueTopologyEntry, StreamRetention, StreamTopologyEntry,
     TopologyOk,
@@ -85,6 +86,10 @@ pub fn runtime_seed_from_config(config: &ServerConfig) -> RuntimeSettings {
         connection: BrokerConnectionRuntimeSettings {
             reconnect_grace_ms: config.runtime_seed.connection.reconnect_grace_ms,
             drain_handoff_timeout_ms: None,
+            resume_session_restart_ttl_ms: config
+                .runtime_seed
+                .connection
+                .resume_session_restart_ttl_ms,
         },
         replication: ReplicationRuntimeSettings {
             confirm_timeout_ms: config.runtime_seed.replication.confirm_timeout_ms,
@@ -438,9 +443,7 @@ impl fibril_admin::BrokerTestPublisher for AdminTestPublisher {
             .map(|(_, part, _)| part)
             .collect();
         if partitions.is_empty() {
-            return Err(format!(
-                "no queue or stream named '{topic}' on this broker"
-            ));
+            return Err(format!("no queue or stream named '{topic}' on this broker"));
         }
 
         // Random starting partition, then try the rest in turn: in cluster mode
@@ -487,7 +490,9 @@ impl fibril_admin::BrokerTestPublisher for AdminTestPublisher {
                 Err(_) => Err("timed out waiting for the durable confirm".to_string()),
             };
         }
-        Err(format!("no publishable partition on this broker: {last_error}"))
+        Err(format!(
+            "no publishable partition on this broker: {last_error}"
+        ))
     }
 }
 
@@ -1859,9 +1864,26 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         (None, _) => None,
     };
 
-    let connection_settings = ConnectionSettings::new(None)
+    // Durable resume-session skeletons, so a fast restart can honor a client
+    // resume. Best-effort: a load failure disables restart-resume (fresh
+    // sessions, today's behavior) rather than blocking boot. The minted id is
+    // adopted only on first boot; a restart reuses the persisted owner id.
+    let session_store =
+        match SessionSkeletonStore::load_from_stroma_engine(&engine, uuid::Uuid::new_v4()).await {
+            Ok(store) => Some(Arc::new(store)),
+            Err(err) => {
+                tracing::warn!("resume session store unavailable, restart-resume disabled: {err}");
+                None
+            }
+        };
+
+    let mut connection_settings = ConnectionSettings::new(None)
         .with_publisher_cache_idle_timeout_ms(runtime.idle_queue_cleanup.publisher_idle_timeout_ms)
-        .with_reconnect_grace_ms(runtime.connection.reconnect_grace_ms);
+        .with_reconnect_grace_ms(runtime.connection.reconnect_grace_ms)
+        .with_resume_session_restart_ttl_ms(runtime.connection.resume_session_restart_ttl_ms);
+    if let Some(store) = session_store {
+        connection_settings = connection_settings.with_session_store(store);
+    }
     {
         let broker = broker.clone();
         let connection_settings = connection_settings.clone();
@@ -1876,6 +1898,10 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
                         .idle_queue_cleanup
                         .publisher_idle_timeout_ms,
                     reconnect_grace_ms: snapshot.settings.connection.reconnect_grace_ms,
+                    resume_session_restart_ttl_ms: snapshot
+                        .settings
+                        .connection
+                        .resume_session_restart_ttl_ms,
                 });
             }
         });
@@ -2105,8 +2131,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
             let consensus_server = parts.consensus_server;
             let controller_status = parts.controller_status;
             let liveness_source = parts.coordination.clone();
-            let liveness_ttl =
-                Duration::from_millis(config.coordination.ganglion.liveness_ttl_ms);
+            let liveness_ttl = Duration::from_millis(config.coordination.ganglion.liveness_ttl_ms);
             admin
                 .with_cluster_mode()
                 .with_liveness(Arc::new(move || {
@@ -2160,12 +2185,10 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
                         let coordination = source.clone();
                         Box::pin(async move {
                             let retention = retention
-                                .map(|r| {
-                                    fibril_coordination_ganglion::StreamRetentionConfig {
-                                        max_age_ms: r.max_age_ms,
-                                        max_bytes: r.max_bytes,
-                                        max_records: r.max_records,
-                                    }
+                                .map(|r| fibril_coordination_ganglion::StreamRetentionConfig {
+                                    max_age_ms: r.max_age_ms,
+                                    max_bytes: r.max_bytes,
+                                    max_records: r.max_records,
                                 })
                                 .unwrap_or_default();
                             let config = coordination
@@ -2173,10 +2196,8 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
                                 .await
                                 .map_err(|error| error.to_string())?;
                             for partition in 0..config.partition_count {
-                                let stream = StreamIdentity::new(
-                                    topic.clone(),
-                                    Partition::new(partition),
-                                );
+                                let stream =
+                                    StreamIdentity::new(topic.clone(), Partition::new(partition));
                                 coordination
                                     .register_stream(&stream)
                                     .await

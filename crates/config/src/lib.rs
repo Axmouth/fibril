@@ -123,6 +123,9 @@ struct CliArgs {
 
     #[arg(long)]
     reconnect_grace_ms: Option<u64>,
+
+    #[arg(long)]
+    resume_session_restart_ttl_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -662,6 +665,10 @@ impl ServerConfig {
             self.runtime_seed.connection.reconnect_grace_ms =
                 Some(parse_env("FIBRIL_RECONNECT_GRACE_MS", &value)?);
         }
+        if let Some(value) = env_value(&mut get, "FIBRIL_RESUME_SESSION_RESTART_TTL_MS")? {
+            self.runtime_seed.connection.resume_session_restart_ttl_ms =
+                Some(parse_env("FIBRIL_RESUME_SESSION_RESTART_TTL_MS", &value)?);
+        }
         Ok(())
     }
 
@@ -737,6 +744,10 @@ impl ServerConfig {
         }
         if let Some(reconnect_grace_ms) = args.reconnect_grace_ms {
             self.runtime_seed.connection.reconnect_grace_ms = Some(reconnect_grace_ms);
+        }
+        if let Some(resume_session_restart_ttl_ms) = args.resume_session_restart_ttl_ms {
+            self.runtime_seed.connection.resume_session_restart_ttl_ms =
+                Some(resume_session_restart_ttl_ms);
         }
     }
 
@@ -1776,16 +1787,26 @@ impl Default for IdleQueueCleanupSettings {
 /// and resubscribe. Operators opt out by setting `reconnect_grace_ms = 0`.
 pub const DEFAULT_RECONNECT_GRACE_MS: u64 = 5_000;
 
+/// Default window a restarted broker will honor a persisted session skeleton
+/// for. On by default so a fast bounce lets clients resume and reconcile
+/// instead of getting a bare rejection. Bounds how stale a skeleton the broker
+/// trusts after a restart. Operators opt out by setting it to 0 (skeletons are
+/// then never honored across a restart). Live-process dormancy stays governed
+/// by `reconnect_grace_ms`, independent of this.
+pub const DEFAULT_RESUME_SESSION_RESTART_TTL_MS: u64 = 60_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct ConnectionSettings {
     pub reconnect_grace_ms: Option<u64>,
+    pub resume_session_restart_ttl_ms: Option<u64>,
 }
 
 impl Default for ConnectionSettings {
     fn default() -> Self {
         Self {
             reconnect_grace_ms: Some(DEFAULT_RECONNECT_GRACE_MS),
+            resume_session_restart_ttl_ms: Some(DEFAULT_RESUME_SESSION_RESTART_TTL_MS),
         }
     }
 }
@@ -1870,8 +1891,7 @@ mod tests {
     fn admin_advertise_explicit_entry_wins() {
         let mut config = ServerConfig::default();
         config.admin.listener.bind = "0.0.0.0:8081".parse().unwrap();
-        config.admin.listener.advertise =
-            vec!["".to_string(), "dash.example:8081".to_string()];
+        config.admin.listener.advertise = vec!["".to_string(), "dash.example:8081".to_string()];
         assert_eq!(config.admin_advertise_address(), "dash.example:8081");
     }
 
@@ -1979,6 +1999,10 @@ mod tests {
         assert_eq!(
             config.runtime_seed.connection.reconnect_grace_ms,
             Some(DEFAULT_RECONNECT_GRACE_MS)
+        );
+        assert_eq!(
+            config.runtime_seed.connection.resume_session_restart_ttl_ms,
+            Some(DEFAULT_RESUME_SESSION_RESTART_TTL_MS)
         );
         assert_eq!(
             config.idle_queue_cleanup_internal(),
