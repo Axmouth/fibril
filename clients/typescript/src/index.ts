@@ -47,6 +47,7 @@ export {
   BrokenPipeError,
   RedirectError,
   ServerError,
+  SubscriptionClosedError,
   EofError,
   UnexpectedError,
   WireError,

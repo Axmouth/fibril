@@ -368,6 +368,13 @@ export interface GoingAwayMsg {
   message: string;
 }
 
+/** Server push that one subscription ended, with a machine-readable reason. */
+export interface SubscriptionClosedMsg {
+  sub_id: bigint;
+  code: number;
+  message: string;
+}
+
 /**
  * Routing redirect: not an error but a target to retry against. The retry goes
  * to one of owner_endpoints on a separate connection, so the routing layer (not

@@ -36,8 +36,12 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   `sub.close_reason()`. Auto-resubscribe (default on, opt out with
   `ClientOptions::auto_resubscribe(false)`) makes a supervised subscription
   silently re-subscribe when the broker advises a safe recreate, otherwise
-  the typed `Recreated` close surfaces. The other four clients gain the same
-  surface in a following change.
+  the typed `Recreated` close surfaces. The TypeScript client gains the same
+  surface: a subscription's iterator throws a typed `SubscriptionClosedError`
+  (carrying the reason code) when the broker or a reconcile verdict ends it,
+  a clean user `close()` still ends iteration quietly, and
+  `withAutoResubscribe(false)` opts out of silent recreate. The remaining
+  three clients follow in later changes.
 
 - The typed subscription lifecycle, server half. The wire grew a
   machine-readable reason taxonomy: reconcile results carry a tagged code
