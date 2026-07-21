@@ -54,7 +54,7 @@ For example:
 In that case, the broker can accept the settlement instead of immediately
 returning the message for redelivery.
 
-## What It Does Not Do Yet
+## Reconciliation and Subscription Lifecycle
 
 All five clients (Rust, TypeScript, Python, Go, and C#) store the resume identity
 and make one conservative automatic reconnect attempt before a new publish,
@@ -100,17 +100,38 @@ If resume is not accepted, or the broker reports that the client and server
 disagree about a subscription, treat that stream as unsafe and recreate the
 subscription at the application level.
 
-Today the clients report a closed subscription as end-of-stream on their normal
-receive API, each in its idiomatic shape: Rust `recv()` returns `None`,
-TypeScript returns `null` or ends async iteration, Python returns `None` (or
-raises `StopAsyncIteration`), Go closes the delivery channel, and C# ends the
-`IAsyncEnumerable`. None of them yet attach a specific reconciliation-close reason
-to that stream. A typed subscription lifecycle that carries the termination reason
-is planned as part of the client API freeze (see the [reconnection grace
-note](/development/reconnection-grace/#remaining-reconciliation-work)).
+A closed subscription never ends silently: every client carries a typed reason
+so you always know why a stream stopped. When the broker ends a subscription
+(the topic was deleted, ownership moved away, the broker is draining) it sends a
+typed close, and a reconcile verdict that closes a subscription carries its
+reason too. Each client surfaces it in its idiomatic shape:
 
-Reconnect grace is also not durable restart recovery. If the broker process
-restarts, the in-memory dormant connection state is gone.
+- **Rust** `recv()` yields a `SubEvent` (`Delivery(msg)` or `Closed(reason)`);
+  the terminal event is fused, so code that left the loop can still call
+  `sub.close_reason()`.
+- **TypeScript** and **Python** throw a typed `SubscriptionClosedError` from the
+  subscription's iterator (a clean user `close()` still ends iteration quietly).
+- **Go** closes the `Deliveries` channel and exposes `CloseReason()`, read after
+  the channel closes.
+- **C#** completes the `Deliveries()` enumeration with a typed
+  `SubscriptionClosedException`.
+
+Supervised subscriptions (the default) ride through the reasons that are safe to
+retry: an owner move or a broker-advised recreate re-subscribes automatically.
+Terminal reasons (the topic was deleted, a server error) stop the supervisor and
+surface. Auto-resubscribe on a recreate is on by default and can be turned off,
+in which case a recreate surfaces as a typed close instead.
+
+### Durable restart resume
+
+Reconnect grace covers a live broker. A broker *restart* is covered separately:
+the broker persists a small skeleton of each resumable session, so a fast
+restart lets a client resume and reconcile its subscriptions instead of being
+rejected. The handshake reports `resumed_after_restart` for this case. Messages
+redeliver per at-least-once, and delivery tags held from before the restart are
+stale (the client marks them so, and settling one returns a typed error). This
+is bounded by `connection.resume_session_restart_ttl_ms` (default 60s, `0`
+disables it) and is independent of reconnect grace.
 
 ## Configuration
 
@@ -144,7 +165,8 @@ yet, so rather than name clients inline this is the support matrix:
 | Resume identity + one automatic reconnect attempt before an op | yes | yes | yes | yes | yes |
 | Subscription reconciliation on reconnect (conservative default) | yes | yes | yes | yes | yes |
 | Opt-in restore policy | yes | yes | yes | yes | yes |
-| Closed subscription surfaces as end-of-stream (no typed reason yet) | yes | yes | yes | yes | yes |
+| Typed subscription close reason on the receive surface | yes | yes | yes | yes | yes |
+| Auto-resubscribe on a broker-advised recreate (opt-out) | yes | yes | yes | yes | yes |
 | No replay of in-flight operations | yes | yes | yes | yes | yes |
 | Explicit `reconnect()` returning the handshake outcome | yes | yes | yes | no | no |
 | Disable automatic reconnect | yes | yes | yes | no | no |

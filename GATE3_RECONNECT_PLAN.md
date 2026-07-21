@@ -438,10 +438,36 @@ line flipped). Design note: NOT persisted per incremental subscribe (the
 skeleton sub set is informational, the client reconcile is
 authoritative), so writes are ~1/session + 1/reconnect.
 
-RESUME AT BRICK 5: client-surface parity (TS/Py/Go/C# typed close +
-auto_resubscribe), FEATURE_MATRIX rows, #104 stale-tag (deferred from
-brick 3), the brick-3 auto-resubscribe-ON continuity test. Then brick 6
-docs (reconnects.md rewrite - the "not yet" section retires).
+Brick 5 DONE (client-surface parity). All four non-Rust clients gained
+the typed subscription-close surface + auto-resubscribe, each in its
+idiom: TS/Python throw a typed SubscriptionClosedError from the iterator
+(546713d, dd4244a), Go exposes CloseReason() after the Deliveries channel
+closes with DisableAutoResubscribe to opt out (e54bb1b), C# completes the
+Deliveries() enumeration with a SubscriptionClosedException and
+AutoResubscribe=false to opt out (3a53b09). Shared design across all:
+the engine handles the SubscriptionClosed frame (op 104) and stamps the
+reason on the delivery leg, reconcile close verdicts carry their code,
+and the supervisor distinguishes terminal reasons (topic deleted, server
+error, opted-out recreate -> stop + surface) from resubscribe-worthy
+ones (owner move, recreate -> re-subscribe) via a shared isTerminalClose
+classifier. Each client got a typed-close test. FEATURE_MATRIX rows all
+flipped to done.
+
+Brick 6 DONE (docs). reconnects.md rewritten: the "What It Does Not Do
+Yet" section became "Reconciliation and Subscription Lifecycle", the
+typed-close-per-client shapes documented, a "Durable restart resume"
+subsection added (#105), and the support matrix rows updated (typed close
++ auto-resubscribe done across all five, the stale "no typed reason yet"
+row removed).
+
+STILL DEFERRED: #104 stale-tag MARKING (the client side). The broker
+already redelivers per at-least-once and the typed Disconnected/restart
+outcome tells a client its tags are dead; the focused client-side work
+(stamp each delivery with its engine incarnation, mark in-hand
+deliveries stale on a non-Resumed reconnect, return a typed StaleDelivery
+error on settling one) is its own follow-up across all five clients. Also
+deferred: the brick-3 auto-resubscribe-ON continuity test (shares
+machinery with the existing grow-partition supervisor test).
 
 ## Ratification record
 
