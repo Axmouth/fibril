@@ -349,14 +349,15 @@ mod tests {
         // A zero TTL disables restart resume entirely.
         assert!(manager.lookup(&client, &token, 0).await.is_none());
 
-        // An effectively-zero window (already elapsed) expires it.
+        // A skeleton older than the TTL window expires: sleep past a small
+        // window and confirm the lookup no longer honors it.
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
         assert!(
-            manager.lookup(&client, &token, 1).await.is_none() || {
-                // On a very fast machine updated_ms == now, so 1ms may still match;
-                // an impossible-past window is the robust assertion.
-                true
-            }
+            manager.lookup(&client, &token, 5).await.is_none(),
+            "a skeleton older than the ttl must not be honored",
         );
+        // But a generous window still honors the same skeleton.
+        assert!(manager.lookup(&client, &token, 60_000).await.is_some());
     }
 
     #[tokio::test]
