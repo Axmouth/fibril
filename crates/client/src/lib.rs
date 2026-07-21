@@ -3701,17 +3701,32 @@ enum Command {
 ///   held delivery settles to [`FibrilError::StaleDelivery`] and its message
 ///   redelivers on the current subscription instead.
 struct SettleContext {
-    /// The current engine's command sender, swapped in on every (re)connect.
-    current_tx: arc_swap::ArcSwapOption<mpsc::Sender<Command>>,
-    /// The live connection incarnation. Deliveries carry the value in effect
-    /// when they arrived; a non-resumed reconnect increments it.
-    incarnation: AtomicU64,
+    /// The live engine binding, swapped atomically on every (re)connect. Pairing
+    /// the incarnation with the command sender in one value means a settle reads
+    /// both from a single consistent snapshot - it can never match an old
+    /// incarnation yet route to a newer engine, or vice versa.
+    current: arc_swap::ArcSwapOption<EngineBinding>,
+    /// Monotonic incarnation allocator. A non-resumed reconnect claims a fresh
+    /// value so every delivery held from the replaced session goes stale; a
+    /// resumed reconnect reuses the current binding's incarnation.
+    next_incarnation: AtomicU64,
+}
+
+/// The currently-live engine: its command channel plus the incarnation its
+/// deliveries are stamped with. One immutable value swapped in per (re)connect.
+#[derive(Debug)]
+struct EngineBinding {
+    incarnation: u64,
+    tx: mpsc::Sender<Command>,
 }
 
 impl std::fmt::Debug for SettleContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SettleContext")
-            .field("incarnation", &self.incarnation())
+            .field(
+                "incarnation",
+                &self.current.load().as_ref().map(|b| b.incarnation),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -3719,39 +3734,48 @@ impl std::fmt::Debug for SettleContext {
 impl SettleContext {
     fn new() -> Self {
         Self {
-            current_tx: arc_swap::ArcSwapOption::empty(),
-            incarnation: AtomicU64::new(0),
+            current: arc_swap::ArcSwapOption::empty(),
+            next_incarnation: AtomicU64::new(0),
         }
     }
 
-    /// Point settlement at a newly (re)connected engine.
-    fn bind(&self, tx: mpsc::Sender<Command>) {
-        self.current_tx.store(Some(Arc::new(tx)));
+    /// Point settlement at a newly (re)connected engine and return the
+    /// incarnation this engine's deliveries must be stamped with. `fresh_session`
+    /// is true when the reconnect did NOT resume the prior server session (New /
+    /// ResumeRejected / ResumeNotFound / ResumedAfterRestart): a fresh
+    /// incarnation is allocated so deliveries held from the replaced session go
+    /// stale. A resumed reconnect keeps the current incarnation so held
+    /// deliveries still settle.
+    ///
+    /// The returned incarnation is captured once by the engine's reader loop and
+    /// stamped on every delivery it hands out - never re-read live - so a delivery
+    /// from an about-to-be-replaced engine keeps its own (soon stale) incarnation
+    /// even after a later reconnect bumps the shared counter.
+    fn bind(&self, fresh_session: bool, tx: mpsc::Sender<Command>) -> u64 {
+        let incarnation = if fresh_session {
+            self.next_incarnation.fetch_add(1, Ordering::AcqRel)
+        } else {
+            self.current
+                .load()
+                .as_ref()
+                .map(|b| b.incarnation)
+                .unwrap_or_else(|| self.next_incarnation.fetch_add(1, Ordering::AcqRel))
+        };
+        self.current
+            .store(Some(Arc::new(EngineBinding { incarnation, tx })));
+        incarnation
     }
 
-    fn incarnation(&self) -> u64 {
-        self.incarnation.load(Ordering::Acquire)
-    }
-
-    /// Advance the incarnation so every outstanding delivery becomes stale.
-    /// Called on a non-resumed reconnect, where the server-side session (and
-    /// its delivery tags) was replaced.
-    fn invalidate(&self) {
-        self.incarnation.fetch_add(1, Ordering::AcqRel);
-    }
-
-    /// Settle a delivery received at `incarnation`. Returns
-    /// [`FibrilError::StaleDelivery`] if the incarnation has moved on, else
-    /// routes the settle to the current engine.
+    /// Settle a delivery stamped at `incarnation`. Loads the current binding as a
+    /// single snapshot: if the incarnation has moved on the delivery is stale (its
+    /// server session was replaced) and [`FibrilError::StaleDelivery`] is
+    /// returned with no frame sent, else the settle routes to the live engine.
     async fn settle(&self, incarnation: u64, cmd: Command) -> FibrilResult<()> {
-        if incarnation != self.incarnation() {
+        let binding = self.current.load_full().ok_or(FibrilError::BrokenPipe)?;
+        if incarnation != binding.incarnation {
             return Err(FibrilError::StaleDelivery);
         }
-        let tx = self
-            .current_tx
-            .load_full()
-            .ok_or(FibrilError::BrokenPipe)?;
-        tx.send(cmd).await.map_err(|_| FibrilError::BrokenPipe)
+        binding.tx.send(cmd).await.map_err(|_| FibrilError::BrokenPipe)
     }
 }
 
@@ -4106,16 +4130,16 @@ where
     }
 
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<Command>(8192);
-    // Retarget settlement at this newly (re)connected engine as one ordered
-    // transition, before the reader loop below can deliver anything: a
-    // non-resumed outcome first invalidates the prior incarnation (so held
-    // deliveries from the replaced session settle to StaleDelivery), then the
-    // current tx is bound so new deliveries route here. A Resumed outcome keeps
-    // the incarnation, so deliveries held across the reconnect still settle.
-    if resume_outcome != ResumeOutcome::Resumed {
-        settle_ctx.invalidate();
-    }
-    settle_ctx.bind(cmd_tx.clone());
+    // Retarget settlement at this newly (re)connected engine before the reader
+    // loop below can deliver anything. A non-resumed outcome allocates a fresh
+    // incarnation (so held deliveries from the replaced session settle to
+    // StaleDelivery), a Resumed outcome keeps the current one (so deliveries held
+    // across the reconnect still settle). This engine's reader loop stamps every
+    // delivery with the returned `my_incarnation`, captured once here - it must
+    // NOT re-read the shared context at delivery time, or a late delivery on an
+    // about-to-be-replaced engine would pick up a newer reconnect's incarnation
+    // and wrongly settle as fresh.
+    let my_incarnation = settle_ctx.bind(resume_outcome != ResumeOutcome::Resumed, cmd_tx.clone());
     let close_reason = Arc::new(std::sync::Mutex::new(None::<FibrilError>));
     let handle = Arc::new(EngineHandle {
         tx: cmd_tx.clone(),
@@ -4468,11 +4492,12 @@ where
                                     SubDelivery::Manual(tx, _) => {
                                         // Stamp the delivery with its durable
                                         // settle routing (topic/group/partition
-                                        // + tag) and the current connection
-                                        // incarnation. Settling later routes to
-                                        // whatever engine is live then, or
-                                        // returns StaleDelivery if a non-resumed
-                                        // reconnect has moved the incarnation on.
+                                        // + tag) and THIS engine's incarnation
+                                        // (captured once at bind, not re-read).
+                                        // Settling later routes to whatever engine
+                                        // is live then, or returns StaleDelivery
+                                        // if a non-resumed reconnect has moved the
+                                        // incarnation on.
                                         let msg = InflightMessage {
                                             delivery_tag: d.delivery_tag,
                                             published: d.published,
@@ -4484,7 +4509,7 @@ where
                                             topic: sub_topic,
                                             group: sub_group,
                                             partition: sub_partition,
-                                            incarnation: settle_ctx.incarnation(),
+                                            incarnation: my_incarnation,
                                             settle: settle_ctx.clone(),
                                         };
 
@@ -5763,7 +5788,7 @@ mod tests {
             resume_outcome: ResumeOutcome::New,
         });
         let settle_ctx = Arc::new(SettleContext::new());
-        settle_ctx.bind(tx);
+        settle_ctx.bind(true, tx);
 
         (engine, rx, settle_ctx)
     }
@@ -7522,8 +7547,8 @@ mod tests {
     async fn retry_after_sends_delayed_nack() {
         let (tx, mut rx) = mpsc::channel::<Command>(4);
         let settle_ctx = Arc::new(SettleContext::new());
-        settle_ctx.bind(tx);
-        let msg = inflight_for_test(settle_ctx, 0);
+        let inc = settle_ctx.bind(true, tx);
+        let msg = inflight_for_test(settle_ctx, inc);
 
         let before = unix_millis();
         let settled = msg
@@ -7556,22 +7581,27 @@ mod tests {
 
     #[tokio::test]
     async fn settling_a_stale_delivery_returns_stale_error() {
-        // A delivery received at incarnation 0, then the connection is replaced
-        // (incarnation bumped). Settling it reports StaleDelivery and sends no
-        // command - the message will redeliver on the current subscription.
+        // A delivery received on the first session, then a NON-resumed reconnect
+        // replaces it (a fresh engine binding claims a new incarnation). Settling
+        // the held delivery reports StaleDelivery and sends no command - the
+        // message will redeliver on the current subscription.
         let (tx, mut rx) = mpsc::channel::<Command>(4);
         let settle_ctx = Arc::new(SettleContext::new());
-        settle_ctx.bind(tx);
-        let msg = inflight_for_test(settle_ctx.clone(), 0);
+        let inc = settle_ctx.bind(true, tx);
+        let msg = inflight_for_test(settle_ctx.clone(), inc);
 
-        settle_ctx.invalidate(); // a non-resumed reconnect happened
+        // The non-resumed reconnect: a fresh session bumps the incarnation. The
+        // held delivery keeps its own (now stale) stamp.
+        let (new_tx, mut new_rx) = mpsc::channel::<Command>(4);
+        settle_ctx.bind(true, new_tx);
 
         assert!(matches!(
             msg.complete().await,
             Err(FibrilError::StaleDelivery)
         ));
-        // No settle command was sent.
+        // No settle command was sent to either the old or the new engine.
         assert!(rx.try_recv().is_err());
+        assert!(new_rx.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -7581,12 +7611,13 @@ mod tests {
         // engine but the incarnation is unchanged).
         let (_old_tx, mut old_rx) = mpsc::channel::<Command>(4);
         let settle_ctx = Arc::new(SettleContext::new());
-        settle_ctx.bind(_old_tx);
-        let msg = inflight_for_test(settle_ctx.clone(), 0);
+        let inc = settle_ctx.bind(true, _old_tx);
+        let msg = inflight_for_test(settle_ctx.clone(), inc);
 
         // Resumed reconnect: rebind to a new engine, incarnation unchanged.
         let (new_tx, mut new_rx) = mpsc::channel::<Command>(4);
-        settle_ctx.bind(new_tx);
+        let resumed_inc = settle_ctx.bind(false, new_tx);
+        assert_eq!(inc, resumed_inc, "a resumed reconnect keeps the incarnation");
 
         msg.complete().await.expect("resumed-incarnation settle should succeed");
         // The ack routed to the CURRENT (new) engine, not the old one.

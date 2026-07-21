@@ -2115,6 +2115,29 @@ replication + stale-epoch-apply harness), so it lands after the admin-thin items
 - Plexus: fan-out / stream channel type. See the dedicated "Plexus streams"
   design section below. [DN]
 
+## Plexus stream settle-model gaps (found in the #104 adversarial review, 2026-07-21)
+
+Surfaced while reviewing #104 (stale-tag settlement). Both are preexisting and
+independent of the staleness work - #104's guarantees hold for streams (a record
+that goes StaleDelivery was never acked, so it replays from the durable cursor).
+Recorded here rather than expanded into #104's scope.
+
+- Nack-family settles on a stream manual subscription are a broker no-op. The
+  `Op::Nack` handler in `crates/protocol/src/v1/handler.rs` looks up only queue
+  `state.subs`, so a stream `fail()`/`retry()`/`retry_after()` frame is ignored
+  while the client still returns Ok. A stream's durable-cursor model has no
+  requeue, so the honest fix is to decide the semantics: either reject
+  Nack-with-requeue on a stream sub client-side (make stream manual settle
+  ack-only) or define a documented meaning (e.g. do not advance the cursor and
+  redeliver from this offset). Until then, scope the "will redeliver" language in
+  the manual-ack docs to the work queue.
+- A stream ack sent right after a RESUMED reconnect can be dropped if the fan-in
+  supervisor has not yet re-subscribed (the broker drains stream_subs on
+  disconnect and the client re-subscribes asynchronously). The cursor is not
+  committed, so the record replays - at-least-once holds, but resumed-settleability
+  is best-effort for streams. Fix if it matters: gate stream acks on the
+  re-subscribe completing, or buffer-and-retry the commit.
+
 ## Plexus streams (fan-out channels) - BUILT (kept as design reference)
 
 Plexus = a fan-out / stream channel type beside the work queue. Every consumer
