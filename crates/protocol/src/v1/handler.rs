@@ -20,7 +20,8 @@ use fibril_broker::{Group, Partition, Topic};
 use fibril_broker::{
     broker::{
         Broker, BrokerError, BrokerFollowerReplicationApply, BrokerOwnerReplicationRecords,
-        ConsumerConfig, ConsumerHandle, ConsumerLease, ExclusiveAssignmentUpdate, PublisherHandle,
+        ConsumerCloseCause, ConsumerConfig, ConsumerHandle, ConsumerLease,
+        ExclusiveAssignmentUpdate, PublisherHandle,
         ReplicationResourceKind, SettleRequest, SettleType,
     },
     queue_engine::{
@@ -31,7 +32,7 @@ use fibril_broker::{
     },
     stream::{
         StreamChannel, StreamDurability as BrokerStreamDurability, StreamFilter, StreamRecord,
-        SubscribeStart,
+        StreamSubEnd, SubscribeStart,
     },
 };
 use fibril_metrics::{ConnectionStats, TcpStats};
@@ -1199,6 +1200,7 @@ async fn install_subscription(
         sub_id,
         pending_settles,
         activity_lease,
+        closed,
         ..
     } = consumer;
 
@@ -1267,11 +1269,30 @@ async fn install_subscription(
     let req_id_gen_clone = args.req_id_gen.clone();
     let metrics = args.metrics.clone();
     let auto_ack = args.auto_ack;
+    let pump_broker = args.broker.clone();
+    let pump_logical = args.logical.clone();
+    let pump_stats = args.connection_stats.clone();
+    let pump_conn_id = args.conn_id;
+    let pump_sub_key = sub_key.clone();
     let handle = tokio::spawn(async move {
         let mut rx = messages;
         let mut cached_tx = None;
 
-        'pump: while let Some(batch) = rx.recv().await {
+        // Every way out of the pump is named so the terminal mapping below
+        // stays total - a new exit path has to pick its close signal.
+        enum PumpEnd {
+            /// The broker dropped the delivery sender (teardown stamped why).
+            SenderDropped,
+            /// A Deliver frame failed to encode, the subscription is broken.
+            EncodeFailed,
+            /// The transport is gone, the connection teardown owns the story.
+            TransportGone,
+        }
+
+        let end = 'pump: loop {
+            let Some(batch) = rx.recv().await else {
+                break 'pump PumpEnd::SenderDropped;
+            };
             let mut auto_ack_tags = Vec::new();
             for msg in batch {
                 let delivery_tag = msg.delivery_tag;
@@ -1302,7 +1323,7 @@ async fn install_subscription(
                     Err(err) => {
                         tracing::error!("Failed to encode Deliver frame: {err}");
                         metrics.error();
-                        break 'pump;
+                        break 'pump PumpEnd::EncodeFailed;
                     }
                 };
                 if send_to_current_transport(&mut transport_rx, &mut cached_tx, frame)
@@ -1311,7 +1332,7 @@ async fn install_subscription(
                 {
                     tracing::warn!("Failed to send deliver frame to active transport");
                     metrics.error();
-                    break 'pump;
+                    break 'pump PumpEnd::TransportGone;
                 }
 
                 if auto_ack {
@@ -1329,6 +1350,79 @@ async fn install_subscription(
                     .collect();
                 send_settle_batch(&settler, &pending_settles_clone, reqs).await;
             }
+        };
+
+        // Map the exit onto the typed terminal signal. Transport-gone sends
+        // nothing (connection teardown owns that story) and a client-asked
+        // removal sends nothing (the unsubscribe or reconcile reply already
+        // told the client). Everything else announces the close so the
+        // delivery stream never just goes silent.
+        let notice = match &end {
+            PumpEnd::TransportGone => None,
+            PumpEnd::EncodeFailed => Some((
+                ReasonCode::ServerError,
+                "a delivery failed to encode, the subscription is closed".to_string(),
+            )),
+            PumpEnd::SenderDropped => match closed.get() {
+                Some(ConsumerCloseCause::Unsubscribed) => None,
+                Some(ConsumerCloseCause::OwnerMoved) => Some((
+                    ReasonCode::OwnerMoved,
+                    "partition ownership moved away from this broker".to_string(),
+                )),
+                Some(ConsumerCloseCause::TopicDeleted) => Some((
+                    ReasonCode::TopicDeleted,
+                    "the queue was deleted".to_string(),
+                )),
+                None => Some((
+                    ReasonCode::ServerError,
+                    "the subscription ended on the broker side".to_string(),
+                )),
+            },
+        };
+        let Some((code, message)) = notice else {
+            return;
+        };
+        if let Ok(frame) = wire::encode_subscription_closed(
+            req_id_gen_clone.next_id(),
+            &SubscriptionClosed {
+                sub_id,
+                code,
+                message,
+            },
+        ) {
+            let _ = send_to_current_transport(&mut transport_rx, &mut cached_tx, frame).await;
+        }
+        // A broken pump leaves the broker-side consumer registered, release it
+        // so its leases redeliver.
+        if matches!(end, PumpEnd::EncodeFailed) {
+            if let Err(err) = pump_broker
+                .unsubscribe(
+                    &pump_sub_key.0,
+                    pump_sub_key.2.as_deref(),
+                    pump_sub_key.1,
+                    sub_id,
+                )
+                .await
+            {
+                tracing::warn!("Failed to unsubscribe consumer {sub_id}: {err}");
+            }
+        }
+        // Drop the dead entry from connection state so a later reconcile does
+        // not claim the subscription is still alive.
+        let removed = {
+            let mut state = pump_logical.state.lock().await;
+            let ours = state
+                .subs
+                .get(&pump_sub_key)
+                .is_some_and(|sub| sub.sub_id == sub_id);
+            if ours {
+                state.subs.remove(&pump_sub_key)
+            } else {
+                None
+            }
+        };
+        if let Some(stats_sub_id) = removed.and_then(|sub| sub.stats_sub_id) {
+            pump_stats.remove_sub(&pump_conn_id, &stats_sub_id);
         }
     });
 
@@ -1416,10 +1510,17 @@ async fn install_stream_subscription(
 
     // Driver: backfill (durable log then ring) then live records into the sink,
     // re-attaching from its watermark after a lag eviction so delivery stays
-    // contiguous per subscriber.
+    // contiguous per subscriber. The driver stamps why it stopped so the
+    // delivery task can announce the close instead of ending silently.
+    let stream_end: Arc<std::sync::OnceLock<StreamSubEnd>> =
+        Arc::new(std::sync::OnceLock::new());
     let driver = tokio::spawn({
         let channel = channel.clone();
-        async move { channel.run_subscription(start, filter, sink_tx).await }
+        let stream_end = stream_end.clone();
+        async move {
+            let end = channel.run_subscription(start, filter, sink_tx).await;
+            let _ = stream_end.set(end);
+        }
     });
 
     // Delivery: records -> Deliver frames on the current transport. The stream
@@ -1435,7 +1536,22 @@ async fn install_stream_subscription(
     let settle_channel = channel.clone();
     let delivery = tokio::spawn(async move {
         let mut cached_tx = None;
-        while let Some(record) = sink_rx.recv().await {
+
+        // Named exits, same discipline as the queue pump: each one decides
+        // its terminal signal below.
+        enum PumpEnd {
+            /// The driver stopped feeding the sink (it stamped why).
+            DriverStopped,
+            /// A Deliver frame failed to encode, the subscription is broken.
+            EncodeFailed,
+            /// The transport is gone, the connection teardown owns the story.
+            TransportGone,
+        }
+
+        let end = 'pump: loop {
+            let Some(record) = sink_rx.recv().await else {
+                break 'pump PumpEnd::DriverStopped;
+            };
             let deliver = Deliver {
                 sub_id,
                 topic: topic.clone(),
@@ -1456,7 +1572,7 @@ async fn install_stream_subscription(
                 Err(err) => {
                     tracing::error!("Failed to encode stream Deliver frame: {err}");
                     metrics.error();
-                    break;
+                    break 'pump PumpEnd::EncodeFailed;
                 }
             };
             if send_to_current_transport(&mut transport_rx, &mut cached_tx, frame)
@@ -1465,7 +1581,7 @@ async fn install_stream_subscription(
             {
                 tracing::warn!("Failed to send stream deliver frame to active transport");
                 metrics.error();
-                break;
+                break 'pump PumpEnd::TransportGone;
             }
             if let Some(stats) = &broker_stats {
                 stats.delivered();
@@ -1477,6 +1593,37 @@ async fn install_stream_subscription(
                     }
                 }
             }
+        };
+
+        let notice = match end {
+            PumpEnd::TransportGone => None,
+            PumpEnd::EncodeFailed => Some((
+                ReasonCode::ServerError,
+                "a delivery failed to encode, the subscription is closed".to_string(),
+            )),
+            PumpEnd::DriverStopped => match stream_end.get() {
+                // The channel is gone for good, tell the subscriber. An unset
+                // slot means the driver was aborted by teardown, where the
+                // client either asked or the connection is going away.
+                Some(StreamSubEnd::ChannelGone) => Some((
+                    ReasonCode::TopicDeleted,
+                    "the stream was deleted or retired".to_string(),
+                )),
+                Some(StreamSubEnd::SinkClosed) | None => None,
+            },
+        };
+        let Some((code, message)) = notice else {
+            return;
+        };
+        if let Ok(frame) = wire::encode_subscription_closed(
+            req_id_gen_clone.next_id(),
+            &SubscriptionClosed {
+                sub_id,
+                code,
+                message,
+            },
+        ) {
+            let _ = send_to_current_transport(&mut transport_rx, &mut cached_tx, frame).await;
         }
     });
 
@@ -1713,13 +1860,36 @@ async fn reconcile_subscriptions(
                 }
             }
             None => {
-                results.push(ReconcileSubscriptionResult {
-                    client: Some(client),
-                    server: None,
-                    action: ReconcileAction::CloseClientSide,
-                    code: ReasonCode::ServerMissing,
-                    reason: "server_missing".into(),
-                });
+                // The server has no such subscription and the policy does not
+                // restore it broker-side. A manual-ack sub on a queue this
+                // broker still owns is safely recreatable: the client
+                // resubscribes (an exclusive cohort rejoins via member_id) and
+                // unsettled work redelivers. An auto-ack sub cannot recreate
+                // honestly - deliveries in flight at the disconnect were
+                // already settled at send - so it keeps the close verdict.
+                let recreatable = !client.auto_ack
+                    && broker.owns_queue_partition(
+                        &client.topic,
+                        client.partition,
+                        client.group.as_deref(),
+                    );
+                if recreatable {
+                    results.push(ReconcileSubscriptionResult {
+                        client: Some(client),
+                        server: None,
+                        action: ReconcileAction::RecreateClientSide,
+                        code: ReasonCode::Recreate,
+                        reason: "recreate".into(),
+                    });
+                } else {
+                    results.push(ReconcileSubscriptionResult {
+                        client: Some(client),
+                        server: None,
+                        action: ReconcileAction::CloseClientSide,
+                        code: ReasonCode::ServerMissing,
+                        reason: "server_missing".into(),
+                    });
+                }
             }
         }
     }
@@ -1763,13 +1933,14 @@ async fn reconcile_subscriptions(
     let mut server_dropped = 0_u64;
     let mut mismatched = 0_u64;
     let mut restore_failed = 0_u64;
+    let mut recreated = 0_u64;
 
     for result in &results {
         match result.action {
             ReconcileAction::Keep => {
                 kept += 1;
                 metrics.reconcile_kept();
-                if result.reason == "server_restored" {
+                if result.code == ReasonCode::ServerRestored {
                     restored += 1;
                     metrics.reconcile_restored();
                 }
@@ -1777,11 +1948,11 @@ async fn reconcile_subscriptions(
             ReconcileAction::CloseClientSide => {
                 client_closed += 1;
                 metrics.reconcile_client_closed();
-                if result.reason == "server_mismatch" {
+                if result.code == ReasonCode::ServerMismatch {
                     mismatched += 1;
                     metrics.reconcile_mismatched();
                 }
-                if result.reason == "server_restore_failed" {
+                if result.code == ReasonCode::ServerRestoreFailed {
                     restore_failed += 1;
                     metrics.reconcile_restore_failed();
                 }
@@ -1790,7 +1961,10 @@ async fn reconcile_subscriptions(
                 server_dropped += 1;
                 metrics.reconcile_server_dropped();
             }
-            ReconcileAction::RecreateClientSide => {}
+            ReconcileAction::RecreateClientSide => {
+                recreated += 1;
+                metrics.reconcile_recreated();
+            }
         }
     }
 
@@ -1804,6 +1978,7 @@ async fn reconcile_subscriptions(
         server_dropped,
         mismatched,
         restore_failed,
+        recreated,
         "subscription reconciliation completed"
     );
 

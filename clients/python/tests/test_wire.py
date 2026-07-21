@@ -281,6 +281,57 @@ def _cases() -> dict[str, tuple[bytes, object]]:
             ),
             wire.decode_going_away_body,
         ),
+        "reconcile_result": (
+            wire.encode_reconcile_result_body(
+                wire.ReconcileResult(
+                    subscriptions=[
+                        wire.ReconcileSubscriptionResult(
+                            client=wire.ReconcileSubscription(
+                                sub_id=1,
+                                topic="t",
+                                partition=0,
+                                group=None,
+                                auto_ack=False,
+                                prefetch=8,
+                            ),
+                            server=None,
+                            action="close_client_side",
+                            code=wire.REASON_SERVER_MISSING,
+                            reason="server_missing",
+                        ),
+                        wire.ReconcileSubscriptionResult(
+                            client=None,
+                            server=wire.ReconcileSubscription(
+                                sub_id=2,
+                                topic="t",
+                                partition=1,
+                                group="g",
+                                auto_ack=True,
+                                prefetch=4,
+                            ),
+                            action="close_server_side",
+                            code=wire.REASON_CLIENT_MISSING,
+                            reason="client_missing",
+                        ),
+                    ]
+                )
+            ),
+            wire.decode_reconcile_result_body,
+        ),
+        "subscription_closed": (
+            wire.encode_subscription_closed_body(
+                wire.SubscriptionClosed(
+                    sub_id=7, code=wire.REASON_OWNER_MOVED, message="partition moved"
+                )
+            ),
+            wire.decode_subscription_closed_body,
+        ),
+        "hello_ok_resumed_after_restart": (
+            wire.encode_hello_ok_body(
+                wire.HelloOk(1, _u(9), _u(8), _u(7), "resumed_after_restart", "srv", "v=1;x")
+            ),
+            wire.decode_hello_ok_body,
+        ),
         "redirect": (
             wire.encode_redirect_body(wire.Redirect("t", 1, "g", [wire.AdvertisedAddress("h", 1)], 3)),
             wire.decode_redirect_body,
@@ -402,6 +453,9 @@ _ENCODERS = {
     "going_away": wire.encode_going_away_body,
     "redirect": wire.encode_redirect_body,
     "reconcile_client": wire.encode_reconcile_client_body,
+    "reconcile_result": wire.encode_reconcile_result_body,
+    "subscription_closed": wire.encode_subscription_closed_body,
+    "hello_ok_resumed_after_restart": wire.encode_hello_ok_body,
     "declare_plexus": wire.encode_declare_plexus_body,
     "declare_plexus_min": wire.encode_declare_plexus_body,
     "declare_plexus_ok": wire.encode_declare_plexus_ok_body,

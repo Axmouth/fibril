@@ -12,6 +12,13 @@ internal enum ResumeOutcome : byte
     Resumed = 1,
     NotFound = 2,
     Rejected = 3,
+
+    /// <summary>
+    /// The broker restarted and honored a persisted session skeleton:
+    /// subscriptions reconcile like a resume, but delivery tags from before
+    /// the restart are dead and their messages redeliver.
+    /// </summary>
+    ResumedAfterRestart = 4,
 }
 
 /// <summary>Identity the broker returns and the client offers on reconnect to resume a session.</summary>
@@ -185,7 +192,7 @@ internal static class WireComposites
     public static ResumeOutcome ResumeOutcome(this WireReader r)
     {
         var tag = r.U8();
-        if (tag > (byte)Fibril.ResumeOutcome.Rejected)
+        if (tag > (byte)Fibril.ResumeOutcome.ResumedAfterRestart)
         {
             throw new WireException(WireErrorKind.UnknownTag, "wire: unknown resume outcome");
         }

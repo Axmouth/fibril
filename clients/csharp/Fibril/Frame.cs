@@ -48,6 +48,7 @@ public enum Op : ushort
     TopologyUpdate = 101,
     TopologyUpdateAck = 102,
     GoingAway = 103,
+    SubscriptionClosed = 104,
 
     Error = 255,
 }

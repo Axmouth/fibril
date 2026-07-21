@@ -153,6 +153,7 @@ fn node_families(server: &AdminServer) -> Vec<MetricFamily> {
                 reconcile_outcome("server_dropped", tcp.reconcile_server_dropped_total),
                 reconcile_outcome("mismatched", tcp.reconcile_mismatched_total),
                 reconcile_outcome("restore_failed", tcp.reconcile_restore_failed_total),
+                reconcile_outcome("recreated", tcp.reconcile_recreated_total),
             ],
         },
         gauge(

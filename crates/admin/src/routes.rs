@@ -1690,6 +1690,12 @@ pub async fn delete_queue(
         }
     }
 
+    // Close any live consumers so their connections get a typed close instead
+    // of waiting silently on a queue whose storage is gone.
+    if let Some(closer) = &server.queue_consumer_closer {
+        closer(&request.topic, group.as_deref());
+    }
+
     server.audit.record(
         "queue_deleted",
         "warning",

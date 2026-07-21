@@ -599,10 +599,34 @@ func (r *reader) optionalReconcileSubscription() *reconcileSubscription {
 // reconcileSubscriptionResult is the broker's verdict for one subscription a
 // reconnecting client asked it to reconcile: the client's view, the server's
 // restored view (if any), the action, and a human-readable reason.
+// ReasonCode is the machine-readable reason taxonomy shared by reconcile
+// results and the SubscriptionClosed push. A raw uint16 on the wire, so a
+// code minted by a newer broker survives decode verbatim.
+type ReasonCode uint16
+
+const (
+	ReasonUnspecified         ReasonCode = 0
+	ReasonMatched             ReasonCode = 1
+	ReasonServerIDChanged     ReasonCode = 2
+	ReasonServerRestored      ReasonCode = 3
+	ReasonServerMismatch      ReasonCode = 4
+	ReasonServerRestoreFailed ReasonCode = 5
+	ReasonServerMissing       ReasonCode = 6
+	ReasonClientMissing       ReasonCode = 7
+	ReasonRecreate            ReasonCode = 8
+	ReasonTopicDeleted        ReasonCode = 20
+	ReasonOwnerMoved          ReasonCode = 21
+	ReasonBrokerShutdown      ReasonCode = 22
+	ReasonCohortRemoved       ReasonCode = 23
+	ReasonLagged              ReasonCode = 24
+	ReasonServerError         ReasonCode = 40
+)
+
 type reconcileSubscriptionResult struct {
 	Client *reconcileSubscription
 	Server *reconcileSubscription
 	Action reconcileAction
+	Code   ReasonCode
 	Reason string
 }
 
@@ -649,6 +673,11 @@ func encodeReconcileResult(rr reconcileResult) []byte {
 		w.u8(uint8(s.Action))
 		w.writeStr(s.Reason)
 	}
+	// Tagged codes ride as a tail array parallel to the subscriptions, one
+	// u16 each (absent on brokers from before the taxonomy).
+	for _, s := range rr.Subscriptions {
+		w.u16(uint16(s.Code))
+	}
 	return w.buf
 }
 
@@ -665,7 +694,42 @@ func decodeReconcileResult(body []byte) (reconcileResult, error) {
 			Reason: r.readStr(),
 		})
 	}
+	// A broker from before the taxonomy sends no code tail, every code stays
+	// ReasonUnspecified.
+	if r.err == nil && r.pos < len(r.buf) {
+		for i := range rr.Subscriptions {
+			rr.Subscriptions[i].Code = ReasonCode(r.u16())
+		}
+	}
 	return rr, r.finish()
+}
+
+// subscriptionClosed is the broker's push that one subscription ended (op
+// 104): the delivery stream never just goes silent while the connection is up.
+type subscriptionClosed struct {
+	SubID   uint64
+	Code    ReasonCode
+	Message string
+}
+
+func encodeSubscriptionClosed(sc subscriptionClosed) []byte {
+	w := writer{}
+	w.magic("FSC1")
+	w.u64(sc.SubID)
+	w.u16(uint16(sc.Code))
+	w.writeStr(sc.Message)
+	return w.buf
+}
+
+func decodeSubscriptionClosed(body []byte) (subscriptionClosed, error) {
+	r := reader{buf: body}
+	r.expectMagic("FSC1")
+	sc := subscriptionClosed{
+		SubID:   r.u64(),
+		Code:    ReasonCode(r.u16()),
+		Message: r.readStr(),
+	}
+	return sc, r.finish()
 }
 
 // ---- redirect ----------------------------------------------------------

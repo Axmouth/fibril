@@ -18,7 +18,7 @@ Layout rules (all big-endian):
 from __future__ import annotations
 
 import struct
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal, Optional, Union
 
 from .errors import WireError
@@ -73,19 +73,23 @@ class CustomDlqPolicy:
 #: Dead-letter policy on a queue declaration.
 QueueDlqPolicy = Union[Literal["discard", "global"], CustomDlqPolicy]
 
-ResumeOutcome = Literal["new", "resumed", "resume_not_found", "resume_rejected"]
+ResumeOutcome = Literal[
+    "new", "resumed", "resume_not_found", "resume_rejected", "resumed_after_restart"
+]
 
 _RESUME_OUTCOME_TO_U8: dict[str, int] = {
     "new": 0,
     "resumed": 1,
     "resume_not_found": 2,
     "resume_rejected": 3,
+    "resumed_after_restart": 4,
 }
 _RESUME_OUTCOME_FROM_U8: list[ResumeOutcome] = [
     "new",
     "resumed",
     "resume_not_found",
     "resume_rejected",
+    "resumed_after_restart",
 ]
 
 ReconcilePolicy = Literal["conservative", "restore"]
@@ -136,12 +140,33 @@ class ReconcileSubscription:
     member_id: Optional[Uuid] = None
 
 
+# The machine-readable reason taxonomy shared by reconcile results and the
+# subscription-closed push. Carried as a raw u16 so a code minted by a newer
+# broker survives decode verbatim; these are the known codes.
+REASON_UNSPECIFIED = 0
+REASON_MATCHED = 1
+REASON_SERVER_ID_CHANGED = 2
+REASON_SERVER_RESTORED = 3
+REASON_SERVER_MISMATCH = 4
+REASON_SERVER_RESTORE_FAILED = 5
+REASON_SERVER_MISSING = 6
+REASON_CLIENT_MISSING = 7
+REASON_RECREATE = 8
+REASON_TOPIC_DELETED = 20
+REASON_OWNER_MOVED = 21
+REASON_BROKER_SHUTDOWN = 22
+REASON_COHORT_REMOVED = 23
+REASON_LAGGED = 24
+REASON_SERVER_ERROR = 40
+
+
 @dataclass(frozen=True)
 class ReconcileSubscriptionResult:
     client: Optional[ReconcileSubscription]
     server: Optional[ReconcileSubscription]
     action: ReconcileAction
     reason: str
+    code: int = REASON_UNSPECIFIED
 
 
 # ---- byte writer / reader ----------------------------------------------
@@ -1324,6 +1349,10 @@ def encode_reconcile_result_body(rr: ReconcileResult) -> bytes:
         w.optional_reconcile_subscription(s.server)
         w.reconcile_action(s.action)
         w.write_str(s.reason)
+    # Tagged codes ride as a tail array parallel to the subscriptions, one u16
+    # each (absent on brokers from before the taxonomy).
+    for s in rr.subscriptions:
+        w.u16(s.code)
     return w.finish()
 
 
@@ -1340,6 +1369,10 @@ def decode_reconcile_result_body(body: bytes) -> ReconcileResult:
         )
         for _ in range(n)
     ]
+    # A broker from before the taxonomy sends no code tail, every code stays
+    # REASON_UNSPECIFIED.
+    if r.remaining() > 0:
+        subscriptions = [replace(s, code=r.u16()) for s in subscriptions]
     r.finish()
     return ReconcileResult(subscriptions=subscriptions)
 
@@ -1608,6 +1641,36 @@ def decode_going_away_body(body: bytes) -> GoingAway:
     message = r.read_str()
     r.finish()
     return GoingAway(grace_ms=grace_ms, message=message)
+
+
+@dataclass(frozen=True)
+class SubscriptionClosed:
+    """The broker's push that one subscription ended outside a reconcile
+    exchange, so a delivery stream never just goes silent while the connection
+    is up."""
+
+    sub_id: int
+    code: int
+    message: str
+
+
+def encode_subscription_closed_body(closed: SubscriptionClosed) -> bytes:
+    w = Writer()
+    w.magic("FSC1")
+    w.u64(closed.sub_id)
+    w.u16(closed.code)
+    w.write_str(closed.message)
+    return w.finish()
+
+
+def decode_subscription_closed_body(body: bytes) -> SubscriptionClosed:
+    r = Reader(body)
+    r.expect_magic("FSC1")
+    sub_id = r.u64()
+    code = r.u16()
+    message = r.read_str()
+    r.finish()
+    return SubscriptionClosed(sub_id=sub_id, code=code, message=message)
 
 
 def encode_redirect_body(redirect: Redirect) -> bytes:

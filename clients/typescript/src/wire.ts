@@ -26,19 +26,26 @@ export interface ResumeIdentity {
   resumeToken: Uuid;
 }
 
-export type ResumeOutcome = "new" | "resumed" | "resume_not_found" | "resume_rejected";
+export type ResumeOutcome =
+  | "new"
+  | "resumed"
+  | "resume_not_found"
+  | "resume_rejected"
+  | "resumed_after_restart";
 
 const RESUME_OUTCOME_TO_U8: Record<ResumeOutcome, number> = {
   new: 0,
   resumed: 1,
   resume_not_found: 2,
   resume_rejected: 3,
+  resumed_after_restart: 4,
 };
 const RESUME_OUTCOME_FROM_U8: ResumeOutcome[] = [
   "new",
   "resumed",
   "resume_not_found",
   "resume_rejected",
+  "resumed_after_restart",
 ];
 
 export type ReconcilePolicy = "conservative" | "restore";
@@ -1242,10 +1249,35 @@ export interface ReconcileSubscription {
   memberId: Uuid | null;
 }
 
+/**
+ * The machine-readable reason taxonomy shared by reconcile results and the
+ * SubscriptionClosed push. Carried as a raw u16 so a code minted by a newer
+ * broker survives decode verbatim; the named values are the known codes.
+ */
+export const REASON_CODES = {
+  unspecified: 0,
+  matched: 1,
+  serverIdChanged: 2,
+  serverRestored: 3,
+  serverMismatch: 4,
+  serverRestoreFailed: 5,
+  serverMissing: 6,
+  clientMissing: 7,
+  recreate: 8,
+  topicDeleted: 20,
+  ownerMoved: 21,
+  brokerShutdown: 22,
+  cohortRemoved: 23,
+  lagged: 24,
+  serverError: 40,
+} as const;
+export type ReasonCode = number;
+
 export interface ReconcileSubscriptionResult {
   client: ReconcileSubscription | null;
   server: ReconcileSubscription | null;
   action: ReconcileAction;
+  code: ReasonCode;
   reason: string;
 }
 
@@ -1306,6 +1338,11 @@ export function encodeReconcileResultBody(rr: ReconcileResult): Uint8Array {
     w.reconcileAction(s.action);
     w.str(s.reason);
   }
+  // Tagged codes ride as a tail array parallel to the subscriptions, one u16
+  // each (absent on brokers from before the taxonomy).
+  for (const s of rr.subscriptions) {
+    w.u16(s.code);
+  }
   return w.finish();
 }
 
@@ -1319,8 +1356,16 @@ export function decodeReconcileResultBody(body: Uint8Array): ReconcileResult {
       client: r.optionalReconcileSubscription(),
       server: r.optionalReconcileSubscription(),
       action: r.reconcileAction(),
+      code: REASON_CODES.unspecified,
       reason: r.str(),
     });
+  }
+  // A broker from before the taxonomy sends no code tail, every code stays
+  // unspecified.
+  if (r.remaining() > 0) {
+    for (const sub of subscriptions) {
+      sub.code = r.u16();
+    }
   }
   r.finish();
   return { subscriptions };
@@ -1580,6 +1625,35 @@ export function decodeGoingAwayBody(body: Uint8Array): GoingAway {
   const message = r.str();
   r.finish();
   return { graceMs, message };
+}
+
+/**
+ * The broker's push that one subscription ended outside a reconcile exchange,
+ * so a delivery stream never just goes silent while the connection is up.
+ */
+export interface SubscriptionClosed {
+  subId: bigint;
+  code: ReasonCode;
+  message: string;
+}
+
+export function encodeSubscriptionClosedBody(closed: SubscriptionClosed): Uint8Array {
+  const w = new Writer();
+  w.magic("FSC1");
+  w.u64(closed.subId);
+  w.u16(closed.code);
+  w.str(closed.message);
+  return w.finish();
+}
+
+export function decodeSubscriptionClosedBody(body: Uint8Array): SubscriptionClosed {
+  const r = new Reader(body);
+  r.expectMagic("FSC1");
+  const subId = r.u64();
+  const code = r.u16();
+  const message = r.str();
+  r.finish();
+  return { subId, code, message };
 }
 
 export function encodeRedirectBody(redirect: Redirect): Uint8Array {

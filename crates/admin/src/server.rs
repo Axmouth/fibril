@@ -37,6 +37,11 @@ use fibril_metrics::Metrics;
 
 pub type BrokerQueueObservability = dyn Fn() -> serde_json::Value + Send + Sync + 'static;
 
+/// Closes every live broker-side consumer of a deleted queue `(topic, group)`
+/// so their connections learn the close instead of waiting silently on a
+/// queue whose storage is gone.
+pub type QueueConsumerCloser = dyn Fn(&str, Option<&str>) + Send + Sync + 'static;
+
 /// Producer of the optional consensus-internals block in `GET /admin/api/topology`
 /// (the coordination backend's consensus state serialized to JSON). Opaque JSON
 /// callback so the admin crate stays independent of the coordination backend.
@@ -271,6 +276,9 @@ pub struct AdminServer {
     pub drain: Option<Arc<dyn BrokerDrainController>>,
     /// Optional test-message publisher for `POST /admin/api/publish`.
     pub test_publisher: Option<Arc<dyn BrokerTestPublisher>>,
+    /// Optional hook run after a queue deletion so the broker closes the
+    /// queue's live consumers with a typed reason.
+    pub queue_consumer_closer: Option<Arc<QueueConsumerCloser>>,
     /// Optional live TLS reload for `POST /admin/api/tls/reload`.
     pub tls_reload: Option<Arc<TlsReloadHandler>>,
     /// Optional served-certificate metadata (fingerprint, validity) for the
@@ -350,6 +358,7 @@ impl AdminServer {
             users: None,
             drain: None,
             test_publisher: None,
+            queue_consumer_closer: None,
             tls_reload: None,
             cert_info: None,
             history: crate::history::History::new(),
@@ -382,6 +391,12 @@ impl AdminServer {
     /// Attach the test-message publisher for `POST /admin/api/publish`.
     pub fn with_test_publisher(mut self, publisher: Arc<dyn BrokerTestPublisher>) -> Self {
         self.test_publisher = Some(publisher);
+        self
+    }
+
+    /// Attach the hook that closes a deleted queue's live consumers.
+    pub fn with_queue_consumer_closer(mut self, closer: Arc<QueueConsumerCloser>) -> Self {
+        self.queue_consumer_closer = Some(closer);
         self
     }
 

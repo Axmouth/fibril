@@ -12,17 +12,23 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
-- The wire protocol grew the first half of the typed subscription
-  lifecycle: reconcile results now carry a machine-readable reason code
-  beside the human-readable string, a new `SubscriptionClosed` frame lets
-  the broker say why a subscription ended instead of letting deliveries
-  silently stop, and `ResumeOutcome` gained `ResumedAfterRestart` for
-  brokers that honor a resume across a restart. Unknown future codes
-  decode as a preserved `Other` value, so the taxonomy can grow without
-  breaking older peers. Pre-0.5 clients break on two narrow paths
-  (reconcile results and restart resumes), accepted while nothing is
-  frozen - the broker does not emit the new frame or outcome yet, that
-  lands with the rest of the reconciliation family.
+- The typed subscription lifecycle, server half. The wire grew a
+  machine-readable reason taxonomy: reconcile results carry a tagged code
+  beside the human-readable string, and a new `SubscriptionClosed` frame
+  says why a subscription ended instead of letting deliveries silently
+  stop. The broker now sends it when a queue is deleted under a live
+  subscriber, when partition ownership moves away, and when a stream
+  channel goes for good - and an admin queue delete now actively closes
+  the queue's live consumers instead of leaving them waiting on destroyed
+  storage. Reconcile also starts advising `recreate_client_side` for
+  safely recreatable subscriptions (manual-ack on a still-owned queue), a
+  new `recreated` outcome joins the reconcile metrics, and `ResumeOutcome`
+  gained `resumed_after_restart` for brokers that honor a resume across a
+  restart (not emitted yet, arrives with durable session skeletons). All
+  five clients decode the new surface byte-exactly (unknown future codes
+  are preserved, not errors) - the typed client-side receive surface is
+  the next brick. Pre-0.5 clients break on two narrow paths (reconcile
+  results and restart resumes), accepted while nothing is frozen.
 - The cluster tryout comes alive out of the box: the Docker image carries
   fibril-demo, and compose.cluster.example.yaml runs it as a service in
   place of the old one-shot seeder - realistic traffic, attention arcs,

@@ -366,6 +366,24 @@ Cross-cutting:
 Bricks 1-3 are one reviewable arc (the typed surface), 4 is #105, 5-6
 close the family. Each brick keeps the suite green on its own.
 
+Status: brick 1 DONE (234a3fa). Brick 2 DONE - broker emits
+SubscriptionClosed via a close-cause slot on the consumer state (the
+teardown path stamps why and drops the delivery sender, which required
+making the sender swappable because the settle loop pins the consumer
+state for the connection's lifetime), the queue and stream pumps map
+every named exit onto a terminal signal (the invariant-2 totality is
+compiler-enforced by the exit enums), an admin queue delete closes live
+consumers through a new hook, reconcile advises RecreateClientSide for
+the manual-ack safe set, and metrics re-keyed onto codes with a new
+recreated outcome. The four non-Rust clients carried the codec half of
+parity in the same change because every client suite gates on vector
+completeness (a new shared vector fails their CI until they cover it),
+with Go and C# interim-treating RecreateClientSide as a close so no
+client strands a consumer before brick 3/5 builds the real policy.
+Known test gap: the stream ChannelGone close path has no automated test
+yet (stream deletion is only reachable via idle eviction today), cover
+it with the brick 4 restart matrix or an eviction-driven test.
+
 ## Ratification record
 
 All decisions ratified 2026-07-21:
