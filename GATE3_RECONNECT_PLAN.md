@@ -384,6 +384,28 @@ Known test gap: the stream ChannelGone close path has no automated test
 yet (stream deletion is only reachable via idle eviction today), cover
 it with the brick 4 restart matrix or an eviction-driven test.
 
+Brick 3 DONE (Rust client typed surface). recv() returns SubEvent
+(Delivery | Closed(CloseReason)), fused terminal, close_reason()
+accessor. A write-once ReasonSlot travels with every delivery leg
+(PartRx): the engine stamps it from a SubscriptionClosed frame, a
+reconcile close/recreate verdict, or a non-retryable connection teardown,
+and the fan-in merges the first leg reason onto the user-facing slot. The
+supervisor consumes the slot: TopicDeleted and (auto_resubscribe off)
+Recreated end the subscription with that reason, everything else
+re-subscribes as before. New auto_resubscribe option (default on).
+Every recv() call site across the workspace swept to the SubEvent shape
+(the while-let one-word change, or .delivery() for one-shot/test sites).
+Tests: subscription_closed_frame_surfaces_typed_terminal_event (buffered
+delivery then one fused TopicDeleted close), recreate_verdict_without_
+auto_resubscribe_surfaces_recreated_close. NOT YET COVERED (small
+follow-up): auto-resubscribe-ON continuity through a Recreate close -
+shares machinery with the existing subscription_auto_resubscribes_to_
+grown_partition supervisor test (leg-close -> re-subscribe), worth an
+explicit test in brick 5's client-parity sweep. #104 stale-tag marking
+is NOT in this brick - deferred to a focused follow-up (needs delivery
+incarnation stamping); the typed Disconnected close already tells a
+consumer the subscription died, which is the honest signal for now.
+
 ## Ratification record
 
 All decisions ratified 2026-07-21:

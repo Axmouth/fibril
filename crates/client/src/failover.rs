@@ -16,9 +16,11 @@ use fibril_wire::{
 };
 
 use crate::{
-    Client, FibrilError, FibrilResult, InflightMessage, Message, subscribe_partition_auto,
-    subscribe_partition_manual, subscribe_stream_partition_auto, subscribe_stream_partition_manual,
+    Client, CloseReason, FibrilError, FibrilResult, InflightMessage, Message, PartRx, ReasonSlot,
+    stamp_reason, subscribe_partition_auto, subscribe_partition_manual,
+    subscribe_stream_partition_auto, subscribe_stream_partition_manual,
 };
+use fibril_wire::ReasonCode;
 
 /// A subscribe request the supervisor can migrate across an owner failover. Both
 /// the queue [`Subscribe`] and the stream [`SubscribeStream`] expose the routing
@@ -186,7 +188,7 @@ impl PublishRetryState {
 /// the subscription is dropped.
 /// Boxed re-subscribe future for [`supervise_forward`].
 type ResubscribeFut<M> =
-    std::pin::Pin<Box<dyn std::future::Future<Output = FibrilResult<mpsc::Receiver<M>>> + Send>>;
+    std::pin::Pin<Box<dyn std::future::Future<Output = FibrilResult<PartRx<M>>> + Send>>;
 
 /// Forward one partition's stream into the fan-in channel, supervising it across
 /// an owner failover. When the per-partition stream ends unexpectedly (the owner
@@ -196,20 +198,26 @@ type ResubscribeFut<M> =
 ///
 /// Stops only when: the consumer drops the subscription (the fan-in sender
 /// closes), the client is shutting down, the topic is gone (a refreshed,
-/// populated topology no longer knows it), or re-subscribe fails permanently.
+/// populated topology no longer knows it, or the leg closed as TopicDeleted),
+/// auto-resubscribe is off and the broker asked for a recreate, or re-subscribe
+/// fails permanently. Every give-up stamps the user-facing reason slot so the
+/// merged subscription ends with a typed terminal event instead of silence.
 /// Unlike the producer there is no fixed deadline: a subscription is long-lived,
 /// so it retries (with backoff) for as long as the consumer keeps it open.
 fn supervise_forward<R, M, F>(
     client: Client,
     req: R,
-    mut part_rx: mpsc::Receiver<M>,
+    part: PartRx<M>,
     tx: mpsc::Sender<M>,
+    user_reason: ReasonSlot,
     resubscribe: F,
 ) where
     R: SupervisedReq,
     M: Send + 'static,
     F: Fn(Client, R) -> ResubscribeFut<M> + Send + 'static,
 {
+    let mut part_rx = part.rx;
+    let mut part_reason = part.reason;
     tokio::spawn(async move {
         let check = Duration::from_millis(SUBSCRIPTION_OWNER_CHECK_MS);
         let owner_of = |client: &Client, req: &R| {
@@ -279,7 +287,28 @@ fn supervise_forward<R, M, F>(
                 return;
             }
             if tx.is_closed() || client.shared.user_shutdown.load(Ordering::Acquire) {
+                stamp_reason(&user_reason, CloseReason::Unsubscribed);
                 return;
+            }
+
+            // The leg closed with a stamped reason, and some closes end the
+            // subscription instead of migrating it.
+            match part_reason.get() {
+                // The topic is gone, there is nothing to re-subscribe to.
+                Some(CloseReason::TopicDeleted) => {
+                    stamp_reason(&user_reason, CloseReason::TopicDeleted);
+                    return;
+                }
+                // The broker advised a recreate and the user opted out of
+                // automatic resubscribes, so surface the typed close instead.
+                Some(CloseReason::Recreated) if !client.shared.opts.auto_resubscribe => {
+                    stamp_reason(&user_reason, CloseReason::Recreated);
+                    return;
+                }
+                // Everything else (owner moved, recreate advised, reconcile
+                // close, a blip with no reason) is the supervisor's job:
+                // re-subscribe and keep the consumer fed.
+                _ => {}
             }
 
             // Re-resolve and re-subscribe to the new owner, backing off until it
@@ -287,24 +316,39 @@ fn supervise_forward<R, M, F>(
             let mut backoff_ms = PUBLISH_RETRY_INITIAL_BACKOFF_MS;
             loop {
                 if tx.is_closed() || client.shared.user_shutdown.load(Ordering::Acquire) {
+                    stamp_reason(&user_reason, CloseReason::Unsubscribed);
                     return;
                 }
                 if client.shared.refresh_topology_throttled().await {
                     let topo = client.shared.topology.load();
                     if topo.is_populated() && !topo.knows_topic(req.topic(), req.group()) {
-                        return; // topic deleted - stop re-subscribing
+                        // topic deleted - stop re-subscribing
+                        stamp_reason(&user_reason, CloseReason::TopicDeleted);
+                        return;
                     }
                 }
                 match resubscribe(client.clone(), req.clone()).await {
-                    Ok(new_rx) => {
-                        part_rx = new_rx;
+                    Ok(new_leg) => {
+                        part_rx = new_leg.rx;
+                        part_reason = new_leg.reason;
                         break;
                     }
                     Err(err) if err.is_transient() => {
                         tokio::time::sleep(publish_retry_nap(backoff_ms)).await;
                         backoff_ms = (backoff_ms * 2).min(PUBLISH_RETRY_MAX_BACKOFF_MS);
                     }
-                    Err(_) => return, // permanent (e.g. not-found / max redirects)
+                    Err(err) => {
+                        // Permanent (e.g. not-found / max redirects): the
+                        // subscription cannot continue, say why.
+                        stamp_reason(
+                            &user_reason,
+                            CloseReason::ServerError {
+                                code: ReasonCode::Unspecified,
+                                message: format!("re-subscribe failed: {err}"),
+                            },
+                        );
+                        return;
+                    }
                 }
             }
         }
@@ -315,10 +359,11 @@ fn supervise_forward<R, M, F>(
 pub(crate) fn supervise_forward_manual(
     client: Client,
     req: Subscribe,
-    part_rx: mpsc::Receiver<InflightMessage>,
+    part: PartRx<InflightMessage>,
     tx: mpsc::Sender<InflightMessage>,
+    user_reason: ReasonSlot,
 ) {
-    supervise_forward(client, req, part_rx, tx, |client, req| {
+    supervise_forward(client, req, part, tx, user_reason, |client, req| {
         Box::pin(async move { subscribe_partition_manual(&client, req).await })
     });
 }
@@ -327,10 +372,11 @@ pub(crate) fn supervise_forward_manual(
 pub(crate) fn supervise_forward_auto(
     client: Client,
     req: Subscribe,
-    part_rx: mpsc::Receiver<Message>,
+    part: PartRx<Message>,
     tx: mpsc::Sender<Message>,
+    user_reason: ReasonSlot,
 ) {
-    supervise_forward(client, req, part_rx, tx, |client, req| {
+    supervise_forward(client, req, part, tx, user_reason, |client, req| {
         Box::pin(async move { subscribe_partition_auto(&client, req).await })
     });
 }
@@ -339,10 +385,11 @@ pub(crate) fn supervise_forward_auto(
 pub(crate) fn supervise_forward_stream_manual(
     client: Client,
     req: SubscribeStream,
-    part_rx: mpsc::Receiver<InflightMessage>,
+    part: PartRx<InflightMessage>,
     tx: mpsc::Sender<InflightMessage>,
+    user_reason: ReasonSlot,
 ) {
-    supervise_forward(client, req, part_rx, tx, |client, req| {
+    supervise_forward(client, req, part, tx, user_reason, |client, req| {
         Box::pin(async move { subscribe_stream_partition_manual(&client, req).await })
     });
 }
@@ -351,10 +398,11 @@ pub(crate) fn supervise_forward_stream_manual(
 pub(crate) fn supervise_forward_stream_auto(
     client: Client,
     req: SubscribeStream,
-    part_rx: mpsc::Receiver<Message>,
+    part: PartRx<Message>,
     tx: mpsc::Sender<Message>,
+    user_reason: ReasonSlot,
 ) {
-    supervise_forward(client, req, part_rx, tx, |client, req| {
+    supervise_forward(client, req, part, tx, user_reason, |client, req| {
         Box::pin(async move { subscribe_stream_partition_auto(&client, req).await })
     });
 }

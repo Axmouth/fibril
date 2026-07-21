@@ -730,6 +730,7 @@ async fn consume_messages(
                 index + 1
             )
         })?
+        .delivery()
         .with_context(|| format!("subscription closed before message {}", index + 1))?;
 
         let payload = String::from_utf8_lossy(&message.payload).to_string();

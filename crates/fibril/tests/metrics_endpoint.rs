@@ -36,6 +36,7 @@ async fn move_traffic(broker_addr: std::net::SocketAddr) -> fibril_client::Clien
         let msg = tokio::time::timeout(Duration::from_secs(10), sub.recv())
             .await
             .expect("delivery within timeout")
+            .delivery()
             .expect("message");
         msg.complete().await.expect("complete");
     }

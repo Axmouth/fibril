@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use fibril_client::NewMessage;
+use fibril_client::{NewMessage, SubEvent};
 
 use crate::clock::rhythm;
 use crate::data::{pick, reference, CITIES};
@@ -114,7 +114,7 @@ pub async fn run_dispatch(demo: Arc<Demo>) -> anyhow::Result<()> {
 pub async fn run_desk(demo: Arc<Demo>) -> anyhow::Result<()> {
     let client = demo.client().await?;
     let mut sub = client.subscribe("shipments")?.prefetch(8).sub().await?;
-    while let Some(msg) = sub.recv().await {
+    while let SubEvent::Delivery(msg) = sub.recv().await {
         service_time(40, 100).await;
         msg.complete().await?;
     }
@@ -130,7 +130,7 @@ pub async fn run_customs_officer(demo: Arc<Demo>) -> anyhow::Result<()> {
         .prefetch(2)
         .sub()
         .await?;
-    while let Some(msg) = sub.recv().await {
+    while let SubEvent::Delivery(msg) = sub.recv().await {
         service_time(2000, 5000).await;
         msg.complete().await?;
     }

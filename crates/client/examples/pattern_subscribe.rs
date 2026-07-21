@@ -16,9 +16,10 @@ async fn main() -> Result<(), FibrilError> {
     let mut sub = client.routing().subscribe_pattern("events.*").sub().await?;
 
     println!("listening for events.* (new matching queues attach automatically)");
-    while let Some((source, msg)) = sub.recv().await {
+    while let fibril_client::SubEvent::Delivery((source, msg)) = sub.recv().await {
         let message = msg.complete().await?;
         println!("{}: {}", source.topic, message.text().unwrap_or("<binary>"));
     }
+    println!("subscription closed: {:?}", sub.close_reason());
     Ok(())
 }

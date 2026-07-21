@@ -7,7 +7,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use fibril_client::NewMessage;
+use fibril_client::{NewMessage, SubEvent};
 use serde::Serialize;
 
 use crate::clock::rhythm;
@@ -211,7 +211,7 @@ pub async fn run_guest_mail(demo: Arc<Demo>, ledger: Ledger) -> anyhow::Result<(
 pub async fn run_booking_ops(demo: Arc<Demo>) -> anyhow::Result<()> {
     let client = demo.client().await?;
     let mut sub = client.subscribe("bookings")?.prefetch(8).sub().await?;
-    while let Some(msg) = sub.recv().await {
+    while let SubEvent::Delivery(msg) = sub.recv().await {
         service_time(30, 80).await;
         msg.complete().await?;
     }
@@ -225,7 +225,7 @@ pub async fn run_cancellation_ops(demo: Arc<Demo>) -> anyhow::Result<()> {
         .prefetch(4)
         .sub()
         .await?;
-    while let Some(msg) = sub.recv().await {
+    while let SubEvent::Delivery(msg) = sub.recv().await {
         service_time(100, 250).await;
         msg.complete().await?;
     }
@@ -253,11 +253,11 @@ pub async fn run_support_desk(demo: Arc<Demo>) -> anyhow::Result<()> {
                 // connection, so the queue genuinely has no consumer.
                 break;
             }
-            let msg = tokio::select! {
-                msg = sub.recv() => msg,
+            let event = tokio::select! {
+                event = sub.recv() => event,
                 _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => continue,
             };
-            let Some(msg) = msg else {
+            let SubEvent::Delivery(msg) = event else {
                 return Ok(());
             };
             service_time(200, 500).await;

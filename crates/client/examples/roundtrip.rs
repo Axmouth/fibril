@@ -21,7 +21,7 @@ async fn main() -> Result<(), FibrilError> {
         .await?;
     println!("confirmed publish at offset {offset}");
 
-    let msg = sub.recv().await.expect("the round-trip message");
+    let msg = sub.recv().await.delivery().expect("the round-trip message");
     assert_eq!(msg.text()?, "hello", "payload round-trips");
     println!("received {}", msg.text()?);
     Ok(())

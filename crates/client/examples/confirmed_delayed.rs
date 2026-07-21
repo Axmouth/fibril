@@ -35,7 +35,7 @@ async fn main() -> Result<(), FibrilError> {
     println!("published one message delayed by 1s");
 
     for _ in 0..3 {
-        let msg = sub.recv().await.expect("a delivery");
+        let msg = sub.recv().await.delivery().expect("a delivery");
         println!("received {}", msg.text()?);
     }
     Ok(())

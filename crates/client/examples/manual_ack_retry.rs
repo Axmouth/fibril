@@ -20,12 +20,12 @@ async fn main() -> Result<(), FibrilError> {
         .publish_confirmed(NewMessage::text("work"))
         .await?;
 
-    let first = sub.recv().await.expect("first delivery");
+    let first = sub.recv().await.delivery().expect("first delivery");
     assert_eq!(first.payload, b"work", "first payload");
     println!("first delivery: requeuing for another attempt");
     first.retry().await?; // requeue for redelivery
 
-    let second = sub.recv().await.expect("redelivery after retry");
+    let second = sub.recv().await.delivery().expect("redelivery after retry");
     assert_eq!(second.payload, b"work", "redelivered payload");
     println!("redelivery: completing");
     second.complete().await?;

@@ -34,7 +34,7 @@ async fn main() -> Result<(), FibrilError> {
     }
 
     for _ in 0..5 {
-        let record = sub.recv().await.expect("a stream record");
+        let record = sub.recv().await.delivery().expect("a stream record");
         println!("stream record {}", record.text()?);
     }
     Ok(())
