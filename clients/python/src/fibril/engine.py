@@ -28,6 +28,7 @@ from .errors import (
     FibrilError,
     RedirectError,
     ServerError,
+    SubscriptionClosedError,
     TlsRequiredByBrokerError,
     UnexpectedError,
     retry_advice,
@@ -682,6 +683,19 @@ class Engine:
                 self._on_going_away(notice)  # type: ignore[operator]
             return
 
+        if op == Op.SUBSCRIPTION_CLOSED:
+            # The broker ended one subscription while the connection stays up.
+            # Close its delivery leg with the typed reason so the stream never
+            # just goes silent - a supervised subscription re-subscribes on a
+            # non-terminal reason, a terminal one surfaces to the consumer.
+            closed = decode_body(Op.SUBSCRIPTION_CLOSED, frame.payload)
+            assert isinstance(closed, wire.SubscriptionClosed)
+            sub = self._subs.pop(closed.sub_id, None)
+            if sub is not None:
+                sub.queue.close(SubscriptionClosedError(closed.code, closed.message))
+                self._registry.pop(closed.sub_id, None)
+            return
+
         if op == Op.PING:
             await self._send_or_die(build_frame(Op.PONG, frame.request_id, b""))
             return
@@ -833,12 +847,12 @@ def _apply_reconcile_result(
             continue
         registered = registry.get(client.sub_id)
         if item.action != "keep":
+            # Carry the typed reason to the delivery leg. A supervised
+            # subscription treats a recreate (and other non-terminal reasons)
+            # as a cue to re-subscribe; a terminal reason surfaces to the
+            # consumer.
             if registered is not None:
-                registered.queue.close(
-                    DisconnectionError(
-                        f"subscription was not kept after reconnect: {item.reason}"
-                    )
-                )
+                registered.queue.close(SubscriptionClosedError(item.code, item.reason))
             registry.pop(client.sub_id, None)
             continue
         if registered is None:

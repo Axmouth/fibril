@@ -16,7 +16,12 @@ from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 from . import wire
 from .engine import Delivered, Engine, Inflight
-from .errors import BrokenPipeError, FibrilError, is_transient_error
+from .errors import (
+    BrokenPipeError,
+    FibrilError,
+    SubscriptionClosedError,
+    is_transient_error,
+)
 from .internal.bounded_queue import BoundedQueue
 from .internal.retry import (
     PUBLISH_RETRY_INITIAL_BACKOFF_MS,
@@ -38,6 +43,18 @@ def _normalize_group(group: Optional[str]) -> Optional[str]:
     if not trimmed or trimmed == "default":
         return None
     return trimmed
+
+
+def _is_terminal_close(code: int, auto_resubscribe: bool) -> bool:
+    """Whether a typed close ends the subscription (the supervisor stops and
+    surfaces it) rather than triggering a re-subscribe. Topic deletion, a
+    server error, and the reserved lag close are terminal; a recreate is
+    terminal only when the user opted out of auto-resubscribe."""
+    if code in (wire.REASON_TOPIC_DELETED, wire.REASON_SERVER_ERROR, wire.REASON_LAGGED):
+        return True
+    if code == wire.REASON_RECREATE:
+        return not auto_resubscribe
+    return False
 
 
 #: The exclusive cohort a queue subscription joins via ``exclusive()``.
@@ -238,13 +255,23 @@ class _PartitionSupervisor:
                 except Exception:
                     self._stopped = True  # merged closed: the consumer is gone
                     break
+            # A typed close that ends the subscription (topic deleted, server
+            # error, or a recreate the user opted out of) stops the supervisor
+            # and carries the reason to the consumer instead of re-subscribing.
+            close_err = self._part_queue.close_error()
+            terminal = isinstance(close_err, SubscriptionClosedError) and _is_terminal_close(
+                close_err.code, self._client.auto_resubscribe()
+            )
             if (
                 self._stopped
                 or self._client.is_shutting_down()
                 or not self._client.supervise_subscriptions()
+                or terminal
             ):
                 if self._owner_task is not None:
                     self._owner_task.cancel()
+                if terminal:
+                    self._merged.close(close_err)
                 return
             if not await self._resubscribe_with_backoff():
                 if self._owner_task is not None:
@@ -316,6 +343,10 @@ class _FanIn:
     async def recv(self) -> Optional[_Tagged]:
         return await self._merged.recv()
 
+    def close_error(self) -> Optional[BaseException]:
+        """The typed close reason, if the subscription ended with one."""
+        return self._merged.close_error()
+
     def close(self) -> None:
         if self._closed:
             return
@@ -373,6 +404,9 @@ class Subscription:
     async def recv(self) -> Optional[InflightMessage]:
         item = await self._fan_in.recv()
         if item is None:
+            err = self._fan_in.close_error()
+            if err is not None:
+                raise err
             return None
         assert isinstance(item.raw, Inflight)
         return InflightMessage(item.engine, item.raw)
@@ -399,6 +433,9 @@ class AutoAckedSubscription:
     async def recv(self) -> Optional[Message]:
         item = await self._fan_in.recv()
         if item is None:
+            err = self._fan_in.close_error()
+            if err is not None:
+                raise err
             return None
         assert isinstance(item.raw, Delivered)
         return Message(item.raw)

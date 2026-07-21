@@ -74,6 +74,12 @@ class BoundedQueue(Generic[T]):
         self._pending_receiver = fut
         return await fut
 
+    def close_error(self) -> Optional[BaseException]:
+        """The error the queue was closed with, if any. ``recv`` still returns
+        ``None`` on close, so a caller that wants the typed close reason reads
+        this after ``recv`` yields ``None``."""
+        return self._close_error
+
     def _wake_one_sender(self) -> None:
         if not self._pending_senders:
             return

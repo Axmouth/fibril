@@ -62,6 +62,21 @@ class BrokenPipeError(FibrilError):
         super().__init__(message)
 
 
+class SubscriptionClosedError(FibrilError):
+    """A subscription ended with a typed reason instead of a silent stop.
+
+    Raised from a subscription's iterator (or ``recv``) when the broker or a
+    reconcile verdict closes it - a topic deletion, an ownership move that
+    could not be migrated, a broker shutdown, a recreate the client opted out
+    of, or a server error. A clean user ``close()`` ends iteration without
+    this error. ``code`` is the machine-readable reason (see ``wire.REASON_*``).
+    """
+
+    def __init__(self, code: int, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 class ServerError(FibrilError):
     """The server returned a structured error in response to a request."""
 

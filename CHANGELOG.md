@@ -40,8 +40,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   surface: a subscription's iterator throws a typed `SubscriptionClosedError`
   (carrying the reason code) when the broker or a reconcile verdict ends it,
   a clean user `close()` still ends iteration quietly, and
-  `withAutoResubscribe(false)` opts out of silent recreate. The remaining
-  three clients follow in later changes.
+  `withAutoResubscribe(false)` opts out of silent recreate. The Python
+  client mirrors it: a subscription iterator raises a typed
+  `SubscriptionClosedError` on a broker or reconcile close, and
+  `ClientOptions(auto_resubscribe=False)` opts out. The remaining two
+  clients (Go, C#) follow in later changes.
 
 - The typed subscription lifecycle, server half. The wire grew a
   machine-readable reason taxonomy: reconcile results carry a tagged code

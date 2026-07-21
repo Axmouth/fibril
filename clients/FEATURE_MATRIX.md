@@ -93,8 +93,8 @@ the same durable name tracks an independent cursor per partition.
 | Opt-in restore reconcile policy | done | done | done | done | done |
 | Explicit `reconnect()` returning the handshake outcome | done | done | done | no | no |
 | Disable automatic reconnect | done | done | done | no | no |
-| Typed subscription close reason on the receive surface | done | done | no | no | no |
-| Auto-resubscribe on a recreate verdict (opt-out) | done | done | no | no | no |
+| Typed subscription close reason on the receive surface | done | done | done | no | no |
+| Auto-resubscribe on a recreate verdict (opt-out) | done | done | done | no | no |
 
 ## Cluster routing
 
