@@ -9,11 +9,7 @@ import { REASON_CODES } from "./wire.js";
 import { contentTypeHeader, deserializeByContentType } from "./message.js";
 import type { DeliveryTag, SubscribeMsg } from "./protocol.js";
 import type { StreamStart, SubscribeStream } from "./wire.js";
-import type {
-  Engine,
-  InternalDelivered,
-  InternalInflight,
-} from "./engine.js";
+import type { Engine, SettleContext, InternalDelivered, InternalInflight } from "./engine.js";
 import { deferred } from "./internal/deferred.js";
 import { BoundedQueue } from "./internal/bounded-queue.js";
 import {
@@ -75,9 +71,7 @@ export class Message {
       return deserializeByContentType<T>(this.contentType(), this.payload);
     } catch (err) {
       if (err instanceof DeserializationError) throw err;
-      throw new DeserializationError(
-        `Failed to deserialize payload: ${(err as Error).message}`,
-      );
+      throw new DeserializationError(`Failed to deserialize payload: ${(err as Error).message}`);
     }
   }
 
@@ -116,16 +110,12 @@ export class Message {
     try {
       return new TextDecoder().decode(this.payload);
     } catch (err) {
-      throw new DeserializationError(
-        `Failed to decode text payload: ${(err as Error).message}`,
-      );
+      throw new DeserializationError(`Failed to decode text payload: ${(err as Error).message}`);
     }
   }
 }
 
-type SettleState =
-  | { kind: "open" }
-  | { kind: "settled" };
+type SettleState = { kind: "open" } | { kind: "settled" };
 
 /**
  * A delivered message in manual-ack mode. Must be settled with one of
@@ -144,8 +134,15 @@ export class InflightMessage {
   readonly publishReceived: number;
   readonly offset: bigint;
 
-  readonly #engine: Engine;
-  readonly #subId: bigint;
+  // Settlement routes through the connection's persistent SettleContext, keyed by
+  // the durable coordinates and the incarnation this delivery arrived on - not the
+  // engine it arrived on. So an ack after a reconnect reaches the current engine,
+  // or reports StaleDeliveryError if a non-resumed reconnect replaced the session.
+  readonly #settleContext: SettleContext;
+  readonly #topic: string;
+  readonly #group: string | null;
+  readonly #partition: number;
+  readonly #incarnation: bigint;
   readonly #deliverRequestId: bigint;
   #state: SettleState = { kind: "open" };
 
@@ -157,8 +154,11 @@ export class InflightMessage {
     this.published = Number(d.published);
     this.publishReceived = Number(d.publish_received);
     this.offset = d.offset;
-    this.#engine = engine;
-    this.#subId = d.sub_id;
+    this.#settleContext = engine.settleContext;
+    this.#topic = d.topic;
+    this.#group = d.group;
+    this.#partition = d.partition;
+    this.#incarnation = d.incarnation;
     this.#deliverRequestId = d.deliver_request_id;
   }
 
@@ -170,9 +170,7 @@ export class InflightMessage {
       return deserializeByContentType<T>(this.contentType(), this.payload);
     } catch (err) {
       if (err instanceof DeserializationError) throw err;
-      throw new DeserializationError(
-        `Failed to deserialize payload: ${(err as Error).message}`,
-      );
+      throw new DeserializationError(`Failed to deserialize payload: ${(err as Error).message}`);
     }
   }
 
@@ -211,9 +209,7 @@ export class InflightMessage {
     try {
       return new TextDecoder().decode(this.payload);
     } catch (err) {
-      throw new DeserializationError(
-        `Failed to decode text payload: ${(err as Error).message}`,
-      );
+      throw new DeserializationError(`Failed to decode text payload: ${(err as Error).message}`);
     }
   }
 
@@ -226,9 +222,11 @@ export class InflightMessage {
     this.#assertOpen();
     this.#state = { kind: "settled" };
     const reply = deferred<void>();
-    await this.#engine.submit({
+    await this.#settleContext.settle(this.#incarnation, {
       type: "ack",
-      sub_id: this.#subId,
+      topic: this.#topic,
+      group: this.#group,
+      partition: this.#partition,
       tag: this.deliveryTag,
       request_id: this.#deliverRequestId,
       reply,
@@ -247,9 +245,11 @@ export class InflightMessage {
     this.#assertOpen();
     this.#state = { kind: "settled" };
     const reply = deferred<void>();
-    await this.#engine.submit({
+    await this.#settleContext.settle(this.#incarnation, {
       type: "nack",
-      sub_id: this.#subId,
+      topic: this.#topic,
+      group: this.#group,
+      partition: this.#partition,
       tag: this.deliveryTag,
       requeue: false,
       not_before: null,
@@ -269,9 +269,11 @@ export class InflightMessage {
     this.#assertOpen();
     this.#state = { kind: "settled" };
     const reply = deferred<void>();
-    await this.#engine.submit({
+    await this.#settleContext.settle(this.#incarnation, {
       type: "nack",
-      sub_id: this.#subId,
+      topic: this.#topic,
+      group: this.#group,
+      partition: this.#partition,
       tag: this.deliveryTag,
       requeue: true,
       not_before: null,
@@ -292,9 +294,11 @@ export class InflightMessage {
     this.#assertOpen();
     this.#state = { kind: "settled" };
     const reply = deferred<void>();
-    await this.#engine.submit({
+    await this.#settleContext.settle(this.#incarnation, {
       type: "nack",
-      sub_id: this.#subId,
+      topic: this.#topic,
+      group: this.#group,
+      partition: this.#partition,
       tag: this.deliveryTag,
       requeue: true,
       not_before: deadlineFromDelay(delay),
@@ -407,26 +411,29 @@ class PartitionSupervisor<R> {
   // a re-subscribe to the new owner. Unref'd so it never keeps the process alive.
   #startOwnerCheck(): void {
     let checking = false;
-    this.#timer = setInterval(() => {
-      if (this.#stopped || this.client._isShuttingDown()) {
-        this.#clearTimer();
-        return;
-      }
-      if (checking) return;
-      checking = true;
-      void (async () => {
-        try {
-          await this.client._refreshTopologyThrottled();
-          const current = this.#ownerNow();
-          if (current !== null && current !== this.#boundOwner) {
-            this.#boundOwner = current;
-            this.#partQueue.close();
-          }
-        } finally {
-          checking = false;
+    this.#timer = setInterval(
+      () => {
+        if (this.#stopped || this.client._isShuttingDown()) {
+          this.#clearTimer();
+          return;
         }
-      })();
-    }, Math.max(this.client._superviseIntervalMs(), 1));
+        if (checking) return;
+        checking = true;
+        void (async () => {
+          try {
+            await this.client._refreshTopologyThrottled();
+            const current = this.#ownerNow();
+            if (current !== null && current !== this.#boundOwner) {
+              this.#boundOwner = current;
+              this.#partQueue.close();
+            }
+          } finally {
+            checking = false;
+          }
+        })();
+      },
+      Math.max(this.client._superviseIntervalMs(), 1),
+    );
     this.#timer.unref?.();
   }
 
@@ -827,9 +834,7 @@ export class SubscriptionBuilder {
       consumer_group: this.#consumerGroup,
       consumer_target: this.#consumerTarget,
     };
-    const initial = await this.#fanInInitial(baseReq, (r) =>
-      this.#client._subscribeManualOnce(r),
-    );
+    const initial = await this.#fanInInitial(baseReq, (r) => this.#client._subscribeManualOnce(r));
     const fanIn = new FanIn<InternalInflight>(
       this.#client,
       baseReq,
@@ -857,9 +862,7 @@ export class SubscriptionBuilder {
       consumer_group: this.#consumerGroup,
       consumer_target: this.#consumerTarget,
     };
-    const initial = await this.#fanInInitial(baseReq, (r) =>
-      this.#client._subscribeAutoOnce(r),
-    );
+    const initial = await this.#fanInInitial(baseReq, (r) => this.#client._subscribeAutoOnce(r));
     const fanIn = new FanIn<InternalDelivered>(
       this.#client,
       baseReq,
@@ -1047,7 +1050,13 @@ export class StreamSubscriptionBuilder {
     const subscribeOne = (r: SubscribeMsg) =>
       this.#client._subscribeStreamManualOnce(this.#toStreamReq(r.partition ?? 0, false));
     const initial = await this.#initial(subscribeOne, baseReq);
-    const fanIn = new FanIn<InternalInflight>(this.#client, baseReq, subscribeOne, initial, this.#prefetch);
+    const fanIn = new FanIn<InternalInflight>(
+      this.#client,
+      baseReq,
+      subscribeOne,
+      initial,
+      this.#prefetch,
+    );
     return new Subscription(fanIn);
   }
 
@@ -1057,7 +1066,13 @@ export class StreamSubscriptionBuilder {
     const subscribeOne = (r: SubscribeMsg) =>
       this.#client._subscribeStreamAutoOnce(this.#toStreamReq(r.partition ?? 0, true));
     const initial = await this.#initial(subscribeOne, baseReq);
-    const fanIn = new FanIn<InternalDelivered>(this.#client, baseReq, subscribeOne, initial, this.#prefetch);
+    const fanIn = new FanIn<InternalDelivered>(
+      this.#client,
+      baseReq,
+      subscribeOne,
+      initial,
+      this.#prefetch,
+    );
     return new AutoAckedSubscription(fanIn);
   }
 }

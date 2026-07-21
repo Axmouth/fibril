@@ -74,6 +74,52 @@ Each applies to EVERY client (Rust done, then TS, Python, Go, C#).
 - A6: `retry_after_sends_delayed_nack` asserts the `Command::Nack` deadline;
   the full client suite (redirect/reliability integration) passes unchanged.
 
+## Client parity plan (TS, Python, Go, C#)
+
+Scoped from a full map of each client's settle + reconnect path. The wire ack/nack
+is ALREADY keyed by `(topic, group, partition, tag)` with no sub id in every
+client, so no protocol change is needed. The shared gap: each client pins a
+delivery to the concrete engine it arrived on, so a delivery settled after a
+reconnect targets the dead old engine (silent drop or generic BrokenPipe). None
+act on `ResumeOutcome`, none have an incarnation, none have a StaleDelivery error.
+
+Uniform model to add in each client (mirrors the Rust reference):
+- A persistent per-endpoint settle context (current engine binding + a monotonic
+  incarnation allocator) that outlives every engine. `bind(fresh_session, engine)`
+  returns the incarnation the engine must stamp; a non-resumed reconnect
+  (`ResumeOutcome != Resumed`) allocates a fresh one, a resumed reconnect reuses
+  the current one.
+- Each engine stores its bound incarnation as an immutable field and stamps it on
+  every delivery it hands out (NOT a live re-read - this is the bug the Rust
+  adversarial review caught).
+- The delivery carries `(topic, group, partition, tag)` + its incarnation + a
+  reference to the settle context. Settle loads the current binding as one
+  snapshot: incarnation mismatch -> typed StaleDelivery (no frame sent), else route
+  to the live engine.
+- A new typed StaleDelivery error, classified do-not-retry.
+
+Per-client placement (the persistent context's home):
+- TS: DONE. Added a `SettleContext` (engine.ts) held by the bootstrap `EngineSlot`
+  and by each `PooledConnection`; `Engine.start` reserves the incarnation from the
+  resume outcome and binds the context, the deliver loop stamps that captured
+  incarnation + topic/group/partition on `InternalInflight`, and `InflightMessage`
+  routes settles through the context. New `StaleDeliveryError` (do-not-retry).
+  Tests: `a manual delivery held across a non-resumed reconnect settles stale` (A1),
+  `... resumed reconnect settles to the current engine` (A2/A3, asserts the ack
+  lands on the second socket), plus the retryAdvice case (A4). Full TS suite green.
+- Python: no slot today - `Client._engine` (bootstrap) + `_PooledConnection._engine`.
+  Add a settle context per owner. `Inflight` currently drops topic/group/partition
+  in `_on_deliver`; add them.
+- Go: no slot - `Client.bootstrap` + `pool`. Add a per-endpoint settle context.
+  `Delivery` already carries topic/group/partition; add incarnation + context ref.
+- C#: no slot - `Client._bootstrap` + `_pool`; the per-endpoint `ReconcileRegistry`
+  is the natural home. `Delivery` (readonly struct) already carries the tuple; add
+  incarnation + context ref and change the settle methods from void so they can
+  surface StaleDelivery.
+
+Acceptance criteria A1-A7 apply per client; each needs A1 + A2 at unit level and
+one reconnect integration test proving A1 (matching the Rust reference tests).
+
 ## Multi-angle review
 
 ### /simplify (reuse, simplification, efficiency, altitude) - DONE

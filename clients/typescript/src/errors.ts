@@ -79,6 +79,24 @@ export class BrokenPipeError extends FibrilError {
 }
 
 /**
+ * Settling a delivery whose connection was replaced by a non-resumed reconnect
+ * (or a broker restart). The delivery tag was minted by the superseded session
+ * and is dead server-side, so no settle frame is sent. The message is not lost:
+ * it redelivers on the current subscription per the at-least-once guarantee.
+ * Distinct from {@link BrokenPipeError} (the connection is down, retry) - a
+ * stale delivery must NOT be retried, since re-settling would only report stale
+ * again while the message arrives afresh.
+ */
+export class StaleDeliveryError extends FibrilError {
+  override readonly name = "StaleDeliveryError";
+  constructor(
+    message = "delivery is stale: its connection was replaced, the message will redeliver",
+  ) {
+    super(message);
+  }
+}
+
+/**
  * A subscription ended with a typed reason instead of a silent stop. Thrown
  * from the subscription's iterator (or `recv`) when the broker or a reconcile
  * verdict closes it - a topic deletion, an ownership move that could not be
@@ -229,9 +247,7 @@ export class TlsClientCertificateRequiredError extends FibrilError {
  */
 export function isTransientError(err: unknown): boolean {
   return (
-    err instanceof DisconnectionError ||
-    err instanceof BrokenPipeError ||
-    err instanceof EofError
+    err instanceof DisconnectionError || err instanceof BrokenPipeError || err instanceof EofError
   );
 }
 
@@ -265,6 +281,8 @@ export function retryAdvice(err: unknown): RetryAdvice {
     if (err.code >= 500) return "retry";
     return "do_not_retry";
   }
+  // A stale delivery redelivers on its own; retrying the settle is pointless.
+  if (err instanceof StaleDeliveryError) return "do_not_retry";
   // Local request errors (serialize/deserialize/unexpected) and anything else.
   return "do_not_retry";
 }

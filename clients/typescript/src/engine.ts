@@ -1,10 +1,5 @@
 import type { Socket } from "node:net";
-import {
-  buildFrame,
-  decodeFrameBody,
-  encodeFrame,
-  type Frame,
-} from "./codec.js";
+import { buildFrame, decodeFrameBody, encodeFrame, type Frame } from "./codec.js";
 import {
   BrokenPipeError,
   DisconnectionError,
@@ -14,6 +9,7 @@ import {
   RedirectError,
   retryAdvice,
   ServerError,
+  StaleDeliveryError,
   SubscriptionClosedError,
   TlsRequiredByBrokerError,
   UnexpectedError,
@@ -82,33 +78,144 @@ export interface InternalDelivered {
 export interface InternalInflight extends InternalDelivered {
   /** Frame request id from the original Deliver frame. */
   deliver_request_id: bigint;
-  /** Sub id this delivery belongs to (for routing settle commands). */
-  sub_id: bigint;
+  /**
+   * Durable settle coordinates, captured at delivery so settling no longer
+   * depends on the origin engine's sub map. A reconnect that re-keyed the
+   * subscription (new server sub id) still settles correctly.
+   */
+  topic: string;
+  group: string | null;
+  partition: number;
+  /**
+   * The connection incarnation this delivery arrived on, stamped once by the
+   * engine that received it. A non-resumed reconnect bumps the live incarnation,
+   * so a delivery held across it settles to `StaleDeliveryError`.
+   */
+  incarnation: bigint;
 }
 
 // Outstanding request waiters, keyed by request_id.
 type Waiter =
   | { kind: "publish"; deferred: Deferred<bigint> }
   | { kind: "declareQueue"; deferred: Deferred<void> }
-  | { kind: "subscribeManual"; deferred: Deferred<SubscribeResult<InternalInflight>>; supervised: boolean }
-  | { kind: "subscribeAuto"; deferred: Deferred<SubscribeResult<InternalDelivered>>; supervised: boolean }
+  | {
+      kind: "subscribeManual";
+      deferred: Deferred<SubscribeResult<InternalInflight>>;
+      supervised: boolean;
+    }
+  | {
+      kind: "subscribeAuto";
+      deferred: Deferred<SubscribeResult<InternalDelivered>>;
+      supervised: boolean;
+    }
   | { kind: "topology"; deferred: Deferred<TopologyOkMsg> };
 
 // Commands the public API submits to the engine.
 export type Command =
-  | { type: "publishUnconfirmed"; topic: string; group: string | null; partition: number; partition_key: Uint8Array | null; partitioning_version: bigint; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; ttl_ms: bigint | null }
-  | { type: "publishConfirmed"; topic: string; group: string | null; partition: number; partition_key: Uint8Array | null; partitioning_version: bigint; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; ttl_ms: bigint | null; reply: Deferred<bigint> }
-  | { type: "publishDelayedUnconfirmed"; topic: string; group: string | null; partition: number; partition_key: Uint8Array | null; partitioning_version: bigint; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; not_before: bigint }
-  | { type: "publishDelayedConfirmed"; topic: string; group: string | null; partition: number; partition_key: Uint8Array | null; partitioning_version: bigint; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; not_before: bigint; reply: Deferred<bigint> }
+  | {
+      type: "publishUnconfirmed";
+      topic: string;
+      group: string | null;
+      partition: number;
+      partition_key: Uint8Array | null;
+      partitioning_version: bigint;
+      content_type: ContentType | null;
+      headers: Record<string, string>;
+      payload: Uint8Array;
+      published: bigint;
+      ttl_ms: bigint | null;
+    }
+  | {
+      type: "publishConfirmed";
+      topic: string;
+      group: string | null;
+      partition: number;
+      partition_key: Uint8Array | null;
+      partitioning_version: bigint;
+      content_type: ContentType | null;
+      headers: Record<string, string>;
+      payload: Uint8Array;
+      published: bigint;
+      ttl_ms: bigint | null;
+      reply: Deferred<bigint>;
+    }
+  | {
+      type: "publishDelayedUnconfirmed";
+      topic: string;
+      group: string | null;
+      partition: number;
+      partition_key: Uint8Array | null;
+      partitioning_version: bigint;
+      content_type: ContentType | null;
+      headers: Record<string, string>;
+      payload: Uint8Array;
+      published: bigint;
+      not_before: bigint;
+    }
+  | {
+      type: "publishDelayedConfirmed";
+      topic: string;
+      group: string | null;
+      partition: number;
+      partition_key: Uint8Array | null;
+      partitioning_version: bigint;
+      content_type: ContentType | null;
+      headers: Record<string, string>;
+      payload: Uint8Array;
+      published: bigint;
+      not_before: bigint;
+      reply: Deferred<bigint>;
+    }
   | { type: "declareQueue"; req: DeclareQueueMsg; reply: Deferred<void> }
   | { type: "declarePlexus"; req: DeclarePlexus; reply: Deferred<void> }
-  | { type: "subscribe"; req: SubscribeMsg; supervised: boolean; reply: Deferred<SubscribeResult<InternalInflight>> }
-  | { type: "subscribeAutoAck"; req: SubscribeMsg; supervised: boolean; reply: Deferred<SubscribeResult<InternalDelivered>> }
-  | { type: "subscribeStream"; req: SubscribeStream; reply: Deferred<SubscribeResult<InternalInflight>> }
-  | { type: "subscribeStreamAutoAck"; req: SubscribeStream; reply: Deferred<SubscribeResult<InternalDelivered>> }
-  | { type: "ack"; sub_id: bigint; tag: DeliveryTag; request_id: bigint; reply: Deferred<void> }
-  | { type: "nack"; sub_id: bigint; tag: DeliveryTag; requeue: boolean; not_before: bigint | null; request_id: bigint; reply: Deferred<void> }
-  | { type: "topology"; topic: string | null; group: string | null; reply: Deferred<TopologyOkMsg> };
+  | {
+      type: "subscribe";
+      req: SubscribeMsg;
+      supervised: boolean;
+      reply: Deferred<SubscribeResult<InternalInflight>>;
+    }
+  | {
+      type: "subscribeAutoAck";
+      req: SubscribeMsg;
+      supervised: boolean;
+      reply: Deferred<SubscribeResult<InternalDelivered>>;
+    }
+  | {
+      type: "subscribeStream";
+      req: SubscribeStream;
+      reply: Deferred<SubscribeResult<InternalInflight>>;
+    }
+  | {
+      type: "subscribeStreamAutoAck";
+      req: SubscribeStream;
+      reply: Deferred<SubscribeResult<InternalDelivered>>;
+    }
+  | {
+      type: "ack";
+      topic: string;
+      group: string | null;
+      partition: number;
+      tag: DeliveryTag;
+      request_id: bigint;
+      reply: Deferred<void>;
+    }
+  | {
+      type: "nack";
+      topic: string;
+      group: string | null;
+      partition: number;
+      tag: DeliveryTag;
+      requeue: boolean;
+      not_before: bigint | null;
+      request_id: bigint;
+      reply: Deferred<void>;
+    }
+  | {
+      type: "topology";
+      topic: string | null;
+      group: string | null;
+      reply: Deferred<TopologyOkMsg>;
+    };
 
 // ===== Constants =====
 
@@ -177,9 +284,7 @@ function applyReconcileResult(
       // treats a recreate (and other non-terminal reasons) as a cue to
       // re-subscribe; a terminal reason surfaces to the consumer.
       const registered = registry.get(client.sub_id);
-      registered?.delivery.queue.close(
-        new SubscriptionClosedError(item.code, item.reason),
-      );
+      registered?.delivery.queue.close(new SubscriptionClosedError(item.code, item.reason));
       registry.delete(client.sub_id);
       continue;
     }
@@ -200,6 +305,62 @@ function applyReconcileResult(
   return restored;
 }
 
+// ===== Settlement routing =====
+
+/**
+ * Routes a manual settle (ack/nack) to whatever engine is currently live for a
+ * connection, keyed by the connection incarnation the delivery arrived on.
+ * One per persistent connection (the bootstrap owner and each pooled owner),
+ * outliving every engine it swaps through, so a delivery held across a reconnect
+ * settles against the current engine rather than the dead one it arrived on.
+ *
+ * A non-resumed reconnect allocates a fresh incarnation, so a delivery from the
+ * replaced session settles to {@link StaleDeliveryError}. A resumed reconnect
+ * keeps the incarnation, so a held delivery still settles through the new engine.
+ * Mirrors the Rust reference client's `SettleContext`.
+ */
+export class SettleContext {
+  #current: { incarnation: bigint; engine: Engine } | null = null;
+  #nextIncarnation = 0n;
+
+  /**
+   * Reserve the incarnation a (re)connecting engine will stamp on its
+   * deliveries, BEFORE its read loop can deliver anything. A fresh session (a
+   * non-resumed reconnect, or the first connect) claims a new incarnation so
+   * deliveries held from the replaced session go stale; a resumed session reuses
+   * the current one so they still settle. The engine captures the returned value
+   * once and never re-reads it, so a late delivery on a superseded engine keeps
+   * its own (now stale) stamp.
+   */
+  reserve(freshSession: boolean): bigint {
+    if (freshSession || this.#current === null) {
+      const incarnation = this.#nextIncarnation;
+      this.#nextIncarnation += 1n;
+      return incarnation;
+    }
+    return this.#current.incarnation;
+  }
+
+  /** Point settlement at an engine once it exists, under its reserved incarnation. */
+  bind(incarnation: bigint, engine: Engine): void {
+    this.#current = { incarnation, engine };
+  }
+
+  /**
+   * Settle a delivery stamped at `incarnation`. If the incarnation has moved on,
+   * the delivery is stale (its session was replaced) and this throws
+   * {@link StaleDeliveryError} with no frame sent; otherwise the settle routes to
+   * the live engine (which may still throw {@link BrokenPipeError} if it too is
+   * down).
+   */
+  async settle(incarnation: bigint, cmd: Command): Promise<void> {
+    const current = this.#current;
+    if (current === null) throw new BrokenPipeError();
+    if (incarnation !== current.incarnation) throw new StaleDeliveryError();
+    await current.engine.submit(cmd);
+  }
+}
+
 // ===== Public engine handle =====
 
 export class Engine {
@@ -212,6 +373,8 @@ export class Engine {
   readonly #closeReason: CloseReason;
   readonly resumeIdentity: ResumeIdentity;
   readonly resumeOutcome: HelloOk["resume_outcome"];
+  /** The connection's persistent settle router; settlement routes through it. */
+  readonly settleContext: SettleContext;
   #shutdownInitiated = false;
   #closed = false;
   /** Resolved (with the fatal error if any) when the engine task exits. */
@@ -225,6 +388,7 @@ export class Engine {
     closeReason: CloseReason,
     resumeIdentity: ResumeIdentity,
     resumeOutcome: HelloOk["resume_outcome"],
+    settleContext: SettleContext,
   ) {
     this.#commandQueue = commandQueue;
     this.#socket = socket;
@@ -235,6 +399,7 @@ export class Engine {
     });
     this.resumeIdentity = resumeIdentity;
     this.resumeOutcome = resumeOutcome;
+    this.settleContext = settleContext;
   }
 
   /**
@@ -243,6 +408,7 @@ export class Engine {
   static async start(
     socket: Socket,
     opts: ClientOptions,
+    settleContext: SettleContext,
     subscriptionRegistry: SubscriptionRegistry = new Map(),
     onAssignmentChanged?: (msg: AssignmentChangedMsg) => void,
     onTopologyUpdate?: (topology: TopologyOkMsg) => bigint,
@@ -295,19 +461,14 @@ export class Engine {
 
     // ---- AUTH (optional) ----
     if (opts.auth) {
-      await writeFrame(
-        socket,
-        buildFrame(Op.Auth, AUTH_REQUEST_ID, opts.auth satisfies AuthMsg),
-      );
+      await writeFrame(socket, buildFrame(Op.Auth, AUTH_REQUEST_ID, opts.auth satisfies AuthMsg));
       const authFrame = await nextFrameOrEof(iter);
       if (authFrame.opcode === Op.AuthErr) {
         const err = decodeFrameBody<ErrorMsg>(authFrame);
         throw new ServerError(err.code, err.message);
       }
       if (authFrame.opcode !== Op.AuthOk) {
-        throw new UnexpectedError(
-          `Unexpected frame opcode ${authFrame.opcode} during AUTH`,
-        );
+        throw new UnexpectedError(`Unexpected frame opcode ${authFrame.opcode} during AUTH`);
       }
     }
 
@@ -326,10 +487,7 @@ export class Engine {
         policy: opts.reconnectReconcilePolicy,
         subscriptions: reconcileSubs,
       };
-      await writeFrame(
-        socket,
-        buildFrame(Op.ReconcileClient, RECONCILE_REQUEST_ID, reconcile),
-      );
+      await writeFrame(socket, buildFrame(Op.ReconcileClient, RECONCILE_REQUEST_ID, reconcile));
       const reconcileFrame = await nextFrameOrEof(iter);
       if (reconcileFrame.opcode === Op.Error) {
         const err = decodeFrameBody<ErrorMsg>(reconcileFrame);
@@ -348,8 +506,13 @@ export class Engine {
 
     // ---- Start engine loop ----
     const commandQueue = new BoundedQueue<Command>(COMMAND_QUEUE_CAPACITY);
-    const heartbeatInterval =
-      opts.heartbeatIntervalSeconds ?? DEFAULT_HEARTBEAT_INTERVAL_S;
+    const heartbeatInterval = opts.heartbeatIntervalSeconds ?? DEFAULT_HEARTBEAT_INTERVAL_S;
+
+    // Reserve this engine's incarnation before the loop can deliver: a resumed
+    // session keeps the current one so held deliveries still settle, any other
+    // outcome takes a fresh one so they go stale. The loop stamps this exact
+    // value on every delivery (never a live re-read of the shared context).
+    const incarnation = settleContext.reserve(hello.resume_outcome !== "resumed");
 
     const shutdownMode = { preserveSubscriptions: false };
     const closeReason: CloseReason = { reason: null };
@@ -360,6 +523,7 @@ export class Engine {
       heartbeatIntervalSeconds: heartbeatInterval,
       subscriptionRegistry,
       initialSubscriptions: restoredSubscriptions,
+      incarnation,
       shutdownMode,
       closeReason,
       writeCoalesceBytes: opts.writeCoalesceBytes,
@@ -370,7 +534,7 @@ export class Engine {
       onGoingAway,
     });
 
-    return new Engine(
+    const engine = new Engine(
       commandQueue,
       socket,
       completed,
@@ -378,7 +542,12 @@ export class Engine {
       closeReason,
       resumeIdentity,
       hello.resume_outcome,
+      settleContext,
     );
+    // Bind before returning (and before the loop, suspended at its first read,
+    // can process a delivery) so settlement routes to this live engine.
+    settleContext.bind(incarnation, engine);
+    return engine;
   }
 
   /**
@@ -466,6 +635,8 @@ interface EngineLoopArgs {
   heartbeatIntervalSeconds: number;
   subscriptionRegistry: SubscriptionRegistry;
   initialSubscriptions: Map<bigint, SubState>;
+  /** The incarnation this engine stamps on every manual delivery it hands out. */
+  incarnation: bigint;
   shutdownMode: ShutdownMode;
   closeReason: CloseReason;
   writeCoalesceBytes: number;
@@ -484,6 +655,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
     heartbeatIntervalSeconds,
     subscriptionRegistry,
     initialSubscriptions,
+    incarnation,
     shutdownMode,
     closeReason,
     writeCoalesceBytes,
@@ -576,9 +748,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
           await writeBytes(socket, takePending());
         }
       } catch (err) {
-        markDead(
-          new DisconnectionError(`Socket write failed: ${(err as Error).message}`),
-        );
+        markDead(new DisconnectionError(`Socket write failed: ${(err as Error).message}`));
       } finally {
         flushInFlight = null;
       }
@@ -679,11 +849,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
         markDead(new DisconnectionError("Connection closed by peer"));
       }
     } catch (err) {
-      markDead(
-        new DisconnectionError(
-          `Read failed: ${(err as Error).message}`,
-        ),
-      );
+      markDead(new DisconnectionError(`Read failed: ${(err as Error).message}`));
     }
   })();
 
@@ -778,7 +944,11 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
       }
       case "subscribe": {
         const reqId = nextReqId();
-        waiters.set(reqId, { kind: "subscribeManual", deferred: cmd.reply, supervised: cmd.supervised });
+        waiters.set(reqId, {
+          kind: "subscribeManual",
+          deferred: cmd.reply,
+          supervised: cmd.supervised,
+        });
         if (!(await sendOrDie(buildFrame(Op.Subscribe, reqId, cmd.req)))) {
           waiters.delete(reqId);
         }
@@ -786,7 +956,11 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
       }
       case "subscribeAutoAck": {
         const reqId = nextReqId();
-        waiters.set(reqId, { kind: "subscribeAuto", deferred: cmd.reply, supervised: cmd.supervised });
+        waiters.set(reqId, {
+          kind: "subscribeAuto",
+          deferred: cmd.reply,
+          supervised: cmd.supervised,
+        });
         if (!(await sendOrDie(buildFrame(Op.Subscribe, reqId, cmd.req)))) {
           waiters.delete(reqId);
         }
@@ -837,16 +1011,13 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
         return;
       }
       case "ack": {
-        const sub = subs.get(cmd.sub_id);
-        if (!sub) {
-          // Sub no longer exists; resolve so caller doesn't hang.
-          cmd.reply.resolve();
-          return;
-        }
+        // Built from the delivery's own durable coordinates (carried on the
+        // command), not a sub-map lookup - so a reconnect that re-keyed the
+        // subscription still settles correctly.
         const msg: AckMsg = {
-          topic: sub.topic,
-          group: sub.group,
-          partition: sub.partition,
+          topic: cmd.topic,
+          group: cmd.group,
+          partition: cmd.partition,
           tags: [cmd.tag],
         };
         // Acks are fire-and-forget (no reply awaited), so they coalesce like
@@ -858,15 +1029,10 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
         return;
       }
       case "nack": {
-        const sub = subs.get(cmd.sub_id);
-        if (!sub) {
-          cmd.reply.resolve();
-          return;
-        }
         const msg: NackMsg = {
-          topic: sub.topic,
-          group: sub.group,
-          partition: sub.partition,
+          topic: cmd.topic,
+          group: cmd.group,
+          partition: cmd.partition,
           tags: [cmd.tag],
           requeue: cmd.requeue,
           not_before: cmd.not_before,
@@ -1020,7 +1186,13 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
           const inflight: InternalInflight = {
             ...base,
             deliver_request_id: frame.requestId,
-            sub_id: d.sub_id,
+            // Durable settle coordinates + this engine's incarnation, captured
+            // now so a later settle routes to the current engine (or goes stale)
+            // without depending on this engine's sub map surviving a reconnect.
+            topic: sub.topic,
+            group: sub.group,
+            partition: sub.partition,
+            incarnation,
           };
           // Backpressure: this awaits if user code isn't keeping up. That's
           // the prefetch contract.
@@ -1090,9 +1262,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
         const closed = decodeFrameBody<SubscriptionClosedMsg>(frame);
         const sub = subs.get(closed.sub_id);
         if (sub) {
-          sub.delivery.queue.close(
-            new SubscriptionClosedError(closed.code, closed.message),
-          );
+          sub.delivery.queue.close(new SubscriptionClosedError(closed.code, closed.message));
           subs.delete(closed.sub_id);
           subscriptionRegistry.delete(closed.sub_id);
         }
@@ -1123,9 +1293,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
           markDead(
             retryAdvice(failure) === "do_not_retry"
               ? failure
-              : new DisconnectionError(
-                  `Server connection error ${err.code}: ${err.message}`,
-                ),
+              : new DisconnectionError(`Server connection error ${err.code}: ${err.message}`),
           );
         }
         return;
@@ -1156,8 +1324,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
   // ---- cleanup ----
   clearInterval(heartbeatHandle);
 
-  const cleanupError =
-    fatalError ?? new DisconnectionError("engine shutdown");
+  const cleanupError = fatalError ?? new DisconnectionError("engine shutdown");
 
   // Fail all waiters.
   for (const w of waiters.values()) {
@@ -1264,9 +1431,7 @@ function concatChunks(chunks: Uint8Array[], totalBytes: number): Uint8Array {
   return out;
 }
 
-async function nextFrameOrEof(
-  iter: AsyncIterator<Frame>,
-): Promise<Frame> {
+async function nextFrameOrEof(iter: AsyncIterator<Frame>): Promise<Frame> {
   const result = await iter.next();
   if (result.done) {
     throw new EofError("Connection closed before expected frame");

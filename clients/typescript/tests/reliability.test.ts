@@ -10,6 +10,7 @@ import {
   RedirectError,
   SerializationError,
   ServerError,
+  StaleDeliveryError,
   UnexpectedError,
   isRetryable,
   retryAdvice,
@@ -36,10 +37,12 @@ test("retryAdvice classifies errors intuitively", () => {
     assert.equal(retryAdvice(err), "retry", err.name);
     assert.equal(isRetryable(err), true, err.name);
   }
-  // Not-found, invalid, and local request errors do not retry.
+  // Not-found, invalid, a stale delivery (it redelivers on its own), and local
+  // request errors do not retry.
   for (const err of [
     new ServerError(404, "gone"),
     new ServerError(400, "bad"),
+    new StaleDeliveryError(),
     new DeserializationError("x"),
     new SerializationError("x"),
     new UnexpectedError("x"),
