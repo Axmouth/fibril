@@ -1128,6 +1128,23 @@ impl ReplicationProgressCell {
     }
 }
 
+async fn wait_for_replication_progress(
+    changed: &Notify,
+    deadline: tokio::time::Instant,
+    mut satisfied: impl FnMut() -> bool,
+) -> Result<(), tokio::time::error::Elapsed> {
+    loop {
+        // notify_waiters is observed from this future's creation, even before
+        // polling. Create it before reading progress so a final report between
+        // the check and the await cannot leave satisfied progress asleep.
+        let notified = changed.notified();
+        if satisfied() {
+            return Ok(());
+        }
+        tokio::time::timeout_at(deadline, notified).await?;
+    }
+}
+
 impl ReplicationConfirmGate {
     /// Wait until the queue's assignment durability policy is satisfied for a
     /// message at `offset` (the owner's own durable write already counts). No
@@ -1204,31 +1221,103 @@ impl ReplicationConfirmGate {
         // Wait for the durability ack count: enough followers durable past this
         // offset. Unlike the ISR floor, this IS a wait — the acks are in flight
         // and just need replication to catch up to the offset.
-        loop {
-            let satisfied = {
-                let followers = cell.lock_followers();
-                assignment
-                    .followers
-                    .iter()
-                    .filter(|follower| {
-                        followers
-                            .get(*follower)
-                            .is_some_and(|progress| progress.message_next > offset)
-                    })
-                    .count()
-                    >= required_followers
-            };
-            if satisfied {
-                return Ok(());
-            }
-            let notified = cell.changed.notified();
-            if tokio::time::timeout_at(deadline, notified).await.is_err() {
-                return Err(BrokerError::Unknown(format!(
-                    "publish confirm timed out after {timeout_ms}ms: {:?} requires {} follower acknowledgement(s) past offset {offset} on {}/{}",
-                    assignment.durability, required_followers, key.tp, key.part
-                )));
-            }
+        wait_for_replication_progress(&cell.changed, deadline, || {
+            let followers = cell.lock_followers();
+            assignment
+                .followers
+                .iter()
+                .filter(|follower| {
+                    followers
+                        .get(*follower)
+                        .is_some_and(|progress| progress.message_next > offset)
+                })
+                .count()
+                >= required_followers
+        })
+        .await
+        .map_err(|_| BrokerError::Unknown(format!(
+            "publish confirm timed out after {timeout_ms}ms: {:?} requires {} follower acknowledgement(s) past offset {offset} on {}/{}",
+            assignment.durability, required_followers, key.tp, key.part
+        )))
+    }
+}
+
+#[cfg(test)]
+mod replication_confirm_wait_tests {
+    use super::wait_for_replication_progress;
+    use std::{cell::Cell, time::Duration};
+    use tokio::{sync::Notify, time::Instant};
+
+    #[tokio::test(start_paused = true)]
+    async fn progress_between_check_and_wait_is_not_lost() {
+        let changed = Notify::new();
+        let covered = Cell::new(false);
+        let start = Instant::now();
+        let result =
+            wait_for_replication_progress(&changed, start + Duration::from_secs(1), || {
+                let observed = covered.get();
+                if !observed {
+                    // A final follower report arrives after the old progress was
+                    // read, with no subsequent report to rescue a missed wakeup.
+                    covered.set(true);
+                    changed.notify_waiters();
+                }
+                observed
+            })
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "durable progress must not wait for another report"
+        );
+        assert_eq!(Instant::now(), start);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn final_report_wakes_an_existing_waiter() {
+        let changed = Notify::new();
+        let covered = Cell::new(false);
+        let start = Instant::now();
+        let wait = wait_for_replication_progress(&changed, start + Duration::from_secs(1), || {
+            covered.get()
+        });
+        tokio::pin!(wait);
+        assert!(futures::poll!(wait.as_mut()).is_pending());
+
+        covered.set(true);
+        changed.notify_waiters();
+        assert!(wait.await.is_ok());
+        assert_eq!(Instant::now(), start);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unrelated_notifications_do_not_extend_the_deadline() {
+        let changed = Notify::new();
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let wait = wait_for_replication_progress(&changed, deadline, || false);
+        tokio::pin!(wait);
+        assert!(futures::poll!(wait.as_mut()).is_pending());
+
+        for _ in 0..2 {
+            tokio::time::advance(Duration::from_millis(40)).await;
+            changed.notify_waiters();
+            assert!(futures::poll!(wait.as_mut()).is_pending());
         }
+        tokio::time::advance(Duration::from_millis(20)).await;
+        assert!(wait.await.is_err());
+        assert_eq!(Instant::now(), deadline);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn covered_progress_does_not_wait_for_a_notification() {
+        let changed = Notify::new();
+        let start = Instant::now();
+        assert!(
+            wait_for_replication_progress(&changed, start + Duration::from_secs(1), || true)
+                .await
+                .is_ok()
+        );
+        assert_eq!(Instant::now(), start);
     }
 }
 
