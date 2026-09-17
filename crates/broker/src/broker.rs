@@ -1521,6 +1521,9 @@ pub struct Broker<
     /// otherwise diverge and leave a stale owner accepting writes after a fast
     /// failover.
     locally_owned: Arc<DashMap<QueueKey, ()>>,
+    /// Local retirement precedes assignment-watch propagation. Reject stale
+    /// reconnects until a fresh assignment explicitly brings the partition back.
+    retired_queues: DashMap<QueueKey, ()>,
     /// Opt-in exclusive consumer-group routing: maps cohort membership to the
     /// per-partition delivery gate. Absent cohorts leave delivery competing.
     exclusive_groups: Mutex<ExclusiveGroupRouter>,
@@ -1723,6 +1726,7 @@ impl<
             replication_timing: Arc::new(ReplicationTimingMetrics::default()),
             assignment_cache: Arc::new(DashMap::new()),
             locally_owned: Arc::new(DashMap::new()),
+            retired_queues: DashMap::new(),
             exclusive_groups: Mutex::new(ExclusiveGroupRouter::new(default_consumer_target)),
             repartition_transitions: Mutex::new(HashMap::new()),
             pending_settles: Arc::new(AtomicUsize::new(0)),
@@ -2022,7 +2026,11 @@ impl<
         partition: Partition,
         group: Option<&str>,
     ) -> bool {
-        self.ownership.owns_queue(topic, partition, group)
+        !self.retired_queues.contains_key(&QueueKey {
+            tp: topic.to_string(),
+            part: partition,
+            group: group.map(str::to_string),
+        }) && self.ownership.owns_queue(topic, partition, group)
     }
 
     pub(crate) fn ensure_queue_owner(
@@ -2031,7 +2039,7 @@ impl<
         partition: Partition,
         group: Option<&str>,
     ) -> Result<(), BrokerError> {
-        if self.ownership.owns_queue(topic, partition, group) {
+        if self.owns_queue_partition(topic, partition, group) {
             return Ok(());
         }
 
@@ -2078,7 +2086,7 @@ impl<
         partition: Partition,
         group: Option<&str>,
     ) -> Result<(), BrokerError> {
-        if self.ownership.owns_queue(topic, partition, group) {
+        if self.owns_queue_partition(topic, partition, group) {
             return Ok(());
         }
         if group.is_none()
@@ -2100,6 +2108,9 @@ impl<
         partition: Partition,
         group: Option<&str>,
     ) -> Result<(), BrokerError> {
+        // The caller holds this queue's eviction guard. Recheck after acquiring
+        // it so a request admitted before retirement cannot reopen deleted logs.
+        self.ensure_queue_owner(topic, partition, group)?;
         self.engine
             .materialize(topic, partition.id(), group)
             .await
@@ -3067,6 +3078,17 @@ impl<
         let n_old = n_old.max(1);
         let n_new = n_new.max(1);
         let grow = n_new > n_old;
+        if grow {
+            // Watch notifications can coalesce a removal and re-addition into
+            // one unchanged owner assignment. The grow itself also establishes
+            // that these indices are live again, so it must release their fence.
+            self.retired_queues.retain(|key, _| {
+                key.tp != topic
+                    || key.group.as_deref() != group
+                    || key.part.id() < n_old
+                    || key.part.id() >= n_new
+            });
+        }
         for entry in self.queues.iter() {
             let qk = entry.key();
             if qk.tp != topic || qk.group.as_deref() != group {
@@ -3246,16 +3268,23 @@ impl<
         part: u32,
         group: Option<&str>,
     ) -> Result<DestroyOutcome, BrokerError> {
-        // Drop the local loop state so the delivery loop stops referencing it.
-        self.queues.retain(|qk, qs| {
-            let retiring = qk.tp == topic && qk.part.id() == part && qk.group.as_deref() == group;
-            if retiring {
-                for consumer in qs.consumers.iter() {
-                    consumer.value().close(ConsumerCloseCause::OwnerMoved);
-                }
-            }
-            !retiring
-        });
+        // Assignment removal and the shrink reclaimer run independently. Drain
+        // replication before deleting its logs, even if StopFollower has not
+        // reached this node yet; an active ingest could otherwise reopen them.
+        let queue = QueueIdentity::new(topic, Partition::new(part), group);
+        let key = QueueKey {
+            tp: topic.to_string(),
+            part: Partition::new(part),
+            group: group.map(str::to_string),
+        };
+        self.retired_queues.insert(key.clone(), ());
+        let qs = self.queues.get(&key).map(|entry| entry.value().clone());
+        let _eviction_guard = match qs.as_ref() {
+            Some(qs) => Some(qs.lock_for_eviction().await),
+            None => None,
+        };
+        self.stop_follower_replication_worker(&queue).await;
+        self.stop_owner_queue_runtime(&key);
         Ok(self.engine.destroy_partition(topic, part, group).await?)
     }
 
@@ -4655,6 +4684,18 @@ impl Broker<StromaEngine> {
     ) -> Result<BrokerAssignmentTransitionApply, BrokerError> {
         let topic = transition.queue.topic.to_string();
         let group = transition.queue.group.as_deref();
+        if matches!(
+            transition.intent,
+            LocalAssignmentIntent::BecomeOwner | LocalAssignmentIntent::BecomeFollower
+        ) {
+            // A later grow/re-declaration creates a new local assignment. Refresh
+            // and removal of the retired assignment must not lift this fence.
+            self.retired_queues.remove(&QueueKey {
+                tp: topic.clone(),
+                part: transition.queue.partition,
+                group: transition.queue.group.clone(),
+            });
+        }
         // Confirm policies read the assignment governing this queue.
         match &transition.next {
             Some(next) => self.cache_queue_assignment(next),

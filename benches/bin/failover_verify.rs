@@ -15,7 +15,7 @@
 //! The guarantee is: every CONFIRMED id appears in received at least once, and
 //! no phantom ids appear. Duplicates are expected (at-least-once) and quantified.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -153,11 +153,13 @@ async fn main() -> anyhow::Result<()> {
     let confirmed: Arc<Mutex<HashSet<u64>>> = Arc::new(Mutex::new(HashSet::new()));
     let send_failures = Arc::new(AtomicU64::new(0));
     let recovery_confirmed = Arc::new(AtomicU64::new(0));
+    let confirmation_errors = Arc::new(Mutex::new(BTreeMap::<String, u64>::new()));
     {
         let confirmed = confirmed.clone();
         let send_failures = send_failures.clone();
         let recovery_confirmed = recovery_confirmed.clone();
         let recovery_marker = args.recovery_marker.clone();
+        let confirmation_errors = confirmation_errors.clone();
         let topic = args.topic.clone();
         let addr = addr.clone();
         let count = args.count;
@@ -190,10 +192,16 @@ async fn main() -> anyhow::Result<()> {
                     .publish_with_confirmation(NewMessage::raw(encode(seq, 256)))
                     .await
                 {
-                    Ok(conf) => inflight.push(async move {
-                        let ok = conf.confirmed().await.is_ok();
-                        (seq, ok, after_kill)
-                    }),
+                    Ok(conf) => {
+                        let errors = confirmation_errors.clone();
+                        inflight.push(async move {
+                            let result = conf.confirmed().await;
+                            if let Err(error) = &result {
+                                *errors.lock().unwrap().entry(error.to_string()).or_default() += 1;
+                            }
+                            (seq, result.is_ok(), after_kill)
+                        });
+                    }
                     Err(_) => {
                         send_failures.fetch_add(1, Ordering::Relaxed);
                     }
@@ -259,6 +267,11 @@ async fn main() -> anyhow::Result<()> {
     println!("received unique ids:  {}", received_keys.len());
     println!("duplicate deliveries: {duplicates}");
     println!("unconfirmed_delivered:{unconfirmed_delivered}  (saved-but-unacked, expected ok)");
+    let errors = confirmation_errors.lock().unwrap();
+    println!("confirmation_failures: {}", errors.values().sum::<u64>());
+    for (error, count) in errors.iter() {
+        println!("CONFIRM_ERROR count={count} error={error}");
+    }
     println!("LOSS (confirmed not received): {}", loss.len());
     println!("PHANTOM (received never sent): {}", phantom.len());
     let recovery_confirmed = recovery_confirmed.load(Ordering::Relaxed);

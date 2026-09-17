@@ -1480,6 +1480,132 @@ async fn assignment_transition_apply_can_stop_follower() {
 }
 
 #[tokio::test]
+async fn retirement_stops_follower_before_late_assignment_cleanup() {
+    let (broker, _dir) = open_test_broker().await;
+    let topic = "retired-before-assignment-cleanup";
+    let start_following = assignment_transition(
+        topic,
+        LocalAssignmentIntent::BecomeFollower,
+        None,
+        Some(LocalAssignmentRole::Follower),
+    );
+    broker
+        .apply_assignment_transition(&start_following)
+        .await
+        .unwrap();
+    assert!(broker.has_follower_replication_worker(topic, Partition::new(0), Some("workers")));
+    assert_eq!(
+        broker
+            .retire_partition(topic, 0, Some("workers"))
+            .await
+            .unwrap(),
+        DestroyOutcome::Destroyed
+    );
+    assert!(!broker.has_follower_replication_worker(topic, Partition::new(0), Some("workers")));
+    let stop = assignment_transition(
+        topic,
+        LocalAssignmentIntent::StopFollower,
+        Some(LocalAssignmentRole::Follower),
+        None,
+    );
+    broker.apply_assignment_transition(&stop).await.unwrap();
+    assert!(
+        broker
+            .debug_snapshot()
+            .await
+            .unwrap()
+            .queues
+            .iter()
+            .all(|q| q.topic != topic)
+    );
+    broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn retirement_fences_stale_reconnects_until_fresh_assignment() {
+    // Standalone ownership deliberately keeps saying "owned", modelling the
+    // interval before this node observes the committed assignment removal.
+    let (broker, _dir) = open_test_broker().await;
+    let topic = "retired-stale-reconnect";
+    let group = Some("workers".to_string());
+    drop(
+        broker
+            .get_publisher(topic, Partition::new(0), &group)
+            .await
+            .unwrap(),
+    );
+    broker
+        .retire_partition(topic, 0, group.as_deref())
+        .await
+        .unwrap();
+    assert!(!broker.owns_queue_partition(topic, Partition::new(0), group.as_deref()));
+    assert!(matches!(
+        broker.get_publisher(topic, Partition::new(0), &group).await,
+        Err(BrokerError::NotOwner { .. })
+    ));
+    assert!(matches!(
+        broker
+            .subscribe(
+                topic,
+                Partition::new(0),
+                group.as_deref(),
+                Uuid::now_v7(),
+                ConsumerConfig::default()
+            )
+            .await,
+        Err(BrokerError::NotOwner { .. })
+    ));
+    assert!(
+        broker
+            .debug_snapshot()
+            .await
+            .unwrap()
+            .queues
+            .iter()
+            .all(|q| q.topic != topic)
+    );
+
+    // Assignment removal followed by a grow/re-declaration re-enables this key.
+    let fresh = assignment_transition(
+        topic,
+        LocalAssignmentIntent::BecomeOwner,
+        None,
+        Some(LocalAssignmentRole::Owner),
+    );
+    broker.apply_assignment_transition(&fresh).await.unwrap();
+    drop(
+        broker
+            .get_publisher(topic, Partition::new(0), &group)
+            .await
+            .unwrap(),
+    );
+    broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn grow_releases_retirement_fence_when_assignment_watch_coalesces() {
+    let (broker, _dir) = open_test_broker().await;
+    let topic = "regrown-coalesced-assignment";
+    drop(
+        broker
+            .get_publisher(topic, Partition::new(1), &None)
+            .await
+            .unwrap(),
+    );
+    broker.retire_partition(topic, 1, None).await.unwrap();
+    assert!(!broker.owns_queue_partition(topic, Partition::new(1), None));
+    // No BecomeOwner event: the watch may have skipped the intermediate removal.
+    broker.apply_repartition_transition(topic, None, 3, 1, 2);
+    drop(
+        broker
+            .get_publisher(topic, Partition::new(1), &None)
+            .await
+            .unwrap(),
+    );
+    broker.shutdown().await;
+}
+
+#[tokio::test]
 async fn refresh_follower_keeps_replication_worker_progress() {
     let (owner, _owner_dir) = open_test_broker().await;
     let (follower, _follower_dir) = open_test_broker().await;
