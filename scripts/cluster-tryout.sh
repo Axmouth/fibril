@@ -50,6 +50,7 @@ FAILOVER_SMOKE=false
 FAILOVER_VERIFY=false
 FAILOVER_VERIFY_COUNT="${FAILOVER_VERIFY_COUNT:-30000}"
 FAILOVER_VERIFY_RATE="${FAILOVER_VERIFY_RATE:-5000}"
+FAILOVER_VERIFY_RECOVERY_MIN="${FAILOVER_VERIFY_RECOVERY_MIN:-0}"
 REPARTITION_SMOKE=false
 # Segment preallocation for every node (0 = off). Exercises crash recovery over
 # preallocated, zero-padded segments end to end. `--prealloc` with no value uses 64 MiB.
@@ -1037,6 +1038,11 @@ run_failover_verify() {
   fi
   assignment="$(wait_assignment_for_topic "$topic")"
   echo "  initial assignment: $assignment"
+  if [[ -n "${FAILOVER_VERIFY_EXPECT_FOLLOWERS:-}" ]] &&
+     [[ "$(jq '.followers | length' <<< "$assignment")" -ne "$FAILOVER_VERIFY_EXPECT_FOLLOWERS" ]]; then
+    echo "FAIL: failover-verify expected $FAILOVER_VERIFY_EXPECT_FOLLOWERS data followers: $assignment" >&2
+    return 1
+  fi
   durability_mode="$(echo "$assignment" | jq -r '.durability.mode // "local_durable"')"
   if [[ "$durability_mode" != "replica_durable" && "$durability_mode" != "majority_durable" ]]; then
     echo "FAIL: failover-verify needs a durable replica assignment, got $durability_mode" >&2
@@ -1059,11 +1065,16 @@ run_failover_verify() {
   connect_node="$follower_node"
 
   echo "  launching verifier (count=$FAILOVER_VERIFY_COUNT rate=$FAILOVER_VERIFY_RATE/s) against survivor broker-$connect_node; owner=broker-$owner_node will be killed mid-run"
+  local recovery_args=()
+  if [[ "$FAILOVER_VERIFY_RECOVERY_MIN" -gt 0 ]]; then
+    recovery_args=(--recovery-marker "$vdir/owner-exited" --min-recovery-confirmed "$FAILOVER_VERIFY_RECOVERY_MIN")
+  fi
   "$VERIFY_BIN" \
     --broker-addr "127.0.0.1:$((BASE_BROKER_PORT + connect_node))" \
     --topic "$topic" \
     --count "$FAILOVER_VERIFY_COUNT" \
     --rate-per-sec "$FAILOVER_VERIFY_RATE" \
+    "${recovery_args[@]}" \
     >"$vlog" 2>&1 &
   verify_pid=$!
 
@@ -1079,11 +1090,12 @@ run_failover_verify() {
   fi
   wait "$owner_pid" 2>/dev/null || true
 
+  touch "$vdir/owner-exited"
   echo "  waiting for the verifier to finish (producer + consumer ride-through)..."
   if wait "$verify_pid"; then vexit=0; else vexit=$?; fi
 
   echo "  --- verifier verdict ---"
-  grep -E "CONFIRMED|RECEIVED|LOSS|PHANTOM|DUPLICATE|unconfirmed|PASS|FAIL" "$vlog" | sed 's/^/  /' || true
+  grep -E "CONFIRMED|RECEIVED|LOSS|PHANTOM|DUPLICATE|unconfirmed|RECOVERY|PASS|FAIL" "$vlog" | sed 's/^/  /' || true
   echo "  ------------------------"
   if [[ "$vexit" -ne 0 ]]; then
     echo "FAIL: failover-verify reported loss/phantom (exit $vexit); full log: $vlog" >&2

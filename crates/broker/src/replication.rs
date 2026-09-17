@@ -677,8 +677,14 @@ impl FollowerReplicationWorkerRuntime {
     pub(crate) async fn stop_and_wait(&self) {
         self.stopping.store(true, Ordering::Release);
         self.shutdown.cancel();
-        while self.active_ticks.load(Ordering::Acquire) != 0 {
-            self.idle.notified().await;
+        loop {
+            // Register before checking: the final tick may finish between the
+            // predicate and await, with no later tick left to send another wake.
+            let idle = self.idle.notified();
+            if self.active_ticks.load(Ordering::Acquire) == 0 {
+                break;
+            }
+            idle.await;
         }
     }
 }
@@ -691,6 +697,25 @@ pub(crate) struct FollowerReplicationTickGuard {
 impl Drop for FollowerReplicationTickGuard {
     fn drop(&mut self) {
         self.runtime.finish_tick();
+    }
+}
+
+#[cfg(test)]
+mod follower_runtime_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stop_waits_for_last_tick_and_rejects_new_ticks() {
+        let runtime = Arc::new(FollowerReplicationWorkerRuntime::new(3, 7));
+        let tick = runtime.begin_tick().unwrap();
+        let stop = runtime.stop_and_wait();
+        tokio::pin!(stop);
+        assert!(futures::poll!(stop.as_mut()).is_pending());
+        assert!(runtime.begin_tick().is_none());
+        drop(tick);
+        tokio::time::timeout(std::time::Duration::from_secs(1), stop)
+            .await
+            .expect("the final tick must release the drain without another notification");
     }
 }
 
@@ -2452,6 +2477,16 @@ impl<
         };
         worker.stop_and_wait().await;
         true
+    }
+
+    pub(crate) async fn stop_follower_replication_worker_preserving_state(
+        &self,
+        queue: &crate::coordination::QueueIdentity,
+    ) -> Option<FollowerReplicationWorkerState> {
+        let (_, worker) = self.follower_replication_workers.remove(queue)?;
+        worker.stop_and_wait().await;
+        let state = worker.state.lock().await.clone();
+        Some(state)
     }
 
     pub(crate) async fn stop_all_follower_replication_workers(&self) {

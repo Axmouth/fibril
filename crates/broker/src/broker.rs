@@ -4458,7 +4458,8 @@ impl Broker<StromaEngine> {
             match &result {
                 Ok(BrokerAssignmentTransitionApply::Applied(
                     LocalAssignmentIntent::BecomeFollower
-                    | LocalAssignmentIntent::DemoteOwnerToFollower,
+                    | LocalAssignmentIntent::DemoteOwnerToFollower
+                    | LocalAssignmentIntent::RefreshFollower,
                 )) => {
                     if let Some(assignment) = transition.next.clone() {
                         if let Err(err) = self.spawn_follower_replication_worker_loop(
@@ -4515,7 +4516,8 @@ impl Broker<StromaEngine> {
             match &result {
                 Ok(BrokerAssignmentTransitionApply::Applied(
                     LocalAssignmentIntent::BecomeFollower
-                    | LocalAssignmentIntent::DemoteOwnerToFollower,
+                    | LocalAssignmentIntent::DemoteOwnerToFollower
+                    | LocalAssignmentIntent::RefreshFollower,
                 )) => {
                     if let Some(assignment) = transition.next.clone() {
                         let queue = Self::stream_worker_identity(&assignment.stream);
@@ -4677,8 +4679,32 @@ impl Broker<StromaEngine> {
             LocalAssignmentIntent::Noop => Ok(BrokerAssignmentTransitionApply::Noop(
                 LocalAssignmentIntent::Noop,
             )),
-            LocalAssignmentIntent::RefreshOwner | LocalAssignmentIntent::RefreshFollower => {
+            LocalAssignmentIntent::RefreshOwner => {
                 Ok(BrokerAssignmentTransitionApply::Noop(transition.intent))
+            }
+            LocalAssignmentIntent::RefreshFollower => {
+                let source_changed = matches!((&transition.previous, &transition.next),
+                    (Some(previous), Some(next)) if previous.owner != next.owner || previous.epoch != next.epoch);
+                if !source_changed {
+                    return Ok(BrokerAssignmentTransitionApply::Noop(transition.intent));
+                }
+                // A follower can retain its role while its source changes. Drain
+                // old-epoch work before fencing and restarting at the saved cursors.
+                let saved = self
+                    .stop_follower_replication_worker_preserving_state(&transition.queue)
+                    .await;
+                self.become_replication_follower_with_epoch(
+                    &topic,
+                    transition.queue.partition,
+                    group,
+                    assignment_epoch,
+                )
+                .await?;
+                let runtime = self.ensure_follower_replication_worker(&transition.queue);
+                if let Some(saved) = saved {
+                    *runtime.state.lock().await = saved;
+                }
+                Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
             }
             LocalAssignmentIntent::BecomeOwner => {
                 if self
@@ -4906,8 +4932,26 @@ impl Broker<StromaEngine> {
             LocalAssignmentIntent::Noop => Ok(BrokerAssignmentTransitionApply::Noop(
                 LocalAssignmentIntent::Noop,
             )),
-            LocalAssignmentIntent::RefreshOwner | LocalAssignmentIntent::RefreshFollower => {
+            LocalAssignmentIntent::RefreshOwner => {
                 Ok(BrokerAssignmentTransitionApply::Noop(transition.intent))
+            }
+            LocalAssignmentIntent::RefreshFollower => {
+                let source_changed = matches!((&transition.previous, &transition.next),
+                    (Some(previous), Some(next)) if previous.owner != next.owner || previous.epoch != next.epoch);
+                if !source_changed {
+                    return Ok(BrokerAssignmentTransitionApply::Noop(transition.intent));
+                }
+                let saved = self
+                    .stop_follower_replication_worker_preserving_state(&identity)
+                    .await;
+                self.engine
+                    .become_stream_follower_with_epoch(&topic, partition.id(), assignment_epoch)
+                    .await?;
+                let runtime = self.ensure_follower_replication_worker(&identity);
+                if let Some(saved) = saved {
+                    *runtime.state.lock().await = saved;
+                }
+                Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
             }
             LocalAssignmentIntent::BecomeOwner => {
                 // Cold streams become owner lazily on first traffic (route_stream

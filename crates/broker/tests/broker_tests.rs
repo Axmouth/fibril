@@ -1535,19 +1535,33 @@ async fn refresh_follower_keeps_replication_worker_progress() {
         .await
         .unwrap();
 
-    let refresh = assignment_transition(
+    let mut refresh = assignment_transition(
         "transition-refresh-follower",
         LocalAssignmentIntent::RefreshFollower,
         Some(LocalAssignmentRole::Follower),
         Some(LocalAssignmentRole::Follower),
     );
+    assert!(before.message_next_offset > 0);
+    assert!(before.event_next_offset > 0);
+    refresh.previous = Some(PartitionAssignment::new(
+        queue.clone(),
+        "old-owner",
+        vec!["follower".into()],
+        0,
+    ));
+    refresh.next = Some(PartitionAssignment::new(
+        queue.clone(),
+        "new-owner",
+        vec!["follower".into()],
+        1,
+    ));
     let outcome = follower
         .apply_assignment_transition(&refresh)
         .await
         .unwrap();
     assert_eq!(
         outcome,
-        BrokerAssignmentTransitionApply::Noop(LocalAssignmentIntent::RefreshFollower)
+        BrokerAssignmentTransitionApply::Applied(LocalAssignmentIntent::RefreshFollower)
     );
     let after = follower
         .follower_replication_worker_snapshot(
@@ -1558,6 +1572,44 @@ async fn refresh_follower_keeps_replication_worker_progress() {
         .await
         .unwrap();
     assert_eq!(after, before);
+
+    let stale = owner
+        .read_owner_replication_records(
+            "transition-refresh-follower",
+            Partition::new(0),
+            Some("workers"),
+            0,
+            0,
+            10,
+            10,
+            usize::MAX,
+            0,
+        )
+        .await
+        .unwrap();
+    let stale = follower
+        .apply_follower_replication_records(
+            "transition-refresh-follower",
+            Partition::new(0),
+            Some("workers"),
+            ReplicationResourceKind::Queue,
+            stale,
+        )
+        .await
+        .unwrap();
+    let BrokerFollowerReplicationApply::Applied(stale) = stale else {
+        panic!("unexpected checkpoint requirement")
+    };
+    assert!(matches!(
+        stale.message_log,
+        Some(
+            fibril_broker::queue_engine::ReplicatedAppendOutcome::StaleEpoch {
+                current_epoch: 1,
+                attempted_epoch: 0
+            }
+        )
+    ));
+    assert_eq!(stale.event_log, None);
 
     owner.shutdown().await;
     follower.shutdown().await;
@@ -4593,6 +4645,90 @@ impl BrokerOwnerReplicationPeer for EmptyOwnerPeer {
 
 struct StaticOwnerPeerResolver {
     peer: Arc<dyn BrokerOwnerReplicationPeer>,
+}
+
+struct SwitchingOwnerPeerResolver {
+    old: Arc<BlockingOwnerPeer>,
+    new: Arc<BlockingOwnerPeer>,
+}
+
+impl BrokerOwnerReplicationPeerResolver for SwitchingOwnerPeerResolver {
+    fn resolve_owner_peer<'a>(
+        &'a self,
+        assignment: &'a PartitionAssignment,
+        _kind: ReplicationResourceKind,
+    ) -> BoxFuture<'a, Result<Option<Arc<dyn BrokerOwnerReplicationPeer>>, BrokerError>> {
+        let peer: Arc<dyn BrokerOwnerReplicationPeer> = if assignment.owner == "old-owner" {
+            self.old.clone()
+        } else {
+            assert_eq!(assignment.owner, "new-owner");
+            self.new.clone()
+        };
+        Box::pin(async move { Ok(Some(peer)) })
+    }
+}
+
+async fn assert_remaining_follower_retargets_owner(stream: bool) {
+    let topic = if stream {
+        "stream-owner-refresh"
+    } else {
+        "queue-owner-refresh"
+    };
+    let coordination = Arc::new(StaticCoordination::new(
+        "node-a",
+        coordination_snapshot(Vec::new(), 0),
+    ));
+    let (broker, _dir) = open_test_broker_with_ownership(coordination.clone()).await;
+    let old = Arc::new(BlockingOwnerPeer::new());
+    let new = Arc::new(BlockingOwnerPeer::new());
+    broker.spawn_assignment_watcher_with_follower_replication(
+        coordination.clone(),
+        Arc::new(SwitchingOwnerPeerResolver {
+            old: old.clone(),
+            new: new.clone(),
+        }),
+        FollowerReplicationWorkerConfig {
+            stream_enabled: false,
+            ..Default::default()
+        },
+    );
+    let snapshot = |owner: &str, epoch: u64| {
+        let mut snapshot = coordination_snapshot(Vec::new(), epoch);
+        if stream {
+            let identity = StreamIdentity::new(topic, Partition::new(0));
+            snapshot.stream_assignments.insert(
+                identity.clone(),
+                StreamAssignment::new(identity, owner, vec!["node-a".into()], epoch),
+            );
+        } else {
+            let queue = QueueIdentity::new(topic, Partition::new(0), None);
+            snapshot.assignments.insert(
+                queue.clone(),
+                PartitionAssignment::new(queue, owner, vec!["node-a".into()], epoch),
+            );
+        }
+        snapshot
+    };
+    coordination.update_snapshot(snapshot("old-owner", 1));
+    tokio::time::timeout(Duration::from_secs(2), old.wait_for_read())
+        .await
+        .expect("initial follower must start its old-owner read");
+    coordination.update_snapshot(snapshot("new-owner", 2));
+    let retargeted = tokio::time::timeout(Duration::from_secs(2), new.wait_for_read()).await;
+    broker.shutdown().await;
+    retargeted.expect("remaining follower must cancel the old read and contact the new owner");
+    assert_eq!(old.reads.load(Ordering::Acquire), 1);
+    assert_eq!(new.reads.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test]
+async fn queue_remaining_follower_retargets_owner() {
+    assert_remaining_follower_retargets_owner(false).await;
+}
+
+#[tokio::test]
+async fn stream_remaining_follower_retargets_owner() {
+    assert_remaining_follower_retargets_owner(true).await;
 }
 
 impl StaticOwnerPeerResolver {

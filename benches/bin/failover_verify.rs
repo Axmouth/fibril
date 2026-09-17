@@ -49,6 +49,12 @@ struct Args {
     /// producer has finished (and coverage not yet reached).
     #[arg(long, default_value_t = 20)]
     drain_idle_secs: u64,
+    /// Created by the orchestrator after the owner has exited. Only publications
+    /// begun after this marker count toward recovery progress.
+    #[arg(long)]
+    recovery_marker: Option<std::path::PathBuf>,
+    #[arg(long, default_value_t = 0, requires = "recovery_marker")]
+    min_recovery_confirmed: u64,
 }
 
 fn encode(seq: u64, size: usize) -> Vec<u8> {
@@ -67,6 +73,32 @@ fn decode(payload: &[u8]) -> Option<u64> {
         return None; // not ours (e.g. a warm-up message) - ignore
     }
     Some(u64::from_le_bytes(payload[4..12].try_into().ok()?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn existing_identity_invocation_does_not_require_a_marker() {
+        assert!(
+            Args::try_parse_from(["failover_verify", "--broker-addr", "127.0.0.1:7181"]).is_ok()
+        );
+    }
+
+    #[test]
+    fn recovery_threshold_requires_the_owner_exit_marker() {
+        assert!(
+            Args::try_parse_from([
+                "failover_verify",
+                "--broker-addr",
+                "127.0.0.1:7181",
+                "--min-recovery-confirmed",
+                "1000",
+            ])
+            .is_err()
+        );
+    }
 }
 
 #[tokio::main]
@@ -120,9 +152,12 @@ async fn main() -> anyhow::Result<()> {
     let attempted: HashSet<u64> = (0..args.count).collect();
     let confirmed: Arc<Mutex<HashSet<u64>>> = Arc::new(Mutex::new(HashSet::new()));
     let send_failures = Arc::new(AtomicU64::new(0));
+    let recovery_confirmed = Arc::new(AtomicU64::new(0));
     {
         let confirmed = confirmed.clone();
         let send_failures = send_failures.clone();
+        let recovery_confirmed = recovery_confirmed.clone();
+        let recovery_marker = args.recovery_marker.clone();
         let topic = args.topic.clone();
         let addr = addr.clone();
         let count = args.count;
@@ -140,29 +175,36 @@ async fn main() -> anyhow::Result<()> {
             let mut inflight = FuturesUnordered::new();
             for seq in 0..count {
                 while inflight.len() >= window {
-                    if let Some((s, ok)) = inflight.next().await {
+                    if let Some((s, ok, after_kill)) = inflight.next().await {
                         if ok {
                             confirmed.lock().unwrap().insert(s);
+                            if after_kill {
+                                recovery_confirmed.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                     }
                 }
                 tick.tick().await;
+                let after_kill = recovery_marker.as_ref().is_some_and(|path| path.is_file());
                 match publisher
                     .publish_with_confirmation(NewMessage::raw(encode(seq, 256)))
                     .await
                 {
                     Ok(conf) => inflight.push(async move {
                         let ok = conf.confirmed().await.is_ok();
-                        (seq, ok)
+                        (seq, ok, after_kill)
                     }),
                     Err(_) => {
                         send_failures.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
-            while let Some((s, ok)) = inflight.next().await {
+            while let Some((s, ok, after_kill)) = inflight.next().await {
                 if ok {
                     confirmed.lock().unwrap().insert(s);
+                    if after_kill {
+                        recovery_confirmed.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
         });
@@ -219,6 +261,12 @@ async fn main() -> anyhow::Result<()> {
     println!("unconfirmed_delivered:{unconfirmed_delivered}  (saved-but-unacked, expected ok)");
     println!("LOSS (confirmed not received): {}", loss.len());
     println!("PHANTOM (received never sent): {}", phantom.len());
+    let recovery_confirmed = recovery_confirmed.load(Ordering::Relaxed);
+    println!("RECOVERY confirmed after owner exit: {recovery_confirmed}");
+    let recovery_ok = recovery_confirmed >= args.min_recovery_confirmed;
+    if !recovery_ok {
+        println!("RECOVERY required: {}", args.min_recovery_confirmed);
+    }
     if !loss.is_empty() {
         let sample: Vec<u64> = loss.iter().take(10).copied().collect();
         println!("  loss sample: {sample:?}");
@@ -227,13 +275,13 @@ async fn main() -> anyhow::Result<()> {
         let sample: Vec<u64> = phantom.iter().take(10).copied().collect();
         println!("  phantom sample: {sample:?}");
     }
-    let verdict = loss.is_empty() && phantom.is_empty();
+    let verdict = loss.is_empty() && phantom.is_empty() && recovery_ok;
     println!(
         "VERDICT: {}",
         if verdict {
             "PASS - every confirmed id delivered, no phantoms"
         } else {
-            "FAIL - durability/correctness violated"
+            "FAIL - identity coverage or required recovery progress missing"
         }
     );
     if verdict {
