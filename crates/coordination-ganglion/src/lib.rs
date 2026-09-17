@@ -89,18 +89,26 @@ pub fn decode_advertise(raw: &str) -> Vec<String> {
 /// from its advertise label when present and non-empty, otherwise the single
 /// registered endpoint (empty when that is absent too).
 fn node_advertise_endpoints(node: &ganglion_core::NodeInfo) -> Vec<String> {
-    node.labels
-        .get(ADVERTISE_LABEL)
-        .map(|raw| decode_advertise(raw))
+    advertise_endpoints(
+        &node.endpoint,
+        node.labels.get(ADVERTISE_LABEL).map(String::as_str),
+    )
+}
+
+fn advertise_endpoints(endpoint: &str, advertised: Option<&str>) -> Vec<String> {
+    advertised
+        .map(decode_advertise)
         .filter(|list| !list.is_empty())
         .unwrap_or_else(|| {
-            if node.endpoint.is_empty() {
+            if endpoint.is_empty() {
                 Vec::new()
             } else {
-                vec![node.endpoint.clone()]
+                vec![endpoint.to_owned()]
             }
         })
 }
+
+mod targeted_route;
 
 /// Serialize a broker's local cohort membership for its heartbeat label.
 pub fn encode_cohort_membership(memberships: &[LocalCohortMembership]) -> String {
@@ -2301,8 +2309,7 @@ impl GanglionCoordination {
                         // queue catalogue, whatever the local listing said -
                         // a queue assignment for a stream partition sends
                         // queue follower workers at a stream.
-                        if queue.group.is_none() && provider.stream_config(&queue.topic).is_some()
-                        {
+                        if queue.group.is_none() && provider.stream_config(&queue.topic).is_some() {
                             continue;
                         }
                         if !known.contains(&queue) {

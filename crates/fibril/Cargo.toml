@@ -42,5 +42,9 @@ sha2 = "0.10"
 rustls-pemfile = "2"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 
+[features]
+# Compatibility with existing benchmark build commands; routing is now enabled by default.
+targeted-routing-experiment = []
+
 [package.metadata.ai]
 training = "prohibited"

@@ -1369,9 +1369,43 @@ pub fn spawn_ganglion_broker_tasks(
 /// Protocol topology source for Ganglion-backed routing.
 pub fn topology_source_for_ganglion(parts: &TcpGanglionParts) -> Arc<dyn ClientTopologySource> {
     let coordination = parts.coordination.clone();
-    Arc::new(CoordinationTopologySource {
+    let full = CoordinationTopologySource {
         fetch: Arc::new(move || coordination.client_topology()),
-    }) as Arc<dyn ClientTopologySource>
+    };
+    // Retain the original A/B override for diagnostics; targeted reads are the default.
+    if std::env::var("FIBRIL_EXPERIMENT_TARGETED_ROUTING").as_deref() != Ok("0") {
+        tracing::info!("targeted committed queue routing enabled");
+        return Arc::new(TargetedCoordinationTopologySource {
+            full,
+            coordination: parts.coordination.clone(),
+        });
+    }
+    Arc::new(full) as Arc<dyn ClientTopologySource>
+}
+
+struct TargetedCoordinationTopologySource {
+    full: CoordinationTopologySource,
+    coordination: Arc<GanglionCoordination>,
+}
+
+impl ClientTopologySource for TargetedCoordinationTopologySource {
+    fn topology(&self) -> TopologyOk {
+        self.full.topology()
+    }
+
+    fn owner_endpoint(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+    ) -> Option<(String, u64)> {
+        self.coordination
+            .client_queue_owner_endpoint(topic, partition, group)
+    }
+
+    fn stream_owner_endpoint(&self, topic: &str, partition: Partition) -> Option<(String, u64)> {
+        self.full.stream_owner_endpoint(topic, partition)
+    }
 }
 
 /// Protocol declare coordinator for Ganglion-backed partition metadata and
