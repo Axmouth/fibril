@@ -143,11 +143,13 @@ pub type NodeMetaProvider =
 /// with coordination FIRST - the returned count is authoritative (an
 /// already-declared queue's count wins, a conflicting request errors) and
 /// the controller places every partition. Args: topic, group, requested
-/// partition count. Absent = standalone, the local declare is the truth.
+/// partition count, declaration settings. Absent = standalone, where the local
+/// declaration is authoritative.
 pub type QueueDeclareCoordinator = dyn Fn(
         String,
         Option<String>,
         u32,
+        fibril_broker::queue_engine::DeclareMeta,
     ) -> futures::future::BoxFuture<'static, Result<u32, String>>
     + Send
     + Sync;
@@ -1905,19 +1907,20 @@ mod tests {
     #[tokio::test]
     async fn admin_declares_take_the_coordinated_count() {
         // The coordinator's count is authoritative: an admin declare asking
-        // for 3 partitions materializes 5 when the cluster already knows
+        // for 3 partitions returns 5 when the cluster already knows
         // the queue as 5, and a coordination conflict surfaces as 409.
         let server = test_server(RuntimeSettingsLocks::default()).await;
         let server = Arc::try_unwrap(server)
             .ok()
             .expect("sole owner")
-            .with_declare_queue_coordinator(Arc::new(|_topic, _group, requested| {
+            .with_declare_queue_coordinator(Arc::new(|_topic, _group, requested, _meta| {
                 Box::pin(async move { Ok(requested + 2) })
             }))
             .with_declare_stream_coordinator(Arc::new(|_topic, _count, _tier, _retention| {
                 Box::pin(async move { Err("stream partition count conflict".to_string()) })
             }))
             .with_streams(Arc::new(NoopStreamAdmin));
+        let storage = server.storage.clone();
         let app = AdminServer::router(Arc::new(server));
 
         let response = app
@@ -1935,6 +1938,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CREATED);
         let body = response_json(response).await;
         assert_eq!(body["partition_count"], 5);
+        assert!(!storage.is_materialized("orders", 0, None));
 
         let response = app
             .oneshot(

@@ -187,7 +187,7 @@ impl TopologyAdoptionTracker {
 }
 
 /// Server-side writer for declaration coordination: records a resource's
-/// partitioning (count + version) in the replicated store and catalogues its
+/// partitioning and declaration settings in the replicated store and catalogues its
 /// partitions for placement, returning the EFFECTIVE partition count (which may
 /// differ from the request if the resource was already declared). `None`
 /// (standalone) means declare is local-only. Queues and streams live in
@@ -198,6 +198,7 @@ pub trait DeclareCoordinator: Send + Sync {
         topic: &'a str,
         group: Option<&'a str>,
         partition_count: u32,
+        meta: DeclareMeta,
     ) -> futures::future::BoxFuture<'a, Result<u32, String>>;
 
     /// Record a stream's full config (partitioning + durability tier + retention)
@@ -3775,7 +3776,12 @@ where
                 // the requested count directly.
                 let partition_count = if let Some(coordinator) = &declare_coordinator {
                     match coordinator
-                        .declare_partitioning(&declare.topic, declare.group.as_deref(), requested)
+                        .declare_partitioning(
+                            &declare.topic,
+                            declare.group.as_deref(),
+                            requested,
+                            meta.clone(),
+                        )
                         .await
                     {
                         Ok(count) => count,
@@ -3794,44 +3800,39 @@ where
                     requested
                 };
 
-                // Materialize the partitions locally; in cluster mode the
-                // controller assigns ownership and catalogue sync registers them.
+                // Standalone owns every local partition. In cluster mode the
+                // declaration travels through coordination to the assigned owner.
                 let mut failure: Option<(u16, String)> = None;
-                for partition in 0..partition_count {
-                    match broker
-                        .engine()
-                        .declare_queue(
-                            &declare.topic,
-                            partition,
-                            declare.group.as_deref(),
-                            meta.clone(),
-                        )
-                        .await
-                    {
-                        Ok(()) => {}
-                        // A partition the controller has assigned to another
-                        // broker (this one may merely follow it) is that
-                        // owner's to materialize - a role refusal here is not
-                        // a declare failure. Without this, redeclaring an
-                        // already-placed queue through a non-owner failed 500
-                        // and idempotent declares wedged.
-                        Err(StromaError::WrongQueueRole { .. })
-                            if declare_coordinator.is_some() => {}
-                        Err(err @ StromaError::InvalidArgument(_)) => {
-                            failure = Some((400, err.to_string()));
-                            break;
-                        }
-                        Err(err) => {
-                            let trace = format!("{:08x}", uuid::Uuid::now_v7().as_u128() as u32);
-                            tracing::error!("Declare queue failed [trace {trace}]: {err}");
-                            failure = Some((
-                                500,
-                                format!(
-                                    "declare queue failed: {err}. This is a broker-side \
-                                     fault - search the broker logs for trace id {trace}"
-                                ),
-                            ));
-                            break;
+                if declare_coordinator.is_none() {
+                    for partition in 0..partition_count {
+                        match broker
+                            .engine()
+                            .declare_queue(
+                                &declare.topic,
+                                partition,
+                                declare.group.as_deref(),
+                                meta.clone(),
+                            )
+                            .await
+                        {
+                            Ok(()) => {}
+                            Err(err @ StromaError::InvalidArgument(_)) => {
+                                failure = Some((400, err.to_string()));
+                                break;
+                            }
+                            Err(err) => {
+                                let trace =
+                                    format!("{:08x}", uuid::Uuid::now_v7().as_u128() as u32);
+                                tracing::error!("Declare queue failed [trace {trace}]: {err}");
+                                failure = Some((
+                                    500,
+                                    format!(
+                                        "declare queue failed: {err}. This is a broker-side \
+                                         fault - search the broker logs for trace id {trace}"
+                                    ),
+                                ));
+                                break;
+                            }
                         }
                     }
                 }

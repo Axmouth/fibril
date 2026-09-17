@@ -4849,6 +4849,7 @@ async fn declare_uses_coordinator_effective_count() {
             _topic: &'a str,
             _group: Option<&'a str>,
             _partition_count: u32,
+            _meta: fibril_broker::queue_engine::DeclareMeta,
         ) -> futures::future::BoxFuture<'a, Result<u32, String>> {
             let effective = self.0;
             Box::pin(async move { Ok(effective) })
@@ -4868,6 +4869,7 @@ async fn declare_uses_coordinator_effective_count() {
     }
 
     let (broker, dir) = open_test_broker().await;
+    let observer = broker.clone();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let coordinator = Arc::new(FixedCoordinator(5));
@@ -4921,6 +4923,10 @@ async fn declare_uses_coordinator_effective_count() {
         "coordinator count overrides the request"
     );
 
+    assert!(
+        !observer.engine().is_materialized("orders", 0, None),
+        "a coordinated declaration must not create an owner log on the receiving broker"
+    );
     drop(framed);
     server_task.await.unwrap().unwrap();
     drop(dir);

@@ -1565,7 +1565,14 @@ pub async fn create_queue(
     // partition. Standalone materializes the requested count directly.
     let partition_count = match &server.declare_queue_coordinator {
         Some(coordinator) => {
-            match coordinator(request.topic.clone(), group.clone(), partition_count).await {
+            match coordinator(
+                request.topic.clone(),
+                group.clone(),
+                partition_count,
+                meta.clone(),
+            )
+            .await
+            {
                 Ok(count) => count,
                 Err(message) => {
                     return Ok(admin_error(
@@ -1578,27 +1585,29 @@ pub async fn create_queue(
         }
         None => partition_count,
     };
-    for partition in 0..partition_count {
-        match server
-            .storage
-            .declare_queue(&request.topic, partition, group.as_deref(), meta.clone())
-            .await
-        {
-            Ok(()) => {}
-            Err(err @ StromaError::InvalidArgument(_)) => {
-                return Ok(admin_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_queue",
-                    err.to_string(),
-                ));
-            }
-            Err(err) => {
-                tracing::error!("create queue failed: {err}");
-                return Ok(admin_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "create_queue_failed",
-                    "create queue failed",
-                ));
+    if server.declare_queue_coordinator.is_none() {
+        for partition in 0..partition_count {
+            match server
+                .storage
+                .declare_queue(&request.topic, partition, group.as_deref(), meta.clone())
+                .await
+            {
+                Ok(()) => {}
+                Err(err @ StromaError::InvalidArgument(_)) => {
+                    return Ok(admin_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_queue",
+                        err.to_string(),
+                    ));
+                }
+                Err(err) => {
+                    tracing::error!("create queue failed: {err}");
+                    return Ok(admin_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "create_queue_failed",
+                        "create queue failed",
+                    ));
+                }
             }
         }
     }

@@ -28,7 +28,8 @@ use crate::coordination::{
     plan_local_assignment_transitions, plan_local_stream_transitions,
 };
 use crate::queue_engine::{
-    DestroyOutcome, EvictOutcome, QueueEngine, QueuePromotionOutcome, StreamStore, StromaEngine,
+    DeclareMeta, DestroyOutcome, EvictOutcome, QueueEngine, QueuePromotionOutcome, StreamStore,
+    StromaEngine,
 };
 use crate::stream::{StreamChannel, StreamDurability};
 use stroma_core::{
@@ -476,6 +477,16 @@ impl Default for BrokerConfig {
 
 pub trait QueueOwnership: std::fmt::Debug + Send + Sync {
     fn owns_queue(&self, topic: &str, partition: Partition, group: Option<&str>) -> bool;
+
+    /// Committed queue settings. Standalone and legacy undeclared queues have
+    /// no coordinated settings. Corrupt metadata must fail closed.
+    fn queue_declaration(
+        &self,
+        _topic: &str,
+        _group: Option<&str>,
+    ) -> Result<Option<DeclareMeta>, String> {
+        Ok(None)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1524,6 +1535,7 @@ pub struct Broker<
     /// Local retirement precedes assignment-watch propagation. Reject stale
     /// reconnects until a fresh assignment explicitly brings the partition back.
     retired_queues: DashMap<QueueKey, ()>,
+    applied_declarations: DashMap<QueueKey, DeclareMeta>,
     /// Opt-in exclusive consumer-group routing: maps cohort membership to the
     /// per-partition delivery gate. Absent cohorts leave delivery competing.
     exclusive_groups: Mutex<ExclusiveGroupRouter>,
@@ -1727,6 +1739,7 @@ impl<
             assignment_cache: Arc::new(DashMap::new()),
             locally_owned: Arc::new(DashMap::new()),
             retired_queues: DashMap::new(),
+            applied_declarations: DashMap::new(),
             exclusive_groups: Mutex::new(ExclusiveGroupRouter::new(default_consumer_target)),
             repartition_transitions: Mutex::new(HashMap::new()),
             pending_settles: Arc::new(AtomicUsize::new(0)),
@@ -2111,6 +2124,7 @@ impl<
         // The caller holds this queue's eviction guard. Recheck after acquiring
         // it so a request admitted before retirement cannot reopen deleted logs.
         self.ensure_queue_owner(topic, partition, group)?;
+        let was_materialized = self.engine.is_materialized(topic, partition.id(), group);
         self.engine
             .materialize(topic, partition.id(), group)
             .await
@@ -2127,6 +2141,34 @@ impl<
                 .await?;
         }
 
+        if !was_materialized {
+            self.applied_declarations.remove(&key);
+        }
+        self.apply_owned_queue_declaration(&key).await?;
+        // Declaration-created owners need demotion even if the assignment
+        // watcher coalesces the assignment that originally admitted them.
+        self.locally_owned.insert(key, ());
+        Ok(())
+    }
+
+    async fn apply_owned_queue_declaration(&self, key: &QueueKey) -> Result<(), BrokerError> {
+        if let Some(meta) = self
+            .ownership
+            .queue_declaration(&key.tp, key.group.as_deref())
+            .map_err(BrokerError::Unknown)?
+        {
+            if self
+                .applied_declarations
+                .get(key)
+                .is_none_or(|applied| *applied != meta)
+            {
+                self.ensure_queue_owner(&key.tp, key.part, key.group.as_deref())?;
+                self.engine
+                    .declare_queue(&key.tp, key.part.id(), key.group.as_deref(), meta.clone())
+                    .await?;
+                self.applied_declarations.insert(key.clone(), meta);
+            }
+        }
         Ok(())
     }
 
@@ -3278,6 +3320,7 @@ impl<
             group: group.map(str::to_string),
         };
         self.retired_queues.insert(key.clone(), ());
+        self.applied_declarations.remove(&key);
         let qs = self.queues.get(&key).map(|entry| entry.value().clone());
         let _eviction_guard = match qs.as_ref() {
             Some(qs) => Some(qs.lock_for_eviction().await),
@@ -4446,6 +4489,63 @@ impl Broker<StromaEngine> {
         });
     }
 
+    /// Reconcile declaration changes even when ownership itself did not change.
+    /// The same eviction guard used by publishers serializes the initial Declare
+    /// ahead of first publication and prevents retirement from reopening a log.
+    async fn apply_owned_queue_declarations(&self, node_id: &str, snapshot: &CoordinationSnapshot) {
+        for assignment in snapshot
+            .assignments
+            .values()
+            .filter(|a| a.is_owned_by(node_id))
+        {
+            let queue = &assignment.queue;
+            let meta = match self
+                .ownership
+                .queue_declaration(&queue.topic, queue.group.as_deref())
+            {
+                Ok(Some(meta)) => meta,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::error!(topic = %queue.topic, "cannot read queue declaration: {error}");
+                    continue;
+                }
+            };
+            let key = QueueKey {
+                tp: queue.topic.clone(),
+                part: queue.partition,
+                group: queue.group.clone(),
+            };
+            if self
+                .applied_declarations
+                .get(&key)
+                .is_some_and(|applied| *applied == meta)
+            {
+                continue;
+            }
+            let qs = self.queue(&key).await;
+            let _guard = qs.lock_for_eviction().await;
+            // Never force an existing follower into the owner role here. A
+            // refused promotion must remain refused; declare_queue checks the
+            // storage role before appending anything.
+            let result = if self.engine.is_materialized(&key.tp, key.part.id(), key.group.as_deref()) {
+                self.apply_owned_queue_declaration(&key).await
+            } else {
+                self.materialize_owned_queue(&key.tp, key.part, key.group.as_deref()).await
+            };
+            match result {
+                Ok(()) => {}
+                Err(BrokerError::NotOwner { .. }) => {
+                    // Retirement or a newer assignment can win while this
+                    // snapshot is being reconciled. The ownership fence worked.
+                    tracing::debug!(topic = %key.tp, partition = key.part.id(), "queue declaration skipped after ownership changed");
+                }
+                Err(error) => {
+                    tracing::warn!(topic = %key.tp, partition = key.part.id(), "cannot apply queue declaration: {error}");
+                }
+            }
+        }
+    }
+
     pub async fn apply_assignment_snapshot_transitions(
         &self,
         node_id: &str,
@@ -4468,6 +4568,7 @@ impl Broker<StromaEngine> {
             }
             outcomes.push(result);
         }
+        self.apply_owned_queue_declarations(node_id, next).await;
         outcomes
     }
 
@@ -4520,6 +4621,7 @@ impl Broker<StromaEngine> {
             }
             outcomes.push(result);
         }
+        self.apply_owned_queue_declarations(node_id, next).await;
         outcomes
     }
 
@@ -4696,6 +4798,13 @@ impl Broker<StromaEngine> {
                 group: transition.queue.group.clone(),
             });
         }
+        // A follower checkpoint/promotion can replace the local event history.
+        // Revalidate coordinated settings whenever this role changes.
+        self.applied_declarations.remove(&QueueKey {
+            tp: topic.clone(),
+            part: transition.queue.partition,
+            group: transition.queue.group.clone(),
+        });
         // Confirm policies read the assignment governing this queue.
         match &transition.next {
             Some(next) => self.cache_queue_assignment(next),

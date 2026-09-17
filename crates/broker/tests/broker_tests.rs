@@ -8369,3 +8369,142 @@ async fn stream_fanout_stress(total: usize, subscribers: usize) {
         driver.abort();
     }
 }
+
+#[derive(Debug)]
+struct DeclaredOwnership {
+    meta: std::sync::Mutex<DeclareMeta>,
+    owns: std::sync::atomic::AtomicBool,
+}
+impl fibril_broker::broker::QueueOwnership for DeclaredOwnership {
+    fn owns_queue(&self, _: &str, _: Partition, _: Option<&str>) -> bool {
+        self.owns.load(Ordering::SeqCst)
+    }
+    fn queue_declaration(&self, _: &str, _: Option<&str>) -> Result<Option<DeclareMeta>, String> {
+        Ok(Some(self.meta.lock().unwrap().clone()))
+    }
+}
+
+#[tokio::test]
+async fn coordinated_declaration_is_written_only_by_owner_and_reapplied_after_retirement() {
+    use stroma_core::StromaEvent;
+    let meta = DeclareMeta {
+        dlq_policy: Some(DLQDiscardPolicyWire::CustomDQL {
+            tp: "dead".into(),
+            part: 0,
+            group: Some("archive".into()),
+        }),
+        dlq_max_retries: Some(7),
+        default_message_ttl_ms: Some(60000),
+    };
+    let source = Arc::new(DeclaredOwnership {
+        meta: std::sync::Mutex::new(meta.clone()),
+        owns: std::sync::atomic::AtomicBool::new(false),
+    });
+    let (broker, _dir) = open_test_broker_with_ownership(source.clone()).await;
+    assert!(matches!(
+        broker.get_publisher("jobs", Partition::new(0), &None).await,
+        Err(BrokerError::NotOwner { .. })
+    ));
+    assert!(!broker.engine().is_materialized("jobs", 0, None));
+
+    source.owns.store(true, Ordering::SeqCst);
+    // Concurrent first users must serialize one declaration ahead of writes.
+    let (first, second) = tokio::join!(
+        broker.get_publisher("jobs", Partition::new(0), &None),
+        broker.get_publisher("jobs", Partition::new(0), &None)
+    );
+    drop(first.unwrap());
+    drop(second.unwrap());
+    let OwnerReplicationRead::Batch(events) = broker
+        .engine()
+        .read_owner_event_records("jobs", 0, None, 0, 100)
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(
+        events.records,
+        vec![(0, StromaEvent::Declare(meta.clone()))]
+    );
+
+    // Config changes are reconciled even when the assignment is unchanged.
+    let updated = DeclareMeta {
+        dlq_max_retries: Some(11),
+        ..meta
+    };
+    *source.meta.lock().unwrap() = updated.clone();
+    let assignment = PartitionAssignment::new(
+        QueueIdentity::new("jobs", Partition::new(0), None),
+        "owner",
+        Vec::new(),
+        0,
+    );
+    let mut snapshot = CoordinationSnapshot::default();
+    snapshot
+        .assignments
+        .insert(assignment.queue.clone(), assignment);
+    broker
+        .apply_assignment_snapshot_transitions("owner", &snapshot, &snapshot)
+        .await;
+    let OwnerReplicationRead::Batch(events) = broker
+        .engine()
+        .read_owner_event_records("jobs", 0, None, 0, 100)
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(
+        events.records.last(),
+        Some(&(1, StromaEvent::Declare(updated.clone())))
+    );
+    assert_eq!(events.records.len(), 2);
+
+    // A new partition receives the same TTL/DLQ settings; retirement and reuse
+    // cannot leave a stale applied-settings cache over a fresh empty log.
+    drop(
+        broker
+            .get_publisher("jobs", Partition::new(1), &None)
+            .await
+            .unwrap(),
+    );
+    broker.retire_partition("jobs", 1, None).await.unwrap();
+    broker.apply_repartition_transition("jobs", None, 3, 1, 2);
+    drop(
+        broker
+            .get_publisher("jobs", Partition::new(1), &None)
+            .await
+            .unwrap(),
+    );
+    let OwnerReplicationRead::Batch(events) = broker
+        .engine()
+        .read_owner_event_records("jobs", 1, None, 0, 100)
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(events.records, vec![(0, StromaEvent::Declare(updated))]);
+    broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn declaration_reconciliation_cannot_override_a_refused_promotion() {
+    let source = Arc::new(DeclaredOwnership {
+        meta: std::sync::Mutex::new(DeclareMeta { default_message_ttl_ms: Some(99), ..Default::default() }),
+        owns: std::sync::atomic::AtomicBool::new(true),
+    });
+    let (broker, _dir) = open_test_broker_with_ownership(source).await;
+    broker.engine().become_queue_follower_with_epoch("jobs", 0, None, 0).await.unwrap();
+    let assignment = PartitionAssignment::new(QueueIdentity::new("jobs", Partition::new(0), None),
+        "owner", Vec::new(), 0);
+    let mut snapshot = CoordinationSnapshot::default();
+    snapshot.assignments.insert(assignment.queue.clone(), assignment);
+    // Coordination says owner, storage still says follower after a refused
+    // promotion. Merely reconciling settings must not bypass that role fence.
+    broker.apply_assignment_snapshot_transitions("owner", &snapshot, &snapshot).await;
+    assert!(matches!(broker.engine().read_owner_event_records("jobs", 0, None, 0, 10).await,
+        Err(StromaError::WrongQueueRole { actual: QueueRole::Follower, .. })));
+    broker.shutdown().await;
+}

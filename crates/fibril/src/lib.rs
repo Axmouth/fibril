@@ -1414,11 +1414,11 @@ pub fn declare_coordinator_for_ganglion(parts: &TcpGanglionParts) -> Arc<dyn Dec
     let coordination = parts.coordination.clone();
     let stream_coordination = parts.coordination.clone();
     Arc::new(CoordinationDeclareCoordinator {
-        declare: Arc::new(move |topic, group, count| {
+        declare: Arc::new(move |topic, group, count, meta| {
             let coordination = coordination.clone();
             Box::pin(async move {
                 let partitioning = coordination
-                    .declare_queue_partitioning(&topic, group.as_deref(), count)
+                    .declare_queue(&topic, group.as_deref(), count, meta)
                     .await
                     .map_err(|error| error.to_string())?;
                 for partition in 0..partitioning.partition_count {
@@ -2191,11 +2191,11 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
                 // partition of a multi-partition queue or stream.
                 .with_declare_queue_coordinator({
                     let source = parts.coordination.clone();
-                    Arc::new(move |topic, group, count| {
+                    Arc::new(move |topic, group, count, meta| {
                         let coordination = source.clone();
                         Box::pin(async move {
                             let partitioning = coordination
-                                .declare_queue_partitioning(&topic, group.as_deref(), count)
+                                .declare_queue(&topic, group.as_deref(), count, meta)
                                 .await
                                 .map_err(|error| error.to_string())?;
                             for partition in 0..partitioning.partition_count {
@@ -2642,7 +2642,11 @@ pub type DeclareFut = futures::future::BoxFuture<'static, Result<u32, String>>;
 /// boxed-future closure captures the provider, avoiding naming its generic type
 /// and keeping coordination-ganglion free of a protocol dependency.
 pub struct CoordinationDeclareCoordinator {
-    pub declare: Arc<dyn Fn(String, Option<String>, u32) -> DeclareFut + Send + Sync>,
+    pub declare: Arc<
+        dyn Fn(String, Option<String>, u32, fibril_broker::queue_engine::DeclareMeta) -> DeclareFut
+            + Send
+            + Sync,
+    >,
     pub declare_stream: Arc<
         dyn Fn(String, u32, u8, StreamRetentionConfig, Option<u32>) -> DeclareFut + Send + Sync,
     >,
@@ -2654,11 +2658,13 @@ impl DeclareCoordinator for CoordinationDeclareCoordinator {
         topic: &'a str,
         group: Option<&'a str>,
         partition_count: u32,
+        meta: fibril_broker::queue_engine::DeclareMeta,
     ) -> futures::future::BoxFuture<'a, Result<u32, String>> {
         (self.declare)(
             topic.to_string(),
             group.map(str::to_string),
             partition_count,
+            meta,
         )
     }
 
@@ -2877,7 +2883,7 @@ mod tests {
 
         let declare = declare_coordinator_for_ganglion(&parts);
         let count = declare
-            .declare_partitioning("jobs", None, 2)
+            .declare_partitioning("jobs", None, 2, Default::default())
             .await
             .expect("declare partitioning");
         assert_eq!(count, 2);

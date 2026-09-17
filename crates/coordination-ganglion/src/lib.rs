@@ -423,6 +423,14 @@ fn queue_partitioning_key(topic: &str, group: Option<&str>) -> String {
     }
 }
 
+fn queue_declaration_key(topic: &str, group: Option<&str>) -> String {
+    // JSON tuple encoding keeps topics/groups containing separators distinct.
+    format!(
+        "fibril/queue_declaration/{}",
+        serde_json::to_string(&(topic, group)).unwrap()
+    )
+}
+
 fn stream_config_key(topic: &str) -> String {
     format!("{STREAM_CONFIG_ATTRIBUTE_PREFIX}{topic}")
 }
@@ -1505,6 +1513,72 @@ impl GanglionCoordination {
         }
         Err(DeclareQueueError::Coordination(
             OpenraftAdapterError::Storage("queue declare lost the CAS race repeatedly".to_string()),
+        ))
+    }
+
+    /// Store queue settings before cataloguing its partitions. Only assigned
+    /// owners append Declare events; the receiving broker never creates a log.
+    /// Like storage declaration, omitted settings preserve their previous values.
+    pub async fn declare_queue(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+        partition_count: u32,
+        meta: fibril_broker::queue_engine::DeclareMeta,
+    ) -> Result<QueuePartitioning, DeclareQueueError> {
+        if group.is_none() && self.stream_config(topic).is_some() {
+            return Err(DeclareQueueError::Coordination(
+                OpenraftAdapterError::Storage(format!(
+                    "{topic} is already declared as a stream, cannot declare it as a queue"
+                )),
+            ));
+        }
+        let partitioning = self
+            .declare_queue_partitioning(topic, group, partition_count)
+            .await?;
+        let key = queue_declaration_key(topic, group);
+        for _ in 0..8 {
+            let current = self.cluster_attribute(&key);
+            let mut merged: fibril_broker::queue_engine::DeclareMeta = match &current {
+                Some(raw) => serde_json::from_str(raw).map_err(|error| {
+                    DeclareQueueError::Coordination(OpenraftAdapterError::Storage(format!(
+                        "queue `{topic}`/{group:?} declaration is corrupt: {error}"
+                    )))
+                })?,
+                None => Default::default(),
+            };
+            if meta.dlq_policy.is_some() {
+                merged.dlq_policy = meta.dlq_policy.clone();
+            }
+            if meta.dlq_max_retries.is_some() {
+                merged.dlq_max_retries = meta.dlq_max_retries;
+            }
+            if meta.default_message_ttl_ms.is_some() {
+                merged.default_message_ttl_ms = meta.default_message_ttl_ms;
+            }
+            let value = serde_json::to_string(&merged).map_err(|error| {
+                DeclareQueueError::Coordination(OpenraftAdapterError::Storage(error.to_string()))
+            })?;
+            if current.as_ref() == Some(&value) {
+                return Ok(partitioning);
+            }
+            match self
+                .forward_command(MetadataRaftCommand::CompareAndSetAttribute {
+                    key: key.clone(),
+                    expected: current,
+                    value,
+                })
+                .await
+            {
+                Ok(_) => return Ok(partitioning),
+                Err(OpenraftAdapterError::AttributeMismatch { .. }) => continue,
+                Err(error) => return Err(DeclareQueueError::Coordination(error)),
+            }
+        }
+        Err(DeclareQueueError::Coordination(
+            OpenraftAdapterError::Storage(
+                "queue declaration lost the CAS race repeatedly".to_string(),
+            ),
         ))
     }
 
@@ -2811,6 +2885,23 @@ impl fibril_broker::broker::QueueOwnership for GanglionCoordination {
     ) -> bool {
         Coordination::owns_queue(self, topic, partition, group)
     }
+
+    fn queue_declaration(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+    ) -> Result<Option<fibril_broker::queue_engine::DeclareMeta>, String> {
+        let key = queue_declaration_key(topic, group);
+        let raw = self
+            .node
+            .read_committed(|snapshot| snapshot.attributes.get(&key).cloned());
+        raw.map(|raw| {
+            serde_json::from_str(&raw).map_err(|error| {
+                format!("queue `{topic}`/{group:?} declaration is corrupt: {error}")
+            })
+        })
+        .transpose()
+    }
 }
 
 /// Stream-ownership gate view: in cluster mode a broker serves only the stream
@@ -3499,6 +3590,95 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn queue_declarations_merge_settings_and_reject_count_conflicts() {
+        use fibril_broker::{
+            broker::QueueOwnership,
+            queue_engine::{DLQDiscardPolicyWire, DeclareMeta},
+        };
+        let router = InProcessRouter::new();
+        let config = default_raft_config().expect("config");
+        let raft_node = RaftMetadataNode::start(1, config, &router)
+            .await
+            .expect("raft node");
+        let mut members = BTreeMap::new();
+        members.insert(1u64, ganglion_openraft::openraft::BasicNode::new("n1"));
+        raft_node.initialize(members).await.expect("initialize");
+        raft_node
+            .wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .expect("election");
+        let provider = GanglionCoordination::new("broker-a", raft_node);
+
+        let meta = DeclareMeta {
+            dlq_policy: Some(DLQDiscardPolicyWire::CustomDQL {
+                tp: "dead".into(),
+                part: 3,
+                group: Some("archive".into()),
+            }),
+            dlq_max_retries: Some(7),
+            default_message_ttl_ms: Some(12345),
+        };
+        provider
+            .declare_queue("orders", Some("workers"), 2, meta.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            provider
+                .queue_declaration("orders", Some("workers"))
+                .unwrap(),
+            Some(meta.clone())
+        );
+        assert_eq!(provider.queue_declaration("orders", None).unwrap(), None);
+        let update = DeclareMeta {
+            dlq_max_retries: Some(9),
+            ..Default::default()
+        };
+        provider
+            .declare_queue("orders", Some("workers"), 2, update)
+            .await
+            .unwrap();
+        let expected = DeclareMeta {
+            dlq_max_retries: Some(9),
+            ..meta
+        };
+        provider
+            .declare_queue("orders", Some("workers"), 2, Default::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            provider
+                .queue_declaration("orders", Some("workers"))
+                .unwrap(),
+            Some(expected.clone())
+        );
+        assert!(
+            provider
+                .declare_queue(
+                    "orders",
+                    Some("workers"),
+                    3,
+                    DeclareMeta {
+                        default_message_ttl_ms: Some(1),
+                        ..Default::default()
+                    }
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            provider
+                .queue_declaration("orders", Some("workers"))
+                .unwrap(),
+            Some(expected)
+        );
+        assert_ne!(
+            queue_declaration_key("a/b", None),
+            queue_declaration_key("a", Some("b"))
+        );
+        provider.node.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn repartition_grows_by_integer_multiple_and_bumps_version() {
         let router = InProcessRouter::new();
         let config = default_raft_config().expect("config");
@@ -3664,8 +3844,12 @@ mod tests {
             .await
             .expect("standby observes the leader");
 
+        use fibril_broker::broker::QueueOwnership;
+        let meta = fibril_broker::queue_engine::DeclareMeta {
+            dlq_max_retries: Some(17), default_message_ttl_ms: Some(12345), ..Default::default()
+        };
         let declared = standby
-            .declare_queue_partitioning("orders", None, 3)
+            .declare_queue("orders", None, 3, meta.clone())
             .await
             .expect("standby declare should forward to leader");
         assert_eq!(declared.partition_count, 3);
@@ -3674,7 +3858,8 @@ mod tests {
             let mut watch = provider.watch();
             tokio::time::timeout(timeout, async {
                 loop {
-                    if provider.queue_partitioning("orders", None) == Some(declared.clone()) {
+                    if provider.queue_partitioning("orders", None) == Some(declared.clone())
+                        && provider.queue_declaration("orders", None).unwrap() == Some(meta.clone()) {
                         break;
                     }
                     watch.changed().await.expect("watch open");
