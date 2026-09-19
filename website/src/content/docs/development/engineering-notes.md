@@ -10,6 +10,29 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Optimizations — September 2026
 
+### Transparent huge pages — deployment option
+
+Allocation tracing found that each materialized queue reserves two 16 MiB write
+buffers and two 256 KiB index buffers, whose resident cost can grow substantially
+under THP even when lightly used. Disabling THP only for the diagnostic broker
+reduced RSS, while separate publish/delivery comparisons found mixed latency
+effects at paced and saturated rates. The existing
+[allocator startup option](/configuration/#linux-memory-policy) is a candidate
+for memory-constrained deployments, especially lightly used materialized logs;
+latency-sensitive deployments require workload-specific validation, and
+production defaults are unchanged.
+
+### Storage writer channel sizing — configurable, defaults unchanged
+
+Crossbeam writer and notification channels allocate their full slot arrays when
+each log opens. In a local 32-queue probe, reducing their capacities from 8,192
+to 64 slots reduced post-declaration broker RSS from about 347 MiB to 248 MiB;
+two short 1 KiB publish/delivery runs per storage type kept throughput within
+roughly 1% of the default mean on tmpfs and SATA. The startup
+[writer buffer factor](/configuration/) exposes this tradeoff while retaining
+the existing default; shrinking the separate async command pipelines caused
+substantial throughput losses in the same investigation.
+
 ### Targeted reads for queue routing — adopted
 
 Queue routing reads the committed metadata it needs through a targeted path,

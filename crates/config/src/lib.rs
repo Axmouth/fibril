@@ -630,6 +630,10 @@ impl ServerConfig {
             self.storage.keratin.max_inflight_fsyncs =
                 parse_env("FIBRIL_KERATIN_MAX_INFLIGHT_FSYNCS", &value)?;
         }
+        if let Some(value) = env_value(&mut get, "FIBRIL_KERATIN_WRITER_BUFFER_FACTOR")? {
+            self.storage.keratin.writer_buffer_factor =
+                parse_env("FIBRIL_KERATIN_WRITER_BUFFER_FACTOR", &value)?;
+        }
         if let Some(value) = env_value(&mut get, "FIBRIL_KERATIN_PIPELINE_COMMIT_RECORDS")? {
             self.storage.keratin.pipeline_commit_records =
                 parse_env("FIBRIL_KERATIN_PIPELINE_COMMIT_RECORDS", &value)?;
@@ -818,6 +822,11 @@ impl ServerConfig {
         if self.runtime_seed.idle_queue_cleanup.sweep_interval_ms == 0 {
             return Err(ConfigError::validation(
                 "runtime_seed.idle_queue_cleanup.sweep_interval_ms must be at least 1",
+            ));
+        }
+        if !(1..=128).contains(&self.storage.keratin.writer_buffer_factor) {
+            return Err(ConfigError::validation(
+                "storage.keratin.writer_buffer_factor must be in 1..=128",
             ));
         }
         if self.runtime_seed.replication.caught_up_poll_ms == 0
@@ -1438,6 +1447,14 @@ pub struct KeratinStorageSection {
     /// At or above it a single fsync stays in flight (bandwidth-bound).
     #[serde(default = "default_pipeline_commit_records")]
     pub pipeline_commit_records: u64,
+    /// Startup factor for the eagerly allocated writer and notification channels
+    /// of each message/event log. Each gets 64 * factor slots; range 1..=128.
+    #[serde(default = "default_writer_buffer_factor")]
+    pub writer_buffer_factor: usize,
+}
+
+fn default_writer_buffer_factor() -> usize {
+    128
 }
 
 fn default_max_inflight_fsyncs() -> usize {
@@ -1479,6 +1496,7 @@ impl Default for KeratinStorageSection {
             segment_preallocate_bytes: 0,
             max_inflight_fsyncs: default_max_inflight_fsyncs(),
             pipeline_commit_records: default_pipeline_commit_records(),
+            writer_buffer_factor: default_writer_buffer_factor(),
         }
     }
 }
@@ -1941,8 +1959,45 @@ mod tests {
     }
 
     #[test]
+    fn writer_buffer_factor_file_env_and_validation() {
+        let mut config =
+            ServerConfig::from_toml_str("[storage.keratin]\nwriter_buffer_factor = 16\n").unwrap();
+        assert_eq!(config.storage.keratin.writer_buffer_factor, 16);
+        config
+            .apply_env_from(|name| match name {
+                "FIBRIL_KERATIN_WRITER_BUFFER_FACTOR" => Some(Ok("1".to_owned())),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(config.storage.keratin.writer_buffer_factor, 1);
+        let serialized = toml::Value::try_from(&config).unwrap();
+        let roundtrip: ServerConfig = serialized.try_into().unwrap();
+        assert_eq!(roundtrip.storage.keratin.writer_buffer_factor, 1);
+        assert_eq!(
+            ServerConfig::from_toml_str("[storage.keratin]\n")
+                .unwrap()
+                .storage
+                .keratin
+                .writer_buffer_factor,
+            128
+        );
+        for factor in [0, 129, usize::MAX] {
+            let input = format!("[storage.keratin]\nwriter_buffer_factor = {factor}\n");
+            assert!(ServerConfig::from_toml_str(&input).is_err());
+            config
+                .apply_env_from(|name| match name {
+                    "FIBRIL_KERATIN_WRITER_BUFFER_FACTOR" => Some(Ok(factor.to_string())),
+                    _ => None,
+                })
+                .unwrap();
+            assert!(config.validate().is_err());
+        }
+    }
+
+    #[test]
     fn defaults_match_current_server_behavior() {
         let config = ServerConfig::default();
+        assert_eq!(config.storage.keratin.writer_buffer_factor, 128);
 
         assert_eq!(config.server.data_dir, PathBuf::from("server_data"));
         assert_eq!(

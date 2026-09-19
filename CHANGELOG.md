@@ -12,6 +12,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- Startup `storage.keratin.writer_buffer_factor` and
+  `FIBRIL_KERATIN_WRITER_BUFFER_FACTOR` scale the storage writer input and
+  notification channels for message and event logs. The accepted range is
+  1–128, with 64 slots per unit; the default preserves 8,192 slots per channel.
+
 - Replication conflict diagnostics include bounded, payload-free histories of
   control operations, offsets and effective record identities, plus checkpoint
   install context. These explain an overlap without logging message bodies;

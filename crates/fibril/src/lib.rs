@@ -1672,6 +1672,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         segment_preallocate_bytes: config.storage.keratin.segment_preallocate_bytes,
         max_inflight_fsyncs: config.storage.keratin.max_inflight_fsyncs,
         pipeline_commit_records: config.storage.keratin.pipeline_commit_records,
+        writer_buffer_factor: config.storage.keratin.writer_buffer_factor,
         ..keratin_default
     };
     let keratin_event_cfg = KeratinConfig {
@@ -1687,6 +1688,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         segment_preallocate_bytes: config.storage.keratin.segment_preallocate_bytes,
         max_inflight_fsyncs: config.storage.keratin.max_inflight_fsyncs,
         pipeline_commit_records: config.storage.keratin.pipeline_commit_records,
+        writer_buffer_factor: config.storage.keratin.writer_buffer_factor,
         ..keratin_default
     };
     let engine = StromaEngine::open(

@@ -56,6 +56,9 @@ fsync_interval_ms = 5
 # tmpfs). On slow-fsync storage such as SATA SSDs a floor around the fsync
 # interval (5) gives the drive breathing room between write barriers.
 min_fsync_interval_ms = 0
+# Writer and notification channels each have 64 * factor slots per log.
+# 128 preserves the default 8192 slots; smaller values reduce eager allocation.
+writer_buffer_factor = 128
 
 [storage.keratin.message_log]
 segment_max_bytes = 268435456
@@ -165,6 +168,7 @@ These fields are read on process start.
 | `coordination.secret_path` | `FIBRIL_CLUSTER_SECRET_PATH` (or `FIBRIL_CLUSTER_SECRET` for the value) | none | unset |
 | `storage.keratin.fsync_interval_ms` | `FIBRIL_KERATIN_FSYNC_INTERVAL_MS` | `--keratin-fsync-interval-ms` | `5` |
 | `storage.keratin.min_fsync_interval_ms` | `FIBRIL_KERATIN_MIN_FSYNC_INTERVAL_MS` | `--keratin-min-fsync-interval-ms` | `0` |
+| `storage.keratin.writer_buffer_factor` | `FIBRIL_KERATIN_WRITER_BUFFER_FACTOR` | none | `128` |
 | `storage.keratin.message_log.segment_max_bytes` | `FIBRIL_KERATIN_MESSAGE_LOG_SEGMENT_MAX_BYTES` | `--keratin-message-log-segment-max-bytes` | `268435456` |
 | `storage.keratin.event_log.segment_max_bytes` | `FIBRIL_KERATIN_EVENT_LOG_SEGMENT_MAX_BYTES` | `--keratin-event-log-segment-max-bytes` | `33554432` |
 | `coordination.mode` | `FIBRIL_COORDINATION_MODE` | none | `static` |
@@ -292,6 +296,19 @@ straight through (the marker is written automatically).
 
 `storage.keratin.message_log.segment_max_bytes` and `storage.keratin.event_log.segment_max_bytes` are rollover thresholds. A segment rolls after an append crosses the configured size, so an individual segment can be slightly larger than this value.
 
+`storage.keratin.writer_buffer_factor` sets the startup capacity of each storage
+writer input and notification channel to `64 × factor` entries. Valid factors
+are `1..=128`: `1` gives 64 entries, `16` gives 1,024, and the default `128`
+gives 8,192. The channels allocate their slot arrays when a log opens, so smaller
+values reduce the resident cost of materialized queues and streams and apply
+backpressure earlier during bursts. A channel entry may own a batch; this
+setting is a slot limit rather than a total memory limit. Measure throughput
+and tail latency with representative payloads, storage and replication before
+choosing a lower value. Changing it requires restart and applies to both the
+message and event logs. Fsync pipeline depth remains controlled by
+`storage.keratin.max_inflight_fsyncs`; caches, actor mailboxes and client buffers
+have separate limits.
+
 `coordination.ganglion.heartbeat_interval_ms` controls how often a broker
 renews its cluster liveness record. `coordination.ganglion.liveness_ttl_ms`
 controls how long a broker can go without a fresh heartbeat before the cluster
@@ -306,6 +323,49 @@ has drained. Adoption is observed from client topology acks. The timeout keeps a
 silent or stuck client from stalling a cutover forever; publish version-fencing
 is the correctness backstop regardless. See
 [live routing and cutover](/development/live-routing-and-cutover/).
+
+## Linux Memory Policy
+
+The Linux broker uses mimalloc, which exposes a startup environment option for
+transparent huge pages (THP). Consider disabling THP when resident memory is a
+deployment constraint, especially with many materialized queues whose log
+buffers are lightly used. Huge pages can make a sparsely touched allocation
+consume substantially more resident RAM; disabling them can also reduce the
+footprint of an active broker.
+
+```bash
+MIMALLOC_ALLOW_THP=0 ./fibril-server
+```
+
+Append the usual broker arguments. Set the same variable in a container's
+environment or a systemd service's `Environment=MIMALLOC_ALLOW_THP=0` directive,
+then restart or recreate the broker. This allocator setting is read at process
+startup and has no Fibril TOML field or admin runtime setting. It disables THP
+for the broker process and its descendants without changing the host policy
+for other services. Remove the variable and restart to restore the allocator's
+default behavior under the host's policy.
+
+The tradeoff depends on workload: huge pages can improve address-translation
+efficiency for large active working sets, while allocating and clearing larger
+pages can add latency and consume extra memory.
+
+:::caution[Latency-sensitive deployments]
+Keep the existing THP policy unless workload-specific testing establishes
+acceptable tail latency. Disabling THP can increase confirmation or delivery
+latency even when throughput stays similar; local paced and saturated tests
+showed mixed results. Compare resident memory and both latency measures at
+representative payload sizes, normal rates and bursts before adopting the
+setting. Behavior under memory pressure and replication remains unmeasured.
+:::
+
+After restart, `/proc/<broker-pid>/status` should report `THP_enabled: 0`, and
+`AnonHugePages` in `/proc/<broker-pid>/smaps_rollup` should be zero. These checks
+confirm that the process policy took effect, including in restricted containers.
+THP policy is independent of the writer channel factor and idle queue cleanup;
+each addresses a different part of the materialized-resource footprint. See
+the [memory investigation notes](/development/engineering-notes/#transparent-huge-pages--deployment-option)
+and the upstream [mimalloc options](https://github.com/microsoft/mimalloc#environment-options)
+and [Linux THP documentation](https://docs.kernel.org/admin-guide/mm/transhuge.html).
 
 ## Runtime Seeds
 
@@ -447,6 +507,7 @@ Current validation rules:
 - when `tls.enabled = true`, exactly one certificate source must be configured: both `tls.cert_path` and `tls.key_path`, or `tls.auto_self_signed = true`
 - `tls.admin_enabled = true` requires `tls.enabled = true`
 - `storage.keratin.fsync_interval_ms` must be at least `1`
+- `storage.keratin.writer_buffer_factor` must be in `1..=128`
 - `storage.keratin.message_log.segment_max_bytes` must be at least `1`
 - `storage.keratin.event_log.segment_max_bytes` must be at least `1`
 - `coordination.ganglion.heartbeat_interval_ms` must be at least `1`

@@ -387,6 +387,7 @@ See also: [configuration](/configuration/),
 | Item | Status | Implemented surface |
 | --- | --- | --- |
 | TOML startup config | Implemented | Config crate and server binary |
+| Storage writer buffer factor | Implemented | `storage.keratin.writer_buffer_factor` or `FIBRIL_KERATIN_WRITER_BUFFER_FACTOR`; restart-time capacities for message/event log writer and notification channels, default preserved at 8,192 slots each |
 | Env and CLI overrides | Implemented | Config crate and server binary |
 | Admin auth startup config | Implemented | TOML, env, CLI, server wiring |
 | Metrics exposition startup config | Implemented | `admin.metrics_per_channel` via TOML and env |
@@ -583,6 +584,7 @@ See also: [source deployment](/deployment/source/).
 | `fibrilctl` in image | Implemented | Server image includes CLI |
 | Cluster tryout and demo workload | Implemented | Cluster Compose and tryout script, with `fibril-demo` running simulated business workloads through the client |
 | Source deployment docs | Implemented | Docs site |
+| Linux allocator THP policy | Implemented | `MIMALLOC_ALLOW_THP=0` disables transparent huge pages for the broker process at startup; restart required, workload-dependent memory/performance tradeoff documented under [Linux memory policy](/configuration/#linux-memory-policy) |
 | Full production hardening guide | Partial | Basic guidance exists, deeper ops runbook is pending |
 
 Conditions and limits:
