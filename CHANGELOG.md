@@ -233,6 +233,12 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Changed
 
+- Reorganize current documentation: completed capabilities and conditions live
+  in implemented surface; active plans track remaining work. Refresh reconnect
+  internals and archive completed design records. Add a later exploration of
+  ordering guarantees across partitioned queues, and concise development notes
+  for optimizations and bugs with implementation references.
+
 - The server flushes buffered socket output when both outgoing queues drain,
   retaining count/byte/time limits during sustained traffic. Small client and
   replication replies leave promptly without changing durability eligibility.

@@ -261,5 +261,6 @@ fans in across channels by a topic glob, driven by the cluster topology.
     settle context per connection (the bootstrap owner and each pooled/routed owner)
     and bumps the incarnation only on a non-resumed reconnect.
 
-See the repo-root `FOLLOWUPS.md` "Clients" section for the brick-by-brick plan
-behind these rows.
+The website's [implemented surface](../website/src/content/docs/implemented-surface.md)
+documents the shared behavior and operating limits. Remaining client work is
+tracked in [FOLLOWUPS.md](../FOLLOWUPS.md).

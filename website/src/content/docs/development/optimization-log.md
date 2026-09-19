@@ -3,13 +3,13 @@ title: Optimization log
 description: Benchmark-first notes for low-level Fibril performance work.
 ---
 
-This page tracks low-level optimization ideas before they become code changes.
-The rule is simple: define the starting point, explain why the change should
-help, measure before and after, then keep the result even when the idea does
-not work.
+This page records benchmark methods and detailed optimization experiments.
+Short summaries of recent optimizations and correctness findings are in
+[optimization and bug notes](/development/engineering-notes/). Historical entries
+retain the measurements and hypotheses from their recorded dates.
 
-Optimization work should not start from taste. It should start from a concrete
-cost model and a benchmark that can prove the result.
+Define the cost to reduce, establish a baseline, compare before and after, and
+record the result, including experiments that did not help.
 
 ## Current measurement surface
 

@@ -1,11 +1,11 @@
 # Checkpoint recovery: reproduced gaps and repair requirements
 
-Investigation checkpoint: 2026-09-19, Fibril `59d47be`, Keratin `11ef6a9`.
-This records failures and a proposed repair direction, not an implemented fix.
+Checkpoint recovery must preserve a consistent relationship between message
+bodies, event history and queue state across errors, cancellation and restart.
+Promotion requires the message coverage referenced by the installed state.
 
-The old `RefreshFollower` no-op bug is separate: `3fc4253` already retargets a
-remaining follower when its owner or epoch changes. The failures here concern
-local storage consistency after it has selected the correct replication source.
+The reproductions below use Fibril `59d47be` and Keratin `11ef6a9` and define
+acceptance cases for the repair. The implementation is pending.
 
 ## Reproductions
 

@@ -3,7 +3,7 @@ title: Documentation style
 description: How Fibril docs should separate user-facing behavior from implementation detail.
 ---
 
-Fibril documentation should start from the user's problem, not from the internal component that solves it.
+Fibril documentation should start from the user's problem and explain the behavior that addresses it.
 
 Most user-facing pages should follow this shape:
 
@@ -15,7 +15,7 @@ Most user-facing pages should follow this shape:
 
 Avoid making regular concept pages depend on internal names such as queue actors, cached handles, or storage materialization unless the name is also part of the user-facing model.
 
-Implementation detail is still useful, but it belongs in development notes. User-facing pages can link there with clear wording so readers know they are choosing a deeper design explanation, not the next required step.
+Development notes explain implementation mechanisms. User-facing pages should link to them as optional deeper reading.
 
 Use the docs sections deliberately:
 
@@ -28,6 +28,41 @@ Use the docs sections deliberately:
 - `development` is the right place for implementation mechanisms, tradeoff
   records, and future design policies.
 
-Keep the [roadmap](/roadmap/) current as work lands. It should be the
-short checkpoint for what changed recently and what remains pending, even when
-the detailed docs for a feature live elsewhere.
+## Keeping documentation current
+
+The [roadmap](/roadmap/) and active planning documents contain remaining work,
+priorities, dependencies and acceptance criteria. Completed capabilities belong
+in [implemented surface](/implemented-surface/), with the interfaces that expose
+them and their operating conditions. [Project status](/status/) summarizes
+maturity; the changelog records change history.
+
+When a capability lands, update these together:
+
+1. Add or update its implemented-surface entry, including client coverage,
+   configuration, limits and links to the relevant guide.
+2. Update the feature matrix and user guide for any changed public behavior.
+3. Remove completed work from the roadmap and active plans. Keep any remaining
+   gap as a specific task with acceptance criteria.
+4. Preserve useful design rationale and test evidence in development notes or
+   an archived design record, linked from the active work where relevant.
+5. Record the change in the changelog; do not copy the completion history back
+   into the roadmap.
+
+Write current behavior in the present tense and pending work as concrete tasks.
+Use direct statements about behavior, requirements and limits. Avoid rhetorical
+contrasts such as “not X, but Y” and slogans about milestones.
+Each page should stand on its own without answering earlier wording or referring
+to a conversation. Release labels require verification that the release was
+published; version numbers, tags and documentation snapshots can exist before
+publication. Edit current unversioned docs when behavior changes; versioned
+snapshots retain their historical contents.
+
+## Short engineering records
+
+Add significant optimizations and bugs to
+[optimization and bug notes](/development/engineering-notes/). Aim for two or
+three sentences per entry: the mechanism or trigger, the measured result or
+correctness effect, and a commit or detailed report link. Label unresolved
+findings and experiments that were not adopted. Include workload conditions
+when quoting measurements, and keep detailed traces and benchmark tables in
+the linked records.

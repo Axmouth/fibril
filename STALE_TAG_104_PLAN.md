@@ -1,14 +1,15 @@
-# #104 stale-tag marking: plan and acceptance criteria
+# Stale-delivery settlement design
 
-Branch: `feature/stale-tag-104`. The long-term-correct settlement model, no
-bandaid: a delivery's settlement is keyed by the durable
-`(topic, group, partition, tag)` and routed to whatever engine is currently
-live for the connection, not to a per-delivery channel tied to the receiving
-engine. Each delivery carries the connection incarnation it arrived on; a
-non-resumed reconnect (or a broker restart reported as resumed-after-restart)
-bumps the incarnation, so a held delivery settles to a typed stale error, while
-a resumed reconnect keeps the incarnation and the delivery still settles
-through the new engine.
+Manual deliveries retain their topic, group, partition, tag and connection
+incarnation. Settlement resolves the current connection binding atomically:
+a matching incarnation routes the operation to the live engine; a stale one
+returns a typed error without sending a frame. This design is implemented in
+Rust, TypeScript, Python, Go and C#.
+
+The user-facing contract is documented in
+[implemented surface](website/src/content/docs/implemented-surface.md#reconnects).
+Remaining stream settlement work is in
+[GATE3_RECONNECT_PLAN.md](GATE3_RECONNECT_PLAN.md).
 
 ## Design (as built for the Rust reference)
 

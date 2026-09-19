@@ -31,7 +31,7 @@ const checks = [
     path: "implemented-surface/index.html",
     includes: [
       "<title>Implemented surface | Fibril</title>",
-      "reverse roadmap",
+      'id="reconnects"',
       "Conditions for a queue to be unloaded from memory",
     ],
   },

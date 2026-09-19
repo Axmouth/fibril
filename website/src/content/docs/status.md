@@ -27,6 +27,8 @@ For a more detailed checklist of what is wired and what conditions apply, see
 | Replication | Experimental | Follower pull replication, failover promotion, in-sync checks, and replica-durable confirms are wired on this branch |
 | Stream replication | Experimental | Durable-tier streams replicate record and cursor logs to followers with replica-durable confirms and caught-up failover, placed and owned through embedded coordination. Express tiers stay owner-only |
 | Live repartitioning | Experimental | Grow or shrink a queue's partition count in coordinated mode, from the admin topology page |
+| Reconnect and restart resume | Available | Typed subscription closure, safe automatic recreation, broker-local persisted resume sessions and stale-delivery settlement across all five clients |
+| Checkpoint recovery | Partial | Epoch-fenced installation and message backfill exist; interruption recovery and promotion before required backfill have reproduced storage-level gaps |
 | Recovery quarantine | Available | A damaged queue log is detected on recovery and isolated per the `recovery.on_mismatch` policy, with operator repair |
 | TLS in transit | Available | The broker listener serves TLS from operator PEMs or generated per-deployment material, mismatches are named in both directions, the clients connect with CA-file, fingerprint-pin, or OS-roots trust, the dashboard serves HTTPS from the same material, and first-boot setup mode offers generate/supply/skip before the broker ever serves. Inter-broker replication and coordination traffic is encrypted too (`tls.inter_broker`, shared-CA lane for generated material), the serving certificate rotates live via `fibrilctl admin reload-tls`, and `tls.client_auth` turns client certificates into credentials (a verified identity authenticates as the matching user with no password, `require` closes the handshake to certless peers) |
 | Broker authentication | Available | Argon2 user store seeded from config, managed from the dashboard and `fibrilctl`, replicated across the cluster. Built-in `fibril`/`fibril` credentials work from loopback only. Node-to-node connections authenticate with a cluster shared secret, never a user account |
@@ -39,10 +41,3 @@ For a more detailed checklist of what is wired and what conditions apply, see
 Informal internal measurements on a Ryzen 5950X system have observed roughly `250k+` messages/sec ingress and egress with 1KB payloads on the durable path. Plexus stream fan-out reaches roughly `1.5M` delivered records/sec across sixteen readers on a single partition, and one partition fans out to hundreds of readers when delivery throughput is not the bottleneck.
 
 These numbers are architecture sanity checks, not a rigorous benchmark suite. Hardware, durability settings, batching, queue depth, workload, and storage behavior all matter. See [benchmarks](/benchmarks/) for the fuller queue and stream tables.
-
-## What can move now
-
-The docs can describe current queue semantics, delayed publish and retry,
-configurable DLQ behavior, deployment shape, sparse-queue behavior, partitioned
-queues, exclusive consumer groups, Plexus streams with their durability tiers,
-and early benchmarks.

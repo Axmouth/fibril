@@ -3,13 +3,9 @@ title: Implemented surface
 description: Detailed checklist of what is wired in the current Fibril codebase.
 ---
 
-This page is the reverse roadmap: a detailed inventory of behavior that is
-currently wired, where it is exposed, and the conditions that decide whether an
-idea is actually done.
-
-Use it when a feature sounds implemented but you need to answer a sharper
-question: which path is wired, which clients expose it, what blocks it, and
-what is still missing.
+This page inventories the behavior available in the current codebase, its
+client and operator interfaces, and its limits. [Project status](/status/)
+summarizes maturity; the [roadmap](/roadmap/) tracks remaining work.
 
 ## Reading This Page
 
@@ -89,8 +85,10 @@ See also: [recovery quarantine](/reliability/recovery-quarantine/).
 
 Conditions and limits:
 
-- A dangling event reference is only possible as a lost-tail suffix (events are
-  written after their messages), so truncate-to-valid is a complete repair.
+- Recovery folds replayed enqueue/cancel events against the durable message tail.
+  It can discard an unconfirmed suffix left by interrupted parallel publication.
+  This check does not establish consistency of a partially replaced checkpoint
+  snapshot; checkpoint recovery has separate limitations below.
 - A corrupt event record is the genuine mid-log failure and uses the same
   quarantine and truncate machinery.
 - `refuse` is lazy today (a mismatch is caught when the partition is first used);
@@ -105,7 +103,7 @@ See also: [client usage](/clients/) and
 | --- | --- | --- |
 | Unconfirmed publish | Implemented | TCP protocol, Rust client, TypeScript client, Python client, Go client, C# client |
 | Confirmed publish | Implemented | TCP protocol, Rust client, TypeScript client, Python client, Go client, C# client |
-| Pipelined confirmation handles | Implemented | Rust `publish_with_confirmation`, TypeScript `publishWithConfirmation`, Python `publish_with_confirmation` |
+| Pipelined confirmation handles | Implemented | Rust, TypeScript, Python, Go and C# clients; each publish retains an individual confirmation |
 | Delayed publish | Implemented | TCP protocol, broker, Rust client, TypeScript client, Python client, Go client, C# client |
 | Content type metadata | Implemented | Protocol metadata, Rust client, TypeScript client, Python client, Go client, C# client, delivery path |
 | Reserved metadata headers | Implemented | Broker protocol handler rejects `fibril.*` and `stroma.*` user headers |
@@ -149,7 +147,7 @@ See also: [backpressure](/concepts/backpressure/) and
 | Competing consumers (default) | Implemented | Many consumers per queue, fair dispatch, unordered |
 | Exclusive consumer groups | Partial | `.exclusive()`/`consumer_target` (Rust), `consumerGroup()`/`consumerTarget()` (TypeScript), and `consumer_group()`/`consumer_target()` (Python) + TCP protocol, per-partition gate, balanced+sticky assignment, soft `consumer_target`, assignment push, reconnect restore, one-cohort-per-queue guard |
 | Cross-broker cohort coordination | Partial | Member identity + controller (aggregate→plan→publish) + owner apply all wired in cluster bootstrap, coordination-level multi-node rebalance test exists, fuller broker/client scenarios are still growing |
-| Partition fan-in | Implemented | Both clients subscribe to all known partitions, merge deliveries while keeping per-partition settlement routing, and pick up partitions added by a live grow |
+| Partition fan-in | Implemented | All five clients subscribe to all known partitions, merge deliveries while keeping per-partition settlement routing, and pick up partitions added by a live grow |
 
 See [consumer groups](/concepts/consumer-groups/) for the user-facing model.
 
@@ -173,14 +171,15 @@ See also: [Plexus streams](/concepts/plexus-streams/) and
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
-| Stream channel type (fan-out) | Implemented | Stroma StreamEngine (cursors/retention), broker fan-out actor, TCP protocol (`DeclarePlexus`/`SubscribeStream`, reuses Publish/Deliver/Ack), Rust + TypeScript + Python clients |
+| Stream channel type (fan-out) | Implemented | Stroma StreamEngine (cursors/retention), broker fan-out actor, TCP protocol (`DeclarePlexus`/`SubscribeStream`, reuses Publish/Deliver/Ack), Rust, TypeScript, Python, Go and C# clients |
 | Declare plexus (partitions, durability, retention, replication factor) | Implemented | `declare_plexus`/`declarePlexus` + `StreamConfig` in the clients, including a per-stream replication-factor override that beats the cluster default |
 | Durable named cursor | Implemented | Broker-side cursor per (channel, partition, name), resuming on restart and advancing on ack |
+| Cursor commit microbatching | Implemented | Broker batches durable cursor commits and flushes pending commits during shutdown |
 | Ephemeral start position | Implemented | latest / earliest / offset / n-back / by-time |
 | Header filter | Implemented | AND of `header == pattern` with `*` glob, stream-only |
 | Client-side fan-in across partitions | Implemented | Reuses the queue fan-in supervisor (failover resubscribe + live-grow pickup). Streams stay out of the reconnect-reconcile registry and resume via the cursor |
 | Durability tiers (ephemeral/speculative/durable) | Implemented | Express lane wired: durable fsyncs before deliver/confirm, speculative delivers off the staged offset and defers the confirm until durable (with a `fibril.speculative` header), ephemeral delivers and confirms at staging with no fsync (AfterWrite). All log-backed |
-| Cross-client wire vectors | Implemented | `DeclarePlexus`/`DeclarePlexusOk`/`SubscribeStream` pinned in `clients/wire_vectors.json`, asserted by Rust/Python/TS |
+| Cross-client wire vectors | Implemented | `DeclarePlexus`/`DeclarePlexusOk`/`SubscribeStream` pinned in `clients/wire_vectors.json`, asserted by all five client test suites |
 
 Conditions and limits:
 
@@ -209,27 +208,31 @@ See also: [reconnects](/reliability/reconnects/) and
 | Restore-client-subscriptions policy | Implemented | Broker, Rust client, TypeScript client, Python client, Go client, C# client |
 | Reconnect observability | Implemented | Admin overview, TCP metrics log, structured reconciliation logs |
 | Planned restart drain | Implemented | `POST /admin/api/drain` broadcasts a `GoingAway` push (grace deadline + message) to connected clients, surfaced by the clients as an app-observable event. In coordinated mode the node also marks itself draining: the controller hands each partition with a caught-up follower to it through the same fenced promotion as failover, the draining node receives no new placements, and the call returns with handoff progress once ownership has moved or `connection.drain_handoff_timeout_ms` (default 30s) elapses. Follower-less partitions stay put and fail over reactively as before |
-| Control-plane activity feed | Implemented | `GET /admin/api/audit` returns a bounded in-memory ring (newest 512 entries, reset on restart) of operator actions, attention transitions, membership changes, and stream lag-recovery events, rendered live on the dashboard's Activity page |
-| Attention feed | Implemented | `GET /admin/api/attention` names conditions needing an operator, most severe first: quarantined partition, expired or expiring certificate, failed settings load, backlog with no consumer, backlog growing despite consumers, low disk on the data directory, stalled replication follower, queue state error, broker left draining. Drives the Overview panel, the sidebar badge, and opt-in desktop notifications |
-| Dashboard history series | Implemented | `GET /admin/api/history`: per-broker in-memory time series (5s samples, last 30 minutes, reset on restart) of throughput, backlog, connections, and process memory/CPU/disk, plus per-queue depth series. Feeds the Overview charts, queue sparklines, and the resources panel |
-| Served-certificate metadata | Implemented | `GET /admin/api/tls`: fingerprint, validity window, and subject of the leaf the broker currently serves. Feeds the Security page and the certificate-expiry attention rule |
-| Live dashboard updates | Implemented | `GET /admin/api/events?families=...` streams named data-family snapshots over server-sent events on a ~2s tick, one multiplexed stream per open dashboard page, serialized once per tick regardless of subscriber count and idle when nobody watches. Dashboard pages fall back to polling when the stream is unavailable |
-| Operator test publish | Implemented | `POST /admin/api/publish` sends one text message through the broker's real publish path (partition pick, durable confirm, delivery) to a queue or Plexus stream, stamped with a reserved `fibril.test: admin` header so consumers can recognize operator traffic. Surfaced as a button on the dashboard's queue detail page and stream cards |
-| Durable broker restart reconciliation | Planned | Design notes only |
+| Typed subscription closure | Implemented | Rust `SubEvent::Closed` and `close_reason()`, TypeScript/Python `SubscriptionClosedError`, Go `CloseReason()` after channel closure, C# `SubscriptionClosedException` |
+| Safe automatic resubscription | Implemented | Supervised subscriptions recreate on supported owner-move or broker-advised recreate outcomes; opt-out exposes the typed close instead |
+| Durable broker restart reconciliation | Implemented | Broker-local persisted session identity and subscription metadata; `resumed_after_restart` within `connection.resume_session_restart_ttl_ms` (default 60s, 0 disables) |
+| Stale-delivery settlement | Implemented | All five clients stamp manual deliveries with their connection incarnation, reject stale settles without sending a frame, and route valid settles through the current connection |
 | In-flight publish replay | Out of scope | Clients do not replay old in-flight protocol requests |
 
 Conditions and limits:
 
-- Reconnect grace only applies while the broker process stays alive.
-- Resume requires the same client resume identity before grace expires.
+- Live-process reconnect grace requires the same resume identity before the grace
+  window expires. Restart resume uses its separate persisted-session TTL.
+- Restart resume is local to the owning broker. It does not transfer a session to
+  another node or restore authentication from persisted session metadata.
+- Delivery tags do not survive a broker restart. Unacknowledged work redelivers
+  according to the queue's at-least-once semantics; settling a held stale delivery
+  returns a typed, non-retryable error.
 - The conservative policy keeps matching subscriptions, drops server-only
   subscriptions, and closes client-side streams that the broker cannot prove are
   still valid.
 - Restore mode can recreate missing server-side subscriptions reported by the
   client after a successful resume.
-- Current Rust, TypeScript, Python, Go, and C# subscription receive APIs surface
-  reconciliation-closed streams as end-of-stream rather than a typed close
-  reason.
+- Terminal failures surface through the typed receive API. Automatic recreation
+  is limited to supported safe outcomes; it does not replay inflight publishes.
+- Stream subscriptions resume through their durable cursors. A cursor ACK sent
+  immediately after a resumed reconnect can race re-subscription and be dropped;
+  the uncommitted record can replay.
 
 ## Settlement, Retry, and Leasing
 
@@ -244,15 +247,19 @@ See also: [core model](/concepts/core-model/),
 | Immediate retry | Implemented | TCP protocol, Rust client, TypeScript client, Python client, Go client, C# client |
 | Delayed retry | Implemented | TCP protocol, broker, Rust client, TypeScript client, Python client, Go client, C# client |
 | Lease expiry | Implemented | Runtime delivery settings and broker/storage path |
+| Settlement history | Implemented | Range-compressed settled offsets with a derived contiguous frontier, preserved through snapshots and replication |
 
 Conditions and limits:
 
-- Ack settles a delivered message.
+- Queue ACK settles a delivered message; stream ACK advances its cursor.
 - Fail means nack without requeue. Depending on queue policy, the message may be discarded or dead-lettered.
 - Retry means nack with requeue.
 - Delayed retry requires `requeue=true` and a `not_before` deadline.
 - Expired leases can return inflight messages to ready.
 - Lease timing is controlled by runtime settings.
+- Queue NACK semantics do not apply to Plexus streams. A stream NACK currently
+  has no broker effect even if the client call succeeds; stream retry/fail
+  semantics remain undefined.
 
 ## Dead Lettering
 
@@ -406,6 +413,12 @@ See also: [admin dashboard](/admin-dashboard/).
 | Item | Status | Implemented surface |
 | --- | --- | --- |
 | Overview metrics | Implemented | Dashboard and API |
+| Control-plane activity feed | Implemented | `GET /admin/api/audit` returns a bounded in-memory ring (newest 512 entries, reset on restart) of operator actions, attention transitions, membership changes, and stream lag-recovery events, rendered live on the dashboard's Activity page |
+| Attention feed | Implemented | `GET /admin/api/attention` names conditions needing an operator, most severe first: quarantined partition, expired or expiring certificate, failed settings load, backlog with no consumer, backlog growing despite consumers, low disk on the data directory, stalled replication follower, queue state error, broker left draining. Drives the Overview panel, the sidebar badge, and opt-in desktop notifications |
+| Dashboard history series | Implemented | `GET /admin/api/history`: per-broker in-memory time series (5s samples, last 30 minutes, reset on restart) of throughput, backlog, connections, and process memory/CPU/disk, plus per-queue depth series. Feeds the Overview charts, queue sparklines, and the resources panel |
+| Served-certificate metadata | Implemented | `GET /admin/api/tls`: fingerprint, validity window, and subject of the leaf the broker currently serves. Feeds the Security page and the certificate-expiry attention rule |
+| Live dashboard updates | Implemented | `GET /admin/api/events?families=...` streams named data-family snapshots over server-sent events on a ~2s tick, one multiplexed stream per open dashboard page, serialized once per tick regardless of subscriber count and idle when nobody watches. Dashboard pages fall back to polling when the stream is unavailable |
+| Operator test publish | Implemented | `POST /admin/api/publish` sends one text message through the broker's real publish path (partition pick, durable confirm, delivery) to a queue or Plexus stream, stamped with a reserved `fibril.test: admin` header so consumers can recognize operator traffic. Surfaced as a button on the dashboard's queue detail page and stream cards |
 | Connections and subscriptions | Implemented | Dashboard and API; per-connection publish counters, and a diagram view of the broker as the fibril ring with publisher connections plugged into one side and subscribers the other, pulses following each connection's live rate |
 | Queues page | Implemented | Dashboard and API, per-partition expand, follower-replication view, DLQ-policy column, hide-inactive toggle + search filter, live in/s and out/s columns, and a depth-trend drilldown (chart, rates, oldest ready message's age) |
 | Create queue | Implemented | `POST /admin/api/queues` + dashboard form (partition count, optional DLQ policy, optional default message TTL); coordinated in cluster mode - the partitioning registers with coordination first, its count is authoritative, and the controller places every partition |
@@ -476,61 +489,52 @@ See also: [client usage](/clients/),
 [quickstart](/quickstart/), and
 [reconnection grace](/development/reconnection-grace/).
 
-Server-side reconnect grace for inflight settles is implemented in the TCP
-handler when `connection.reconnect_grace_ms` is configured. Clients now attempt
-one automatic reconnect before a new operation when the old engine is already
-closed. Clients and broker also exchange subscription metadata after a
-successful resume. Active subscription streams continue when reconciliation
-confirms that the subscription should be kept. An opt-in restore policy can ask
-the broker to recreate subscriptions that the client still owns but the server
-does not currently have.
+Rust, TypeScript, Python, Go and C# expose the shared messaging and reconnect
+surface. Python offers asynchronous APIs and a blocking facade. The
+[client feature matrix](https://github.com/Axmouth/fibril/blob/main/clients/FEATURE_MATRIX.md)
+records language-specific options and exceptions.
 
-| Item | Rust | TypeScript |
+| Item | Status | Client surface |
 | --- | --- | --- |
-| Connect and auth | Implemented | Implemented |
-| Publish unconfirmed | Implemented | Implemented |
-| Publish confirmed | Implemented | Implemented |
-| Pipelined confirmation handle | Implemented | Implemented |
-| Delayed publish | Implemented | Implemented |
-| Message TTL (`expiring` publisher + queue `default_message_ttl`) | Implemented | Implemented |
-| Manual ack subscription | Implemented | Implemented |
-| Auto ack subscription | Implemented | Implemented |
-| Plexus stream declare + subscribe (durable cursor, filter, fan-in) | Implemented | Implemented |
-| Exclusive consumer group | Implemented | Implemented |
-| Assignment-change events | Implemented | Implemented (`onAssignmentChange`) |
-| Resume identity handshake | Implemented | Implemented |
-| Explicit reconnect outcome | Implemented | Implemented |
-| Existing publishers after explicit reconnect | Implemented | Implemented |
-| New subscriptions after explicit reconnect | Implemented | Implemented |
-| Conservative automatic reconnect before new operation | Implemented | Implemented |
-| Subscription reconciliation metadata exchange | Implemented | Implemented |
-| Active subscription recovery after accepted resume | Implemented | Implemented |
-| Opt-in subscription restore after accepted resume | Implemented | Implemented |
-| Delayed retry | Implemented | Implemented |
-| Queue declaration | Implemented | Implemented |
-| Content type helpers | Implemented | Implemented |
-| Default group normalization | Implemented | Implemented |
-| Automatic reconnect and resubscribe | Planned | Planned |
+| Connect, auth and TLS | Implemented | All five clients, including mTLS and typed TLS errors |
+| Confirmed, unconfirmed and delayed publish | Implemented | All five clients, including pipelined confirmation handles and message TTL |
+| Queue consume and settlement | Implemented | All five clients: manual/auto ACK, immediate/delayed retry, prefetch and queue declaration |
+| Stream consume | Implemented | All five clients: durable cursors, start positions, filters and partition fan-in |
+| Routing and discovery | Implemented | All five clients: topology cache, owner redirects, partition-key routing, catalogue and pattern subscriptions |
+| Exclusive consumer groups | Implemented | All five clients: membership and assignment-change events; broader cluster scenario coverage remains partial |
+| Explicit reconnect and automatic reconnect opt-out | Implemented | All five clients return the handshake outcome and expose a policy switch |
+| Reconciliation and typed subscription closure | Implemented | All five clients; see [Reconnects](#reconnects) for resume, recreation and staleness conditions |
+| Guided errors and retry advice | Implemented | Broker error frames and client-local errors carry context and retry classification; shared error-guide fixtures cover wording |
+| Payload codecs and headers | Implemented | Raw/text/JSON/custom content types and user headers; msgpack support follows each language's codec/dependency options |
+| Bounded write coalescing | Implemented | Rust batches ACK writes with queued commands; Python/TypeScript buffer pipelined confirmed publishes; Go/C# drain queued writes into batches |
 
 Conditions and limits:
 
-- Both clients expose msgpack, JSON, text, raw payloads, content type metadata, and custom user headers.
-- Both clients treat content type separately from the header map.
-- Both clients expose delayed publish and delayed retry.
-- TypeScript uses `bigint` for protocol `u64` values such as offsets.
-- Explicit reconnect returns whether the broker accepted the resume identity.
-- Publisher handles use the latest client engine after explicit or automatic reconnect.
-- New subscriptions created after reconnect use the latest client engine.
-- Automatic reconnect is bounded by client policy and defaults to one attempt before a new operation.
-- After a successful resume, both clients send known subscription metadata and read the broker reconciliation result.
-- When the broker returns `keep`, both clients route later deliveries for that subscription into the existing stream.
-- If the broker keeps a subscription under a different server `sub_id`, both clients remap the existing stream to that server id.
-- The default reconciliation policy is conservative. Client-only or mismatched subscriptions are closed client-side, while server-only subscriptions are dropped by the broker.
-- The opt-in restore-client-subscriptions policy recreates client-owned subscriptions that are missing server-side, then keeps the existing client stream using the broker's new subscription id.
-- Operations already in flight when the socket fails are not replayed.
-- Active subscriptions still need application-level handling when resume is rejected or reconciliation reports a mismatch.
-- Late settlements after a short disconnect are accepted only when the client explicitly resumes before grace expires.
-- Broker process restart reconciliation is implemented for resumable sessions: the broker persists a small session skeleton (owner identity, client id, resume token, subscription set) to its durable store, so a restart within `connection.resume_session_restart_ttl_ms` (default 60s, `0` disables) lets a client resume and reconcile rather than being rejected. The handshake reports `resumed_after_restart` for this case. Messages redeliver per at-least-once and delivery tags still die with the process (the client marks held deliveries stale on a non-resumed outcome). Live-process reconnect grace still depends on in-memory dormant connection state as before.
+- Publisher handles and newly created subscriptions use the current connection
+  after reconnect. Valid held manual deliveries settle through that connection;
+  stale deliveries return a typed error.
+- Automatic reconnect defaults to a bounded attempt before a new operation.
+  Subscription supervisors handle supported recreation and ownership changes;
+  terminal reasons remain visible to the application.
+- TypeScript represents protocol `u64` values, including offsets, as `bigint`.
+- Buffered writes preserve individual frames and confirmations. A buffered send
+  is not evidence of durability; failed connections fail outstanding requests.
+- Python's ordinary `publish(confirm=True)` sends immediately; its pipelined
+  confirmation API uses the buffer. TypeScript's confirmed APIs share the
+  buffered engine path. Python/TypeScript expose byte/count/time bounds, with
+  `max_frames=1` / `maxFrames: 1` available for immediate writes.
+- Transport failure does not trigger replay of already-inflight publish requests.
+
+## Server Output
+
+| Item | Status | Implemented surface |
+| --- | --- | --- |
+| Output priority queues | Implemented | Control and replication frames share the high-priority writer path; delivery and publish responses also use the connection writer |
+| Prompt tail flushing | Implemented | Buffered output flushes when both outgoing queues drain; count, byte and elapsed-time limits bound batches under sustained traffic |
+
+Output flushing changes when eligible frames reach the socket. Publish
+confirmation still waits for the configured local and replica durability gates.
+ACK and confirmation semantics remain unchanged.
 
 ## Benchmarks and Operational Scripts
 
@@ -541,14 +545,32 @@ See also: [benchmarks](/benchmarks/).
 | Throughput benchmark | Implemented | Rust bench helper and shell scripts |
 | Steady-state rate benchmark | Implemented | Bench binary and scripts |
 | Memory sampling during bench | Implemented | Bench scripts |
+| Load/eviction memory probe | Implemented | `scripts/memory-audit.sh` checks eviction and settled-RSS growth across repeated cycles |
 | Formal CI benchmark reporting | Planned | Local and informal docs exist, reproducible CI reporting is pending |
-| One command pre-commit verification helper | Planned | Individual checks exist, unified helper is still pending |
+| Repository verification helper | Implemented | `scripts/check.sh` runs shell/template validation, Rust formatting and workspace tests, TypeScript tests, and website verification |
 
 Conditions and limits:
 
 - Current benchmark numbers are local architecture checks.
 - They are not a stable published performance contract.
 - Hardware, storage, durability settings, payload size, queue depth, and batching strongly affect results.
+
+## Validation and Compatibility Tooling
+
+| Item | Status | Implemented surface |
+| --- | --- | --- |
+| Deterministic cluster simulation | Implemented | Turmoil multi-broker harness exercises election, replication, failover, partitions, fencing and repartition scenarios |
+| Chaos and soak tools | Implemented | Broker recovery/soak tests and `scripts/cluster-tryout.sh --chaos` for process faults under load and reconvergence checks |
+| Cross-client wire vectors | Implemented | Shared `clients/wire_vectors.json` fixtures exercised by Rust, TypeScript, Python, Go and C# tests |
+| Storage compatibility fixture | Partial | `datadir-v0.4.0` fixture, generator script and recovery test cover standalone queues, snapshots, stream data/cursors and DLQ state |
+
+Conditions and limits:
+
+- Existing scenarios cover specific failures; they do not certify production HA.
+- The storage fixture does not cover coordination WAL/snapshots or persisted
+  auth-user/runtime-settings documents.
+- Supported compatibility baselines, vector regeneration enforcement,
+  previous-client checks and mixed-version rolling-upgrade coverage remain open.
 
 ## Deployment Surface
 
@@ -559,6 +581,7 @@ See also: [source deployment](/deployment/source/).
 | Website Docker deployment | Implemented | Compose file and Traefik labels |
 | Broker server image | Implemented | Dockerfile and publish workflow |
 | `fibrilctl` in image | Implemented | Server image includes CLI |
+| Cluster tryout and demo workload | Implemented | Cluster Compose and tryout script, with `fibril-demo` running simulated business workloads through the client |
 | Source deployment docs | Implemented | Docs site |
 | Full production hardening guide | Partial | Basic guidance exists, deeper ops runbook is pending |
 
@@ -634,6 +657,10 @@ See also: [clustering](/concepts/clustering/) and
 | Automatic failover | Partial | Dead owner can trigger epoch-bumped reassignment, follower promotion at local tail, stale owner demotion |
 | Cold-restart orphan reconciliation | Partial | A partition reassigned away while a node was down is retained as inert on-disk cold storage after restart (ownership-gated serving means it is never served or materialized) and surfaced at startup. Reclaim of that disk is still manual |
 | Epoch fencing | Implemented | Role transitions advance log epochs before serving or applying replicated batches |
+| Follower source refresh | Implemented | An owner or epoch change drains and retargets a remaining follower's worker while retaining its replication cursors |
+| Checkpoint epoch checks | Implemented | Both source epochs are validated before reset and checked again by each storage writer in command order |
+| Checkpoint recovery | Partial | State installation and subsequent message backfill are wired; interrupted installation and promotion before backfill have reproduced storage-level gaps |
+| Conflict diagnostics | Implemented | Bounded, payload-free control history, offsets and effective record identities accompany overlap reports; checkpoint logs show source epochs and continuation offsets |
 | Replica-durable confirms | Partial | Owner waits for durable follower progress according to assignment policy, with timeout and ISR floor |
 | Durable stream replication (Plexus) | Partial | Tier-gated: the durable tier replicates record + cursor logs to `stream_replication_factor` followers (express tiers stay owner-only), durable publishes confirm on replica durability, and a caught-up follower is promoted on owner failover. Reuses the queue follower-worker, confirm gate, and failover-candidate selection |
 | `min_in_sync_replicas` | Implemented | Runtime setting, fail-fast publish refusal when healthy ISR is below floor |
@@ -646,13 +673,18 @@ See also: [clustering](/concepts/clustering/) and
 
 Conditions and limits:
 
-- This surface is experimental on the replication/sharding branch.
-- Ganglion mode is the active embedded-coordination path. The older etcd-shaped
-  plan remains useful as a design reference, but the current implementation
-  uses the same coordination trait with Ganglion underneath.
+- Cluster operation is experimental. Ganglion provides the embedded
+  coordination and assignment state.
 - Replication is follower-pull. Followers apply durably, then report progress
   through stamped replication reads.
-- Failover safety relies on assignment epochs plus local Stroma promotion gates.
+- Failover checks assignment epochs and local promotion state. Isolated storage
+  tests show that local-tail promotion can accept a checkpoint before required
+  message bodies are backfilled. An interrupted message-log reset can also
+  reopen with snapshot references to missing bodies. Broker-level fault coverage
+  and interruption-safe installation remain pending.
+- Conflict diagnostics do not enable automatic repair of divergent histories.
+  Checkpoint epoch checks protect authority but do not make replacement of both
+  logs and queue state atomic.
 - Replica-durable confirms are meaningful only when the assignment durability
   policy requires more than the owner.
 - Cross-broker topology lag and ISR aggregation into the topology page is still
@@ -665,9 +697,7 @@ Conditions and limits:
 | --- | --- | --- |
 | Transactions | Out of scope | Not planned |
 | Production-ready clustered HA | Planned | Experimental coordination, replication, and failover are wired, but hardening and runbooks remain |
-| Single-node queue deletion | Implemented | Admin API/dashboard; see Admin Surface |
 | Multi-node queue deletion | Planned | Coordinated teardown across replicas is pending |
-| Message TTL (drop by age) | Implemented | Per-message + per-queue default; see Publish |
 | Queue expiration (auto-delete idle queue) | Planned | Distinct from message TTL; needs global/coordinated idle tracking |
 | Log retention by age (truncate old messages) | Planned or undecided | Not currently exposed as a user feature |
 | Message purge (empty a queue) | Planned | Re-scoped: needs a replicated reset, not in-memory only |

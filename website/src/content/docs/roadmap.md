@@ -1,234 +1,100 @@
 ---
 title: Roadmap
-description: Near-term work for Fibril.
+description: Remaining work and acceptance criteria for Fibril.
 ---
 
-Fibril is still early. Treat this page as the current checkpoint for what has
-landed recently and what is still pending. The near-term focus is making the
-existing semantics complete, observable, and usable before adding larger
-distributed-system features.
+Fibril's priorities are recovery safety, complete client semantics, compatibility,
+and cluster operations. This page tracks remaining work. Current capabilities
+and their limits are documented in [implemented surface](/implemented-surface/);
+[project status](/status/) summarizes their maturity.
 
-For the reverse view, use [implemented surface](/implemented-surface/) to
-check what is already wired and under what conditions.
+## Path to 1.0
 
-## Releases and the path to 1.0
+The 1.0 acceptance criteria cover four areas:
 
-Fibril follows SemVer. While on 0.x the public API and wire protocol are not
-frozen and can change between minor releases. Versions move one minor at a time,
-with no vanity jumps: the number tracks the stability promise, not perceived
-completeness. Per-feature maturity lives in [project status](/status/).
+1. **Cluster confidence:** replication, recovery and failover withstand
+   deterministic fault tests, sustained chaos/soak runs, and multi-node operation.
+2. **Compatibility:** stable client APIs, versioned wire and storage formats,
+   a written support policy, and automated compatibility checks.
+3. **Operational lifecycle:** predictable drain, restart, reconnect and upgrade
+   behavior, with typed client outcomes and failure-recovery runbooks.
+4. **Security:** authenticated and encrypted client, admin and inter-broker
+   connections, with documented trust configuration and credential lifecycle.
 
-These docs live at the site root and track main. When a version is cut the whole
-documentation set is frozen under a versioned path (for example `/0.2/`), so an
-adopter on a release reads the surface, the
-[implemented surface](/implemented-surface/) inventory, and the
-[project status](/status/) exactly as that release shipped them while the root
-moves ahead. A version picker switches between the current docs and any frozen
-release.
+The remaining work is grouped below by dependency and operational impact.
 
-1.0 is not a quality badge, it is a commitment: a stable API and wire protocol
-plus confidence in the durability and replication semantics. It ships only when
-all four of these hold.
+## Recovery safety
 
-1. Cluster confidence. Replication and failover are proven by deterministic
-   simulation testing, a green chaos and soak suite, and at least one real
-   multi-node deployment run.
-2. API and wire-protocol freeze. The protocol is versioned with a back-compat
-   policy and client public APIs are stable, including the Offset/Topic newtype
-   and `Arc<str>` pass.
-3. Operational lifecycle. Graceful drain and durable restart reconciliation,
-   with a failure-semantics runbook, so restarts and upgrades are first-class.
-4. Security baseline. TLS in transit and auth/authz beyond the static handler.
+- Make checkpoint replacement interruption-safe across the message log, event
+  log, queue state and persisted snapshot. Recovery must complete or refuse a
+  partial installation before the partition can serve.
+- Prevent promotion until checkpoint-referenced messages have finished
+  backfilling, including after restart.
+- Cover each installation boundary with error, cancellation and process-kill
+  tests, then exercise failover during checkpoint catch-up through real brokers.
+- Define source authority, acknowledged-history preservation, bounded retries
+  and operator alerts before enabling automatic repair of divergent replicas.
 
-### 0.1
+## Client lifecycle and compatibility
 
-Durable single-node queues and Plexus streams, the Rust, TypeScript, Python, Go, and C#
-clients, the admin dashboard, and an experimental cluster path (coordination,
-replication, failover, live repartitioning). Single-node features are Available,
-the cluster path is Experimental, and the API and wire protocol may still change.
+Complete lifecycle semantics before freezing the public APIs:
 
-### 0.2
+- Define stream `fail`, `retry` and delayed-retry behavior, including typed
+  rejection of operations the stream cursor model cannot support.
+- Ensure a resumed stream's cursor ACK waits for re-subscription or is retained
+  for retry until the subscription is ready.
+- Add focused coverage for automatic recreation continuity and fuller
+  multi-broker exclusive-consumer-group scenarios.
 
-Cluster confidence and operational hardening - **gate 1 (cluster confidence) is
-met**:
+The compatibility work follows this order:
 
-- Deterministic simulation testing (turmoil): a multi-broker harness covering
-  election, replication, failover, split-brain, lossy networks, durability floor,
-  checkpoint install, and repartition cutover.
-- A chaos and soak suite (crash recovery and sustained-load no-loss) and a real
-  multi-node failover validation run.
-- Graceful drain announcement so a planned restart is transparent to in-flight
-  work (gate 3), resolved reconnect grace-policy defaults, and configurable
-  replication read/connect timeouts.
-- The versioning and release process itself: a shared repo version, a changelog,
-  per-repo release scripts with an overlord, and version-tagged images.
+1. Finish the Offset/Epoch and Topic/Group type review, including the proposed
+   `Arc<str>` representation, while preserving existing wire bytes.
+2. Define wire and durable-format versioning, migration and support policies.
+3. Review and freeze the Rust, TypeScript, Python, Go and C# client APIs.
+4. Enforce the policies with vector regeneration checks, baseline-client/new-broker
+   tests, mixed-version rolling upgrades and storage fixtures. Select explicit
+   supported baselines and expand fixture coverage to coordination storage, users
+   and runtime settings.
 
-The cluster path stays labeled Experimental until the remaining gates land.
+## Cluster operations
 
-### 0.3
+- Provide one-command node enrollment with short-lived invitations, trust
+  verification and configuration exchange.
+- Aggregate replication lag and in-sync status across brokers in the CLI and
+  topology view.
+- Add coordinated queue deletion, replicated purge, and node scale-up/scale-down
+  workflows with explicit failure outcomes.
+- Narrow exclusive-consumer subscriptions to their assigned partition subset.
+- Define replicated policy for cluster-wide runtime locks while retaining local
+  hardware settings such as storage paths and log tuning.
+- Expand deployment, failover and rolling-upgrade runbooks.
 
-The security release - **gate 4 (security baseline) is substantially met**:
+## Performance and observability
 
-- TLS in transit: the broker listener serves TLS from operator PEMs or
-  per-deployment generated material, the admin dashboard serves HTTPS from the
-  same material, and the Rust, TypeScript, Python, Go, and C# clients connect with
-  OS-root, CA-file, or fingerprint-pin trust and a typed error taxonomy.
-- Broker authentication against an argon2 user store, managed from the
-  dashboard and `fibrilctl`, replicated across the cluster, with the built-in
-  credentials restricted to loopback. Node-to-node connections authenticate
-  with a cluster shared secret, separate from user accounts.
-- A first-boot setup flow (TLS, admin user, and cluster secret) and a cluster
-  setup guide, so both the entry-level and unattended paths are documented.
+- Profile client scheduling, decoding and delivery costs in Python and TypeScript.
+- Track publish and delivery capacity, latency and memory across payload sizes,
+  storage devices, partition counts and replication policies.
+- Improve memory use under large backlogs, high inflight load and many idle queues.
+- Improve bulk DLQ replay, message inspection and sparse-queue diagnostics.
+- Add reproducible benchmark reporting and OpenTelemetry export.
 
-Mutual-TLS client authentication, per-topic authorization, TLS on inter-broker
-connections, and certificate rotation are the remaining security depth, planned
-for later minors.
+## Longer-term options
 
-### 0.4 (latest released minor)
+These require a concrete use case or further design:
 
-The operations release - **gate 4 (security baseline) is effectively
-complete** (per-topic authorization stays shelved until a real need appears)
-and gate 3 gains its drain half:
-
-- A Prometheus `/metrics` endpoint on the admin listener - node-level
-  aggregates plus per-channel series from materialized channels, behind the
-  same auth and HTTPS as the dashboard. See
-  [monitoring](/deployment/monitoring/).
-- Graceful ownership handoff on drain, so a planned restart moves partition
-  ownership to caught-up followers instead of waiting out reactive failover.
-  See
-  [failure modes](/reliability/failure-modes/#planned-restart-or-rolling-upgrade).
-- TLS on inter-broker replication and coordination connections, with a
-  shared-CA lane for generated material and live leaf-certificate rotation
-  through the admin API. See
-  [TLS across nodes](/deployment/cluster/#tls-across-nodes).
-- Mutual TLS: client certificates as credentials (`tls.client_auth`), with
-  certificate identities mapping to store users, `fibrilctl cert issue`, and
-  client options plus a typed required-cert error in the clients.
-
-### Toward 1.0 (later 0.x minors)
-
-The workspace version is still 0.4.0; main also contains unreleased work.
-The following checkpoint reflects main as of 2026-09-19, rather than the frozen
-0.4 documentation.
-
-- Implemented since 0.4: guided errors, typed subscription-close reasons,
-  safe auto-resubscribe, durable broker-local restart resume, and stale-delivery
-  settlement across Rust, TypeScript, Python, Go, and C#. Restart resume still
-  redelivers unacknowledged work; it does not preserve delivery tags across a
-  process restart. This supplies the main reconnect functionality for gate 3.
-- Remaining lifecycle work: close the stream settlement gaps and the focused
-  auto-resubscribe-on continuity test before treating the lifecycle review as
-  finished. Stream NACK operations need explicit semantics; a resumed stream's
-  cursor ACK can race asynchronous re-subscription.
-- Recovery hardening: prove checkpoint installation safe under interruption
-  across both logs and queue state, and test promotion while checkpoint-referenced
-  messages are still backfilling. Epoch-fenced resets and conflict diagnostics
-  have landed, but do not establish atomic installation or safe automatic
-  repair of divergent histories. Isolated storage tests reproduce unsafe reopen
-  after an interrupted reset and premature local-tail promotion before backfill;
-  broker-level failover and process-kill coverage remain pending.
-- Next gate: the compatibility freeze. Finish the Offset/Epoch and Topic/Group
-  type pass, write the wire and durable-format compatibility policy, review all
-  five client APIs, and enforce the promise with wire vectors, previous-release
-  clients, and mixed-version broker tests (gate 2). The v0.4.0 storage golden
-  fixture already exists; extend that coverage and generate fixtures at future
-  releases.
-- Next larger operator feature: one-command cluster join. An invite token
-  enrolls a fresh node with trust, addressing, and configuration.
-- Per-topic authorization remains deferred until a concrete need appears;
-  gate 4's baseline is effectively complete.
-
-Gate 1's earlier simulation, chaos/soak, and multi-node milestone remains recorded
-as met. Newly identified recovery concerns still require their own evidence;
-that milestone is not a blanket guarantee for every failure path. 1.0 follows
-once the remaining gates hold and the frozen surface has soaked.
-
-### After 1.0 (parallel, non-gating)
-
-These add reach and polish without gating 1.0, and several can proceed in
-parallel before then:
-
-- Additional first-party clients, such as Java. Rust, TypeScript, Python, Go,
-  and C# already exist.
-- OpenTelemetry export (the Prometheus endpoint shipped with 0.4).
-- Continued performance refinement (async replication fsync, staging micro-opts).
-- Optional symmetric conveniences such as wildcard publishers (client-side
-  fan-out to every topic matching a pattern, mirroring wildcard subscribe), if a
-  real need appears.
-
-See [out of scope](#out-of-scope) for what stays deliberately outside the broker.
-
-## Release history
-
-Shipped changes are recorded in the repo changelog
-([CHANGELOG.md](https://github.com/Axmouth/fibril/blob/main/CHANGELOG.md)),
-which is also the body of each
-[GitHub release](https://github.com/Axmouth/fibril/releases). This page
-covers direction, not history. For the full wired surface and its
-conditions, see [implemented surface](/implemented-surface/).
-
-## Near term
-
-The near, medium, and longer-term lists below are the detailed backlog that
-feeds the milestones above.
-
-- Refactor server bootstrap wiring into the `fibril` library enough to make
-  multi-node coordination and cohort-controller tests stand up real brokers
-  without going through `main`.
-- Add fuller multi-broker client scenario tests for cross-broker exclusive
-  consumer-group coordination and failure handling.
-- Finish the combined Offset plus Topic/Group newtype pass after the current
-  partition newtype pass, including the planned `Arc<str>` direction for
-  Topic/Group.
-- Finish stream settlement semantics and reconnect continuity coverage; typed
-  subscription-close feedback already exists across all five clients.
-- Keep improving DLQ replay and message inspection workflows, especially bulk operations and clearer operator feedback.
-- Add the next storage-level startup/runtime settings where they have clear operational value.
-- Keep refining sparse-queue observability where it helps operators decide why a queue is loaded, idle, or not yet unloaded.
-- Explore cluster-wide immutable runtime policy. Hardware-shaped startup
-  settings such as storage paths and log tuning should stay local, while any
-  cluster-wide runtime locks need a replicated policy rather than node-local
-  boot config.
-- Improve TCP protocol ergonomics and error behavior.
-- Keep the Rust, TypeScript, Python, Go, and C# client APIs aligned as public-path
-  behavior changes.
-
-## Medium term
-
-- Add cross-broker replication lag aggregation to `fibrilctl topology` and the
-  admin topology diagram.
-- Add programmatic node management and scale-up or scale-down flows around the
-  Ganglion-backed cluster path.
-- Extend the existing fault-injection coverage for partitions, latency, dropped
-  traffic, leadership churn, and interrupted checkpoint installation.
-- Add consumer-group assignment narrowing so clients can subscribe only to their
-  assigned partition subset instead of relying only on the delivery gate.
-- Continue improving runnable broker images and binaries, including `fibrilctl` in the server image.
-- Add more production deployment guidance for the broker itself.
-- Improve admin interface observability.
-- Produce repeatable benchmark reports and keep the
-  [optimization log](/development/optimization-log/) current as
-  low-level performance work is investigated.
-- Tighten memory behavior under large queue depth, high inflight load, and many idle queues.
-
-## Longer term
-
-- Hardening the experimental replication and clustering path (queues and streams)
-  into production guidance and supported defaults.
-- Fully transparent broker restarts. The implemented reconnect lifecycle
-  (see [toward 1.0](#toward-10-later-0x-minors)) reports restart resume and
-  stale deliveries explicitly. The longer-term extension is
-  making it invisible: a client within its grace window reclaims inflight
-  ownership across the restart, with a startup grace window before normal
-  redelivery resumes, so in-flight work sees no disturbance at all. The
-  drain half already shipped: a draining broker announces itself and hands
-  partition ownership off before stopping.
-- Extend the client ecosystem beyond the existing Rust, TypeScript, Python
-  (async plus blocking), Go, and C# clients; Java remains a possible addition.
+- Reclaim inflight ownership across broker restart and transfer sessions across
+  nodes, with a defined startup grace window and redelivery policy.
+- Per-topic authorization and tenancy controls.
+- Ordering guarantees across a partitioned queue: compare per-key and queue-wide
+  ordering, delivery versus processing order, retries and repartitioning, and the
+  cost of sequencing or merging across partitions.
+- Additional clients, such as Java.
+- Richer bounded stream filters and client-side wildcard publishing.
+- Queue expiration based on coordinated inactivity.
 
 ## Out of scope
 
-Transactions are not planned. Fibril is aiming for clear durable messaging semantics, not a clone of every broker feature, and transactional publish/consume workflows are intentionally out of scope.
-
-Content-routing scripting and SQL/stream-processing are also out of scope for the broker core. Programmable routing, if ever pursued, belongs in a layer above Fibril (an external engine that drives declares and subscriptions, potentially its own runtime), not embedded in the broker hot path. Keeping that logic outside the broker preserves the simple, predictable core.
+Transactions and transactional publish/consume workflows are outside the broker's
+scope. Content-routing scripts and SQL/stream processing belong in an external
+layer that uses the broker's publish and subscribe APIs.

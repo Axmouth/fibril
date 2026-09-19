@@ -96,9 +96,9 @@ The clients do not replay operations that were already in flight when the socket
 failed. This avoids silently duplicating confirmed publishes whose frame may
 have reached the broker before the confirmation was lost.
 
-If resume is not accepted, or the broker reports that the client and server
-disagree about a subscription, treat that stream as unsafe and recreate the
-subscription at the application level.
+After a non-resumed reconnect, held deliveries have stale tags. Subscription
+supervisors can recreate a subscription when the broker reports a supported safe
+outcome; terminal or unsupported outcomes require application handling.
 
 A closed subscription never ends silently: every client carries a typed reason
 so you always know why a stream stopped. When the broker ends a subscription
@@ -157,8 +157,7 @@ the runtime settings API.
 
 ## Current Client Signal
 
-Most reconnect behavior is uniform across the clients; two capabilities are not
-yet, so rather than name clients inline this is the support matrix:
+Reconnect controls and lifecycle signals are available across all five clients:
 
 | Capability | Rust | TypeScript | Python | Go | C# |
 |---|---|---|---|---|---|
@@ -172,9 +171,10 @@ yet, so rather than name clients inline this is the support matrix:
 | Disable automatic reconnect | yes | yes | yes | yes | yes |
 
 The explicit `reconnect()` returns the broker handshake outcome. Use it to tell
-whether the broker actually resumed the previous logical connection or started a
-fresh one. If the outcome is not `resumed`, treat old subscriptions and unsettled
-local work as unsafe to continue without a fresh application-level decision. The
+whether the broker resumed the previous logical connection, restored its persisted
+session after restart, or started a fresh session. Only a live-process `resumed`
+outcome preserves held delivery tags; other outcomes make those tags stale.
+Subscription continuity follows the reconciliation and supervisor rules above. The
 method is `reconnect()` in Rust, TypeScript, and Python, `Reconnect(ctx)` in Go,
 and `ReconnectAsync(ct)` in C#. Disabling the automatic attempt makes a closed
 connection surface its close error before the next operation instead of silently

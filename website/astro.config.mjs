@@ -75,6 +75,7 @@ export default defineConfig({
           label: "Development Notes",
           items: [
             { label: "Documentation style", slug: "development/docs-writing" },
+            { label: "Optimization and bug notes", slug: "development/engineering-notes" },
             { label: "Configuration policy", slug: "development/config-policy" },
             { label: "Configuration design", slug: "development/config-design" },
             { label: "Metadata policy", slug: "development/metadata-policy" },
