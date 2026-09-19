@@ -125,7 +125,9 @@ The following checkpoint reflects main as of 2026-09-19, rather than the frozen
   across both logs and queue state, and test promotion while checkpoint-referenced
   messages are still backfilling. Epoch-fenced resets and conflict diagnostics
   have landed, but do not establish atomic installation or safe automatic
-  repair of divergent histories. The promotion concern still needs reproduction.
+  repair of divergent histories. Isolated storage tests reproduce unsafe reopen
+  after an interrupted reset and premature local-tail promotion before backfill;
+  broker-level failover and process-kill coverage remain pending.
 - Next gate: the compatibility freeze. Finish the Offset/Epoch and Topic/Group
   type pass, write the wire and durable-format compatibility policy, review all
   five client APIs, and enforce the promise with wire vectors, previous-release

@@ -22,13 +22,13 @@ Implemented on main since the 0.4 cut:
   prompt socket-tail flushing. Durability and replica-confirmation gates remain.
 
 Remaining work, in recommended order:
-1. Checkpoint recovery hardening: reproduce interruption between message-log
-   reset, event-log reset, state install and snapshot persistence; design durable
-   installation/recovery so a partial install cannot serve or promote. Also
-   reproduce or rule out promotion to local tails before checkpoint-referenced
-   messages finish backfilling. The latter remains a suspected gap. Epoch checks
-   do not make the multi-step installation atomic. General automatic conflict
-   repair stays disabled; see REPLICATION_OVERLAP_DIAGNOSTICS.md.
+1. Checkpoint recovery hardening: isolated storage tests now reproduce both
+   unsafe reopen after interruption following the message-log reset and local-tail
+   promotion before checkpoint message backfill. Design durable installation and
+   backfill tracking so neither partial state can serve or promote. Full broker
+   failover and process-kill reproductions remain pending. Epoch checks do not
+   make installation atomic. See CHECKPOINT_RECOVERY_PLAN.md for evidence and
+   acceptance checks; general automatic conflict repair remains disabled.
 2. Lifecycle completion review: stream NACK semantics and resumed-stream cursor
    settlement (see the Plexus settle-model gaps below), plus the still-deferred
    auto-resubscribe-ON continuity test. #104 itself is implemented, not deferred.
