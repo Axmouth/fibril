@@ -4786,6 +4786,15 @@ impl Broker<StromaEngine> {
     ) -> Result<BrokerAssignmentTransitionApply, BrokerError> {
         let topic = transition.queue.topic.to_string();
         let group = transition.queue.group.as_deref();
+        tracing::info!(
+            topic = %topic, partition = transition.queue.partition.id(), group = ?group,
+            intent = ?transition.intent,
+            previous_owner = ?transition.previous.as_ref().map(|a| a.owner.as_str()),
+            previous_epoch = ?transition.previous.as_ref().map(|a| a.epoch),
+            next_owner = ?transition.next.as_ref().map(|a| a.owner.as_str()),
+            next_epoch = ?transition.next.as_ref().map(|a| a.epoch),
+            "applying queue assignment transition"
+        );
         if matches!(
             transition.intent,
             LocalAssignmentIntent::BecomeOwner | LocalAssignmentIntent::BecomeFollower

@@ -1021,7 +1021,11 @@ async fn owner_identity_persists_across_a_real_engine_restart() {
     let store2 = SessionSkeletonStore::load_from_stroma_engine(&engine2, Uuid::from_u128(2))
         .await
         .expect("reload session store");
-    assert_eq!(store2.owner_id(), owner, "owner id must persist across a restart");
+    assert_eq!(
+        store2.owner_id(),
+        owner,
+        "owner id must persist across a restart"
+    );
     engine2.shutdown().await.expect("engine shutdown");
     drop(dir);
 }
@@ -1147,7 +1151,9 @@ fn short_lease_broker_config() -> BrokerConfig {
     }
 }
 
-fn restart_settings(store: Arc<fibril_protocol::v1::session_store::SessionSkeletonStore>) -> ConnectionSettings {
+fn restart_settings(
+    store: Arc<fibril_protocol::v1::session_store::SessionSkeletonStore>,
+) -> ConnectionSettings {
     ConnectionSettings::new(Some(60))
         .with_reconnect_grace_ms(Some(30_000))
         .with_resume_session_restart_ttl_ms(Some(60_000))
@@ -1216,7 +1222,10 @@ async fn resume_across_a_real_restart_redelivers_unacked_work() {
     let (mut second, second_task, dir, _broker) =
         open_protocol_connection_for_broker(restart_settings(store2), broker2, dir).await;
     let restart_ok = handshake_with_resume(&mut second, Some(resume)).await;
-    assert_eq!(restart_ok.resume_outcome, ResumeOutcome::ResumedAfterRestart);
+    assert_eq!(
+        restart_ok.resume_outcome,
+        ResumeOutcome::ResumedAfterRestart
+    );
 
     // Reconcile the subscription: the fresh session has none, so the manual-ack
     // sub on the still-owned queue is advised to recreate.
@@ -1246,14 +1255,20 @@ async fn resume_across_a_real_restart_redelivers_unacked_work() {
         .unwrap();
     let frame = recv_frame_expect(&mut second, Op::ReconcileResult).await;
     let result: ReconcileResult = try_decode(&frame).unwrap();
-    assert_eq!(result.subscriptions[0].action, ReconcileAction::RecreateClientSide);
+    assert_eq!(
+        result.subscriptions[0].action,
+        ReconcileAction::RecreateClientSide
+    );
 
     // The client re-subscribes (what a real client does on a recreate), and the
     // unacked message redelivers once its pre-restart lease expires.
     let resub_ok = framed_subscribe(&mut second, 4, "e2e.restart", None, false).await;
     assert_eq!(resub_ok.topic, "e2e.restart");
     let redelivered = recv_delivery_for_topic(&mut second, "e2e.restart").await;
-    assert_eq!(redelivered.payload, b"pending", "unacked work redelivers after restart");
+    assert_eq!(
+        redelivered.payload, b"pending",
+        "unacked work redelivers after restart"
+    );
 
     drop(second);
     second_task.await.unwrap().unwrap();
@@ -3561,6 +3576,129 @@ async fn replica_durable_confirm_resolves_over_wire_from_follower_progress() {
     server_task.await.unwrap().unwrap();
 }
 
+#[tokio::test]
+async fn replica_durable_confirm_stays_pending_until_follower_connects() {
+    let topic = "confirm.waits.for.follower";
+    let group: Option<String> = None;
+
+    let (owner_broker, owner_dir) = open_test_broker().await;
+    let (addr, server_task, _owner_dir, owner_broker) = start_protocol_listener_for_broker(
+        ConnectionSettings::new(Some(60)),
+        owner_broker,
+        owner_dir,
+        None,
+    )
+    .await;
+
+    // The owner owns the queue; its assignment demands two durable nodes (owner
+    // plus one follower).
+    owner_broker.cache_queue_assignment(
+        &PartitionAssignment::new(
+            QueueIdentity::new(topic, Partition::new(0), group.as_deref()),
+            "owner-a",
+            vec!["follower-a".to_string()],
+            1,
+        )
+        .with_durability(ReplicationDurabilityPolicy::ReplicaDurable { nodes: 2 }),
+    );
+
+    // The follower materializes the queue and replicates from the owner over
+    // TCP, stamping its reports so the owner's gate can observe its progress.
+    let (follower_broker, _follower_dir) = open_test_broker().await;
+    follower_broker
+        .apply_assignment_transition(&follower_assignment_transition(topic, group.as_deref()))
+        .await
+        .unwrap();
+    let resolver = Arc::new(StaticProtocolOwnerPeerResolver::with_config(
+        ProtocolOwnerPeerResolverConfig::new(HashMap::from([(
+            "owner-a".to_string(),
+            addr.to_string(),
+        )]))
+        .with_reporter("follower-a"),
+    ));
+    let assignment = PartitionAssignment::new(
+        QueueIdentity::new(topic, Partition::new(0), group.as_deref()),
+        "owner-a",
+        vec!["follower-a".to_string()],
+        1,
+    );
+    let shutdown = CancellationToken::new();
+    // Keep polling briskly so the follower picks up the new record promptly.
+    let worker_cfg = FollowerReplicationWorkerConfig {
+        caught_up_poll_ms: 50,
+        retry_poll_ms: 50,
+        ..Default::default()
+    };
+    let publisher = owner_broker
+        .get_publisher(topic, Partition::new(0), &group)
+        .await
+        .unwrap();
+    let mut reply = publisher
+        .publish(
+            b"over-the-wire".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    // No follower transport is being polled yet. Even a promptly flushed owner
+    // socket must not release a replica-durable publisher confirmation here.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut reply)
+            .await
+            .is_err(),
+        "confirmation must remain pending until a required follower is durable"
+    );
+    assert!(
+        owner_broker
+            .follower_replication_progress(topic, Partition::new(0), group.as_deref())
+            .is_empty()
+    );
+
+    let loop_task = follower_broker.run_follower_replication_worker_loop(
+        assignment,
+        resolver.clone(),
+        ReplicationResourceKind::Queue,
+        worker_cfg,
+        shutdown.clone(),
+    );
+
+    let publish_and_check = async {
+        // The confirm can only resolve via the follower's wire replication.
+        let offset = tokio::time::timeout(Duration::from_secs(8), reply)
+            .await
+            .expect("confirm should resolve well within bound")
+            .unwrap()
+            .expect("replica-durable confirm resolves from follower wire progress");
+        assert_eq!(offset, 0);
+
+        // And the owner recorded that progress from the stamped reads.
+        let progress =
+            owner_broker.follower_replication_progress(topic, Partition::new(0), group.as_deref());
+        let follower = progress
+            .iter()
+            .find(|(node, _)| node == "follower-a")
+            .expect("owner recorded follower progress over the wire");
+        assert!(
+            follower.1.0 > 0,
+            "follower durable message_next must pass the published offset"
+        );
+
+        shutdown.cancel();
+    };
+
+    let (_, loop_outcome) = tokio::join!(publish_and_check, loop_task);
+    loop_outcome.unwrap();
+
+    resolver.close_all().await;
+    follower_broker.shutdown().await;
+    owner_broker.shutdown().await;
+    server_task.await.unwrap().unwrap();
+}
+
 /// Test topology source returning a fixed snapshot.
 #[derive(Clone)]
 struct FixedTopology(TopologyOk);
@@ -5058,6 +5196,87 @@ async fn replication_checkpoint_export_install_composes_with_catch_up() {
     drop(follower_framed);
     owner_task.await.unwrap().unwrap();
     follower_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn replication_checkpoint_install_rejects_delayed_old_epoch_without_erasing_data() {
+    let topic = "checkpoint.delayed.epoch";
+    let (broker, dir) = open_test_broker().await;
+    let (mut framed, task, _dir, broker) =
+        open_protocol_connection_for_broker(ConnectionSettings::new(Some(60)), broker, dir).await;
+    handshake(&mut framed).await;
+    framed_publish(&mut framed, 2, topic, None, b"first").await;
+    framed
+        .send(
+            try_encode(
+                Op::ReplicationCheckpointExport,
+                3,
+                &ReplicationCheckpointExport {
+                    topic: topic.into(),
+                    group: None,
+                    partition: Partition::new(0),
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let frame = recv_frame(&mut framed).await;
+    let old: ReplicationCheckpointExportOk = try_decode(&frame).unwrap();
+    assert_eq!(old.checkpoint.message_epoch, 0);
+
+    // A checkpoint response from epoch 0 arrives after new data and the epoch-1
+    // assignment fence. It must not erase either log or replace queue state.
+    framed_publish(&mut framed, 4, topic, None, b"newer").await;
+    broker
+        .become_replication_follower_with_epoch(topic, Partition::new(0), None, 1)
+        .await
+        .unwrap();
+    framed
+        .send(
+            try_encode(
+                Op::ReplicationCheckpointInstall,
+                5,
+                &ReplicationCheckpointInstall {
+                    topic: topic.into(),
+                    group: None,
+                    partition: Partition::new(0),
+                    checkpoint: old.checkpoint,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let frame = recv_frame(&mut framed).await;
+    assert_eq!(
+        frame.opcode,
+        Op::Error as u16,
+        "stale checkpoint must be rejected"
+    );
+    let error: ErrorMsg = try_decode(&frame).unwrap();
+    assert!(error.message.contains("epoch"), "{error:?}");
+
+    let promoted = broker
+        .promote_replication_follower_if_caught_up(topic, Partition::new(0), None, 2, 2)
+        .await
+        .unwrap();
+    assert!(
+        matches!(promoted, QueuePromotionOutcome::Promoted { .. }),
+        "{promoted:?}"
+    );
+    let records = broker
+        .read_owner_replication_records(topic, Partition::new(0), None, 0, 0, 10, 10, usize::MAX, 0)
+        .await
+        .unwrap();
+    let OwnerReplicationRead::Batch(messages) = records.messages else {
+        panic!("messages lost")
+    };
+    assert_eq!(messages.records.len(), 2);
+    assert_eq!(messages.records[0].1.payload, b"first");
+    assert_eq!(messages.records[1].1.payload, b"newer");
+    drop(framed);
+    task.await.unwrap().unwrap();
 }
 
 #[tokio::test]

@@ -5,6 +5,7 @@
 pub use fibril_wire::*;
 
 pub mod client;
+mod connection_writer;
 pub mod handler;
 pub mod replication;
 pub mod replication_stream;

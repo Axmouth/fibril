@@ -42,6 +42,7 @@ uuid = { version = "1.19", features = ["serde", "v4", "v7"] }
 simulation = ["fibril-util/simulation"]
 
 [dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
 fibril-coordination-ganglion = { path = "../coordination-ganglion" }
 fibril-tls = { path = "../tls" }
 ganglion = { git = "https://github.com/Axmouth/ganglion.git", branch = "main" }

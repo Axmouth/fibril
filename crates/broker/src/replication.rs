@@ -2103,11 +2103,22 @@ impl Broker<StromaEngine> {
             let checkpoint = owner
                 .export_owner_state_checkpoint(topic, partition, group)
                 .await?;
+            tracing::warn!(
+                topic, partition = partition.id(), group,
+                message_requirement = ?messages, event_requirement = ?events,
+                message_epoch = checkpoint.message_epoch, event_epoch = checkpoint.event_epoch,
+                message_next_offset = checkpoint.message_checkpoint_offset,
+                event_next_offset = checkpoint.event_next_offset,
+                applied_event_offset = checkpoint.applied_event_offset,
+                "replication checkpoint installation starting"
+            );
             self.install_follower_state_checkpoint(
                 topic,
                 partition,
                 group,
                 FollowerStateCheckpointInstall {
+                    message_epoch: checkpoint.message_epoch,
+                    event_epoch: checkpoint.event_epoch,
                     message_next_offset: checkpoint.message_checkpoint_offset,
                     event_next_offset: checkpoint.event_next_offset,
                     applied_event_offset: checkpoint.applied_event_offset,
@@ -2115,6 +2126,17 @@ impl Broker<StromaEngine> {
                 },
             )
             .await?;
+            tracing::info!(
+                topic,
+                partition = partition.id(),
+                group,
+                message_epoch = checkpoint.message_epoch,
+                event_epoch = checkpoint.event_epoch,
+                message_next_offset = checkpoint.message_checkpoint_offset,
+                event_next_offset = checkpoint.event_next_offset,
+                applied_event_offset = checkpoint.applied_event_offset,
+                "replication checkpoint installed; follower catch-up will resume"
+            );
 
             options.message_from = checkpoint.message_checkpoint_offset;
             options.event_from = checkpoint.event_next_offset;
@@ -2282,11 +2304,18 @@ impl Broker<StromaEngine> {
                     return Ok(FollowerReplicationWorkerLoopExit::OwnerChanged { ticks });
                 }
                 Err(err) => {
+                    let (message_next_offset, event_next_offset) = {
+                        let state = runtime.state.lock().await;
+                        (state.message_next_offset, state.event_next_offset)
+                    };
                     tracing::warn!(
                         topic = %assignment.queue.topic,
                         partition = assignment.queue.partition.id(),
                         group = ?assignment.queue.group,
                         owner = %assignment.owner,
+                        assignment_epoch = assignment.epoch,
+                        message_next_offset,
+                        event_next_offset,
                         "follower replication worker tick failed: {err:?}"
                     );
                     drop(_tick_guard);

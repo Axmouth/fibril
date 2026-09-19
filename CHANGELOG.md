@@ -12,6 +12,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- Replication conflict diagnostics include bounded, payload-free histories of
+  control operations, offsets and effective record identities, plus checkpoint
+  install context. These explain an overlap without logging message bodies;
+  they do not enable automatic repair of divergent histories.
+
 - Explicit reconnect and a disable-auto-reconnect knob in the Go and C# clients,
   bringing them to parity with the others. `Reconnect(ctx)` (Go) and
   `ReconnectAsync(ct)` (C#) force a fresh bootstrap connection, offering the prior
@@ -227,6 +232,13 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   and the matching `FIBRIL_KERATIN_*` env overrides).
 
 ### Changed
+
+- The server flushes buffered socket output when both outgoing queues drain,
+  retaining count/byte/time limits during sustained traffic. Small client and
+  replication replies leave promptly without changing durability eligibility.
+- The Rust client coalesces ACK writes; Python and TypeScript buffer confirmed
+  publishes within bounded write batches. Settlement and confirmation meanings
+  are unchanged. Go and C# already group writes and needed no matching change.
 
 - Tendrils grew into the brand look (second live review): every live ring
   carries a packed batch of organic stems threading through it and forking
@@ -463,6 +475,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   unchanged, matching their own language norms.
 
 ### Fixed
+
+- Checkpoint installation preserves source message/event epochs through both
+  replication paths and rejects mismatches before reset, with a second check in
+  each storage writer. This prevents stale checkpoints replacing fenced history;
+  interruption-safe installation across both logs and state remains pending.
 
 - The Queues and Streams pages no longer render blank on a broker whose
   replication followers have made progress. The follower table formatted

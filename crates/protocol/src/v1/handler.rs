@@ -800,6 +800,8 @@ fn to_follower_state_checkpoint_install(
     checkpoint: ReplicationStateCheckpoint,
 ) -> FollowerStateCheckpointInstall {
     FollowerStateCheckpointInstall {
+        message_epoch: checkpoint.message_epoch,
+        event_epoch: checkpoint.event_epoch,
         message_next_offset: checkpoint.message_checkpoint_offset,
         event_next_offset: checkpoint.event_next_offset,
         applied_event_offset: checkpoint.applied_event_offset,
@@ -2659,12 +2661,12 @@ where
     let (mut writer, mut reader) = framed.split();
 
     // ---- Write fan-in channel ---------------------------------------------
-    let (frame_tx_high_prio, mut frame_rx_high_prio) = mpsc::channel::<Frame>(2048);
-    let (frame_tx_low_prio, mut frame_rx_low_prio) = mpsc::channel::<Frame>(16);
+    let (frame_tx_high_prio, frame_rx_high_prio) = mpsc::channel::<Frame>(2048);
+    let (frame_tx_low_prio, frame_rx_low_prio) = mpsc::channel::<Frame>(16);
 
     let metrics_clone = tcp_stats.clone();
     // ---- Writer task -------------------------------------------------------
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let req_id_gen_clone = req_id_gen.clone();
     let client_id: Uuid;
 
@@ -2770,115 +2772,13 @@ where
         return Err(ProtocolConnectionError::ComplianceMarkerMismatch);
     }
 
-    let mut writer_task = tokio::spawn(async move {
-        tracing::debug!("[writer] START");
-
-        let metrics = metrics_clone.clone();
-        let mut ticker = tokio::time::interval(std::time::Duration::from_millis(2));
-        ticker.tick().await;
-
-        let mut non_flushed_messages: usize = 0;
-        let mut last_flush = Instant::now();
-        let mut bytes_queued: usize = 0;
-        loop {
-            tokio::select! {
-                biased;
-
-                // ---- Shutdown signal -----------------------------------------
-                _ = &mut shutdown_rx => {
-                    tracing::debug!("[writer] Received shutdown signal");
-                    // Drain frames already queued and flush before closing:
-                    // the final frame is often an error reply (auth denial,
-                    // rejected HELLO) and losing it to this race would turn
-                    // a guided failure into a bare disconnect.
-                    while let Ok(frame) = frame_rx_high_prio.try_recv() {
-                        if writer.feed(frame).await.is_err() {
-                            break;
-                        }
-                    }
-                    let _ = writer.flush().await;
-                    break;
-                }
-
-                // ---- Normal write path ---------------------------------------
-                Some(frame) = frame_rx_high_prio.recv() => {
-                    tracing::debug!(
-                        "[writer] Writing Frame to tcp socket.. code={}",
-                        frame.opcode
-                    );
-
-                    let size = size_of_val(&frame) + frame.payload.len();
-
-                    if let Err(err) = writer.feed(frame).await {
-                        metrics.error();
-                        tracing::warn!("[writer] Error writing to tcp socket : {err}");
-                        break;
-                    } else {
-                        metrics.bytes_out(size as u64);
-                        non_flushed_messages += 1;
-                        bytes_queued += size;
-
-                        if non_flushed_messages >= 32 {
-                            let _ = writer.flush().await;
-                            non_flushed_messages = 0;
-                            last_flush = Instant::now();
-                            bytes_queued = 0;
-                        }
-                    }
-                }
-
-                Some(frame) = frame_rx_low_prio.recv() => {
-                    tracing::debug!(
-                        "[writer] Writing Frame to tcp socket.. code={}",
-                        frame.opcode
-                    );
-
-                    let size = size_of_val(&frame) + frame.payload.len();
-
-                    if let Err(err) = writer.feed(frame).await {
-                        metrics.error();
-                        tracing::error!("[writer] Error writing to tcp socket : {err}");
-                        break;
-                    } else {
-                        metrics.bytes_out(size as u64);
-                        non_flushed_messages += 1;
-                        bytes_queued += size;
-                    }
-                }
-
-                // The tick only exists to flush a sub-window tail of buffered
-                // frames, so it stays disabled while nothing is buffered and an
-                // idle connection costs no periodic wakeups. When the arm
-                // re-enables after a quiet stretch the first tick fires
-                // immediately, which just runs the flush check below.
-                _ = ticker.tick(), if non_flushed_messages > 0 => {
-                    // pass
-                }
-
-                // ---- Channel closed ------------------------------------------
-                else => break,
-            }
-
-            // Basic batching logic, limited by message number, time or total bytes to send
-            if (non_flushed_messages > 0)
-                && (non_flushed_messages >= 128
-                    || bytes_queued >= 1024 * 1024
-                    || last_flush.elapsed().as_millis() >= 5)
-            {
-                if let Err(err) = writer.flush().await {
-                    metrics.error();
-                    tracing::warn!("[writer] Error writing to tcp socket : {err}");
-                    break;
-                } else {
-                    non_flushed_messages = 0;
-                    last_flush = Instant::now();
-                    bytes_queued = 0;
-                }
-            }
-        }
-
-        tracing::debug!("[writer] EXIT");
-    });
+    let mut writer_task = tokio::spawn(super::connection_writer::run(
+        writer,
+        frame_rx_high_prio,
+        frame_rx_low_prio,
+        shutdown_rx,
+        metrics_clone,
+    ));
 
     frame_tx_high_prio
         .send(try_encode(Op::HelloOk, frame.request_id, &hello_ok)?)
