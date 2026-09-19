@@ -39,12 +39,11 @@ from .protocol import COMPLIANCE_STRING, PROTOCOL_V1, Op
 
 DEFAULT_HEARTBEAT_INTERVAL_S = 5.0
 
-# Coalesce fire-and-forget writes and flush in one socket write, because
-# asyncio's transport does an eager per-write syscall (an unconfirmed-publish
-# burst is otherwise one send syscall per message). Three triggers flush the
-# buffer, whichever comes first: a byte cap, a frame-count cap, and a short time
-# window. Reply-bearing frames flush immediately regardless, so coalescing only
-# ever delays fire-and-forget frames, and never past the window.
+# Coalesce ACKs and pipelined publishes into socket writes. Each frame retains
+# its own request ID and each confirmed publish still waits for its own broker
+# reply. Byte/count caps bound buffering and apply backpressure; a short timer
+# flushes an idle tail. Timer deadlines depend on event-loop scheduling.
+# Control requests and ordinary publish(confirm=True) flush immediately.
 #
 # Throughput plateaus once a flush carries a few dozen frames (past that the cost
 # is interpreter, not syscalls), so the caps are really memory/latency ceilings,
@@ -242,7 +241,7 @@ class Engine:
         self._fatal: Optional[BaseException] = None
         self._preserve_subscriptions = False
 
-        # Write coalescing for fire-and-forget frames (see _send_buffered).
+        # Write coalescing for ACKs and pipelined publishes (see _send_buffered).
         self._pending = bytearray()
         self._pending_count = 0
         self._flush_handle: Optional[asyncio.Handle] = None
@@ -393,7 +392,7 @@ class Engine:
         self._mark_dead(self._fatal or BrokenPipeError("engine reconnect"))
 
     def _flush_pending_sync(self) -> None:
-        # Best-effort flush of buffered fire-and-forget frames (coalesced acks and
+        # Best-effort flush of buffered frames (coalesced acks and
         # publishes) on a graceful teardown, so an ack-then-close does not silently
         # drop the ack. The transport sends synchronously and close() drains the
         # rest. On a dead socket the write just fails and is ignored.
@@ -434,15 +433,15 @@ class Engine:
 
     async def _confirmation(self, op: Op, msg: object) -> "asyncio.Future[object]":
         """Send a confirm-required publish op and return its reply future without
-        awaiting it. The frame is written before this returns, so send order is
-        kept and callers can fire several and collect each offset later.
+        awaiting it. Frames retain send order in the bounded write buffer; the
+        returned future resolves only after the broker confirms the publish.
         """
         if self._closed:
             raise self._fatal or BrokenPipeError()
         rid = self._alloc_id()
         fut: asyncio.Future[object] = asyncio.get_running_loop().create_future()
         self._waiters[rid] = _Waiter(kind="publish", future=fut)
-        if not await self._send_or_die(build_frame(op, rid, encode_body(op, msg))):
+        if not await self._send_buffered(build_frame(op, rid, encode_body(op, msg))):
             self._waiters.pop(rid, None)
             raise self._fatal or BrokenPipeError()
         return fut
@@ -575,21 +574,19 @@ class Engine:
         return await fut
 
     async def _send_or_die(self, frame: Frame) -> bool:
-        # Reply-bearing and control frames flush immediately: the caller (or the
-        # broker) is about to wait on a response, so the frame cannot sit in the
-        # coalescing buffer. Any pending fire-and-forget frames go out first, in
-        # order.
+        # Control requests and ordinary publish(confirm=True) flush immediately,
+        # behind any already-buffered frames to preserve wire order.
         if self._closed:
             return False
         self._pending += encode_frame(frame)
         return await self._flush()
 
     async def _send_buffered(self, frame: Frame) -> bool:
-        """Queue a fire-and-forget frame, coalescing writes.
+        """Queue an ACK or pipelined publish, coalescing writes.
 
         Appends to the pending buffer and flushes only once it crosses the
-        coalesce threshold, otherwise schedules a flush for the next event-loop
-        tick. A saturating unconfirmed-publish loop never yields, so the
+        coalesce threshold, otherwise schedules a flush at the coalescing deadline.
+        A saturating publish loop need not yield, so the
         threshold flush is what bounds the buffer and batches the send syscalls
         the buffer is coalescing; the scheduled flush covers a lone frame in an
         otherwise idle connection so it leaves promptly.

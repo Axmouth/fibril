@@ -113,7 +113,7 @@ class ClientOptions:
     supervise_subscriptions: bool = True
     subscription_supervise_interval_ms: int = 1_000
     tls: Optional[TlsOptions] = None
-    #: Fire-and-forget writes (unconfirmed publishes) coalesce into one socket
+    #: ACKs and pipelined publishes coalesce into one socket
     #: write, flushed on whichever comes first: these many buffered bytes, this
     #: many buffered frames, or ``write_coalesce_window_ms`` since the last flush.
     #: Tune with :meth:`with_write_coalescing`.
@@ -131,16 +131,16 @@ class ClientOptions:
         max_frames: Optional[int] = None,
         window_ms: Optional[float] = None,
     ) -> "ClientOptions":
-        """Tune coalescing of fire-and-forget writes (unconfirmed publishes).
+        """Tune coalescing of ACKs and pipelined publishes.
 
         Such frames are buffered and sent in one socket write, flushed on
         whichever limit is reached first: ``max_bytes`` buffered, ``max_frames``
-        buffered, or ``window_ms`` since the last flush. Reply-bearing frames
-        (confirmed publishes, acks, requests) always flush immediately. Larger
-        limits trade a little latency for fewer syscalls. The defaults already sit
-        at the throughput plateau, so this is mainly for tightening latency or
-        memory, or disabling coalescing (``max_frames=1``). Only the limits you
-        pass change.
+        buffered, or a timer for ``window_ms`` since the last flush. Control
+        requests and ordinary ``publish(confirm=True)`` flush immediately.
+        Pipelined publishes retain individual broker confirmations. Larger
+        limits trade latency for fewer writes; event-loop scheduling can delay
+        timer execution. Disable coalescing with ``max_frames=1``. Only the
+        limits you pass change.
         """
         result = self
         if max_bytes is not None:

@@ -3449,8 +3449,8 @@ impl EngineSlot {
         let mut framed = Framed::new(stream, ProtoCodec);
         // Raise tokio-util's default 8KB write-buffer flush boundary so it does
         // not force a socket write every few 1KB frames, which would defeat the
-        // engine's own publish-flush batching (PUBLISH_FLUSH_MESSAGES / _BYTES).
-        framed.set_backpressure_boundary(PUBLISH_FLUSH_BYTES);
+        // engine's own write batching (WRITE_FLUSH_FRAMES / _BYTES).
+        framed.set_backpressure_boundary(WRITE_FLUSH_BYTES);
         let settle_ctx = Arc::new(SettleContext::new());
         let engine = start_engine(
             framed,
@@ -3496,8 +3496,8 @@ impl EngineSlot {
         let mut framed = Framed::new(stream, ProtoCodec);
         // Raise tokio-util's default 8KB write-buffer flush boundary so it does
         // not force a socket write every few 1KB frames, which would defeat the
-        // engine's own publish-flush batching (PUBLISH_FLUSH_MESSAGES / _BYTES).
-        framed.set_backpressure_boundary(PUBLISH_FLUSH_BYTES);
+        // engine's own write batching (WRITE_FLUSH_FRAMES / _BYTES).
+        framed.set_backpressure_boundary(WRITE_FLUSH_BYTES);
         let tls_opts = opts.tls.clone();
         let new_engine = start_engine(
             framed,
@@ -3775,7 +3775,11 @@ impl SettleContext {
         if incarnation != binding.incarnation {
             return Err(FibrilError::StaleDelivery);
         }
-        binding.tx.send(cmd).await.map_err(|_| FibrilError::BrokenPipe)
+        binding
+            .tx
+            .send(cmd)
+            .await
+            .map_err(|_| FibrilError::BrokenPipe)
     }
 }
 
@@ -3873,8 +3877,8 @@ fn apply_reconcile_result(
 
 // DEFAULT_HEARTBEAT_INTERVAL is shared from the protocol crate (single source of
 // truth) so the client fallback and the server default cannot drift apart.
-const PUBLISH_FLUSH_MESSAGES: usize = 128;
-const PUBLISH_FLUSH_BYTES: usize = 1024 * 1024;
+const WRITE_FLUSH_FRAMES: usize = 128;
+const WRITE_FLUSH_BYTES: usize = 1024 * 1024;
 const PUBLISH_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_micros(250);
 // Max commands drained from the outbound channel per event-loop wakeup. Under a
 // saturating producer the channel backs up and the writer blocks on send; draining
@@ -4172,8 +4176,9 @@ where
         let mut flush_ticker = tokio::time::interval(PUBLISH_FLUSH_INTERVAL);
         flush_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         flush_ticker.tick().await;
-        let mut queued_publish_frames = 0usize;
-        let mut queued_publish_bytes = 0usize;
+        let mut queued_acks = false;
+        let mut queued_write_frames = 0usize;
+        let mut queued_write_bytes = 0usize;
 
         // In the engine task, before the select! loop:
         let mut fatal_error: Option<FibrilError> = None;
@@ -4185,38 +4190,40 @@ where
                     $err_slot = Some(e);
                     break;
                 } else {
-                    queued_publish_frames = 0;
-                    queued_publish_bytes = 0;
+                    queued_acks = false;
+                    queued_write_frames = 0;
+                    queued_write_bytes = 0;
                 }
             };
         }
 
-        macro_rules! flush_publishes_or_die {
+        macro_rules! flush_writes_or_die {
             ($framed:expr, $err_slot:expr) => {
-                if queued_publish_frames > 0 {
+                if queued_write_frames > 0 {
                     if let Err(e) = flush_protocol_frames(&mut $framed).await {
                         $err_slot = Some(e);
                         break;
                     }
-                    queued_publish_frames = 0;
-                    queued_publish_bytes = 0;
+                    queued_acks = false;
+                    queued_write_frames = 0;
+                    queued_write_bytes = 0;
                 }
             };
         }
 
-        macro_rules! feed_encoded_publish_or_die {
+        macro_rules! feed_encoded_or_die {
             ($framed:expr, $frame:expr, $err_slot:expr) => {
                 match $frame.map_err(|err| FibrilError::Unexpected {
                     msg: err.to_string(),
                 }) {
                     Ok(frame) => match feed_encoded_frame(&mut $framed, frame).await {
                         Ok(size) => {
-                            queued_publish_frames += 1;
-                            queued_publish_bytes += size;
-                            if queued_publish_frames >= PUBLISH_FLUSH_MESSAGES
-                                || queued_publish_bytes >= PUBLISH_FLUSH_BYTES
+                            queued_write_frames += 1;
+                            queued_write_bytes += size;
+                            if queued_write_frames >= WRITE_FLUSH_FRAMES
+                                || queued_write_bytes >= WRITE_FLUSH_BYTES
                             {
-                                flush_publishes_or_die!($framed, $err_slot);
+                                flush_writes_or_die!($framed, $err_slot);
                             }
                         }
                         Err(e) => {
@@ -4246,8 +4253,9 @@ where
                             $err_slot = Some(e);
                             break;
                         }
-                        queued_publish_frames = 0;
-                        queued_publish_bytes = 0;
+                        queued_acks = false;
+                        queued_write_frames = 0;
+                        queued_write_bytes = 0;
                     }
                     Err(e) => {
                         $err_slot = Some(e);
@@ -4278,13 +4286,13 @@ where
                     send_or_die!(framed, Op::Ping, req_id, &(), fatal_error)
                 }
 
-                _ = flush_ticker.tick(), if queued_publish_frames > 0 => {
-                    flush_publishes_or_die!(framed, fatal_error)
+                _ = flush_ticker.tick(), if queued_write_frames > 0 => {
+                    flush_writes_or_die!(framed, fatal_error)
                 }
 
                 _ = shutdown.notified() => {
                     tracing::info!("Shutting down, exiting event loop.");
-                    if queued_publish_frames > 0 {
+                    if queued_write_frames > 0 {
                         if let Err(e) = flush_protocol_frames(&mut framed).await {
                             fatal_error = Some(e);
                         }
@@ -4312,7 +4320,7 @@ where
                             partitioning_version,
                             ttl_ms,
                         };
-                        feed_encoded_publish_or_die!(framed, wire::encode_publish(req_id, &p), fatal_error)
+                        feed_encoded_or_die!(framed, wire::encode_publish(req_id, &p), fatal_error)
                     }
                     Command::PublishConfirmed { topic, group, partition, partitioning_version, content_type, headers, payload, published, ttl_ms, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
@@ -4330,7 +4338,7 @@ where
                             partitioning_version,
                             ttl_ms,
                         };
-                        feed_encoded_publish_or_die!(framed, wire::encode_publish(req_id, &p), fatal_error)
+                        feed_encoded_or_die!(framed, wire::encode_publish(req_id, &p), fatal_error)
                     }
                     Command::PublishDelayedUnconfirmed { topic, group, partition, partitioning_version, content_type, headers, payload, published, not_before } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
@@ -4347,7 +4355,7 @@ where
                             partition_key: None,
                             partitioning_version,
                         };
-                        feed_encoded_publish_or_die!(framed, wire::encode_publish_delayed(req_id, &p), fatal_error)
+                        feed_encoded_or_die!(framed, wire::encode_publish_delayed(req_id, &p), fatal_error)
                     }
                     Command::PublishDelayedConfirmed { topic, group, partition, partitioning_version, content_type, headers, payload, published, not_before, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
@@ -4365,7 +4373,7 @@ where
                             partition_key: None,
                             partitioning_version,
                         };
-                        feed_encoded_publish_or_die!(framed, wire::encode_publish_delayed(req_id, &p), fatal_error)
+                        feed_encoded_or_die!(framed, wire::encode_publish_delayed(req_id, &p), fatal_error)
                     }
                     Command::Subscribe { req, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
@@ -4412,7 +4420,10 @@ where
                             partition,
                             tags: vec![delivery_tag],
                         };
-                        send_encoded_or_die!(framed, wire::encode_ack(request_id, &ack), fatal_error)
+                        // Keep individual ACK frames and request ids, but share socket
+                        // writes within this bounded drain of already queued commands.
+                        queued_acks = true;
+                        feed_encoded_or_die!(framed, wire::encode_ack(request_id, &ack), fatal_error);
                     }
                     Command::Nack { topic, group, partition, delivery_tag, requeue, not_before, request_id } => {
                         let nack = Nack {
@@ -4431,6 +4442,9 @@ where
                         break;
                     }
                     pending = cmd_rx.try_recv().ok();
+                  }
+                  if fatal_error.is_none() && queued_acks {
+                      flush_writes_or_die!(framed, fatal_error);
                   }
                 },
                 Some(frame) = framed.next() => {
@@ -5774,7 +5788,11 @@ mod tests {
         ));
     }
 
-    fn engine_with_command_rx() -> (Arc<EngineHandle>, mpsc::Receiver<Command>, Arc<SettleContext>) {
+    fn engine_with_command_rx() -> (
+        Arc<EngineHandle>,
+        mpsc::Receiver<Command>,
+        Arc<SettleContext>,
+    ) {
         let (tx, rx) = mpsc::channel(8);
         let engine = Arc::new(EngineHandle {
             tx: tx.clone(),
@@ -7523,10 +7541,7 @@ mod tests {
 
     /// Build a standalone inflight message wired to a fresh settle context, for
     /// unit-testing the settle helpers.
-    fn inflight_for_test(
-        settle_ctx: Arc<SettleContext>,
-        incarnation: u64,
-    ) -> InflightMessage {
+    fn inflight_for_test(settle_ctx: Arc<SettleContext>, incarnation: u64) -> InflightMessage {
         InflightMessage {
             delivery_tag: DeliveryTag { epoch: 7 },
             published: 1,
@@ -7617,9 +7632,14 @@ mod tests {
         // Resumed reconnect: rebind to a new engine, incarnation unchanged.
         let (new_tx, mut new_rx) = mpsc::channel::<Command>(4);
         let resumed_inc = settle_ctx.bind(false, new_tx);
-        assert_eq!(inc, resumed_inc, "a resumed reconnect keeps the incarnation");
+        assert_eq!(
+            inc, resumed_inc,
+            "a resumed reconnect keeps the incarnation"
+        );
 
-        msg.complete().await.expect("resumed-incarnation settle should succeed");
+        msg.complete()
+            .await
+            .expect("resumed-incarnation settle should succeed");
         // The ack routed to the CURRENT (new) engine, not the old one.
         assert!(matches!(new_rx.recv().await.unwrap(), Command::Ack { .. }));
         assert!(old_rx.try_recv().is_err());
@@ -7715,5 +7735,225 @@ mod tests {
             message.deserialize::<TestPayload>(),
             Err(FibrilError::DeserializationFailure { .. })
         ));
+    }
+    // Count actual connection-engine writes while checking frame identity/order.
+    struct AckCountIo {
+        inner: tokio::io::DuplexStream,
+        writes: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl tokio::io::AsyncRead for AckCountIo {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+    impl tokio::io::AsyncWrite for AckCountIo {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            let result = std::pin::Pin::new(&mut self.inner).poll_write(cx, buf);
+            if matches!(result, std::task::Poll::Ready(Ok(n)) if n > 0) {
+                self.writes.fetch_add(1, Ordering::Relaxed);
+            }
+            result
+        }
+        fn poll_flush(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+        }
+        fn poll_shutdown(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+    async fn ack_test_engine() -> (
+        Arc<EngineHandle>,
+        Framed<tokio::io::DuplexStream, ProtoCodec>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let (client, server) = tokio::io::duplex(1024 * 1024);
+        let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let client = AckCountIo {
+            inner: client,
+            writes: writes.clone(),
+        };
+        let mut server = Framed::new(server, ProtoCodec);
+        let handshake = async {
+            let hello = server.next().await.unwrap().unwrap();
+            server
+                .send(
+                    try_encode(
+                        Op::HelloOk,
+                        hello.request_id,
+                        &HelloOk {
+                            protocol_version: PROTOCOL_V1,
+                            owner_id: Uuid::nil(),
+                            client_id: Uuid::nil(),
+                            resume_token: Uuid::nil(),
+                            resume_outcome: ResumeOutcome::New,
+                            server_name: "ack-test".into(),
+                            compliance: COMPLIANCE_STRING.into(),
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        };
+        let (engine, ()) = tokio::join!(
+            start_engine(
+                Framed::new(client, ProtoCodec),
+                ClientOptions::new(),
+                Arc::new(RwLock::new(HashMap::new())),
+                broadcast::channel(16).0,
+                Arc::new(std::sync::OnceLock::new()),
+                std::sync::Weak::new(),
+                Arc::new(SettleContext::new())
+            ),
+            handshake
+        );
+        writes.store(0, Ordering::Relaxed);
+        (engine.unwrap(), server, writes)
+    }
+    fn ack_test_command(i: u64) -> Command {
+        Command::Ack {
+            topic: format!("orders{}", i % 2),
+            group: Some("workers".into()),
+            partition: Partition::new((i % 3) as u32),
+            delivery_tag: DeliveryTag { epoch: i },
+            request_id: 1000 + i,
+        }
+    }
+    fn ack_test_publish() -> Command {
+        Command::PublishUnconfirmed {
+            topic: "orders".into(),
+            group: None,
+            partition: Partition::new(0),
+            partitioning_version: 0,
+            content_type: None,
+            headers: HashMap::new(),
+            payload: vec![42],
+            published: 123,
+            ttl_ms: None,
+        }
+    }
+    #[tokio::test]
+    async fn ack_write_batch_idle_tail_and_boundaries() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for n in [1, 127, 128, 129, 255, 256, 257, 513] {
+                let (engine, mut server, writes) = ack_test_engine().await;
+                for i in 0..n {
+                    engine.tx.try_send(ack_test_command(i)).unwrap();
+                }
+                for i in 0..n {
+                    let frame = server.next().await.unwrap().unwrap();
+                    assert_eq!(frame.opcode, Op::Ack as u16);
+                    assert_eq!(frame.request_id, 1000 + i);
+                    let ack: Ack = wire::decode_ack(&frame).unwrap();
+                    assert_eq!(ack.tags, vec![DeliveryTag { epoch: i }]);
+                    assert_eq!(ack.topic, format!("orders{}", i % 2));
+                    assert_eq!(ack.group.as_deref(), Some("workers"));
+                    assert_eq!(ack.partition, Partition::new((i % 3) as u32));
+                }
+                let count = writes.load(Ordering::Relaxed);
+                assert!(
+                    count <= n.div_ceil(128) as usize,
+                    "{n} ACKs used {count} writes"
+                );
+                engine.shutdown.notify_one();
+                assert!(server.next().await.is_none());
+            }
+        })
+        .await
+        .unwrap();
+    }
+    #[tokio::test]
+    async fn ack_write_batch_mixed_order_and_shutdown() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (engine, mut server, _) = ack_test_engine().await;
+            engine.tx.try_send(ack_test_publish()).unwrap();
+            engine.tx.try_send(ack_test_command(0)).unwrap();
+            engine
+                .tx
+                .try_send(Command::Nack {
+                    topic: "orders".into(),
+                    group: None,
+                    partition: Partition::new(0),
+                    delivery_tag: DeliveryTag { epoch: 99 },
+                    request_id: 99,
+                    requeue: true,
+                    not_before: None,
+                })
+                .unwrap();
+            engine.tx.try_send(ack_test_command(1)).unwrap();
+            let (reply, response) = oneshot::channel();
+            engine.tx.try_send(Command::Topology { reply }).unwrap();
+            engine.tx.try_send(ack_test_command(2)).unwrap();
+            engine.tx.try_send(ack_test_publish()).unwrap();
+            for op in [
+                Op::Publish,
+                Op::Ack,
+                Op::Nack,
+                Op::Ack,
+                Op::Topology,
+                Op::Ack,
+                Op::Publish,
+            ] {
+                let frame = server.next().await.unwrap().unwrap();
+                assert_eq!(frame.opcode, op as u16);
+                if matches!(op, Op::Topology) {
+                    server
+                        .send(
+                            try_encode(
+                                Op::TopologyOk,
+                                frame.request_id,
+                                &TopologyOk {
+                                    generation: 0,
+                                    queues: vec![],
+                                    streams: vec![],
+                                },
+                            )
+                            .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+            response.await.unwrap().unwrap();
+            // Shutdown preserves the existing publish-tail flush as well.
+            engine.tx.try_send(ack_test_publish()).unwrap();
+            tokio::task::yield_now().await;
+            engine.shutdown.notify_one();
+            assert_eq!(
+                server.next().await.unwrap().unwrap().opcode,
+                Op::Publish as u16
+            );
+            assert!(server.next().await.is_none());
+        })
+        .await
+        .unwrap();
+    }
+    #[tokio::test]
+    async fn ack_write_batch_failed_flush_closes_engine() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (engine, server, _) = ack_test_engine().await;
+            drop(server);
+            for i in 0..17 {
+                engine.tx.try_send(ack_test_command(i)).unwrap();
+            }
+            engine.tx.closed().await;
+            assert!(engine.close_reason.lock().unwrap().is_some());
+        })
+        .await
+        .unwrap();
     }
 }

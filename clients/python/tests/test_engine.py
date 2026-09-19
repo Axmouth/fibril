@@ -340,3 +340,60 @@ async def test_retryable_connection_error_stays_transient(broker: FakeBroker) ->
     reason = eng.close_reason()
     assert isinstance(reason, DisconnectionError)
     assert retry_advice(reason) == "retry"
+
+
+@pytest.mark.parametrize("count", [1, 127, 128, 129, 513])
+async def test_ack_write_coalescing_preserves_frames_and_idle_tail(broker: FakeBroker, monkeypatch, count: int) -> None:
+    from fibril.codec import try_decode_frame
+
+    eng = await _connect(broker)
+    chunks: list[bytes] = []
+    write = eng._writer.write
+    def counted(data):
+        chunks.append(bytes(data))
+        return write(data)
+    monkeypatch.setattr(eng._writer, "write", counted)
+    try:
+        for i in range(count):
+            await eng.ack(f"jobs{i % 2}", "workers", i % 3, wire.DeliveryTag(i), 1000 + i)
+        async with asyncio.timeout(1):
+            while len(broker.acks) < count:
+                await asyncio.sleep(0)
+        frames = []
+        data = b"".join(chunks)
+        while data:
+            result = try_decode_frame(data)
+            assert result is not None
+            frame, used = result
+            frames.append(frame)
+            data = data[used:]
+        assert [f.request_id for f in frames] == list(range(1000, 1000 + count))
+        assert all(f.opcode == Op.ACK for f in frames)
+        assert [(a.topic, a.group, a.partition, a.tags) for a in broker.acks] == [
+            (f"jobs{i % 2}", "workers", i % 3, [wire.DeliveryTag(i)]) for i in range(count)
+        ]
+        assert len(chunks) <= (count + 127) // 128
+    finally:
+        eng.shutdown()
+
+
+@pytest.mark.parametrize("count", [1, 127, 128, 129, 513])
+async def test_pipelined_confirmations_coalesce_without_losing_offsets(broker: FakeBroker, monkeypatch, count: int) -> None:
+    eng = await _connect(broker)
+    chunks: list[bytes] = []
+    write = eng._writer.write
+    def counted(data):
+        chunks.append(bytes(data))
+        return write(data)
+    monkeypatch.setattr(eng._writer, "write", counted)
+    try:
+        pending = []
+        for i in range(count):
+            msg = wire.Publish("jobs", 0, None, True, None, {}, i.to_bytes(8, "little"), 0)
+            pending.append(await eng.publish_with_confirmation(msg))
+        offsets = await asyncio.wait_for(asyncio.gather(*pending), timeout=1)
+        assert offsets == list(range(1, count + 1))
+        assert [p.payload for p in broker.publishes] == [i.to_bytes(8, "little") for i in range(count)]
+        assert len(chunks) <= (count + 127) // 128
+    finally:
+        eng.shutdown()

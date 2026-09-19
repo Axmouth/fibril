@@ -225,14 +225,12 @@ const HANDSHAKE_REQUEST_ID = 1n;
 const AUTH_REQUEST_ID = 2n;
 const RECONCILE_REQUEST_ID = 3n;
 
-// Coalesce fire-and-forget writes and flush in one socket write. Node does one
-// write syscall per socket.write, so an unconfirmed-publish burst is otherwise
-// one syscall per message. Three triggers flush the buffer, whichever comes
-// first: a byte cap, a frame-count cap, and a short time window. Reply-bearing
-// and control frames flush immediately, so coalescing only ever delays
-// fire-and-forget frames, and never past the window. Mirrors the Python client;
-// see its engine.py for the sizing rationale (memory/latency ceiling, not a
-// throughput knob).
+// Coalesce ACKs and publishes into socket writes. Each frame retains its own
+// request ID and each confirmed publish still waits for its own broker reply.
+// Byte/count caps bound buffering and apply backpressure; a short timer flushes
+// an idle tail. Timer deadlines depend on event-loop scheduling (Node rounds
+// sub-millisecond timeouts up). Control requests flush immediately, in order.
+// Mirrors the Python client's pipelined path; see engine.py for cap sizing.
 export const WRITE_COALESCE_BYTES = 128 * 1024;
 export const WRITE_COALESCE_COUNT = 128;
 export const WRITE_COALESCE_WINDOW_MS = 0.5;
@@ -253,7 +251,7 @@ export type SubscriptionRegistry = Map<bigint, RegisteredSubscription>;
 interface ShutdownMode {
   preserveSubscriptions: boolean;
   // Set by the engine loop: best-effort synchronous flush of buffered
-  // fire-and-forget frames (coalesced acks and publishes), called on a graceful
+  // frames (coalesced acks and publishes), called on a graceful
   // shutdown before the socket closes so an ack-then-close does not drop the ack.
   flush?: () => void;
 }
@@ -589,7 +587,7 @@ export class Engine {
   shutdown(): void {
     if (this.#shutdownInitiated) return;
     this.#shutdownInitiated = true;
-    // Push any buffered fire-and-forget frames (coalesced acks/publishes) to the
+    // Push any buffered frames (coalesced acks/publishes) to the
     // socket before it closes, so an ack-then-shutdown does not drop the ack.
     this.#shutdownMode.flush?.();
     // Close the command queue: command consumer will exit cleanly.
@@ -694,7 +692,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
     // Record the terminal reason before the socket is destroyed, so the
     // reconnect gate can read it the instant isClosed() flips.
     closeReason.reason = fatalError;
-    // Drop any buffered fire-and-forget frames the dead socket can't take.
+    // Drop any buffered frames the dead socket can't take.
     cancelScheduledFlush();
     pending = [];
     pendingBytes = 0;
@@ -707,7 +705,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
 
   // ---- write coalescing (shared by the command and frame tasks) ----
   // Both tasks append to one pending buffer, so global write order is preserved
-  // even when a reply-bearing frame from one task flushes fire-and-forget frames
+  // even when a control frame from one task flushes publish or ACK frames
   // buffered by the other. A single in-flight flush drains the buffer (awaiting
   // socket drain for backpressure) and never overlaps itself.
   let pending: Uint8Array[] = [];
@@ -772,8 +770,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
     pendingCount += 1;
   };
 
-  // Reply-bearing and control frames flush immediately, in order behind any
-  // buffered fire-and-forget frames, because a reply is about to be awaited.
+  // Control frames flush immediately, in order behind any buffered frames.
   const sendOrDie = async (frame: Frame): Promise<boolean> => {
     if (socketDead) return false;
     bufferFrame(frame);
@@ -781,7 +778,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
     return !socketDead;
   };
 
-  // Fire-and-forget frames coalesce: buffer, and flush only on a cap (which also
+  // ACKs and publishes coalesce: buffer, and flush only on a cap (which also
   // applies backpressure), else leave it to the window. A saturating publish loop
   // keeps the queue near empty, so the window is what batches the send syscalls.
   const sendBuffered = async (frame: Frame): Promise<boolean> => {
@@ -795,7 +792,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
     return !socketDead;
   };
 
-  // Graceful-shutdown hook: push buffered fire-and-forget frames to the socket
+  // Graceful-shutdown hook: push buffered frames to the socket
   // before it closes. libuv attempts a synchronous write and the kernel flushes
   // its send buffer on the FIN, so a small trailing ack still reaches the broker.
   shutdownMode.flush = (): void => {
@@ -898,7 +895,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
           published: cmd.published,
           ttl_ms: cmd.ttl_ms,
         };
-        if (!(await sendOrDie(buildFrame(Op.Publish, reqId, msg)))) {
+        if (!(await sendBuffered(buildFrame(Op.Publish, reqId, msg)))) {
           waiters.delete(reqId);
         }
         return;
@@ -937,7 +934,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
           payload: cmd.payload,
           published: cmd.published,
         };
-        if (!(await sendOrDie(buildFrame(Op.PublishDelayed, reqId, msg)))) {
+        if (!(await sendBuffered(buildFrame(Op.PublishDelayed, reqId, msg)))) {
           waiters.delete(reqId);
         }
         return;

@@ -155,6 +155,33 @@ with the new engine.
   sequence. It is at-least-once today and becomes effectively-once with no API
   change once the broker dedups on those keys.
 
+## Write coalescing
+
+Rust, Python and TypeScript coalesce ACK frames and pipelined publish frames
+into bounded socket writes. Go and C# also have existing write grouping. This
+changes transport writes, not protocol semantics: every ACK
+retains its request ID, routing fields and delivery tag, and every confirmed
+publish retains its individual broker reply. A buffered send is not a durable
+confirmation. Control requests flush earlier buffered frames first to preserve
+wire order; shutdown attempts to flush the tail, while a failed connection still
+fails outstanding confirmations.
+
+Rust drains up to 256 currently available commands and flushes any ACK tail at
+the end of that drain. Python and TypeScript use byte/count limits plus a timer
+for their buffered tail. Python's ordinary `publish(confirm=True)` remains an
+immediate request; its pipelined confirmation API uses the buffer. TypeScript's
+confirmed APIs share the buffered engine command. Python's
+`with_write_coalescing(max_frames=1)` and TypeScript's
+`withWriteCoalescing({maxFrames: 1})` disable coalescing when immediate writes are
+preferred. Timer deadlines are subject to event-loop scheduling; Node rounds
+sub-millisecond timers up.
+
+Keep performance experiments separate from these guarantees. In particular, an
+idle-aware confirmed-publish flush must distinguish buffered publishes from
+publishes already sent and awaiting replies, and release its accounting on
+errors and redirects as well as success. A consumer-only ACK stream cannot use
+the publisher's outstanding-confirmation count to decide its batching policy.
+
 ## Lessons learned (porting)
 
 - **Read the whole Rust subsystem for a feature before writing it.** Where this

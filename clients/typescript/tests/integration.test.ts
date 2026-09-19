@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import { adv } from "./helpers.js";
 import assert from "node:assert/strict";
-import { createServer, type Server, type Socket } from "node:net";
+import { createServer, type Server, Socket } from "node:net";
 import {
   buildFrame,
   decodeFrameBody,
@@ -2520,3 +2520,43 @@ test("subscription surfaces a typed close reason from a SubscriptionClosed frame
     await broker.stop();
   }
 });
+
+for (const count of [1, 127, 128, 129, 513]) {
+  test(`pipelined confirmed writes preserve ${count} offsets and flush the idle tail`, async () => {
+    const broker = new FakeBroker();
+    await broker.start();
+    let client: Client | undefined;
+    const original = Socket.prototype.write;
+    let writes = 0;
+    try {
+      let offset = 0n;
+      broker.onFrame = (f, s) => {
+        if (f.opcode === Op.Hello) broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+        if (f.opcode === Op.Publish) {
+          const msg = decodeFrameBody<PublishMsg>(f);
+          assert.equal(msg.require_confirm, true);
+          assert.equal(Buffer.from(msg.payload).readBigUInt64LE(), offset);
+          broker.send(s, buildFrame(Op.PublishOk, f.requestId, { offset: offset++ }));
+        }
+      };
+      client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+      Socket.prototype.write = function (this: Socket, ...args: Parameters<Socket["write"]>) {
+        if (this.remotePort === broker.port) writes++;
+        return original.apply(this, args);
+      } as typeof original;
+      const pub = client.publisher("jobs");
+      const pending = [];
+      for (let i = 0; i < count; i++) {
+        const bytes = Buffer.alloc(8); bytes.writeBigUInt64LE(BigInt(i));
+        pending.push(await pub.publishBytesWithConfirmation(bytes));
+      }
+      const offsets = await Promise.all(pending.map(c => c.confirmed()));
+      assert.deepEqual(offsets, Array.from({ length: count }, (_, i) => BigInt(i)));
+      assert.ok(writes <= Math.ceil(count / 128), `${count} publishes used ${writes} writes`);
+    } finally {
+      Socket.prototype.write = original;
+      await client?.shutdown();
+      await broker.stop();
+    }
+  });
+}

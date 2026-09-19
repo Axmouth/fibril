@@ -145,14 +145,14 @@ export interface ClientOptionsInit {
    */
   subscriptionSuperviseIntervalMs?: number;
   /**
-   * Coalesce fire-and-forget writes (unconfirmed publishes) until this many
+   * Coalesce ACKs and publishes until this many
    * buffered bytes, then flush in one socket write. Tune with
    * {@link ClientOptions.withWriteCoalescing}.
    */
   writeCoalesceBytes?: number;
-  /** Coalesce fire-and-forget writes until this many buffered frames. */
+  /** Coalesce ACKs and publishes until this many buffered frames. */
   writeCoalesceCount?: number;
-  /** Flush coalesced fire-and-forget writes within this many ms of the last flush. */
+  /** Schedule a flush this many ms after the last flush; event-loop timing applies. */
   writeCoalesceWindowMs?: number;
 }
 
@@ -228,14 +228,12 @@ export class ClientOptions {
   }
 
   /**
-   * Return a copy with fire-and-forget write coalescing tuned. Unconfirmed
-   * publishes are buffered and sent in one socket write, flushed on whichever
-   * limit is reached first: `maxBytes` buffered, `maxFrames` buffered, or
-   * `windowMs` since the last flush. Reply-bearing frames (confirmed publishes,
-   * acks, requests) always flush immediately. Larger limits trade a little
-   * latency for fewer syscalls; the defaults already sit at the throughput
-   * plateau, so this is mainly for tightening latency or memory, or disabling
-   * coalescing (`maxFrames: 1`). Only the limits passed change.
+   * Tune coalescing of ACKs and publishes. Byte/count caps flush immediately;
+   * otherwise a timer flushes the tail. Every confirmed publish retains its own
+   * broker reply. Control requests flush immediately in wire order. Larger
+   * limits trade latency for fewer writes; Node rounds sub-millisecond timers
+   * up, and a busy event loop can delay them. Use `maxFrames: 1` to disable
+   * coalescing. Only the limits passed change.
    */
   withWriteCoalescing(limits: {
     maxBytes?: number;
