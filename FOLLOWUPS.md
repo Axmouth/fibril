@@ -1,57 +1,57 @@
 # Follow-ups and pending work
 
-## Recommended release roadmap (as of the 0.4 cut, 2026-07-04)
+## Current planning checkpoint — 2026-09-19
 
-The sequence for the pending arcs. Two hard ordering constraints drive
-it: gate-3's wire additions must land BEFORE #110 freezes the wire, and
-anything touching protocol or client API (#82 per-stream RF, #62
-TopologyUpdate) must beat the #111 freeze or wait for 2.0.
+This section is the current status and supersedes older prospective wording in
+the design briefs below. The unversioned website docs track main; `docs/0.2`,
+`docs/0.3`, and `docs/0.4` are frozen release snapshots. Workspace version 0.4.0
+does not mean the unreleased main checkout has only the 0.4 feature set.
 
-Immediately (design-free, decays with every commit on main):
-- Generate the v0.4.0 golden fixture from the tag (back-compat brief
-  below has the mechanics). Writing gen-compat-fixture.sh here is the
-  reusable part - every future cut runs it.
+Implemented on main since the 0.4 cut:
+- Guided broker/client errors and the #102-#105 reconnect family: typed close
+  reasons, safe auto-resubscribe, broker-local durable restart resume, and
+  stale-delivery settlement across all five clients. See GATE3_RECONNECT_PLAN.md,
+  STALE_TAG_104_PLAN.md, clients/FEATURE_MATRIX.md and CHANGELOG.md.
+- Go and C# clients. They participate in the API review and compatibility matrix
+  alongside Rust, TypeScript and Python; they are not future ports.
+- The v0.4.0 data-dir golden fixture and its recovery test. The fixture's existing
+  coverage limits remain in the storage compatibility brief below.
+- Stream cursor commit microbatching (#83), which is no longer pending.
+- Payload-free replication conflict diagnostics, checkpoint epoch validation,
+  Rust ACK write coalescing, Python/TypeScript confirmed-publish buffering, and
+  prompt socket-tail flushing. Durability and replica-confirmation gates remain.
 
-0.5 - the clarity release: guided errors + gate-3 reconciliation
-(#102-#105). One release because they are one product story (the broker
-says what happened and what to do) and they co-design at the seam:
-reconnect-closure reasons belong to #102, not the errors pass. Inside
-the arc: broker-side guides first (the broker_error_response funnel is
-brick 1, includes the InvalidArgument 500 -> 400 code fix), client-local
-guides second, then the gate-3 family per its brief. The 0.5 cut is the
-first to prove the back-compat guarantee by opening the v0.4.0 fixture
-in CI, and generates its own fixture on the way out.
+Remaining work, in recommended order:
+1. Checkpoint recovery hardening: reproduce interruption between message-log
+   reset, event-log reset, state install and snapshot persistence; design durable
+   installation/recovery so a partial install cannot serve or promote. Also
+   reproduce or rule out promotion to local tails before checkpoint-referenced
+   messages finish backfilling. The latter remains a suspected gap. Epoch checks
+   do not make the multi-step installation atomic. General automatic conflict
+   repair stays disabled; see REPLICATION_OVERLAP_DIAGNOSTICS.md.
+2. Lifecycle completion review: stream NACK semantics and resumed-stream cursor
+   settlement (see the Plexus settle-model gaps below), plus the still-deferred
+   auto-resubscribe-ON continuity test. #104 itself is implemented, not deferred.
+3. Gate 2 (#109-#112): finish domain types, define wire/storage compatibility,
+   ratify all five client APIs, then enforce previous-client and mixed-broker
+   compatibility. Audit remaining wire/API proposals before freezing; resolve
+   them explicitly rather than inferring a new feature requirement from an old
+   brief. Preserve current bytes during the newtype pass.
+4. Node enrollment: one-command join with trust/configuration. Its admin-facing
+   design is independent of the client protocol freeze.
 
-0.6 - the freeze release: gate-2 family (#109-#112), strict internal
-order #109 -> #110 -> #111 -> #112. BEFORE #109 starts, sweep in the
-wire-touching stragglers so they do not miss the freeze: #82 per-stream
-RF override at declare, and a decision on #62 TopologyUpdate push+ack
-(do it or explicitly punt to 2.0). The durable-format policy from the
-back-compat brief folds into #110's normative doc.
+The earlier gate-1 validation milestone and gate-4 security baseline remain
+recorded as met. They do not close newly identified recovery gaps. Gate 3's main
+functionality is implemented; the remaining lifecycle review is listed above.
+Gate 2 remains unfinished. 1.0 still needs those gates and soak evidence.
 
-0.7 - the operator-onboarding release: node enrollment (brief below,
-fully unblocked since #153, admin-surface only so zero interaction with
-the frozen wire). Bundle the small operator polish: #81 stream debug UI
-view, #83 microbatch stream cursor commits.
-
-Parallel track, any time after #111 lands: Go client #119 - built
-against the FROZEN API it conforms rather than expands the freeze
-scope, and joins the #112 matrix as a fourth column. C# (#120) behind
-it.
-
-Then 1.0: gate-4 done, gate-3 completes with 0.5, gate-2 with 0.6,
-cluster confidence met since 0.2. After 0.7 the remaining 1.0 work is
-soak time and doc polish, not features.
-
-Judgment call recorded: enrollment could swap with the freeze family
-(0.6 <-> 0.7) since they do not interact. Freeze stays earlier - every
-release shipped pre-freeze adds compat surface owed forever, while
-enrollment loses nothing by waiting.
-
-Parked with recorded triggers: per-topic authz (tenancy-dependent,
-revisit against the tenancy criteria when a user asks), benchmarks.md
-overhaul (blocked on the NVMe slice), the TUI demo cursor
-(demo/website work, orthogonal - pick up opportunistically).
+The historical release direction was 0.5 for clarity/reconnect, 0.6 for the
+freeze, and 0.7 for onboarding. These are planning scopes, not releases already
+cut or a promise that only documentation remains before 1.0. Per-topic authz
+remains deferred until a concrete need appears. Benchmark documentation can now
+use the native physical-storage evidence; the old "waiting for an NVMe slice"
+blocker is obsolete. TUI/demo work and further measured performance work remain
+independent of the freeze.
 
 ## 0.4 arc plans (2026-07-05) - implementation briefs
 
@@ -370,34 +370,18 @@ Tests:
   new serial.
 - Ganglion: cluster formation over the TLS dialer + acceptor.
 
-### After 0.4 - sequencing notes
+### After 0.4 — sequencing notes
 
-- Gate 3 remainder (#102-#105, reconnect reconciliation family): typed
-  subscription-close reasons on receive APIs, auto-resubscribe for safe
-  recreate_client_side, inflight reconciliation across reconnect,
-  durable restart reconciliation. Wants its own precedent-and-brief
-  pass when picked up: the close-reason surface interacts with the API
-  freeze, so design it immediately before or together with #111.
-- Storage and snapshot back-compat (raised at the 0.4 cut, co-design
-  with #110/#112): full brief below ("Storage and snapshot
-  back-compat"). The quick win - generating the v0.4.0 golden fixture -
-  needs no design and should happen BEFORE main drifts.
+Use the current planning checkpoint above for status. Guided errors and the
+#102-#105 implementation have landed; the v0.4 fixture and Go/C# clients exist.
+The remaining freeze sequence is #109 -> #110 -> #111 -> #112, including all
+five clients. Lifecycle gaps that affect the public contract must be resolved
+before that freeze. Enrollment is independent; per-topic authz remains deferred.
 
-- Gate 2 freeze family (#109-#112): OPENS with the guided-errors pass
-  (below), then newtype/Arc<str> (pure churn, last-moment before
-  freezing), then the wire versioning + back-compat policy, client API
-  freeze, and the compat matrix. Auth settled the handshake, so nothing
-  structural blocks this after the TLS tail lands.
-- Security depth, later minors: per-topic authorization (needs its own
-  precedent pass: Kafka ACLs vs RabbitMQ per-vhost patterns, and it is
-  tenancy-dependent - see the tenancy criteria section) and the
-  node-enrollment arc recorded below. mTLS shipped in 0.4.
-- Go client (#119): parallel-friendly at any point. The Python port
-  playbook plus clients/FEATURE_MATRIX.md is the checklist.
-- benchmarks.md overhaul stays blocked on the NVMe slice, spec recorded
-  earlier in this file.
+### Guided client errors pass (implemented; design reference)
 
-### Guided client errors pass (opens the gate-2 family)
+The initial guided-error pass is recorded in CHANGELOG.md. The brief below
+preserves its design; additional cases can still be added as needed.
 
 Goal: extend the TLS-error philosophy - every error names the likely
 fix - across the client-facing error surface, BEFORE the API freeze
@@ -818,6 +802,11 @@ Tests:
 
 ## Gate 3 arc plan: reconnect reconciliation family (#102-#105)
 
+Implementation status: the family is implemented across all five clients.
+The outline below is the original design reference, not an outstanding task
+list. GATE3_RECONNECT_PLAN.md and STALE_TAG_104_PLAN.md record the delivered
+surface; the current checkpoint above lists the remaining review/test work.
+
 Goal: a client always KNOWS what happened to its subscriptions and
 inflight work across a reconnect or broker restart, as typed surface
 rather than silence or a generic disconnect. Finishes the operational
@@ -921,18 +910,18 @@ handshake.
 - #109 newtype + Arc<str> pass: Offset/Epoch-style domain integers get
   distinct serde(transparent) newtypes (Partition already is one,
   DeliveryTag exists as a struct in crates/common/src/lib.rs:12).
-  Known starting anchors: `pub type Offset = u64` is a bare alias at
-  crates/storage/src/lib.rs:16, and epoch rides as bare u64 inside
-  DeliveryTag (common/src/lib.rs:13) and throughout
-  crates/broker/src/coordination.rs. Topic/Group become validated
-  Arc<str> newtypes end to end (interning groundwork exists from #65).
+  Current starting anchors: `pub type Offset = u64` remains at
+  crates/broker/src/storage.rs. Review epoch integers throughout the
+  coordination and storage boundary. The Rust client already has validated
+  TopicName/GroupName wrappers backed by Box<str>; the proposed Arc<str>
+  direction and end-to-end domain typing are not complete.
   Pure mechanical churn - do it IMMEDIATELY before freezing so nothing
   re-churns after. Compiler does the work; tests are the existing
   suites passing. Newtyping wire-visible fields must stay
   serde(transparent) so no wire bytes change (the vectors gate below
   proves it).
 - #110 wire versioning + back-compat policy: PROTOCOL_V1 and the HELLO
-  negotiation already exist (crates/protocol/src/v1/mod.rs:31). Write
+  negotiation already exist in the shared crates/wire vocabulary. Write
   the policy down as normative doc: additive-only within a protocol
   version (serde-default fields, new opcodes), version bump criteria,
   support window (broker supports N and N-1; clients declare, broker
@@ -943,7 +932,7 @@ handshake.
   committed vectors and regenerated vectors differ). The durable
   formats get their policy from the back-compat brief above, written
   into the same doc.
-- #111 client API freeze: the public-API review across Rust/TS/Python
+- #111 client API freeze: the public-API review across Rust/TS/Python/Go/C#
   against FEATURE_MATRIX; the typed subscription-lifecycle enum from the
   reconciliation family is ratified here; deprecations resolved; then
   semver discipline begins (breaking = major).
@@ -2834,6 +2823,11 @@ Phase 1:
    both-durable, so any dangling enqueue is unconfirmed and safe to drop.
 
 ## Client API freeze bundle (#111) - Tier 5 Group A of the client-API audit
+
+Historical design input: typed close reasons and stale-delivery settlement
+have since landed across all five clients. Do not reimplement the lifecycle
+from this older "Today" description. Review and ratify the actual surface at
+#111; remaining proposals below are review questions, not accepted new scope.
 
 From clients/API_CONSISTENCY_AUDIT.md (archived). These reshape the client
 receive/error surface, so they are designed ONCE at the API freeze, not piecemeal.

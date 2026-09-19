@@ -84,7 +84,7 @@ Mutual-TLS client authentication, per-topic authorization, TLS on inter-broker
 connections, and certificate rotation are the remaining security depth, planned
 for later minors.
 
-### 0.4 (current)
+### 0.4 (latest released minor)
 
 The operations release - **gate 4 (security baseline) is effectively
 complete** (per-topic authorization stays shelved until a real need appears)
@@ -108,38 +108,47 @@ and gate 3 gains its drain half:
 
 ### Toward 1.0 (later 0.x minors)
 
-Each subsequent minor knocks off part of a gate. The expected shape of the
-next few, as direction rather than a promise - scope can shift between cuts:
+The workspace version is still 0.4.0; main also contains unreleased work.
+The following checkpoint reflects main as of 2026-09-19, rather than the frozen
+0.4 documentation.
 
-- Next: clearer errors and a typed reconnect lifecycle. Client-facing errors
-  name the likely fix where one exists (the TLS errors set the pattern), and
-  a subscription that ends across a reconnect or broker restart ends with a
-  typed reason instead of silence, including sessions that survive a fast
-  broker restart. This completes gate 3.
-- Then: the compatibility freeze. The wire protocol is versioned with a
-  written back-compat policy, the client APIs are frozen after the
-  Offset/Topic newtype and `Arc<str>` pass, and CI enforces both with
-  cross-client byte vectors and a previous-release compatibility matrix
-  (gate 2). Durable storage formats get the same promise: a data dir
-  upgrades in place from the previous minor, proven by golden fixtures
-  generated at each release.
-- Then: one-command cluster join. An invite token enrolls a fresh node with
-  trust, addressing, and configuration in a single step, the
-  enrollment-token pattern.
-- Per-topic authorization is the only security-depth item left open, and it
-  is shelved until a real need appears (it reads as tenancy-adjacent), so
-  gate 4 is effectively complete.
+- Implemented since 0.4: guided errors, typed subscription-close reasons,
+  safe auto-resubscribe, durable broker-local restart resume, and stale-delivery
+  settlement across Rust, TypeScript, Python, Go, and C#. Restart resume still
+  redelivers unacknowledged work; it does not preserve delivery tags across a
+  process restart. This supplies the main reconnect functionality for gate 3.
+- Remaining lifecycle work: close the stream settlement gaps and the focused
+  auto-resubscribe-on continuity test before treating the lifecycle review as
+  finished. Stream NACK operations need explicit semantics; a resumed stream's
+  cursor ACK can race asynchronous re-subscription.
+- Recovery hardening: prove checkpoint installation safe under interruption
+  across both logs and queue state, and test promotion while checkpoint-referenced
+  messages are still backfilling. Epoch-fenced resets and conflict diagnostics
+  have landed, but do not establish atomic installation or safe automatic
+  repair of divergent histories. The promotion concern still needs reproduction.
+- Next gate: the compatibility freeze. Finish the Offset/Epoch and Topic/Group
+  type pass, write the wire and durable-format compatibility policy, review all
+  five client APIs, and enforce the promise with wire vectors, previous-release
+  clients, and mixed-version broker tests (gate 2). The v0.4.0 storage golden
+  fixture already exists; extend that coverage and generate fixtures at future
+  releases.
+- Next larger operator feature: one-command cluster join. An invite token
+  enrolls a fresh node with trust, addressing, and configuration.
+- Per-topic authorization remains deferred until a concrete need appears;
+  gate 4's baseline is effectively complete.
 
-1.0 follows once the gates hold and the frozen surface has soaked. More
-first-party clients (Go first) can proceed in parallel once the client API
-freeze lands, conforming to the frozen surface rather than expanding it.
+Gate 1's earlier simulation, chaos/soak, and multi-node milestone remains recorded
+as met. Newly identified recovery concerns still require their own evidence;
+that milestone is not a blanket guarantee for every failure path. 1.0 follows
+once the remaining gates hold and the frozen surface has soaked.
 
 ### After 1.0 (parallel, non-gating)
 
 These add reach and polish without gating 1.0, and several can proceed in
 parallel before then:
 
-- More first-party clients: Go, C#, Java.
+- Additional first-party clients, such as Java. Rust, TypeScript, Python, Go,
+  and C# already exist.
 - OpenTelemetry export (the Prometheus endpoint shipped with 0.4).
 - Continued performance refinement (async replication fsync, staging micro-opts).
 - Optional symmetric conveniences such as wildcard publishers (client-side
@@ -170,8 +179,8 @@ feeds the milestones above.
 - Finish the combined Offset plus Topic/Group newtype pass after the current
   partition newtype pass, including the planned `Arc<str>` direction for
   Topic/Group.
-- Improve client feedback for reconnect cases where reconciliation closes a
-  subscription stream.
+- Finish stream settlement semantics and reconnect continuity coverage; typed
+  subscription-close feedback already exists across all five clients.
 - Keep improving DLQ replay and message inspection workflows, especially bulk operations and clearer operator feedback.
 - Add the next storage-level startup/runtime settings where they have clear operational value.
 - Keep refining sparse-queue observability where it helps operators decide why a queue is loaded, idle, or not yet unloaded.
@@ -189,8 +198,8 @@ feeds the milestones above.
   admin topology diagram.
 - Add programmatic node management and scale-up or scale-down flows around the
   Ganglion-backed cluster path.
-- Add fault-injection and unreliable-infrastructure testing for partitions,
-  latency, dropped traffic, and leadership churn.
+- Extend the existing fault-injection coverage for partitions, latency, dropped
+  traffic, leadership churn, and interrupted checkpoint installation.
 - Add consumer-group assignment narrowing so clients can subscribe only to their
   assigned partition subset instead of relying only on the delivery gate.
 - Continue improving runnable broker images and binaries, including `fibrilctl` in the server image.
@@ -205,16 +214,16 @@ feeds the milestones above.
 
 - Hardening the experimental replication and clustering path (queues and streams)
   into production guidance and supported defaults.
-- Fully transparent broker restarts. The near-term reconnect-lifecycle work
-  (see [toward 1.0](#toward-10-later-0x-minors)) makes a restart honest -
-  sessions resume and every outcome is typed. The longer-term extension is
+- Fully transparent broker restarts. The implemented reconnect lifecycle
+  (see [toward 1.0](#toward-10-later-0x-minors)) reports restart resume and
+  stale deliveries explicitly. The longer-term extension is
   making it invisible: a client within its grace window reclaims inflight
   ownership across the restart, with a startup grace window before normal
   redelivery resumes, so in-flight work sees no disturbance at all. The
   drain half already shipped: a draining broker announces itself and hands
   partition ownership off before stopping.
-- More complete client ecosystem. The Python client (async plus a blocking
-  facade) has landed. The next targets are C#, Go, and Java.
+- Extend the client ecosystem beyond the existing Rust, TypeScript, Python
+  (async plus blocking), Go, and C# clients; Java remains a possible addition.
 
 ## Out of scope
 

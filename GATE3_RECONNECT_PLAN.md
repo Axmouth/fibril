@@ -1,10 +1,16 @@
 # Gate 3 plan: reconnect reconciliation family (#102-#105)
 
-Working plan for the 0.5 clarity release. Expands the FOLLOWUPS brief with
-verified as-is findings and precise acceptance criteria. Design decisions
-marked PROPOSED await ratification before implementation starts. The typed
-surface designed here is the one #111 later freezes, so shape choices are
-made freeze-grade now.
+Implementation record for the planned 0.5 clarity release. Decisions were
+ratified on 2026-07-21 (see the record below); earlier PROPOSED/as-is sections
+preserve the original design and are not the current backlog. The typed surface
+is implemented and remains subject to the later #111 compatibility freeze.
+
+Current status (2026-09-19): typed close reasons, safe auto-resubscribe and durable
+restart resume are implemented; #104 stale-delivery settlement is also complete
+across Rust, TypeScript, Python, Go and C# (STALE_TAG_104_PLAN.md). Remaining work
+includes the focused auto-resubscribe-ON continuity test and the separate Plexus
+stream settlement gaps recorded in FOLLOWUPS.md. Restart resume does not preserve
+process-local delivery tags or transfer sessions across nodes.
 
 ## Goal
 
@@ -475,14 +481,15 @@ keratin flock releases on drop), the client resumes ResumedAfterRestart,
 reconciles into a recreate, re-subscribes, and the unacked message
 redelivers per at-least-once. This is the "prove it end to end" test.
 
-STILL DEFERRED: #104 stale-tag MARKING (the client side). The broker
-already redelivers per at-least-once and the typed Disconnected/restart
-outcome tells a client its tags are dead; the focused client-side work
-(stamp each delivery with its engine incarnation, mark in-hand
-deliveries stale on a non-Resumed reconnect, return a typed StaleDelivery
-error on settling one) is its own follow-up across all five clients. Also
-deferred: the brick-3 auto-resubscribe-ON continuity test (shares
-machinery with the existing grow-partition supervisor test).
+#104 stale-tag marking is now COMPLETE across all five clients. The later
+STALE_TAG_104_PLAN.md records captured engine incarnations, atomic binding checks,
+typed stale-delivery errors and routing valid settles to the current engine.
+This supersedes the earlier deferral at the end of the initial reconnect arc.
+
+Still deferred: the brick-3 auto-resubscribe-ON continuity test (shares
+machinery with the existing grow-partition supervisor test). The separate stream
+NACK and resumed-stream ACK gaps remain in FOLLOWUPS.md; do not infer stream
+retry semantics from the queue's at-least-once redelivery behavior.
 
 ## Ratification record
 
