@@ -25,15 +25,14 @@ The remaining work is grouped below by dependency and operational impact.
 
 ## Recovery safety
 
-- Make checkpoint replacement interruption-safe across the message log, event
-  log, queue state and persisted snapshot. Recovery must complete or refuse a
-  partial installation before the partition can serve.
+- Implement and validate Windows durable metadata replacement before enabling
+  checkpoint installation and recovery seals on that platform.
 - Require promotion to preserve the previously confirmed history, using current
   replica evidence and assignment fencing. Cover stale heartbeat tails and a
   lagging, internally consistent candidate that lacks a confirmed batch. See the
   [failover plan](/development/failover-plan/).
-- Cover each installation boundary with error, cancellation and process-kill
-  tests, then exercise failover during checkpoint catch-up through real brokers.
+- Exercise failover during checkpoint catch-up through real brokers, and extend
+  local error/cancellation/process-kill coverage to power-loss persistence tests.
 - Define source authority, acknowledged-history preservation, bounded retries
   and operator alerts before enabling automatic repair of divergent replicas.
 

@@ -10,6 +10,14 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Recoverable follower checkpoint installation
+
+A crash between the two log resets could leave old queue state referring to removed message bodies. A durable installation journal now resumes replacement before ordinary recovery, and a completion receipt prevents retries from erasing later backfill; snapshot fencing rejects stale writes after installation or eviction. Linux fault, cancellation and six-boundary SIGKILL tests cover [Keratin 76f1469](https://github.com/Axmouth/keratin/commit/76f1469); coordinated history selection and activation remain pending.
+
+### Manifest replacement crash window
+
+Manifest storage removed the old file before renaming its replacement, allowing a failed rename or crash to lose the persisted epoch. Direct replacement now preserves the previous manifest on rename failure and synchronizes both affected directories on Unix; an injected-failure regression covers [Keratin 3435e3d](https://github.com/Axmouth/keratin/commit/3435e3d). Windows metadata durability still requires separate implementation and testing.
+
 ### Replication wakeups independent of confirmation waits
 
 Each locally durable queue batch now wakes replication after its payload/enqueue dependency is registered. A previous publication waiting for remote confirmation no longer delays that notification; the notification runs once per batch and skips a cancelled owner runtime. A regression parks a follower beyond batch A, leaves A unconfirmed, and verifies that durable batch B wakes the follower while both confirmations still wait for replica progress.

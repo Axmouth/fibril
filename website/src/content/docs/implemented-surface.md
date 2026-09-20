@@ -87,8 +87,8 @@ Conditions and limits:
 
 - Recovery folds replayed enqueue/cancel events against the durable message tail.
   It can discard an unconfirmed suffix left by interrupted parallel publication.
-  This check does not establish consistency of a partially replaced checkpoint
-  snapshot; checkpoint recovery has separate limitations below.
+  Interrupted checkpoint installation is resolved from its durable installation
+  record before this ordinary replay path. See checkpoint recovery below.
 - A corrupt event record is the genuine mid-log failure and uses the same
   quarantine and truncate machinery.
 - `refuse` is lazy today (a mismatch is caught when the partition is first used);
@@ -662,7 +662,7 @@ See also: [clustering](/concepts/clustering/) and
 | Follower source refresh | Implemented | An owner or epoch change drains and retargets a remaining follower's worker while retaining its replication cursors |
 | Checkpoint epoch checks | Implemented | Both source epochs are validated before reset and checked again by each storage writer in command order |
 | Local recovery seal | Partial | Keratin preserves a sealed replica across restart and supports identical-request retry; Linux validated, other platforms reject sealing before mutation. Automatic broker failover does not invoke this primitive yet |
-| Checkpoint recovery | Partial | Backfill dependencies gate promotion and owner activation, including after restart; interruption-safe replacement of both logs and snapshot state remains pending |
+| Checkpoint recovery | Partial | Unix installation journals resume interrupted replacement of both logs and queue state before ordinary replay; completion receipts preserve later backfill on retry. Payload dependencies gate promotion across restart. Linux fault/SIGKILL tests pass; non-Unix installation is unsupported pending durable metadata support |
 | Conflict diagnostics | Implemented | Bounded, payload-free control history, offsets and effective record identities accompany overlap reports; checkpoint logs show source epochs and continuation offsets |
 | Replica-durable confirms | Partial | Queues require the same follower to cover the payload batch and exact enqueue frontier; epoch/session-fenced progress feeds confirmation and delivery visibility, with timeout and ISR floor |
 | Durable stream replication (Plexus) | Partial | Tier-gated: the durable tier replicates record + cursor logs to `stream_replication_factor` followers (express tiers stay owner-only), durable publishes confirm on replica durability, and owner loss triggers follower selection and local promotion checks. Reuses the queue follower-worker, confirm gate, and failover-candidate selection |
@@ -687,16 +687,15 @@ Conditions and limits:
   restart, and client admission waits for explicit promotion. A locally complete
   candidate can still lack a batch confirmed on another replica: heartbeat tails
   are advisory and promotion does not yet prove the cluster-wide confirmed
-  prefix. That proof, atomic checkpoint replacement and broader broker-level
-  interruption coverage remain pending.
+  prefix. That proof and broader broker-level interruption coverage remain pending.
 - The placement controller holds ownership, follower-set and durability-policy
   changes involving replicated confirmation, including replicated durable
   streams. Pending recovery records survive metadata restart and are exposed in
   controller status. This prevents automatic promotion of an unproven candidate;
   it currently leaves replicated failover unavailable pending recovery support.
 - Conflict diagnostics do not enable automatic repair of divergent histories.
-  Checkpoint epoch checks protect authority but do not make replacement of both
-  logs and queue state atomic.
+  Checkpoint installation checks both epochs and uses a recoverable journal;
+  authoritative source selection and new-quorum activation remain separate gates.
 - Replica-durable confirms are meaningful only when the assignment durability
   policy requires more than the owner.
 - Cross-broker topology lag and ISR aggregation into the topology page is still

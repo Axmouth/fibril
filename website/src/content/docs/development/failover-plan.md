@@ -54,8 +54,11 @@ unconfirmed or incomplete records; they do not establish authoritative history.
 The primitive is validated on Linux and is not called by automatic broker
 failover. Other platforms currently reject sealing before changing storage.
 Authenticated request dispatch, retained data-history identity, compatible-history
-selection, atomic installation and activation remain required. The completed
+selection, new-write-quorum installation and activation remain required. The completed
 controller must coalesce retries per transition and resume work after restarts.
+Local checkpoint interruption recovery is documented in
+[implemented surface](/implemented-surface/#experimental-cluster-and-replication-surface);
+it does not supply the coordinated history proof or activation decision.
 
 ## Eager failure detection
 

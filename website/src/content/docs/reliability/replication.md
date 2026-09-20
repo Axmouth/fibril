@@ -95,8 +95,11 @@ latency. See the [configuration](/configuration/) replication settings.
   missing a batch confirmed by the old owner and another follower. Preserving
   the cluster's confirmed history during promotion requires additional replica
   evidence and fencing; heartbeat candidate selection alone is insufficient.
-  Checkpoint backfill is checked before promotion and after restart; atomic
-  replacement of both logs and checkpoint state also remains pending.
+  Checkpoint backfill is checked before promotion and after restart. Unix
+  checkpoint installation uses a durable journal to resume interrupted log/state
+  replacement before ordinary replay; completed retries preserve later backfill.
+  Linux fault and process-kill tests cover this local path. Non-Unix checkpoint
+  installation is unsupported pending durable metadata support.
 - The controller now prevents that automatic reassignment by persisting pending
   recovery metadata. It also holds follower-set and durability-policy changes
   involving replicated confirmation. Existing healthy owners retain their active
