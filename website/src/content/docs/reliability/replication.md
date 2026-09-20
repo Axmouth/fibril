@@ -31,7 +31,10 @@ partition has one **owner** and one or more **followers**:
 - **Replica-durable publishes wait for replicas.** When the assignment's
   durability policy requires more than the owner, a confirmed publish does not
   return until enough followers have reported the required progress, subject to a
-  timeout and an in-sync floor.
+  timeout and an in-sync floor. Each counted follower must have the queue payload
+  batch and its exact enqueue-event frontier; the complete payload group is
+  required when one enqueue record names several messages. Delivery visibility
+  uses the same dependency proof.
 
 ## Durability levels
 
@@ -74,8 +77,15 @@ latency. See the [configuration](/configuration/) replication settings.
 - `local_durable` queues behave exactly like single-node queues even in a
   cluster. Replica-durable confirms only mean something when the durability
   policy requires more than the owner.
-- Follower application is durable: a follower fsyncs before reporting the
-  progress that owners count toward replica-durable confirms.
+- Follower application is durable: message and event writes overlap, and both
+  completions drain before queue state is applied and progress is reported.
+  Failed or interrupted application blocks promotion until recovery or resync.
+- Progress reports are tied to an assignment epoch and an ordered transport
+  session. Replacement sessions and assignments invalidate earlier reports;
+  resets replace both reported frontiers together.
+- Run matching broker revisions across a cluster. Older reports without an
+  assignment epoch remain readable but do not count toward replicated confirms.
+  The client publish, delivery and acknowledgment frames are unchanged.
 
 ## Tradeoffs and limits
 
@@ -83,7 +93,9 @@ latency. See the [configuration](/configuration/) replication settings.
   bounded by the follower poll interval and the confirm timeout.
 - This surface is experimental. Failover safety rests on assignment epochs plus
   local promotion gates, and more failure testing is needed before treating it
-  as production-ready high availability.
+  as production-ready high availability. Checkpoint backfill is checked before
+  promotion and after restart; atomic replacement of both logs and checkpoint
+  state remains pending.
 - Cross-broker replication-lag aggregation into a single cluster view is still
   pending. A broker's own follower workers and their progress are visible on the
   [admin queues page](/admin-dashboard/).

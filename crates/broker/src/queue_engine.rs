@@ -158,6 +158,23 @@ pub trait QueueEngine {
         items: Vec<PublishItem>,
     ) -> Result<(), StromaError>;
 
+    /// Queue publications must expose their enqueue dependency to the broker.
+    async fn publish_batch_observed(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        items: Vec<PublishItem>,
+        observer: stroma_core::QueuePublishObserver,
+    ) -> Result<(), StromaError>;
+
+    async fn queue_durable_frontiers(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<stroma_core::QueuePublishCommit, StromaError>;
+
     async fn next_expiry_hint(&self) -> Result<Option<UnixMillis>, StromaError>;
 
     async fn requeue_expired(
@@ -235,6 +252,14 @@ pub trait QueueEngine {
         tp: &str,
         part: u32,
         group: Option<&str>,
+    ) -> Result<(), StromaError>;
+
+    async fn ensure_queue_owner_epoch(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        epoch: Option<u64>,
     ) -> Result<(), StromaError>;
 
     async fn become_queue_owner_with_epoch(
@@ -1059,6 +1084,28 @@ impl QueueEngine for StromaEngine {
             .await
     }
 
+    async fn publish_batch_observed(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        items: Vec<PublishItem>,
+        observer: stroma_core::QueuePublishObserver,
+    ) -> Result<(), StromaError> {
+        self.inner
+            .append_message_batch_observed(tp, part, group, items, Some(observer))
+            .await
+    }
+
+    async fn queue_durable_frontiers(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<stroma_core::QueuePublishCommit, StromaError> {
+        self.inner.queue_durable_frontiers(tp, part, group).await
+    }
+
     async fn next_expiry_hint(&self) -> Result<Option<UnixMillis>, StromaError> {
         self.inner.next_expiry_hint().await
     }
@@ -1213,6 +1260,18 @@ impl QueueEngine for StromaEngine {
         group: Option<&str>,
     ) -> Result<(), StromaError> {
         self.inner.materialize(tp, part, group).await
+    }
+
+    async fn ensure_queue_owner_epoch(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        epoch: Option<u64>,
+    ) -> Result<(), StromaError> {
+        self.inner
+            .ensure_queue_owner_epoch(tp, part, group, epoch)
+            .await
     }
 
     async fn become_queue_owner_with_epoch(

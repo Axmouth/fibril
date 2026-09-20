@@ -384,7 +384,7 @@ impl AdminTestPublisher {
                 Err(_) => return Err("timed out waiting for the durable confirm".to_string()),
             };
             self.broker
-                .await_replication_confirm(
+                .await_stream_replication_confirm(
                     topic,
                     fibril_broker::storage::Partition::new(part),
                     None,

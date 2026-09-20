@@ -46,6 +46,33 @@ pub trait BrokerOwnerReplicationPeer: Send + Sync {
         max_wait_ms: u64,
     ) -> BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>>;
 
+    fn read_owner_replication_records_fenced<'a>(
+        &'a self,
+        topic: &'a str,
+        partition: Partition,
+        group: Option<&'a str>,
+        message_from: Offset,
+        event_from: Offset,
+        max_messages: usize,
+        max_events: usize,
+        max_bytes: usize,
+        max_wait_ms: u64,
+        reporter_epoch: Option<u64>,
+    ) -> BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
+        let _ = reporter_epoch;
+        self.read_owner_replication_records(
+            topic,
+            partition,
+            group,
+            message_from,
+            event_from,
+            max_messages,
+            max_events,
+            max_bytes,
+            max_wait_ms,
+        )
+    }
+
     fn export_owner_state_checkpoint<'a>(
         &'a self,
         topic: &'a str,
@@ -56,6 +83,35 @@ pub trait BrokerOwnerReplicationPeer: Send + Sync {
     /// Run a credit-based replication stream from this owner, applying batches
     /// through `apply` until the stream ends. The default reports it unsupported
     /// so the follower worker falls back to pull. Streaming peers override it.
+    fn stream_replication_fenced<'a>(
+        &'a self,
+        topic: &'a str,
+        partition: Partition,
+        group: Option<&'a str>,
+        message_from: Offset,
+        event_from: Offset,
+        credit_bytes: u64,
+        tunables: StreamApplyTunablesFn,
+        buffer_batches: usize,
+        apply: Arc<dyn BrokerReplicationStreamApply>,
+        shutdown: CancellationToken,
+        reporter_epoch: Option<u64>,
+    ) -> BoxFuture<'a, Result<FollowerStreamExit, BrokerError>> {
+        let _ = reporter_epoch;
+        self.stream_replication(
+            topic,
+            partition,
+            group,
+            message_from,
+            event_from,
+            credit_bytes,
+            tunables,
+            buffer_batches,
+            apply,
+            shutdown,
+        )
+    }
+
     fn stream_replication<'a>(
         &'a self,
         _topic: &'a str,
@@ -74,6 +130,76 @@ pub trait BrokerOwnerReplicationPeer: Send + Sync {
                 "replication streaming not supported by this peer".into(),
             ))
         })
+    }
+}
+
+/// Pins reports to the worker's assignment, even while the shared broker cache
+/// has already observed a successor assignment and is cancelling the old worker.
+struct AssignmentReplicationPeer<'p> {
+    peer: &'p dyn BrokerOwnerReplicationPeer,
+    epoch: u64,
+}
+impl BrokerOwnerReplicationPeer for AssignmentReplicationPeer<'_> {
+    fn read_owner_replication_records<'a>(
+        &'a self,
+        topic: &'a str,
+        partition: Partition,
+        group: Option<&'a str>,
+        message_from: Offset,
+        event_from: Offset,
+        max_messages: usize,
+        max_events: usize,
+        max_bytes: usize,
+        max_wait_ms: u64,
+    ) -> BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
+        self.peer.read_owner_replication_records_fenced(
+            topic,
+            partition,
+            group,
+            message_from,
+            event_from,
+            max_messages,
+            max_events,
+            max_bytes,
+            max_wait_ms,
+            Some(self.epoch),
+        )
+    }
+    fn export_owner_state_checkpoint<'a>(
+        &'a self,
+        topic: &'a str,
+        partition: Partition,
+        group: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
+        self.peer
+            .export_owner_state_checkpoint(topic, partition, group)
+    }
+    fn stream_replication<'a>(
+        &'a self,
+        topic: &'a str,
+        partition: Partition,
+        group: Option<&'a str>,
+        message_from: Offset,
+        event_from: Offset,
+        credit_bytes: u64,
+        tunables: StreamApplyTunablesFn,
+        buffer_batches: usize,
+        apply: Arc<dyn BrokerReplicationStreamApply>,
+        shutdown: CancellationToken,
+    ) -> BoxFuture<'a, Result<FollowerStreamExit, BrokerError>> {
+        self.peer.stream_replication_fenced(
+            topic,
+            partition,
+            group,
+            message_from,
+            event_from,
+            credit_bytes,
+            tunables,
+            buffer_batches,
+            apply,
+            shutdown,
+            Some(self.epoch),
+        )
     }
 }
 
@@ -1106,6 +1232,85 @@ pub(crate) struct FollowerProgress {
     pub(crate) message_next: Offset,
     pub(crate) event_next: Offset,
     pub(crate) last_report: std::time::Instant,
+    session: u64,
+}
+
+/// Pending enqueue boundaries. Once quorum covers a prefix, its proof can be
+/// folded into one frontier; offline followers do not retain per-batch history.
+#[derive(Debug, Default)]
+pub(crate) struct QueueDependencies {
+    pub(crate) initialized: bool,
+    committed: Offset,
+    boundaries: std::collections::VecDeque<(Offset, Offset)>,
+}
+
+impl QueueDependencies {
+    pub(crate) fn record(&mut self, commit: stroma_core::QueuePublishCommit) {
+        if commit.message_next > self.committed {
+            let at = self
+                .boundaries
+                .partition_point(|(message, _)| *message < commit.message_next);
+            if let Some((message, event)) = self
+                .boundaries
+                .get_mut(at)
+                .filter(|(m, _)| *m == commit.message_next)
+            {
+                let _ = message;
+                *event = (*event).max(commit.event_next);
+            } else {
+                self.boundaries
+                    .insert(at, (commit.message_next, commit.event_next));
+            }
+        }
+        // Keep bounded history during an arbitrarily long replica outage.
+        // The retained later boundary conservatively covers the discarded prefix.
+        if self.boundaries.len() > 4096 {
+            self.boundaries.drain(..2048);
+        }
+    }
+
+    fn covered_next(&self, progress: &FollowerProgress) -> Offset {
+        let covered_count = self.boundaries.partition_point(|(message, event)| {
+            *message <= progress.message_next && *event <= progress.event_next
+        });
+        let covered = covered_count
+            .checked_sub(1)
+            .map(|i| self.boundaries[i].0)
+            .unwrap_or(self.committed);
+        covered.min(progress.message_next).max(self.committed)
+    }
+
+    pub(crate) fn visibility(
+        &mut self,
+        assignment: &PartitionAssignment,
+        followers: &std::collections::HashMap<String, FollowerProgress>,
+        required_followers: usize,
+    ) -> Offset {
+        let mut nexts: Vec<_> = assignment
+            .followers
+            .iter()
+            .map(|node| {
+                followers
+                    .get(node)
+                    .map(|p| self.covered_next(p))
+                    .unwrap_or(self.committed)
+            })
+            .collect();
+        nexts.sort_unstable_by(|a, b| b.cmp(a));
+        let next = nexts
+            .get(required_followers - 1)
+            .copied()
+            .unwrap_or(self.committed);
+        self.committed = self.committed.max(next);
+        while self
+            .boundaries
+            .front()
+            .is_some_and(|(message, _)| *message <= self.committed)
+        {
+            self.boundaries.pop_front();
+        }
+        self.committed
+    }
 }
 
 /// Follower durable progress for one queue, plus a waiter wake-up.
@@ -1114,6 +1319,32 @@ pub struct ReplicationProgressCell {
     /// follower node id -> last-reported durable progress
     pub(crate) followers: std::sync::Mutex<std::collections::HashMap<String, FollowerProgress>>,
     pub(crate) changed: Notify,
+    pub(crate) dependencies: std::sync::Mutex<QueueDependencies>,
+    next_session: AtomicU64,
+}
+
+/// A progress report belongs to one assignment and one ordered transport
+/// session. A replacement stream or reconnect invalidates the previous proof.
+#[derive(Debug)]
+pub struct ReplicationProgressSession {
+    key: QueueKey,
+    assignment: PartitionAssignment,
+    follower: String,
+    cell: Arc<ReplicationProgressCell>,
+    id: u64,
+}
+
+impl Drop for ReplicationProgressSession {
+    fn drop(&mut self) {
+        let mut followers = self.cell.lock_followers();
+        if followers
+            .get(&self.follower)
+            .is_some_and(|p| p.session == self.id)
+        {
+            followers.remove(&self.follower);
+            self.cell.changed.notify_waiters();
+        }
+    }
 }
 
 impl ReplicationProgressCell {
@@ -1155,9 +1386,32 @@ impl ReplicationConfirmGate {
         key: &QueueKey,
         offset: Offset,
     ) -> Result<(), BrokerError> {
-        let Some(assignment) = self.assignments.get(key).map(|a| a.clone()) else {
+        let assignment = self.assignments.get(key).map(|a| a.clone());
+        self.await_dependency(key, offset, None, assignment).await
+    }
+
+    pub(crate) async fn await_dependency(
+        &self,
+        key: &QueueKey,
+        offset: Offset,
+        dependency: Option<stroma_core::QueuePublishCommit>,
+        expected_assignment: Option<PartitionAssignment>,
+    ) -> Result<(), BrokerError> {
+        if self.assignments.get(key).as_deref() != expected_assignment.as_ref() {
+            return Err(BrokerError::Unknown(
+                "assignment changed after publication admission".into(),
+            ));
+        }
+        let Some(assignment) = expected_assignment else {
             return Ok(());
         };
+        if dependency.is_some_and(|d| {
+            d.message_epoch != assignment.epoch || d.event_epoch != assignment.epoch
+        }) {
+            return Err(BrokerError::Unknown(
+                "publication belongs to a different replication epoch".into(),
+            ));
+        }
         let requirement = assignment.durability_requirement().map_err(|error| {
             BrokerError::InvalidArgument(format!(
                 "replication durability unsatisfiable for {}/{}: {error:?}",
@@ -1229,7 +1483,8 @@ impl ReplicationConfirmGate {
                 .filter(|follower| {
                     followers
                         .get(*follower)
-                        .is_some_and(|progress| progress.message_next > offset)
+                        .is_some_and(|progress| progress.message_next > offset
+                            && dependency.is_none_or(|d| progress.message_next >= d.message_next && progress.event_next >= d.event_next))
                 })
                 .count()
                 >= required_followers
@@ -1238,7 +1493,17 @@ impl ReplicationConfirmGate {
         .map_err(|_| BrokerError::Unknown(format!(
             "publish confirm timed out after {timeout_ms}ms: {:?} requires {} follower acknowledgement(s) past offset {offset} on {}/{}",
             assignment.durability, required_followers, key.tp, key.part
-        )))
+        )))?;
+        if self
+            .assignments
+            .get(key)
+            .is_none_or(|current| *current != assignment)
+        {
+            return Err(BrokerError::Unknown(
+                "assignment changed while awaiting replication".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -1879,9 +2144,9 @@ impl Broker<StromaEngine> {
     /// Wait until the cached assignment's replication durability policy is
     /// satisfied for `offset` (the owner's local durable write already counts).
     /// Returns immediately when there is no cached assignment (standalone) or the
-    /// policy is local-durable. Used by both the queue and stream publish-confirm
-    /// paths; streams pass group `None`.
-    pub async fn await_replication_confirm(
+    /// policy is local-durable. Streams have no per-record enqueue event;
+    /// queues use `await_queue_replication_confirm` with an exact dependency.
+    pub async fn await_stream_replication_confirm(
         &self,
         topic: &str,
         partition: Partition,
@@ -1895,6 +2160,32 @@ impl Broker<StromaEngine> {
         };
         self.replication_confirm_gate()
             .await_confirm(&key, offset)
+            .await
+    }
+
+    /// Confirm a queue record only when each counted follower covers both its
+    /// payload and the exact enqueue dependency supplied by local completion.
+    pub async fn await_queue_replication_confirm(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        offset: Offset,
+        dependency: stroma_core::QueuePublishCommit,
+    ) -> Result<(), BrokerError> {
+        if offset >= dependency.message_next {
+            return Err(BrokerError::InvalidArgument(
+                "offset outside queue publication dependency".into(),
+            ));
+        }
+        let key = QueueKey {
+            tp: topic.to_string(),
+            part: partition,
+            group: group.map(str::to_string),
+        };
+        let assignment = self.assignment_cache.get(&key).map(|a| a.clone());
+        self.replication_confirm_gate()
+            .await_dependency(&key, offset, Some(dependency), assignment)
             .await
     }
 
@@ -1943,7 +2234,7 @@ impl Broker<StromaEngine> {
                 let _follower_owner_read_timer =
                     self.replication_timing.follower_owner_read.timer();
                 owner
-                    .read_owner_replication_records(
+                    .read_owner_replication_records_fenced(
                         topic,
                         partition,
                         group,
@@ -1953,6 +2244,13 @@ impl Broker<StromaEngine> {
                         options.max_events_per_read,
                         options.max_bytes_per_read,
                         options.max_wait_ms,
+                        self.assignment_cache
+                            .get(&QueueKey {
+                                tp: topic.to_string(),
+                                part: partition,
+                                group: group.map(str::to_string),
+                            })
+                            .map(|a| a.epoch),
                     )
                     .await?
             };
@@ -2249,6 +2547,10 @@ impl Broker<StromaEngine> {
                 return Ok(FollowerReplicationWorkerLoopExit::Cancelled { ticks });
             }
 
+            let scoped_owner = AssignmentReplicationPeer {
+                peer: owner.as_ref(),
+                epoch: assignment.epoch,
+            };
             let tick_result = tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => {
@@ -2263,7 +2565,7 @@ impl Broker<StromaEngine> {
                     // a Plexus stream always catches up via the pull path.
                     if cfg.stream_enabled && kind == ReplicationResourceKind::Queue {
                         self.run_follower_replication_stream_tick(
-                            owner.as_ref(),
+                            &scoped_owner,
                             &assignment.queue,
                             cfg,
                             runtime.shutdown.clone(),
@@ -2271,7 +2573,7 @@ impl Broker<StromaEngine> {
                         .await
                     } else {
                         self.run_follower_replication_worker_once(
-                            owner.as_ref(),
+                            &scoped_owner,
                             &assignment.queue,
                             kind,
                             cfg,
@@ -2370,7 +2672,7 @@ impl Broker<StromaEngine> {
         let tunables = stream_apply_tunables_from(self.cfg.clone());
 
         let exit = owner
-            .stream_replication(
+            .stream_replication_fenced(
                 queue.topic.as_str(),
                 queue.partition,
                 queue.group.as_deref(),
@@ -2381,6 +2683,13 @@ impl Broker<StromaEngine> {
                 cfg.stream_buffer_batches,
                 apply.clone(),
                 shutdown,
+                self.assignment_cache
+                    .get(&QueueKey {
+                        tp: queue.topic.to_string(),
+                        part: queue.partition,
+                        group: queue.group.clone(),
+                    })
+                    .map(|a| a.epoch),
             )
             .await?;
 
@@ -2677,6 +2986,93 @@ impl<
         + 'static,
 > Broker<E>
 {
+    pub fn begin_replication_progress_session(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        follower: &str,
+        epoch: u64,
+    ) -> Option<ReplicationProgressSession> {
+        let key = QueueKey {
+            tp: topic.to_string(),
+            part: partition,
+            group: group.map(str::to_string),
+        };
+        let assignment_guard = self.assignment_cache.get(&key)?;
+        let assignment = assignment_guard.clone();
+        if assignment.epoch != epoch
+            || !assignment.is_followed_by(follower)
+            || !(self.owns_queue_partition(topic, partition, group)
+                || (group.is_none() && self.owns_stream(topic, partition.id())))
+        {
+            return None;
+        }
+        let cell = self
+            .replication_progress
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(ReplicationProgressCell::default()))
+            .clone();
+        let id = cell.next_session.fetch_add(1, Ordering::Relaxed) + 1;
+        cell.lock_followers().insert(
+            follower.to_string(),
+            FollowerProgress {
+                message_next: 0,
+                event_next: 0,
+                last_report: Instant::now(),
+                session: id,
+            },
+        );
+        cell.changed.notify_waiters();
+        Some(ReplicationProgressSession {
+            key,
+            assignment,
+            follower: follower.to_string(),
+            cell,
+            id,
+        })
+    }
+
+    pub fn record_replication_session_progress(
+        &self,
+        session: &ReplicationProgressSession,
+        message_next: Offset,
+        event_next: Offset,
+    ) {
+        let Some(assignment_guard) = self.assignment_cache.get(&session.key) else {
+            return;
+        };
+        if *assignment_guard != session.assignment
+            || self
+                .replication_progress
+                .get(&session.key)
+                .is_none_or(|c| !Arc::ptr_eq(&c, &session.cell))
+        {
+            return;
+        }
+        {
+            let mut followers = session.cell.lock_followers();
+            let Some(p) = followers
+                .get_mut(&session.follower)
+                .filter(|p| p.session == session.id)
+            else {
+                return;
+            };
+            // Reports on a session are ordered. Replace the PAIR; taking each
+            // coordinate's max can combine progress from before and after reset.
+            p.message_next = message_next;
+            p.event_next = event_next;
+            p.last_report = Instant::now();
+        }
+        drop(assignment_guard);
+        self.replication_timing.record_follower_progress_report();
+        session.cell.changed.notify_waiters();
+        self.refresh_visibility_ceiling(&session.key);
+    }
+
+    /// Record trusted in-process progress. Network transports must use an
+    /// epoch-fenced `ReplicationProgressSession` instead.
+    ///
     /// Record a follower's durable replication progress (from a stamped
     /// replication read: followers apply durably, so their pull offsets are
     /// durable watermarks). Wakes any publish confirms waiting on policy.
@@ -2707,10 +3103,10 @@ impl<
                     message_next: 0,
                     event_next: 0,
                     last_report: std::time::Instant::now(),
+                    session: 0,
                 });
-            // Monotonic: late/reordered reports never regress progress.
-            entry.message_next = entry.message_next.max(durable_message_next);
-            entry.event_next = entry.event_next.max(durable_event_next);
+            entry.message_next = durable_message_next;
+            entry.event_next = durable_event_next;
             entry.last_report = std::time::Instant::now();
         }
         self.replication_timing.record_follower_progress_report();
@@ -2891,5 +3287,91 @@ impl<
             checkpoint_required_count,
         };
         (workers, summary)
+    }
+}
+
+#[cfg(test)]
+mod queue_dependency_tests {
+    use super::*;
+    fn progress(message_next: u64, event_next: u64) -> FollowerProgress {
+        FollowerProgress {
+            message_next,
+            event_next,
+            last_report: Instant::now(),
+            session: 0,
+        }
+    }
+    fn commit(message_next: u64, event_next: u64) -> stroma_core::QueuePublishCommit {
+        stroma_core::QueuePublishCommit {
+            message_next,
+            event_next,
+            message_epoch: 1,
+            event_epoch: 1,
+        }
+    }
+    #[test]
+    fn visibility_uses_same_replica_and_reclaims_committed_boundaries() {
+        let a = PartitionAssignment::new(
+            crate::coordination::QueueIdentity::new("t", Partition::new(0), None),
+            "a",
+            vec!["b".into(), "c".into()],
+            1,
+        );
+        let mut deps = QueueDependencies::default();
+        deps.record(commit(2, 1));
+        deps.record(commit(4, 3));
+        let mut followers = std::collections::HashMap::from([
+            ("b".into(), progress(4, 1)),
+            ("c".into(), progress(1, 3)),
+        ]);
+        assert_eq!(deps.visibility(&a, &followers, 1), 2);
+        assert_eq!(deps.boundaries.len(), 1);
+        followers.insert("b".into(), progress(4, 3));
+        assert_eq!(deps.visibility(&a, &followers, 1), 4);
+        assert!(deps.boundaries.is_empty());
+        deps.record(commit(6, 5));
+        followers.insert("b".into(), progress(0, 0));
+        assert_eq!(
+            deps.visibility(&a, &followers, 1),
+            4,
+            "previously proved prefix survives a reconnect"
+        );
+        assert_eq!(deps.covered_next(&progress(6, 4)), 4);
+    }
+    #[test]
+    fn unavailable_replicas_keep_bounded_conservative_history() {
+        let mut deps = QueueDependencies::default();
+        for n in 1..=100_000 {
+            deps.record(commit(n, 2 * n));
+        }
+        assert!(deps.boundaries.len() <= 4096);
+        assert_eq!(deps.covered_next(&progress(100_000, 1)), 0);
+        assert_eq!(deps.covered_next(&progress(100_000, 200_000)), 100_000);
+    }
+    #[tokio::test]
+    async fn removed_assignment_cannot_become_a_local_confirmation() {
+        let assignments = Arc::new(DashMap::new());
+        let key = QueueKey {
+            tp: "t".into(),
+            part: Partition::new(0),
+            group: None,
+        };
+        let a = PartitionAssignment::new(
+            crate::coordination::QueueIdentity::new("t", key.part, None),
+            "a",
+            vec!["b".into()],
+            1,
+        );
+        let gate = ReplicationConfirmGate {
+            assignments,
+            progress: Arc::new(DashMap::new()),
+            cfg: Arc::new(ArcSwap::from_pointee(BrokerConfig::default())),
+            timing: Arc::new(ReplicationTimingMetrics::default()),
+        };
+        assert!(
+            gate.await_dependency(&key, 0, Some(commit(1, 1)), Some(a))
+                .await
+                .is_err()
+        );
     }
 }

@@ -661,9 +661,9 @@ See also: [clustering](/concepts/clustering/) and
 | Epoch fencing | Implemented | Role transitions advance log epochs before serving or applying replicated batches |
 | Follower source refresh | Implemented | An owner or epoch change drains and retargets a remaining follower's worker while retaining its replication cursors |
 | Checkpoint epoch checks | Implemented | Both source epochs are validated before reset and checked again by each storage writer in command order |
-| Checkpoint recovery | Partial | State installation and subsequent message backfill are wired; interrupted installation and promotion before backfill have reproduced storage-level gaps |
+| Checkpoint recovery | Partial | Backfill dependencies gate promotion and owner activation, including after restart; interruption-safe replacement of both logs and snapshot state remains pending |
 | Conflict diagnostics | Implemented | Bounded, payload-free control history, offsets and effective record identities accompany overlap reports; checkpoint logs show source epochs and continuation offsets |
-| Replica-durable confirms | Partial | Owner waits for durable follower progress according to assignment policy, with timeout and ISR floor |
+| Replica-durable confirms | Partial | Queues require the same follower to cover the payload batch and exact enqueue frontier; epoch/session-fenced progress feeds confirmation and delivery visibility, with timeout and ISR floor |
 | Durable stream replication (Plexus) | Partial | Tier-gated: the durable tier replicates record + cursor logs to `stream_replication_factor` followers (express tiers stay owner-only), durable publishes confirm on replica durability, and a caught-up follower is promoted on owner failover. Reuses the queue follower-worker, confirm gate, and failover-candidate selection |
 | `min_in_sync_replicas` | Implemented | Runtime setting, fail-fast publish refusal when healthy ISR is below floor |
 | Live repartitioning | Partial | Grow or shrink a queue's partition count in Ganglion mode (versioned routing, in-flight transition serialization, drain-and-retire on shrink); admin control + API |
@@ -677,13 +677,14 @@ Conditions and limits:
 
 - Cluster operation is experimental. Ganglion provides the embedded
   coordination and assignment state.
-- Replication is follower-pull. Followers apply durably, then report progress
-  through stamped replication reads.
-- Failover checks assignment epochs and local promotion state. Isolated storage
-  tests show that local-tail promotion can accept a checkpoint before required
-  message bodies are backfilled. An interrupted message-log reset can also
-  reopen with snapshot references to missing bodies. Broker-level fault coverage
-  and interruption-safe installation remain pending.
+- Replication uses follower pull or credit-based streaming. Followers overlap
+  message/event persistence and report progress after durable completion and state
+  application. Reports carry the worker’s assignment epoch and belong to one
+  ordered transport session.
+- Failover checks assignment epochs, completed application and payload dependencies
+  in queue state. Checkpoints awaiting payload backfill remain followers after
+  restart, and client admission waits for explicit promotion. Atomic checkpoint
+  replacement and broader broker-level interruption coverage remain pending.
 - Conflict diagnostics do not enable automatic repair of divergent histories.
   Checkpoint epoch checks protect authority but do not make replacement of both
   logs and queue state atomic.

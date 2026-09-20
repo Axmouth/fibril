@@ -18,8 +18,7 @@ use crate::{
     ReplicationStreamEnd, ReplicationStreamProgress, ReplicationStreamReset,
     ReplicationStreamStart, ResumeIdentity, ResumeOutcome, StreamDurability, StreamRetention,
     StreamStart, StreamTopologyEntry, Subscribe, SubscribeOk, SubscribeStream, SubscriptionClosed,
-    TopologyOk,
-    TopologyRequest, TopologyUpdateAck, frame::Frame,
+    TopologyOk, TopologyRequest, TopologyUpdateAck, frame::Frame,
 };
 
 pub type WireResult<T> = Result<T, WireError>;
@@ -872,6 +871,9 @@ fn put_replication_read_body(out: &mut BytesMut, read: &ReplicationRead) -> Wire
     out.put_u64(read.max_bytes);
     out.put_u32(read.max_wait_ms);
     put_optional_str(out, read.reporter_node_id.as_deref())?;
+    if read.reporter_epoch.is_some() {
+        put_optional_u64(out, read.reporter_epoch);
+    }
     Ok(())
 }
 
@@ -888,6 +890,11 @@ fn read_replication_read_body(reader: &mut Reader) -> WireResult<ReplicationRead
         max_bytes: reader.u64()?,
         max_wait_ms: reader.u32()?,
         reporter_node_id: reader.optional_str()?.map(ToOwned::to_owned),
+        reporter_epoch: if reader.remaining() > 0 {
+            reader.optional_u64()?
+        } else {
+            None
+        },
     })
 }
 
@@ -979,6 +986,9 @@ pub fn encode_replication_stream_start(
     out.put_u64(start.event_from);
     out.put_u64(start.credit_bytes);
     put_optional_str(&mut out, start.reporter_node_id.as_deref())?;
+    if start.reporter_epoch.is_some() {
+        put_optional_u64(&mut out, start.reporter_epoch);
+    }
     Ok(frame(Op::ReplicationStreamStart, stream_id, out.freeze()))
 }
 
@@ -995,6 +1005,11 @@ pub fn decode_replication_stream_start(frame: &Frame) -> WireResult<ReplicationS
         event_from: reader.u64()?,
         credit_bytes: reader.u64()?,
         reporter_node_id: reader.optional_str()?.map(ToOwned::to_owned),
+        reporter_epoch: if reader.remaining() > 0 {
+            reader.optional_u64()?
+        } else {
+            None
+        },
     };
     reader.finish()?;
     Ok(start)
@@ -2551,7 +2566,8 @@ mod tests {
 
     #[test]
     fn stream_replication_read_roundtrips() {
-        let msg = ReplicationRead {
+        let mut msg = ReplicationRead {
+            reporter_epoch: None,
             topic: "events".into(),
             group: None,
             partition: Partition::new(2),
@@ -2566,6 +2582,11 @@ mod tests {
         let frame = encode_stream_replication_read(7, &msg).unwrap();
         assert_eq!(frame.opcode, Op::StreamReplicationRead as u16);
         assert_eq!(decode_stream_replication_read(&frame).unwrap(), msg);
+        for epoch in [Some(0), Some(42)] {
+            msg.reporter_epoch = epoch;
+            let frame = encode_stream_replication_read(7, &msg).unwrap();
+            assert_eq!(decode_stream_replication_read(&frame).unwrap(), msg);
+        }
     }
 
     #[test]
@@ -2787,7 +2808,10 @@ mod tests {
             message: "from the future".into(),
         };
         let frame = encode_subscription_closed(1, &closed).unwrap();
-        assert_eq!(decode_subscription_closed(&frame).unwrap().code, ReasonCode::Other(9001));
+        assert_eq!(
+            decode_subscription_closed(&frame).unwrap().code,
+            ReasonCode::Other(9001)
+        );
     }
 
     #[test]
@@ -2820,10 +2844,12 @@ mod tests {
         old.payload = old.payload.slice(..old.payload.len() - 4);
         let decoded = decode_reconcile_result(&old).unwrap();
         assert_eq!(decoded.subscriptions.len(), 2);
-        assert!(decoded
-            .subscriptions
-            .iter()
-            .all(|sub| sub.code == ReasonCode::Unspecified));
+        assert!(
+            decoded
+                .subscriptions
+                .iter()
+                .all(|sub| sub.code == ReasonCode::Unspecified)
+        );
         assert_eq!(decoded.subscriptions[1].reason, "server_missing");
     }
 
@@ -2920,7 +2946,8 @@ mod tests {
 
     #[test]
     fn replication_stream_start_roundtrips() {
-        let start = ReplicationStreamStart {
+        let mut start = ReplicationStreamStart {
+            reporter_epoch: None,
             topic: "orders".into(),
             group: Some("workers".into()),
             partition: Partition::new(7),
@@ -2933,6 +2960,11 @@ mod tests {
         assert_eq!(frame.opcode, Op::ReplicationStreamStart as u16);
         assert_eq!(frame.request_id, 555);
         assert_eq!(decode_replication_stream_start(&frame).unwrap(), start);
+        for epoch in [Some(0), Some(42)] {
+            start.reporter_epoch = epoch;
+            let frame = encode_replication_stream_start(7, &start).unwrap();
+            assert_eq!(decode_replication_stream_start(&frame).unwrap(), start);
+        }
     }
 
     #[test]
@@ -2986,6 +3018,7 @@ mod tests {
         let frame = encode_replication_stream_start(
             1,
             &ReplicationStreamStart {
+                reporter_epoch: None,
                 topic: "t".into(),
                 group: None,
                 partition: Partition::new(0),

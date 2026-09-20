@@ -245,6 +245,28 @@ impl QueueEngine for FailingPublishEngine {
         ))
     }
 
+    async fn publish_batch_observed(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        items: Vec<PublishItem>,
+        _observer: stroma_core::QueuePublishObserver,
+    ) -> Result<(), StromaError> {
+        self.publish_batch(tp, part, group, items).await
+    }
+
+    async fn queue_durable_frontiers(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _group: Option<&str>,
+    ) -> Result<stroma_core::QueuePublishCommit, StromaError> {
+        Err(StromaError::Unsupported(
+            "test engine has no log frontiers".into(),
+        ))
+    }
+
     async fn next_expiry_hint(&self) -> Result<Option<u64>, StromaError> {
         Ok(None)
     }
@@ -343,6 +365,16 @@ impl QueueEngine for FailingPublishEngine {
         _tp: &str,
         _part: u32,
         _group: Option<&str>,
+    ) -> Result<(), StromaError> {
+        Ok(())
+    }
+
+    async fn ensure_queue_owner_epoch(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _group: Option<&str>,
+        _epoch: Option<u64>,
     ) -> Result<(), StromaError> {
         Ok(())
     }
@@ -3901,7 +3933,7 @@ async fn durable_stream_publish_confirm_waits_for_follower_progress() {
 
     // No follower progress yet: the confirm for offset 0 must time out.
     let err = broker
-        .await_replication_confirm("events", Partition::new(0), None, 0)
+        .await_stream_replication_confirm("events", Partition::new(0), None, 0)
         .await
         .expect_err("confirm must wait without follower progress");
     assert!(
@@ -3919,7 +3951,7 @@ async fn durable_stream_publish_confirm_waits_for_follower_progress() {
         0,
     );
     broker
-        .await_replication_confirm("events", Partition::new(0), None, 0)
+        .await_stream_replication_confirm("events", Partition::new(0), None, 0)
         .await
         .expect("confirm resolves once the follower reports durable progress");
 
@@ -8494,20 +8526,43 @@ async fn coordinated_declaration_is_written_only_by_owner_and_reapplied_after_re
 #[tokio::test]
 async fn declaration_reconciliation_cannot_override_a_refused_promotion() {
     let source = Arc::new(DeclaredOwnership {
-        meta: std::sync::Mutex::new(DeclareMeta { default_message_ttl_ms: Some(99), ..Default::default() }),
+        meta: std::sync::Mutex::new(DeclareMeta {
+            default_message_ttl_ms: Some(99),
+            ..Default::default()
+        }),
         owns: std::sync::atomic::AtomicBool::new(true),
     });
     let (broker, _dir) = open_test_broker_with_ownership(source).await;
-    broker.engine().become_queue_follower_with_epoch("jobs", 0, None, 0).await.unwrap();
-    let assignment = PartitionAssignment::new(QueueIdentity::new("jobs", Partition::new(0), None),
-        "owner", Vec::new(), 0);
+    broker
+        .engine()
+        .become_queue_follower_with_epoch("jobs", 0, None, 0)
+        .await
+        .unwrap();
+    let assignment = PartitionAssignment::new(
+        QueueIdentity::new("jobs", Partition::new(0), None),
+        "owner",
+        Vec::new(),
+        0,
+    );
     let mut snapshot = CoordinationSnapshot::default();
-    snapshot.assignments.insert(assignment.queue.clone(), assignment);
+    snapshot
+        .assignments
+        .insert(assignment.queue.clone(), assignment);
     // Coordination says owner, storage still says follower after a refused
     // promotion. Merely reconciling settings must not bypass that role fence.
-    broker.apply_assignment_snapshot_transitions("owner", &snapshot, &snapshot).await;
-    assert!(matches!(broker.engine().read_owner_event_records("jobs", 0, None, 0, 10).await,
-        Err(StromaError::WrongQueueRole { actual: QueueRole::Follower, .. })));
+    broker
+        .apply_assignment_snapshot_transitions("owner", &snapshot, &snapshot)
+        .await;
+    assert!(matches!(
+        broker
+            .engine()
+            .read_owner_event_records("jobs", 0, None, 0, 10)
+            .await,
+        Err(StromaError::WrongQueueRole {
+            actual: QueueRole::Follower,
+            ..
+        })
+    ));
     broker.shutdown().await;
 }
 
@@ -8597,7 +8652,12 @@ async fn ignored_settlements_preserve_owner_tags_and_drain_pending_accounting() 
         broker.wait_for_pending_settles().await;
         // Durable completion enqueues state application; express state reads
         // can overtake it. Wait for the actor to observe all accepted ACKs.
-        while broker.partition_lowest_unsettled_offset("settle-ownership", Partition::ZERO, None).await.unwrap() != 3 {
+        while broker
+            .partition_lowest_unsettled_offset("settle-ownership", Partition::ZERO, None)
+            .await
+            .unwrap()
+            != 3
+        {
             tokio::task::yield_now().await;
         }
         // An ignored-only batch must also finish; no later valid ACK can hide it.
@@ -8613,4 +8673,458 @@ async fn ignored_settlements_preserve_owner_tags_and_drain_pending_accounting() 
     })
     .await
     .expect("settlement ownership or pending accounting failed to drain");
+}
+
+#[tokio::test]
+async fn queue_confirm_requires_enqueue_at_zero() {
+    queue_dependency_boundary(0).await;
+}
+#[tokio::test]
+async fn queue_confirm_requires_enqueue_after_prefix() {
+    queue_dependency_boundary(1).await;
+}
+async fn queue_dependency_boundary(prefix: u64) {
+    let topic = "diagnostic-confirm-enqueue";
+    let (owner, _owner_dir) = open_test_broker().await;
+    let (follower, _follower_dir) = open_test_broker().await;
+    follower
+        .become_replication_follower(topic, Partition::new(0), None)
+        .await
+        .unwrap();
+    let mut event_from = 0;
+    if prefix > 0 {
+        let (completion, rx) = KeratinAppendCompletion::pair();
+        owner
+            .engine()
+            .publish_batch(
+                topic,
+                0,
+                None,
+                vec![PublishItem {
+                    headers: MessageHeaders {
+                        published: unix_millis(),
+                        publish_received: unix_millis(),
+                        content_type: None,
+                        extra: Default::default(),
+                    },
+                    payload: vec![9; 64],
+                    not_before: None,
+                    expire_at: None,
+                    completion,
+                }],
+            )
+            .await
+            .unwrap();
+        rx.await.unwrap().unwrap();
+        let seed = owner
+            .read_owner_replication_records(
+                topic,
+                Partition::new(0),
+                None,
+                0,
+                0,
+                2048,
+                2048,
+                8 * 1024 * 1024,
+                0,
+            )
+            .await
+            .unwrap();
+        if let OwnerReplicationRead::Batch(events) = &seed.events {
+            event_from = events.next_offset;
+        } else {
+            panic!("seed checkpoint");
+        }
+        follower
+            .apply_replicated_stream_batch(topic, Partition::new(0), None, seed)
+            .await
+            .unwrap();
+    }
+    let mut items = Vec::new();
+    let mut completions = Vec::new();
+    for id in 0..2u8 {
+        let (completion, rx) = KeratinAppendCompletion::pair();
+        items.push(PublishItem {
+            headers: MessageHeaders {
+                published: unix_millis(),
+                publish_received: unix_millis(),
+                content_type: None,
+                extra: Default::default(),
+            },
+            payload: vec![id; 64],
+            not_before: None,
+            expire_at: None,
+            completion,
+        });
+        completions.push(rx);
+    }
+    let (dependency_tx, dependency_rx) = tokio::sync::oneshot::channel();
+    owner
+        .engine()
+        .publish_batch_observed(
+            topic,
+            0,
+            None,
+            items,
+            Box::new(move |d| {
+                let _ = dependency_tx.send(d);
+            }),
+        )
+        .await
+        .unwrap();
+    let dependency = dependency_rx.await.unwrap();
+    for rx in completions {
+        rx.await.unwrap().unwrap();
+    }
+    owner.cache_queue_assignment(
+        &PartitionAssignment::new(
+            QueueIdentity::new(topic, Partition::new(0), None),
+            "owner-a",
+            vec!["follower-b".to_string(), "follower-c".to_string()],
+            0,
+        )
+        .with_durability(fibril_broker::coordination::ReplicationDurabilityPolicy::MajorityDurable),
+    );
+    follower
+        .become_replication_follower(topic, Partition::new(0), None)
+        .await
+        .unwrap();
+    // Real owner-read path, including event-frontier capping. Only the first
+    // new payload fits; its EnqueueMany also requires the second payload.
+    let records = owner
+        .read_owner_replication_records(
+            topic,
+            Partition::new(0),
+            None,
+            prefix,
+            event_from,
+            1,
+            2048,
+            8 * 1024 * 1024,
+            0,
+        )
+        .await
+        .unwrap();
+    let (messages, events) = match (&records.messages, &records.events) {
+        (OwnerReplicationRead::Batch(m), OwnerReplicationRead::Batch(e)) => {
+            (m.records.len(), e.records.len())
+        }
+        _ => panic!("fresh logs must not need checkpoints"),
+    };
+    assert_eq!(messages, 1);
+    assert_eq!(
+        events, 0,
+        "EnqueueMany crosses the returned payload frontier"
+    );
+    let outcome = follower
+        .apply_replicated_stream_batch(topic, Partition::new(0), None, records)
+        .await
+        .unwrap();
+    let fibril_broker::replication::ReplicatedStreamApply::Applied {
+        message_next,
+        event_next,
+    } = outcome
+    else {
+        panic!("expected durable apply")
+    };
+    assert_eq!((message_next, event_next), (prefix + 1, event_from));
+    owner.record_follower_replication_progress(
+        topic,
+        Partition::new(0),
+        None,
+        "follower-b",
+        message_next,
+        event_next,
+    );
+    let confirm =
+        owner.await_queue_replication_confirm(topic, Partition::new(0), None, prefix, dependency);
+    tokio::pin!(confirm);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), &mut confirm)
+            .await
+            .is_err(),
+        "payload alone must not confirm"
+    );
+    // An event-only report from a different follower cannot combine with b's payload.
+    owner.record_follower_replication_progress(
+        topic,
+        Partition::new(0),
+        None,
+        "follower-c",
+        prefix,
+        dependency.event_next,
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), &mut confirm)
+            .await
+            .is_err(),
+        "two incomplete replicas must not combine"
+    );
+    // Even when the enqueue record arrives first, its entire payload batch is
+    // required: recovery cannot retain only half of one EnqueueMany record.
+    owner.record_follower_replication_progress(
+        topic,
+        Partition::new(0),
+        None,
+        "follower-b",
+        message_next,
+        dependency.event_next,
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), &mut confirm)
+            .await
+            .is_err(),
+        "an indivisible enqueue cannot confirm a partial payload batch"
+    );
+    let suffix = owner
+        .read_owner_replication_records(
+            topic,
+            Partition::new(0),
+            None,
+            message_next,
+            event_next,
+            2048,
+            2048,
+            8 * 1024 * 1024,
+            0,
+        )
+        .await
+        .unwrap();
+    let outcome = follower
+        .apply_replicated_stream_batch(topic, Partition::new(0), None, suffix)
+        .await
+        .unwrap();
+    let fibril_broker::replication::ReplicatedStreamApply::Applied {
+        message_next,
+        event_next,
+    } = outcome
+    else {
+        panic!("expected durable suffix")
+    };
+    owner.record_follower_replication_progress(
+        topic,
+        Partition::new(0),
+        None,
+        "follower-b",
+        message_next,
+        event_next,
+    );
+    tokio::time::timeout(Duration::from_secs(2), &mut confirm)
+        .await
+        .unwrap()
+        .unwrap();
+    owner.shutdown().await;
+    let outcome = follower
+        .promote_replication_follower_to_local_tail(topic, Partition::new(0), None, 2)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, QueuePromotionOutcome::Promoted { .. }));
+    let delivered = follower
+        .engine()
+        .poll_ready(topic, 0, None, 10, unix_millis() + 1000, u64::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        delivered.iter().map(|m| m.offset).collect::<Vec<_>>(),
+        (0..prefix + 2).collect::<Vec<_>>()
+    );
+    follower.shutdown().await;
+}
+
+#[tokio::test]
+async fn replication_progress_sessions_fence_reset_reconnect_and_assignment() {
+    let (broker, _dir) = open_test_broker().await;
+    let topic = "progress-fencing";
+    let part = Partition::new(0);
+    let assignment = PartitionAssignment::new(
+        QueueIdentity::new(topic, part, None),
+        "owner",
+        vec!["b".into()],
+        1,
+    )
+    .with_durability(fibril_broker::coordination::ReplicationDurabilityPolicy::MajorityDurable);
+    broker.cache_queue_assignment(&assignment);
+    assert!(
+        broker
+            .begin_replication_progress_session(topic, part, None, "stranger", 1)
+            .is_none()
+    );
+    assert!(
+        broker
+            .begin_replication_progress_session(topic, part, None, "b", 0)
+            .is_none()
+    );
+    let first = broker
+        .begin_replication_progress_session(topic, part, None, "b", 1)
+        .unwrap();
+    let dep = stroma_core::QueuePublishCommit {
+        message_next: 4,
+        event_next: 4,
+        message_epoch: 1,
+        event_epoch: 1,
+    };
+    broker.record_replication_session_progress(&first, 8, 2);
+    broker.record_replication_session_progress(&first, 2, 8);
+    let wait = broker.await_queue_replication_confirm(topic, part, None, 3, dep);
+    tokio::pin!(wait);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut wait)
+            .await
+            .is_err(),
+        "reset must replace both coordinates, not combine their maxima"
+    );
+    let second = broker
+        .begin_replication_progress_session(topic, part, None, "b", 1)
+        .unwrap();
+    broker.record_replication_session_progress(&first, 8, 8);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut wait)
+            .await
+            .is_err(),
+        "replaced session cannot restore stale progress"
+    );
+    drop(first);
+    broker.record_replication_session_progress(&second, 4, 4);
+    tokio::time::timeout(Duration::from_secs(1), &mut wait)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut next = assignment.clone();
+    next.epoch = 2;
+    broker.cache_queue_assignment(&next);
+    assert!(
+        broker
+            .begin_replication_progress_session(topic, part, None, "b", 1)
+            .is_none()
+    );
+    broker.record_replication_session_progress(&second, 99, 99);
+    let dep = stroma_core::QueuePublishCommit {
+        message_epoch: 2,
+        event_epoch: 2,
+        ..dep
+    };
+    let wait = broker.await_queue_replication_confirm(topic, part, None, 3, dep);
+    tokio::pin!(wait);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut wait)
+            .await
+            .is_err(),
+        "old assignment proof cannot confirm reused offsets"
+    );
+    let third = broker
+        .begin_replication_progress_session(topic, part, None, "b", 2)
+        .unwrap();
+    broker.record_replication_session_progress(&third, 4, 4);
+    tokio::time::timeout(Duration::from_secs(1), &mut wait)
+        .await
+        .unwrap()
+        .unwrap();
+    broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn queue_visibility_waits_for_enqueue_on_the_payload_replica() {
+    let (broker, _dir) = open_test_broker().await;
+    let topic = "visibility-enqueue";
+    let part = Partition::new(0);
+    broker.cache_queue_assignment(
+        &PartitionAssignment::new(
+            QueueIdentity::new(topic, part, None),
+            "a",
+            vec!["b".into(), "c".into()],
+            1,
+        )
+        .with_durability(fibril_broker::coordination::ReplicationDurabilityPolicy::MajorityDurable),
+    );
+    let publisher = broker.get_publisher(topic, part, &None).await.unwrap();
+    let mut sub = broker
+        .subscribe(topic, part, None, Uuid::now_v7(), ConsumerConfig::default())
+        .await
+        .unwrap();
+    let mut confirmed = publisher
+        .publish(
+            b"held".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    let dep = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let d = broker
+                .engine()
+                .queue_durable_frontiers(topic, 0, None)
+                .await
+                .unwrap();
+            if d.message_next == 1 {
+                break d;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    broker.record_follower_replication_progress(topic, part, None, "b", 1, 0);
+    broker.record_follower_replication_progress(topic, part, None, "c", 0, dep.event_next);
+    assert!(recv_with_timeout(&mut sub, 30).await.is_none());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), &mut confirmed)
+            .await
+            .is_err()
+    );
+    broker.record_follower_replication_progress(topic, part, None, "b", 1, dep.event_next);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), confirmed)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        recv_with_timeout(&mut sub, 1000)
+            .await
+            .unwrap()
+            .message
+            .offset,
+        0
+    );
+    broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn client_admission_cannot_promote_a_follower_before_the_watcher() {
+    let (broker, _dir) = open_test_broker().await;
+    let topic = "admission-follower";
+    let part = Partition::new(0);
+    broker
+        .become_replication_follower_with_epoch(topic, part, None, 1)
+        .await
+        .unwrap();
+    broker.cache_queue_assignment(&PartitionAssignment::new(
+        QueueIdentity::new(topic, part, None),
+        "new-owner",
+        vec![],
+        2,
+    ));
+    assert!(broker.get_publisher(topic, part, &None).await.is_err());
+    assert!(
+        broker
+            .subscribe(topic, part, None, Uuid::now_v7(), ConsumerConfig::default())
+            .await
+            .is_err()
+    );
+    // Explicit promotion owns the role transition and its backfill checks.
+    assert!(matches!(
+        broker
+            .promote_replication_follower_to_local_tail(topic, part, None, 2)
+            .await
+            .unwrap(),
+        QueuePromotionOutcome::Promoted { .. }
+    ));
+    assert!(broker.get_publisher(topic, part, &None).await.is_ok());
+    broker.shutdown().await;
 }

@@ -10,6 +10,18 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Complete durable cache tails
+
+The log reader now accepts a cache hit that contains every record up to the captured durable frontier, even when the requested batch is larger. Incomplete coverage, decode failures and offset discontinuities fall back to the file reader; rollover, eviction and reopen parity are covered by regression tests. The initial three-node SATA/NVMe screen found overlapping throughput and latency ranges, so this change carries no end-to-end speedup claim; see [Keratin dd7943e](https://github.com/Axmouth/keratin/commit/dd7943e).
+
+### Queue replication dependencies and follower persistence
+
+Queue confirmation and delivery visibility require the same counted follower to cover the payload batch and its exact enqueue-event frontier, including the whole payload group referenced by an indivisible enqueue record. Progress is fenced by assignment epoch and transport session, and replacing an assignment clears its previous proof. Follower message and event writes overlap; both completions drain before state application, while an interrupted or failed apply blocks promotion until recovery or checkpoint resync.
+
+### Checkpoint backfill and owner admission
+
+Promotion and direct owner activation check the payload frontier required by ready, delayed, inflight, settled and dead-letter state; recovery keeps a checkpoint with missing payload backfill in the follower role. Client admission cannot perform the watcher’s follower-to-owner transition. Recovery also replays retained event zero when a legacy snapshot’s inclusive zero could denote an empty checkpoint; atomic replacement of both logs and checkpoint state remains pending.
+
 ### Durable publication application order
 
 Consecutive batches could reach queue state in reverse order when the earlier durability continuation was delayed. Keratin now reserves an application turn under the append-order lock, allowing persistence to overlap while preserving state submission order; failed or abandoned turns fail the chain closed until recovery. A deterministic overtaking test and the Stroma regression suite cover [Keratin 0944dd6](https://github.com/Axmouth/keratin/commit/0944dd6).

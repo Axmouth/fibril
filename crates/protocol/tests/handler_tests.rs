@@ -1696,6 +1696,7 @@ async fn replication_read_returns_owner_log_records() {
                 Op::ReplicationRead,
                 3,
                 &ReplicationRead {
+                    reporter_epoch: None,
                     topic: "replication.read.tcp".into(),
                     group: Some("workers".into()),
                     partition: Partition::new(0),
@@ -1759,6 +1760,7 @@ async fn unowned_replication_read_returns_not_owner_error_and_keeps_connection_o
                 Op::ReplicationRead,
                 2,
                 &ReplicationRead {
+                    reporter_epoch: None,
                     topic: "unowned".into(),
                     group: None,
                     partition: Partition::new(0),
@@ -2698,6 +2700,7 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
     // The owner broker has no watcher in this harness; apply what its
     // watcher's BecomeOwner would: fence its logs at the assignment epoch so
     // its replication reads carry the fenced epoch.
+    owner_broker.cache_queue_assignment(&assignment);
     owner_broker
         .advance_replication_epoch(topic, Partition::new(0), None, assignment.epoch)
         .await

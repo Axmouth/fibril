@@ -624,6 +624,7 @@ fn to_replication_read_ok(
 /// follower-progress calls (the same ones the pull `ReplicationRead` path uses).
 struct BrokerOwnerStreamSource {
     broker: Arc<Broker<StromaEngine>>,
+    progress: Option<fibril_broker::replication::ReplicationProgressSession>,
 }
 
 #[async_trait::async_trait]
@@ -667,14 +668,14 @@ impl replication_stream::OwnerStreamSource for BrokerOwnerStreamSource {
         durable_message_next: u64,
         durable_event_next: u64,
     ) {
-        self.broker.record_follower_replication_progress(
-            topic,
-            partition,
-            group,
-            reporter,
-            durable_message_next,
-            durable_event_next,
-        );
+        let _ = (topic, partition, group, reporter);
+        if let Some(session) = &self.progress {
+            self.broker.record_replication_session_progress(
+                session,
+                durable_message_next,
+                durable_event_next,
+            );
+        }
     }
 }
 
@@ -1710,7 +1711,7 @@ async fn handle_stream_publish(
                             // the confirm. A no-op for express tiers / owner-only
                             // streams (the gate short-circuits on local-durable).
                             match broker
-                                .await_replication_confirm(&topic, partition, None, offset)
+                                .await_stream_replication_confirm(&topic, partition, None, offset)
                                 .await
                             {
                                 Ok(()) => {
@@ -2907,6 +2908,10 @@ where
     // Stop or when this map drops at connection end) makes its sender task exit.
     let mut owner_streams: HashMap<u64, mpsc::Sender<replication_stream::OwnerStreamControl>> =
         HashMap::new();
+    let mut pull_progress: HashMap<
+        (String, Partition, Option<String>, String),
+        (u64, fibril_broker::replication::ReplicationProgressSession),
+    > = HashMap::new();
 
     loop {
         let loop_event = tokio::select! {
@@ -3121,15 +3126,38 @@ where
 
                 // A stamped read doubles as the follower's durable-progress
                 // report (followers apply durably; pull offsets = watermarks).
-                if let Some(reporter) = &read.reporter_node_id {
-                    broker.record_follower_replication_progress(
-                        &read.topic,
+                if let (Some(reporter), Some(epoch)) = (&read.reporter_node_id, read.reporter_epoch)
+                {
+                    let key = (
+                        read.topic.clone(),
                         read.partition,
-                        read.group.as_deref(),
-                        reporter,
-                        read.message_from,
-                        read.event_from,
+                        read.group.clone(),
+                        reporter.clone(),
                     );
+                    if pull_progress
+                        .get(&key)
+                        .is_some_and(|(old, _)| *old != epoch)
+                    {
+                        pull_progress.remove(&key);
+                    }
+                    if !pull_progress.contains_key(&key) {
+                        if let Some(session) = broker.begin_replication_progress_session(
+                            &read.topic,
+                            read.partition,
+                            read.group.as_deref(),
+                            reporter,
+                            epoch,
+                        ) {
+                            pull_progress.insert(key.clone(), (epoch, session));
+                        }
+                    }
+                    if let Some((_, session)) = pull_progress.get(&key) {
+                        broker.record_replication_session_progress(
+                            session,
+                            read.message_from,
+                            read.event_from,
+                        );
+                    }
                 }
 
                 match broker
@@ -3198,15 +3226,38 @@ where
                 // A stamped read doubles as the stream follower's durable-progress
                 // report (group None), feeding the owner's replica-durable confirm
                 // gate exactly as the queue ReplicationRead path does.
-                if let Some(reporter) = &read.reporter_node_id {
-                    broker.record_follower_replication_progress(
-                        &read.topic,
+                if let (Some(reporter), Some(epoch)) = (&read.reporter_node_id, read.reporter_epoch)
+                {
+                    let key = (
+                        read.topic.clone(),
                         read.partition,
-                        None,
-                        reporter,
-                        read.message_from,
-                        read.event_from,
+                        read.group.clone(),
+                        reporter.clone(),
                     );
+                    if pull_progress
+                        .get(&key)
+                        .is_some_and(|(old, _)| *old != epoch)
+                    {
+                        pull_progress.remove(&key);
+                    }
+                    if !pull_progress.contains_key(&key) {
+                        if let Some(session) = broker.begin_replication_progress_session(
+                            &read.topic,
+                            read.partition,
+                            read.group.as_deref(),
+                            reporter,
+                            epoch,
+                        ) {
+                            pull_progress.insert(key.clone(), (epoch, session));
+                        }
+                    }
+                    if let Some((_, session)) = pull_progress.get(&key) {
+                        broker.record_replication_session_progress(
+                            session,
+                            read.message_from,
+                            read.event_from,
+                        );
+                    }
                 }
 
                 // The owner serves a stream's record + cursor-commit logs (group
@@ -3278,8 +3329,22 @@ where
                 // Replace any existing stream on this id (drops the old sender,
                 // which makes the old task exit).
                 owner_streams.insert(stream_id, control_tx);
+                let progress = start
+                    .reporter_node_id
+                    .as_ref()
+                    .zip(start.reporter_epoch)
+                    .and_then(|(reporter, epoch)| {
+                        broker.begin_replication_progress_session(
+                            &start.topic,
+                            start.partition,
+                            start.group.as_deref(),
+                            reporter,
+                            epoch,
+                        )
+                    });
                 let source = Arc::new(BrokerOwnerStreamSource {
                     broker: broker.clone(),
+                    progress,
                 });
                 tokio::spawn(replication_stream::run_owner_replication_stream(
                     source,

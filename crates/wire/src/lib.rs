@@ -685,6 +685,10 @@ pub struct ReplicationRead {
     /// don't report.
     #[serde(default)]
     pub reporter_node_id: Option<String>,
+    /// Assignment epoch of the reporting follower. Missing epochs are readable
+    /// for compatibility but cannot supply a replicated confirmation proof.
+    #[serde(default)]
+    pub reporter_epoch: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -781,6 +785,8 @@ pub struct ReplicationStreamStart {
     /// Follower identity for owner-side durable progress tracking. Followers
     /// apply durably, so reported offsets are honest durable progress.
     pub reporter_node_id: Option<String>,
+    #[serde(default)]
+    pub reporter_epoch: Option<u64>,
 }
 
 /// follower->owner: durable apply progress plus a credit refill, in one frame.

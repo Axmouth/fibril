@@ -775,6 +775,7 @@ mod tests {
     #[test]
     fn replication_read_roundtrips() {
         let msg = ReplicationRead {
+        reporter_epoch: None,
             topic: "orders".into(),
             group: Some("workers".into()),
             partition: Partition::new(3),

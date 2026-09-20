@@ -265,6 +265,9 @@ fn apply_control<S: OwnerStreamSource>(
         } => {
             *message_from = m;
             *event_from = e;
+            if let Some(reporter) = reporter {
+                source.record_progress(topic, partition, group, reporter, m, e);
+            }
             true
         }
         OwnerStreamControl::Stop => false,
@@ -574,6 +577,7 @@ mod tests {
 
     fn start(credit_bytes: u64) -> ReplicationStreamStart {
         ReplicationStreamStart {
+            reporter_epoch: None,
             topic: "orders".into(),
             group: None,
             partition: Partition::new(0),

@@ -761,6 +761,33 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
         max_bytes: usize,
         max_wait_ms: u64,
     ) -> futures::future::BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
+        self.read_owner_replication_records_fenced(
+            topic,
+            partition,
+            group,
+            message_from,
+            event_from,
+            max_messages,
+            max_events,
+            max_bytes,
+            max_wait_ms,
+            None,
+        )
+    }
+
+    fn read_owner_replication_records_fenced<'a>(
+        &'a self,
+        topic: &'a str,
+        partition: Partition,
+        group: Option<&'a str>,
+        message_from: Offset,
+        event_from: Offset,
+        max_messages: usize,
+        max_events: usize,
+        max_bytes: usize,
+        max_wait_ms: u64,
+        reporter_epoch: Option<u64>,
+    ) -> futures::future::BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
         Box::pin(async move {
             let max_messages = u32::try_from(max_messages).map_err(|_| {
                 BrokerError::InvalidArgument("max_messages exceeds protocol limit".into())
@@ -794,6 +821,7 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
                         read_op,
                         request_id,
                         &ReplicationRead {
+                            reporter_epoch: reporter_epoch,
                             topic: topic.to_string(),
                             group: group.map(str::to_string),
                             partition,
@@ -939,6 +967,35 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
         apply: Arc<dyn BrokerReplicationStreamApply>,
         shutdown: CancellationToken,
     ) -> futures::future::BoxFuture<'a, Result<FollowerStreamExit, BrokerError>> {
+        self.stream_replication_fenced(
+            topic,
+            partition,
+            group,
+            message_from,
+            event_from,
+            credit_bytes,
+            tunables,
+            buffer_batches,
+            apply,
+            shutdown,
+            None,
+        )
+    }
+
+    fn stream_replication_fenced<'a>(
+        &'a self,
+        topic: &'a str,
+        partition: Partition,
+        group: Option<&'a str>,
+        message_from: Offset,
+        event_from: Offset,
+        credit_bytes: u64,
+        tunables: StreamApplyTunablesFn,
+        buffer_batches: usize,
+        apply: Arc<dyn BrokerReplicationStreamApply>,
+        shutdown: CancellationToken,
+        reporter_epoch: Option<u64>,
+    ) -> futures::future::BoxFuture<'a, Result<FollowerStreamExit, BrokerError>> {
         Box::pin(async move {
             // The stream owns a connection for its lifetime (no concurrent
             // request/response on it). take_conn reconnects if needed.
@@ -956,6 +1013,7 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
                 credit_bytes,
                 tunables,
                 self.reporter_node_id.clone(),
+                reporter_epoch,
                 stream_id,
                 buffer_batches,
                 shutdown,
@@ -1002,6 +1060,7 @@ pub async fn catch_up_replication_over_protocol(
             Op::ReplicationRead,
             read_request_id,
             &ReplicationRead {
+                reporter_epoch: None,
                 topic: topic.to_string(),
                 group: group.map(str::to_string),
                 partition,
@@ -1437,6 +1496,7 @@ pub async fn run_follower_replication_stream<S: FollowerStreamSink>(
     credit_bytes: u64,
     tunables: StreamApplyTunablesFn,
     reporter_node_id: Option<String>,
+    reporter_epoch: Option<u64>,
     stream_id: u64,
     buffer_batches: usize,
     shutdown: CancellationToken,
@@ -1444,6 +1504,7 @@ pub async fn run_follower_replication_stream<S: FollowerStreamSink>(
     let (mut conn_sink, mut conn_stream) = conn.split();
 
     let start = ReplicationStreamStart {
+        reporter_epoch: reporter_epoch,
         topic,
         group,
         partition,
@@ -1740,6 +1801,7 @@ mod stream_transport_tests {
                 max_merge_bytes: 1,
             }),
             Some("broker-2".into()),
+            Some(1),
             42,
             4,
             CancellationToken::new(),

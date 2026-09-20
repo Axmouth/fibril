@@ -1949,45 +1949,39 @@ impl<
     /// Recompute the replica-durable visibility ceiling for a queue from its
     /// cached assignment and follower durable progress, and store it on the
     /// queue loop state for the delivery gate. The committed watermark is the
-    /// (nodes-1)-th largest follower `message_next` (the owner is always durable
-    /// locally), i.e. the highest offset durable on the required number of
-    /// replicas. Local-durable queues (nodes <= 1) are left ungated. No-op when
+    /// (nodes-1)-th largest follower prefix covering both payload and enqueue
+    /// dependencies (the owner is already durable locally). Local-durable queues (nodes <= 1) are left ungated. No-op when
     /// the queue is not yet known locally.
     pub(crate) fn refresh_visibility_ceiling(&self, key: &QueueKey) {
-        let Some(assignment) = self.assignment_cache.get(key).map(|entry| entry.clone()) else {
+        let Some(qs) = self.queues.get(key).map(|entry| entry.value().clone()) else {
+            return;
+        };
+        let Some(assignment) = self.assignment_cache.get(key) else {
             return;
         };
         let Ok(requirement) = assignment.durability_requirement() else {
             return;
         };
         if requirement.nodes <= 1 {
-            // Local-durable: deliver as soon as locally ready (no gate).
+            qs.set_visibility_ceiling(None);
             return;
         }
         let required_followers = requirement.nodes - 1;
-        let Some(qs) = self.queues.get(key).map(|entry| entry.value().clone()) else {
-            return;
-        };
 
-        // A follower that has not reported counts as 0. The committed watermark
-        // is the required-th largest follower message_next.
-        let mut follower_nexts: Vec<Offset> = {
-            match self.replication_progress.get(key) {
-                Some(cell) => {
-                    let followers = cell.lock_followers();
-                    assignment
-                        .followers
-                        .iter()
-                        .map(|node| followers.get(node).map(|p| p.message_next).unwrap_or(0))
-                        .collect()
-                }
-                None => vec![0; assignment.followers.len()],
-            }
-        };
-        follower_nexts.sort_unstable_by(|a, b| b.cmp(a));
-        let watermark = follower_nexts
-            .get(required_followers - 1)
-            .copied()
+        // The same follower must cover payload and enqueue. Exact successful
+        // publication boundaries, plus a conservative recovered-backlog seed,
+        // turn the two independent tails into a queue-recoverable prefix.
+        let watermark = self
+            .replication_progress
+            .get(key)
+            .map(|cell| {
+                let followers = cell.lock_followers();
+                let mut dependencies = cell
+                    .dependencies
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                dependencies.visibility(&assignment, &followers, required_followers)
+            })
             .unwrap_or(0);
         qs.set_visibility_ceiling(Some(watermark));
     }
@@ -1999,8 +1993,34 @@ impl<
             part: assignment.queue.partition,
             group: assignment.queue.group.clone(),
         };
-        self.assignment_cache
-            .insert(key.clone(), assignment.clone());
+        let qs = self.queues.get(&key).map(|q| q.clone());
+        {
+            // Publish assignment changes and proof invalidation under the same
+            // map entry lock. A new-epoch waiter cannot observe old progress.
+            use dashmap::mapref::entry::Entry;
+            let entry = self.assignment_cache.entry(key.clone());
+            let changed = match &entry {
+                Entry::Occupied(e) => e.get() != assignment,
+                Entry::Vacant(_) => true,
+            };
+            if changed {
+                if let Some((_, old)) = self.replication_progress.remove(&key) {
+                    old.changed.notify_waiters();
+                }
+                if let Some(qs) = &qs {
+                    qs.committed_message_offset.store(0, Ordering::Release);
+                    qs.wake();
+                }
+                match entry {
+                    Entry::Occupied(mut e) => {
+                        e.insert(assignment.clone());
+                    }
+                    Entry::Vacant(e) => {
+                        e.insert(assignment.clone());
+                    }
+                }
+            }
+        }
         // A newly cached replica-durable assignment installs the visibility gate
         // (no-op for local-durable or an unmaterialized queue).
         self.refresh_visibility_ceiling(&key);
@@ -2135,19 +2155,60 @@ impl<
             part: partition,
             group: group.map(str::to_string),
         };
-        if let Some(assignment) = self.assignment_cache.get(&key).map(|entry| entry.clone()) {
-            self.engine
-                .become_queue_owner_with_epoch(topic, partition.id(), group, assignment.epoch)
-                .await?;
-        }
+        let epoch = self
+            .assignment_cache
+            .get(&key)
+            .map(|assignment| assignment.epoch);
+        self.engine
+            .ensure_queue_owner_epoch(topic, partition.id(), group, epoch)
+            .await?;
 
         if !was_materialized {
             self.applied_declarations.remove(&key);
         }
         self.apply_owned_queue_declaration(&key).await?;
+        self.initialize_queue_dependencies(&key).await?;
         // Declaration-created owners need demotion even if the assignment
         // watcher coalesces the assignment that originally admitted them.
         self.locally_owned.insert(key, ());
+        Ok(())
+    }
+
+    async fn initialize_queue_dependencies(&self, key: &QueueKey) -> Result<(), BrokerError> {
+        if let Some(assignment) = self.assignment_cache.get(key).map(|a| a.clone()) {
+            if assignment
+                .durability_requirement()
+                .is_ok_and(|r| r.nodes > 1)
+            {
+                let cell = self
+                    .replication_progress
+                    .entry(key.clone())
+                    .or_insert_with(|| Arc::new(ReplicationProgressCell::default()))
+                    .clone();
+                let initialized = cell
+                    .dependencies
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .initialized;
+                if !initialized {
+                    let frontier = self
+                        .engine
+                        .queue_durable_frontiers(&key.tp, key.part.id(), key.group.as_deref())
+                        .await?;
+                    if frontier.message_epoch == assignment.epoch
+                        && frontier.event_epoch == assignment.epoch
+                    {
+                        let mut dependencies = cell
+                            .dependencies
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        dependencies.record(frontier);
+                        dependencies.initialized = true;
+                    }
+                    self.refresh_visibility_ceiling(key);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -2283,23 +2344,11 @@ impl<
             })
             .await;
 
-        // The gate admitted this publisher, so the broker is now serving owner
-        // writes for the queue. Record it so the assignment watcher can demote on
-        // a later loss of ownership even if no BecomeOwner transition was observed
-        // (the gate and the watcher's view can otherwise diverge briefly).
-        self.locally_owned.insert(
-            QueueKey {
-                tp: tp.clone(),
-                part,
-                group: group.clone(),
-            },
-            (),
-        );
-
         // TODO: make async by maybe making two tasks: one to receive publish requests and one to wait for completions and send confirms? Or use a bounded channel and backpressure?
         let (confirm_sink_tx, mut confirm_sink_rx) = mpsc::channel::<(
             oneshot::Receiver<Result<AppendResult, IoError>>,
             oneshot::Sender<Result<u64, BrokerError>>,
+            Arc<OnceLock<(stroma_core::QueuePublishCommit, Option<PartitionAssignment>)>>,
         )>(16384);
         let metrics = self.metrics.clone();
         let activity_lease = {
@@ -2316,6 +2365,9 @@ impl<
             drop(eviction_guard);
             lease
         };
+        let publish_progress = self.replication_progress.clone();
+        let publish_assignments = self.assignment_cache.clone();
+        let publish_key = confirm_key.clone();
         let qs_publish = qs.clone();
         let qs_clone = qs.clone();
         let replication_timing = self.replication_timing.clone();
@@ -2373,6 +2425,7 @@ impl<
                     }
                 }
 
+                let batch_commit = Arc::new(OnceLock::new());
                 let mut items = Vec::with_capacity(batch.len());
                 let mut confirmations = Vec::with_capacity(batch.len());
                 for PublishRequest {
@@ -2395,7 +2448,7 @@ impl<
                     };
                     let (completion, rx_completion) = KeratinAppendCompletion::pair();
 
-                    confirmations.push((rx_completion, reply));
+                    confirmations.push((rx_completion, reply, batch_commit.clone()));
                     items.push(stroma_core::PublishItem {
                         headers,
                         payload,
@@ -2410,13 +2463,51 @@ impl<
                 }
 
                 let batch_size = items.len();
+                let progress = publish_progress.clone();
+                let assignments = publish_assignments.clone();
+                let key = publish_key.clone();
+                let qs_committed = qs_publish.clone();
+                let admitted_assignment = publish_assignments.get(&publish_key).map(|a| a.clone());
+                let observer = Box::new(move |commit: stroma_core::QueuePublishCommit| {
+                    let _ = batch_commit.set((commit, admitted_assignment));
+                    if let Some(assignment) = assignments.get(&key) {
+                        if assignment.epoch == commit.message_epoch
+                            && assignment.epoch == commit.event_epoch
+                            && assignment
+                                .durability_requirement()
+                                .is_ok_and(|r| r.nodes > 1)
+                        {
+                            let cell = progress
+                                .entry(key)
+                                .or_insert_with(|| Arc::new(ReplicationProgressCell::default()))
+                                .clone();
+                            let followers = cell.lock_followers();
+                            let mut dependencies = cell
+                                .dependencies
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            dependencies.record(commit);
+                            if let Ok(requirement) = assignment.durability_requirement() {
+                                if requirement.nodes > 1 {
+                                    qs_committed.set_visibility_ceiling(Some(
+                                        dependencies.visibility(
+                                            &assignment,
+                                            &followers,
+                                            requirement.nodes - 1,
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                });
                 if let Err(err) = engine
-                    .publish_batch(&tp, part.id(), group.as_deref(), items)
+                    .publish_batch_observed(&tp, part.id(), group.as_deref(), items, observer)
                     .await
                 {
                     tracing::error!("publish_batch failed: {err:?}");
                     let err_msg = err.to_string();
-                    for (_, reply) in confirmations {
+                    for (_, reply, _) in confirmations {
                         let res = Err(BrokerError::Engine(StromaError::Io(err_msg.clone())));
                         if let Err(e) = reply.send(res) {
                             tracing::error!("Failed to send publish error response: {e:?}");
@@ -2427,7 +2518,7 @@ impl<
 
                 for confirmation in confirmations {
                     if let Err(e) = confirm_sink_tx.send(confirmation).await {
-                        let (_, reply) = e.0;
+                        let (_, reply, _) = e.0;
                         if let Err(e) = reply.send(Err(BrokerError::ChannelClosed)) {
                             tracing::error!("Failed to send publish error response: {e:?}");
                         }
@@ -2447,7 +2538,7 @@ impl<
         // cancel token (broker shutdown), and TaskTracker reaps finished tasks.
 
         self.task_group.spawn("confirm_sink_loop", async move {
-            while let Some((rx_completion, reply)) = confirm_sink_rx.recv().await {
+            while let Some((rx_completion, reply, commit)) = confirm_sink_rx.recv().await {
                 // Wait for durability
                 match rx_completion.await {
                     Ok(Ok(append)) => {
@@ -2457,10 +2548,20 @@ impl<
                         // Local durability first, then the assignment's
                         // replication policy (replica/majority acks) before
                         // the producer sees the confirm.
-                        let res: Result<u64, BrokerError> = confirm_gate
-                            .await_confirm(&confirm_key, offset)
-                            .await
-                            .map(|()| offset);
+                        let res: Result<u64, BrokerError> = match commit.get().cloned() {
+                            Some((dependency, assignment)) => confirm_gate
+                                .await_dependency(
+                                    &confirm_key,
+                                    offset,
+                                    Some(dependency),
+                                    assignment,
+                                )
+                                .await
+                                .map(|()| offset),
+                            None => Err(BrokerError::Unknown(
+                                "queue completion omitted its enqueue dependency".into(),
+                            )),
+                        };
                         if let Err(e) = reply.send(res) {
                             tracing::error!("Failed to send publish response: {e:?}");
                         }
@@ -3661,7 +3762,10 @@ impl<
                 })
                 .map(|kv| kv.1)
             else {
-                tracing::warn!("Settle for unknown or differently owned tag {:?}", req.delivery_tag);
+                tracing::warn!(
+                    "Settle for unknown or differently owned tag {:?}",
+                    req.delivery_tag
+                );
                 continue;
             };
 
@@ -4535,11 +4639,16 @@ impl Broker<StromaEngine> {
             // Never force an existing follower into the owner role here. A
             // refused promotion must remain refused; declare_queue checks the
             // storage role before appending anything.
-            let result = if self.engine.is_materialized(&key.tp, key.part.id(), key.group.as_deref()) {
-                self.apply_owned_queue_declaration(&key).await
-            } else {
-                self.materialize_owned_queue(&key.tp, key.part, key.group.as_deref()).await
-            };
+            let result =
+                if self
+                    .engine
+                    .is_materialized(&key.tp, key.part.id(), key.group.as_deref())
+                {
+                    self.apply_owned_queue_declaration(&key).await
+                } else {
+                    self.materialize_owned_queue(&key.tp, key.part, key.group.as_deref())
+                        .await
+                };
             match result {
                 Ok(()) => {}
                 Err(BrokerError::NotOwner { .. }) => {
@@ -4847,6 +4956,25 @@ impl Broker<StromaEngine> {
                 LocalAssignmentIntent::Noop,
             )),
             LocalAssignmentIntent::RefreshOwner => {
+                if self
+                    .engine
+                    .is_materialized(&topic, transition.queue.partition.id(), group)
+                {
+                    self.engine
+                        .become_queue_owner_with_epoch(
+                            &topic,
+                            transition.queue.partition.id(),
+                            group,
+                            assignment_epoch,
+                        )
+                        .await?;
+                    let key = QueueKey {
+                        tp: topic.clone(),
+                        part: transition.queue.partition,
+                        group: transition.queue.group.clone(),
+                    };
+                    self.initialize_queue_dependencies(&key).await?;
+                }
                 Ok(BrokerAssignmentTransitionApply::Noop(transition.intent))
             }
             LocalAssignmentIntent::RefreshFollower => {
