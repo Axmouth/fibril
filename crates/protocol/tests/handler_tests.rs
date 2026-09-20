@@ -139,6 +139,66 @@ async fn open_protocol_connection_for_broker(
     TempDir,
     Arc<Broker<StromaEngine>>,
 ) {
+    open_protocol_connection_for_broker_with_auth(settings, broker, dir, None).await
+}
+
+async fn open_node_connection_for_broker(
+    settings: ConnectionSettings,
+    broker: Arc<Broker<StromaEngine>>,
+    dir: TempDir,
+) -> (
+    Conn,
+    tokio::task::JoinHandle<Result<(), ProtocolConnectionError>>,
+    TempDir,
+    Arc<Broker<StromaEngine>>,
+) {
+    open_protocol_connection_for_broker_with_auth(settings, broker, dir, Some(node_auth())).await
+}
+
+async fn open_node_connection() -> (
+    Conn,
+    tokio::task::JoinHandle<Result<(), ProtocolConnectionError>>,
+    TempDir,
+) {
+    let (broker, dir) = open_test_broker().await;
+    let (conn, task, dir, _) =
+        open_node_connection_for_broker(ConnectionSettings::new(Some(60)), broker, dir).await;
+    (conn, task, dir)
+}
+
+fn node_auth() -> StaticAuthHandler {
+    StaticAuthHandler::new("@node".into(), "secret".into())
+}
+
+async fn node_handshake(conn: &mut Conn) {
+    handshake(conn).await;
+    conn.send(
+        try_encode(
+            Op::Auth,
+            900,
+            &fibril_protocol::v1::Auth {
+                username: "@node".into(),
+                password: "secret".into(),
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(recv_frame(conn).await.opcode, Op::AuthOk as u16);
+}
+
+async fn open_protocol_connection_for_broker_with_auth(
+    settings: ConnectionSettings,
+    broker: Arc<Broker<StromaEngine>>,
+    dir: TempDir,
+    auth: Option<StaticAuthHandler>,
+) -> (
+    Conn,
+    tokio::task::JoinHandle<Result<(), ProtocolConnectionError>>,
+    TempDir,
+    Arc<Broker<StromaEngine>>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
@@ -155,7 +215,7 @@ async fn open_protocol_connection_for_broker(
         tcp_stats,
         connection_stats,
         conn_id,
-        None::<StaticAuthHandler>,
+        auth,
         None,
         settings,
         None,
@@ -1679,8 +1739,8 @@ async fn malformed_publish_returns_error_and_keeps_connection_open() {
 
 #[tokio::test]
 async fn replication_read_returns_owner_log_records() {
-    let (mut framed, server_task, _dir) = open_protocol_connection().await;
-    handshake(&mut framed).await;
+    let (mut framed, server_task, _dir) = open_node_connection().await;
+    node_handshake(&mut framed).await;
     framed_publish(
         &mut framed,
         2,
@@ -1751,8 +1811,8 @@ async fn unowned_replication_read_returns_not_owner_error_and_keeps_connection_o
     let (broker, dir) =
         open_test_broker_with_ownership(Arc::new(StaticQueueOwnership::new(HashSet::new()))).await;
     let (mut framed, server_task, _dir, _broker) =
-        open_protocol_connection_for_broker(ConnectionSettings::new(Some(60)), broker, dir).await;
-    handshake(&mut framed).await;
+        open_node_connection_for_broker(ConnectionSettings::new(Some(60)), broker, dir).await;
+    node_handshake(&mut framed).await;
 
     framed
         .send(
@@ -1793,8 +1853,8 @@ async fn replication_apply_writes_follower_log_records() {
         .await
         .unwrap();
     let (mut framed, server_task, _dir, broker) =
-        open_protocol_connection_for_broker(ConnectionSettings::new(Some(60)), broker, dir).await;
-    handshake(&mut framed).await;
+        open_node_connection_for_broker(ConnectionSettings::new(Some(60)), broker, dir).await;
+    node_handshake(&mut framed).await;
 
     let event_payload = StromaEvent::Enqueue {
         off: 0,
@@ -1873,8 +1933,8 @@ async fn replication_apply_rejects_non_contiguous_records_and_keeps_connection_o
         .await
         .unwrap();
     let (mut framed, server_task, _dir, _broker) =
-        open_protocol_connection_for_broker(ConnectionSettings::new(Some(60)), broker, dir).await;
-    handshake(&mut framed).await;
+        open_node_connection_for_broker(ConnectionSettings::new(Some(60)), broker, dir).await;
+    node_handshake(&mut framed).await;
 
     framed
         .send(
@@ -1921,8 +1981,8 @@ async fn replication_apply_rejects_non_contiguous_records_and_keeps_connection_o
 async fn replication_read_and_apply_compose_for_manual_catch_up() {
     let topic = "replication.catchup.tcp";
     let group = Some("workers".to_string());
-    let (mut owner_framed, owner_task, _owner_dir) = open_protocol_connection().await;
-    handshake(&mut owner_framed).await;
+    let (mut owner_framed, owner_task, _owner_dir) = open_node_connection().await;
+    node_handshake(&mut owner_framed).await;
     framed_publish(
         &mut owner_framed,
         2,
@@ -1946,13 +2006,13 @@ async fn replication_read_and_apply_compose_for_manual_catch_up() {
         .await
         .unwrap();
     let (mut follower_framed, follower_task, _follower_dir, follower_broker) =
-        open_protocol_connection_for_broker(
+        open_node_connection_for_broker(
             ConnectionSettings::new(Some(60)),
             follower_broker,
             follower_dir,
         )
         .await;
-    handshake(&mut follower_framed).await;
+    node_handshake(&mut follower_framed).await;
 
     let outcome = catch_up_replication_over_protocol(
         &mut owner_framed,
@@ -2005,8 +2065,8 @@ async fn replication_read_and_apply_compose_for_manual_catch_up() {
 async fn protocol_owner_replication_peer_reads_owner_records() {
     let topic = "replication.peer.read";
     let group = Some("workers".to_string());
-    let (mut owner_framed, owner_task, _owner_dir) = open_protocol_connection().await;
-    handshake(&mut owner_framed).await;
+    let (mut owner_framed, owner_task, _owner_dir) = open_node_connection().await;
+    node_handshake(&mut owner_framed).await;
     framed_publish(
         &mut owner_framed,
         2,
@@ -2056,8 +2116,8 @@ async fn protocol_owner_replication_peer_reads_owner_records() {
 async fn protocol_owner_replication_peer_exports_checkpoint() {
     let topic = "replication.peer.checkpoint";
     let group = Some("workers".to_string());
-    let (mut owner_framed, owner_task, _owner_dir) = open_protocol_connection().await;
-    handshake(&mut owner_framed).await;
+    let (mut owner_framed, owner_task, _owner_dir) = open_node_connection().await;
+    node_handshake(&mut owner_framed).await;
     framed_publish(
         &mut owner_framed,
         2,
@@ -2088,8 +2148,8 @@ async fn protocol_owner_replication_peer_maps_not_owner_error() {
     let (broker, dir) =
         open_test_broker_with_ownership(Arc::new(StaticQueueOwnership::new(HashSet::new()))).await;
     let (mut framed, server_task, _dir, _broker) =
-        open_protocol_connection_for_broker(ConnectionSettings::new(Some(60)), broker, dir).await;
-    handshake(&mut framed).await;
+        open_node_connection_for_broker(ConnectionSettings::new(Some(60)), broker, dir).await;
+    node_handshake(&mut framed).await;
 
     let peer = ProtocolOwnerReplicationPeer::new(framed);
     let err = peer
@@ -2142,13 +2202,16 @@ async fn static_protocol_owner_peer_resolver_reads_from_owner_node() {
         ConnectionSettings::new(Some(60)),
         owner_broker,
         owner_dir,
-        None,
+        Some(node_auth()),
     )
     .await;
-    let resolver = StaticProtocolOwnerPeerResolver::new(HashMap::from([(
-        "owner-a".to_string(),
-        addr.to_string(),
-    )]));
+    let resolver = StaticProtocolOwnerPeerResolver::with_config(
+        ProtocolOwnerPeerResolverConfig::new(HashMap::from([(
+            "owner-a".to_string(),
+            addr.to_string(),
+        )]))
+        .with_auth("@node", "secret"),
+    );
     let assignment = PartitionAssignment::new(
         QueueIdentity::new(topic, Partition::new(0), group.as_deref()),
         "owner-a",
@@ -2442,7 +2505,7 @@ async fn static_protocol_owner_peer_resolver_can_authenticate() {
         ConnectionSettings::new(Some(60)),
         owner_broker,
         owner_dir,
-        Some(StaticAuthHandler::new("fibril".into(), "secret".into())),
+        Some(node_auth()),
     )
     .await;
     let resolver = StaticProtocolOwnerPeerResolver::with_config(
@@ -2450,7 +2513,7 @@ async fn static_protocol_owner_peer_resolver_can_authenticate() {
             "owner-a".to_string(),
             addr.to_string(),
         )]))
-        .with_auth("fibril", "secret"),
+        .with_auth("@node", "secret"),
     );
     let assignment = PartitionAssignment::new(
         QueueIdentity::new(topic, Partition::new(0), None),
@@ -2533,7 +2596,7 @@ async fn owner_peer_replication_works_over_tls() {
             tcp_stats,
             connection_stats,
             conn_id,
-            None::<StaticAuthHandler>,
+            Some(node_auth()),
             None,
             ConnectionSettings::new(Some(60)),
             None,
@@ -2549,6 +2612,7 @@ async fn owner_peer_replication_works_over_tls() {
             "owner-a".to_string(),
             addr.to_string(),
         )]))
+        .with_auth("@node", "secret")
         .with_tls(connector),
     );
     let assignment = PartitionAssignment::new(
@@ -2633,7 +2697,7 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
         ConnectionSettings::new(Some(60)),
         owner_broker,
         owner_dir,
-        None,
+        Some(node_auth()),
     )
     .await;
 
@@ -2660,8 +2724,11 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
     // Follower broker: ONLY the supervised watcher — no manual transitions.
     let (follower_broker, _follower_dir) = open_test_broker().await;
     let resolver = Arc::new(
-        fibril_protocol::v1::replication::CoordinationProtocolOwnerPeerResolver::new(
+        fibril_protocol::v1::replication::CoordinationProtocolOwnerPeerResolver::with_config(
             coordination.clone(),
+            ProtocolOwnerPeerResolverConfig::new(HashMap::new())
+                .with_auth("@node", "secret")
+                .with_reporter("b-follower"),
         ),
     );
     follower_broker.spawn_assignment_watcher_with_follower_replication(
@@ -2817,7 +2884,7 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
         ConnectionSettings::new(Some(60)),
         owner_broker,
         owner_dir,
-        None,
+        Some(node_auth()),
     )
     .await;
 
@@ -2841,8 +2908,11 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
 
     let (follower_broker, _follower_dir) = open_test_broker().await;
     let resolver = Arc::new(
-        fibril_protocol::v1::replication::CoordinationProtocolOwnerPeerResolver::new(
+        fibril_protocol::v1::replication::CoordinationProtocolOwnerPeerResolver::with_config(
             coordination.clone(),
+            ProtocolOwnerPeerResolverConfig::new(HashMap::new())
+                .with_auth("@node", "secret")
+                .with_reporter("b-follower"),
         ),
     );
     follower_broker.spawn_assignment_watcher_with_follower_replication(
@@ -3195,13 +3265,16 @@ async fn follower_worker_loop_catches_up_over_static_protocol_resolver() {
         ConnectionSettings::new(Some(60)),
         owner_broker,
         owner_dir,
-        None,
+        Some(node_auth()),
     )
     .await;
-    let resolver = StaticProtocolOwnerPeerResolver::new(HashMap::from([(
-        "owner-a".to_string(),
-        addr.to_string(),
-    )]));
+    let resolver = StaticProtocolOwnerPeerResolver::with_config(
+        ProtocolOwnerPeerResolverConfig::new(HashMap::from([(
+            "owner-a".to_string(),
+            addr.to_string(),
+        )]))
+        .with_auth("@node", "secret"),
+    );
     let resolver = Arc::new(resolver);
 
     let (follower_broker, _follower_dir) = open_test_broker().await;
@@ -3472,6 +3545,15 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
 /// its durable progress past the offset on the owner's confirm gate.
 #[tokio::test]
 async fn replica_durable_confirm_resolves_over_wire_from_follower_progress() {
+    replica_durable_confirm_over_wire(false).await;
+}
+
+#[tokio::test]
+async fn replica_durable_confirm_resolves_over_authenticated_stream() {
+    replica_durable_confirm_over_wire(true).await;
+}
+
+async fn replica_durable_confirm_over_wire(stream_enabled: bool) {
     let topic = "confirm.over.wire";
     let group: Option<String> = None;
 
@@ -3480,7 +3562,7 @@ async fn replica_durable_confirm_resolves_over_wire_from_follower_progress() {
         ConnectionSettings::new(Some(60)),
         owner_broker,
         owner_dir,
-        None,
+        Some(node_auth()),
     )
     .await;
 
@@ -3508,6 +3590,7 @@ async fn replica_durable_confirm_resolves_over_wire_from_follower_progress() {
             "owner-a".to_string(),
             addr.to_string(),
         )]))
+        .with_auth("@node", "secret")
         .with_reporter("follower-a"),
     ));
     let assignment = PartitionAssignment::new(
@@ -3519,6 +3602,7 @@ async fn replica_durable_confirm_resolves_over_wire_from_follower_progress() {
     let shutdown = CancellationToken::new();
     // Keep polling briskly so the follower picks up the new record promptly.
     let worker_cfg = FollowerReplicationWorkerConfig {
+        stream_enabled,
         caught_up_poll_ms: 50,
         retry_poll_ms: 50,
         ..Default::default()
@@ -3589,7 +3673,7 @@ async fn replica_durable_confirm_stays_pending_until_follower_connects() {
         ConnectionSettings::new(Some(60)),
         owner_broker,
         owner_dir,
-        None,
+        Some(node_auth()),
     )
     .await;
 
@@ -3617,6 +3701,7 @@ async fn replica_durable_confirm_stays_pending_until_follower_connects() {
             "owner-a".to_string(),
             addr.to_string(),
         )]))
+        .with_auth("@node", "secret")
         .with_reporter("follower-a"),
     ));
     let assignment = PartitionAssignment::new(
@@ -5077,8 +5162,8 @@ async fn declare_uses_coordinator_effective_count() {
 async fn replication_checkpoint_export_install_composes_with_catch_up() {
     let topic = "replication.checkpoint.tcp";
     let group = Some("workers".to_string());
-    let (mut owner_framed, owner_task, _owner_dir) = open_protocol_connection().await;
-    handshake(&mut owner_framed).await;
+    let (mut owner_framed, owner_task, _owner_dir) = open_node_connection().await;
+    node_handshake(&mut owner_framed).await;
     framed_publish(
         &mut owner_framed,
         2,
@@ -5121,13 +5206,13 @@ async fn replication_checkpoint_export_install_composes_with_catch_up() {
         .await
         .unwrap();
     let (mut follower_framed, follower_task, _follower_dir, follower_broker) =
-        open_protocol_connection_for_broker(
+        open_node_connection_for_broker(
             ConnectionSettings::new(Some(60)),
             follower_broker,
             follower_dir,
         )
         .await;
-    handshake(&mut follower_framed).await;
+    node_handshake(&mut follower_framed).await;
 
     follower_framed
         .send(
@@ -5206,8 +5291,8 @@ async fn replication_checkpoint_install_rejects_delayed_old_epoch_without_erasin
     let topic = "checkpoint.delayed.epoch";
     let (broker, dir) = open_test_broker().await;
     let (mut framed, task, _dir, broker) =
-        open_protocol_connection_for_broker(ConnectionSettings::new(Some(60)), broker, dir).await;
-    handshake(&mut framed).await;
+        open_node_connection_for_broker(ConnectionSettings::new(Some(60)), broker, dir).await;
+    node_handshake(&mut framed).await;
     framed_publish(&mut framed, 2, topic, None, b"first").await;
     framed
         .send(
@@ -6996,7 +7081,7 @@ async fn recovery_seal_requires_node_auth_and_exact_committed_authority_over_tcp
 }
 
 #[tokio::test]
-async fn recovery_seal_does_not_inherit_node_privileges_from_a_resumed_session() {
+async fn replication_controls_do_not_inherit_node_privileges_from_a_resumed_session() {
     use fibril_protocol::v1::{Auth, RecoverySeal};
     let settings = ConnectionSettings::new(Some(60)).with_reconnect_grace_ms(Some(5_000));
     let (broker, dir) = open_test_broker().await;
@@ -7059,7 +7144,276 @@ async fn recovery_seal_does_not_inherit_node_privileges_from_a_resumed_session()
         .await
         .unwrap();
     assert_error_frame(&mut second, 3, 403).await;
+    assert_replication_controls_forbidden(&mut second).await;
     drop(second);
     task.await.unwrap().unwrap();
+    broker.shutdown().await;
+}
+
+
+// Exercise every internal request before payload decoding, including stream
+// controls that otherwise return no response when no stream has been opened.
+async fn assert_replication_controls_forbidden(conn: &mut Conn) {
+    for opcode in [
+        Op::ReplicationRead,
+        Op::StreamReplicationRead,
+        Op::ReplicationApply,
+        Op::ReplicationCheckpointExport,
+        Op::ReplicationCheckpointInstall,
+        Op::ReplicationStreamStart,
+        Op::ReplicationStreamProgress,
+        Op::ReplicationStreamReset,
+        Op::ReplicationStreamStop,
+        Op::RecoverySeal,
+    ] {
+        conn.send(Frame {
+            version: PROTOCOL_V1,
+            flags: 0,
+            opcode: opcode as u16,
+            request_id: 910,
+            payload: Bytes::new(),
+        })
+        .await
+        .unwrap();
+        let frame = recv_frame(conn).await;
+        assert_eq!(frame.opcode, Op::Error as u16, "opcode {opcode:?}");
+        let error: ErrorMsg = try_decode(&frame).unwrap();
+        assert_eq!(error.code, 403, "opcode {opcode:?}: {error:?}");
+    }
+    assert_connection_still_responds(conn).await;
+}
+
+#[tokio::test]
+async fn replication_controls_reject_anonymous_and_ordinary_users() {
+    use fibril_protocol::v1::Auth;
+    for identity in [None, Some("ordinary-user")] {
+        let (broker, dir) = open_test_broker().await;
+        let (addr, task, _dir, _) = start_protocol_listener_for_broker(
+            ConnectionSettings::new(Some(60)),
+            broker.clone(),
+            dir,
+            identity.map(|name| StaticAuthHandler::new(name.into(), "secret".into())),
+        )
+        .await;
+        let mut conn = plain_conn(TcpStream::connect(addr).await.unwrap());
+        handshake(&mut conn).await;
+        if let Some(identity) = identity {
+            conn.send(
+                try_encode(
+                    Op::Auth,
+                    2,
+                    &Auth {
+                        username: identity.into(),
+                        password: "secret".into(),
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(recv_frame(&mut conn).await.opcode, Op::AuthOk as u16);
+        }
+        // A valid read must not leak retained records to an ordinary client.
+        framed_publish(&mut conn, 3, "private-replica", None, b"private-body").await;
+        conn.send(
+            try_encode(
+                Op::ReplicationRead,
+                4,
+                &ReplicationRead {
+                    topic: "private-replica".into(),
+                    group: None,
+                    partition: Partition::new(0),
+                    message_from: 0,
+                    event_from: 0,
+                    max_messages: 10,
+                    max_events: 10,
+                    max_bytes: 1024 * 1024,
+                    max_wait_ms: 0,
+                    reporter_node_id: None,
+                    reporter_epoch: None,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_error_frame(&mut conn, 4, 403).await;
+        assert_replication_controls_forbidden(&mut conn).await;
+        broker
+            .become_replication_follower("private-follower", Partition::new(0), None)
+            .await
+            .unwrap();
+        conn.send(
+            try_encode(
+                Op::ReplicationApply,
+                5,
+                &ReplicationApply {
+                    topic: "private-follower".into(),
+                    group: None,
+                    partition: Partition::new(0),
+                    messages: Some(ReplicationMessageApplyBatch {
+                        epoch: 0,
+                        records: vec![ReplicationMessageRecord {
+                            offset: 0,
+                            flags: 0,
+                            headers: vec![],
+                            payload: b"forged".to_vec(),
+                        }],
+                    }),
+                    events: None,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_error_frame(&mut conn, 5, 403).await;
+        assert_eq!(
+            broker
+                .promote_replication_follower_if_caught_up(
+                    "private-follower",
+                    Partition::new(0),
+                    None,
+                    0,
+                    0,
+                )
+                .await
+                .unwrap(),
+            QueuePromotionOutcome::Promoted {
+                message_next_offset: 0,
+                event_next_offset: 0,
+                applied_event_offset: None,
+            }
+        );
+        drop(conn);
+        task.await.unwrap().unwrap();
+        broker.shutdown().await;
+    }
+}
+
+
+#[tokio::test]
+async fn owner_peer_reauthenticates_after_transport_loss() {
+    use fibril_protocol::v1::{Auth, replication::ProtocolOwnerPeerAuth};
+    let (broker, _dir) = open_test_broker().await;
+    let publisher = broker
+        .get_publisher("reconnect-auth", Partition::new(0), &None)
+        .await
+        .unwrap();
+    publisher
+        .publish(
+            b"after-reconnect".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+            None,
+        )
+        .await
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let serving_broker = broker.clone();
+    let server = tokio::spawn(async move {
+        // Lose the first transport after successful authentication. The next
+        // attempt reaches the real handler and must authenticate again.
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut first = plain_conn(socket);
+        let hello = recv_frame(&mut first).await;
+        assert_eq!(hello.opcode, Op::Hello as u16);
+        first
+            .send(
+                try_encode(
+                    Op::HelloOk,
+                    hello.request_id,
+                    &HelloOk {
+                        protocol_version: PROTOCOL_V1,
+                        owner_id: Uuid::now_v7(),
+                        client_id: Uuid::now_v7(),
+                        resume_token: Uuid::now_v7(),
+                        resume_outcome: ResumeOutcome::New,
+                        server_name: "dropped-owner".into(),
+                        compliance: "test".into(),
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let frame = recv_frame(&mut first).await;
+        let auth: Auth = try_decode(&frame).unwrap();
+        assert_eq!(auth.username, "@node");
+        assert_eq!(auth.password, "secret");
+        first
+            .send(try_encode(Op::AuthOk, frame.request_id, &()).unwrap())
+            .await
+            .unwrap();
+        drop(first);
+        let (socket, peer) = listener.accept().await.unwrap();
+        let stats = ConnectionStats::new();
+        let id = stats.add_connection(peer, Instant::now(), false);
+        handle_connection(
+            socket,
+            Some(peer),
+            serving_broker,
+            TcpStats::new(10),
+            stats,
+            id,
+            Some(node_auth()),
+            None,
+            ConnectionSettings::new(Some(60)),
+            None,
+            None,
+            None,
+        )
+        .await
+    });
+    let peer = ProtocolOwnerReplicationPeer::new_reconnecting(
+        addr.to_string(),
+        Some(ProtocolOwnerPeerAuth {
+            username: "@node".into(),
+            password: "secret".into(),
+        }),
+        "reconnect-test".into(),
+        "test".into(),
+    );
+    assert!(
+        peer.read_owner_replication_records(
+            "reconnect-auth",
+            Partition::new(0),
+            None,
+            0,
+            0,
+            8,
+            8,
+            1024 * 1024,
+            0
+        )
+        .await
+        .is_err()
+    );
+    let records = peer
+        .read_owner_replication_records(
+            "reconnect-auth",
+            Partition::new(0),
+            None,
+            0,
+            0,
+            8,
+            8,
+            1024 * 1024,
+            0,
+        )
+        .await
+        .unwrap();
+    let OwnerReplicationRead::Batch(messages) = records.messages else {
+        panic!("expected records")
+    };
+    assert_eq!(messages.records[0].1.payload, b"after-reconnect");
+    peer.close().await;
+    server.await.unwrap().unwrap();
     broker.shutdown().await;
 }

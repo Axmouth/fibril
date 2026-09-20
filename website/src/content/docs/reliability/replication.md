@@ -70,6 +70,11 @@ latency. See the [configuration](/configuration/) replication settings.
 
 ## Activation and conditions
 
+- Internal reads, writes, checkpoint operations and streaming controls require
+  the `@node` principal authenticated on the current connection. Ordinary users
+  cannot access them, including when a logical session resumes. Production peers
+  use the configured cluster secret and authenticate again when reconnecting.
+
 - Replication requires Ganglion coordination mode and a follower target
   (`coordination.ganglion.target_followers` greater than zero). It is a
   cluster-level placement decision, not a per-queue client option.

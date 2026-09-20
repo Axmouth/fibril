@@ -10,6 +10,10 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Replication authorization boundary
+
+Internal replication handlers accepted ordinary authenticated clients, and unauthenticated clients when authentication was disabled; a real TCP regression reproduced a read of retained payloads. All replication and recovery controls now require the node principal on the physical connection before decoding or changing state. Tests cover refused reads/writes, every control opcode, resumed sessions, authenticated catch-up/checkpoints, TLS, streaming confirms and reauthentication after transport loss.
+
 ### Authenticated recovery requests and retained history
 
 Explicit seal requests now require node authentication on the current transport and consensus authorization of the exact pending transition, with concurrent identical requests sharing one operation. Storage persists a fingerprint of the frozen records and snapshot, independent of fencing epochs and replica-local append times; retry reads bypass the cache so disk changes cannot hide behind cached contents. Authentication, cancellation, stale-transition and changed-record regressions cover this increment; automatic dispatch and compatible-history selection remain pending ([recovery sealing](/reliability/recovery-sealing/)).

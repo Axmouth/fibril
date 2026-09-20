@@ -68,6 +68,6 @@ support. Process tests do not establish hardware power-loss behavior.
 
 The cluster currently uses a shared node credential and trusts its peers. The
 returned replica ID is coordinator-derived, rather than a cryptographic identity
-proof against a malicious peer. Older replication handlers still need the same
-node-only authorization rule before automatic recovery is enabled. Remaining
-work is tracked in the [failover plan](/development/failover-plan/).
+proof against a malicious peer. Replication read, apply, checkpoint and streaming controls require the same
+node authentication on the current transport. Remaining work is tracked in the
+[failover plan](/development/failover-plan/).

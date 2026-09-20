@@ -2736,7 +2736,7 @@ where
         }
     }
     let logical = resume.logical.clone();
-    // Recovery control requires authentication on this transport. A resumed
+    // Replication control requires authentication on this transport. A resumed
     // ordinary-client session must not inherit cluster control privileges.
     let mut authenticated_principal: Option<String> = None;
     let transport_generation = logical.attach_transport(frame_tx_high_prio.clone());
@@ -3032,6 +3032,36 @@ where
             metrics.error();
 
             break; // close connection
+        }
+
+        // Internal replication may read or replace storage and report progress
+        // that releases confirms. Require node credentials on this transport,
+        // independently of ordinary-client auth and logical session resumption.
+        let node_control = matches!(frame.opcode, x if
+            x == Op::ReplicationRead as u16
+            || x == Op::StreamReplicationRead as u16
+            || x == Op::ReplicationApply as u16
+            || x == Op::ReplicationCheckpointExport as u16
+            || x == Op::ReplicationCheckpointInstall as u16
+            || x == Op::ReplicationStreamStart as u16
+            || x == Op::ReplicationStreamProgress as u16
+            || x == Op::ReplicationStreamReset as u16
+            || x == Op::ReplicationStreamStop as u16
+            || x == Op::RecoverySeal as u16
+        );
+        if node_control
+            && authenticated_principal.as_deref()
+                != Some(fibril_broker::auth_store::NODE_PRINCIPAL)
+        {
+            send_error_response_and_count(
+                &frame_tx_high_prio,
+                &metrics,
+                frame.request_id,
+                403,
+                "replication control requires an authenticated cluster peer",
+            )
+            .await;
+            continue;
         }
 
         match frame.opcode {
@@ -3407,19 +3437,6 @@ where
             // Recovery always requires an authenticated cluster principal,
             // including when ordinary client authentication is disabled.
             x if x == Op::RecoverySeal as u16 => {
-                let is_node = authenticated_principal.as_deref()
-                    == Some(fibril_broker::auth_store::NODE_PRINCIPAL);
-                if !is_node {
-                    send_error_response_and_count(
-                        &frame_tx_high_prio,
-                        &metrics,
-                        frame.request_id,
-                        403,
-                        "recovery sealing requires an authenticated cluster peer",
-                    )
-                    .await;
-                    continue;
-                }
                 let request: RecoverySeal =
                     decode_or_400!(frame, frame_tx_high_prio, metrics, RecoverySeal);
                 let command = fibril_broker::recovery::RecoverySealCommand {

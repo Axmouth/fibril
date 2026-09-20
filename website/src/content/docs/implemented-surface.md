@@ -655,7 +655,7 @@ See also: [clustering](/concepts/clustering/) and
 | Broker advertise address | Partial | `broker.listener.advertise` / `FIBRIL_BROKER_ADVERTISE` (priority-ordered list, peer-derived default), carried to clients as `owner_endpoints`; clients dial the first entry (Rust high-level client connects to socket-address entries only) |
 | Queue catalogue and placement controller | Partial | Declared queues register partitions, controller assigns owners and followers, placement is stable and anti-churn |
 | Partition ownership gate | Partial | Broker serves only assigned owners in Ganglion mode. Standalone mode owns all queues |
-| Follower pull replication | Partial | Follower workers pull owner records over protocol, apply durably, install checkpoints when needed |
+| Follower pull replication | Partial | Node-authenticated follower workers pull owner records, apply durably and install checkpoints when needed. Internal read/apply/checkpoint/streaming controls require node credentials on each physical connection |
 | Automatic failover | Partial | Changes involving replicated confirmation persist a pending recovery request and retain the previous assignment/source; automatic recovery and activation await the confirmed-history protocol. Owner-only policy retains its existing failover behavior |
 | Cold-restart orphan reconciliation | Partial | A partition reassigned away while a node was down is retained as inert on-disk cold storage after restart (ownership-gated serving means it is never served or materialized) and surfaced at startup. Reclaim of that disk is still manual |
 | Epoch fencing | Implemented | Role transitions advance log epochs before serving or applying replicated batches |

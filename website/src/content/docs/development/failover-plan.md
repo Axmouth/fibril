@@ -48,9 +48,6 @@ recovery requires the following pieces:
 3. Transfer the selected history and durably install it on the new write quorum,
    including the candidate, before committing activation. Resume interrupted
    phases and isolate the old owner through repeated failovers.
-4. Require node authentication on the older replication read, apply, checkpoint
-   and stream handlers. These currently check general authentication; the new
-   recovery-seal handler checks the node principal on each physical connection.
 
 Automatic dispatch remains disabled until installation and activation can finish
 safely. Linux tests cover local seals and interrupted checkpoint replacement;
