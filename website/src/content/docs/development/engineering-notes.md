@@ -8,6 +8,24 @@ for further detail. Measurements describe the stated workload and hardware.
 Current capabilities are in [implemented surface](/implemented-surface/);
 remaining work is in the [roadmap](/roadmap/).
 
+## Adoption — September 2026
+
+### Durable publication application order
+
+Consecutive batches could reach queue state in reverse order when the earlier durability continuation was delayed. Keratin now reserves an application turn under the append-order lock, allowing persistence to overlap while preserving state submission order; failed or abandoned turns fail the chain closed until recovery. A deterministic overtaking test and the Stroma regression suite cover [Keratin 0944dd6](https://github.com/Axmouth/keratin/commit/0944dd6).
+
+### Settlement ownership and ignored requests
+
+An ACK from a different consumer could remove the rightful consumer's delivery tag, and ignored or duplicate requests could leave settlement-drain accounting nonzero. Ownership validation and removal now share the same map lock, while ignored requests release their accounting without changing consumer credit. The ordinary-broker regression covers wrong-consumer ACK/NACK/reject requests, duplicate ACKs and graceful drain in [Fibril d64577d](https://github.com/Axmouth/fibril/commit/d64577d).
+
+### Ordered benchmark confirmations
+
+The Rust confirmation handle implements `Future`, permitting direct polling without a per-confirmation wrapper. The steady workload offers `--ordered-confirmations` for FIFO polling on an ordered single-partition workload; the default and cross-broker harness retain concurrent completion collection. This reduces benchmark bookkeeping and does not change broker confirmation guarantees or optimize the other SDKs' transports.
+
+### Reproducible comparison tooling
+
+The [shared Rust harness](https://github.com/Axmouth/fibril/tree/main/benchmarks/comparison) records message identity, offered load, completion latency and resource samples, with isolated single-node Docker provisioning. Existing-server modes also cover pipelined request/reply and multiple connections; portable cluster/fault orchestration remains pending. Raw competitor measurements remain separate from public capacity claims.
+
 ## Optimizations — September 2026
 
 ### Transparent huge pages — deployment option

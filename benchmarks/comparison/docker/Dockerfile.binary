@@ -1,0 +1,5 @@
+# Local Linux benchmark only: exact executable and matching host runtime libs.
+# run.py records every input hash. Published images remain the portable default.
+FROM scratch
+COPY rootfs /
+ENV PATH=/usr/local/bin:/usr/bin:/bin

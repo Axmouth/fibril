@@ -296,6 +296,8 @@ This represents the current working baseline. Some areas (DLQ, retries, protocol
 
 ## Performance (early observations)
 
+The [repeatable broker comparison](benchmarks/comparison/README.md) runs a shared Rust queue workload against Fibril, NATS JetStream and RabbitMQ. It records throughput, admission and completion latency, resource use, settings and validation evidence, with Docker setups for repeating the measurements.
+
 Informal internal benchmarks using the current TCP transport and durable path on a single Ubuntu 26.04 node have observed throughput in the range of:
 
 * ~250k+ messages/sec ingress

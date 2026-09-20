@@ -1,0 +1,22 @@
+[package]
+name = "broker-compare"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Independent lockfile: benchmark clients must not change the broker dependency graph.
+[workspace]
+
+[dependencies]
+anyhow = "1"
+async-nats = "0.49"
+async-rs = { version = "0.8", default-features = false, features = ["tokio"] }
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+fibril-client = { path = "../../crates/client", default-features = false }
+futures = "0.3"
+hdrhistogram = "7"
+lapin = { version = "4", default-features = false, features = ["default-runtime", "rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }

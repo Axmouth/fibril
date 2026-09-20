@@ -77,7 +77,9 @@ The compatibility work follows this order:
   storage devices, partition counts and replication policies.
 - Improve memory use under large backlogs, high inflight load and many idle queues.
 - Improve bulk DLQ replay, message inspection and sparse-queue diagnostics.
-- Add reproducible benchmark reporting and OpenTelemetry export.
+- Extend the shared benchmark harness with stream workloads, portable cluster/fault
+  provisioning and repeated workload matrices.
+- Add OpenTelemetry export.
 
 ## Longer-term options
 
