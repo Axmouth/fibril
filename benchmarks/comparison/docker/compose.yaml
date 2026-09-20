@@ -1,0 +1,45 @@
+# Exactly one service is started for each run. The runner creates an isolated
+# project and a fresh bind directory, and records the resolved configuration.
+services:
+  fibril:
+    image: ${FIBRIL_IMAGE}
+    user: "${BENCH_UID}:${BENCH_GID}"
+    command: ["fibril-server", "--data-dir", "/data", "--broker-bind", "0.0.0.0:9876", "--admin-bind", "0.0.0.0:8081"]
+    environment:
+      RUST_LOG: warn
+      FIBRIL_AUTH_USERNAME: bench
+      FIBRIL_AUTH_PASSWORD: bench
+      FIBRIL_COORDINATION_ASSIGNMENT_DURABILITY: local_durable
+    ports:
+      - "127.0.0.1::9876"
+      - "127.0.0.1::8081"
+    volumes:
+      - "${BENCH_DATA}:/data"
+    healthcheck:
+      disable: true
+  nats:
+    image: ${NATS_IMAGE}
+    user: "${BENCH_UID}:${BENCH_GID}"
+    command: ["-c", "/etc/nats/bench.conf"]
+    ports:
+      - "127.0.0.1::4222"
+      - "127.0.0.1::8222"
+    volumes:
+      - "${BENCH_DATA}:/data"
+      - "${NATS_CONFIG}:/etc/nats/bench.conf:ro"
+  rabbitmq:
+    image: ${RABBITMQ_IMAGE}
+    user: "${BENCH_UID}:${BENCH_GID}"
+    environment:
+      HOME: /data
+      RABBITMQ_MNESIA_BASE: /data/mnesia
+      RABBITMQ_DEFAULT_USER: bench
+      RABBITMQ_DEFAULT_PASS: bench
+      RABBITMQ_ERLANG_COOKIE: isolated-benchmark-only
+      # Keep management sampling consistent and get timely settlement evidence.
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-rabbit collect_statistics_interval 1000"
+    ports:
+      - "127.0.0.1::5672"
+      - "127.0.0.1::15672"
+    volumes:
+      - "${BENCH_DATA}:/data"

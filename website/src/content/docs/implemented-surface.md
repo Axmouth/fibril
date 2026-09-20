@@ -103,7 +103,7 @@ See also: [client usage](/clients/) and
 | --- | --- | --- |
 | Unconfirmed publish | Implemented | TCP protocol, Rust client, TypeScript client, Python client, Go client, C# client |
 | Confirmed publish | Implemented | TCP protocol, Rust client, TypeScript client, Python client, Go client, C# client |
-| Pipelined confirmation handles | Implemented | Rust, TypeScript, Python, Go and C# clients; each publish retains an individual confirmation |
+| Pipelined confirmation handles | Implemented | Rust, TypeScript, Python, Go and C# clients; each publish retains an individual confirmation. Rust handles implement `Future` and retain `.confirmed()` |
 | Delayed publish | Implemented | TCP protocol, broker, Rust client, TypeScript client, Python client, Go client, C# client |
 | Content type metadata | Implemented | Protocol metadata, Rust client, TypeScript client, Python client, Go client, C# client, delivery path |
 | Reserved metadata headers | Implemented | Broker protocol handler rejects `fibril.*` and `stroma.*` user headers |
@@ -707,3 +707,9 @@ Conditions and limits:
 | Go client | Planned | Next client priority |
 | C# client | Planned | Future client priority |
 | Java client | Planned | Future client priority |
+
+## Benchmark tooling
+
+The repository includes a [shared Rust queue workload](https://github.com/Axmouth/fibril/tree/main/benchmarks/comparison) with fixed offered rates, saturation, payload identity checks and completion histograms. A Python/Docker runner provisions fresh single-node Fibril, JetStream and RabbitMQ instances, verifies final settlement and records CPU/memory samples. Existing-server modes support RPC reply pipelining, multiple connections and declarations requesting three copies; cluster placement and durability must be verified separately.
+
+Stream adapters, portable cluster/fault provisioning and a repeated workload matrix remain planned. These tools provide reproducible measurements and do not establish power-loss safety or production capacity.
