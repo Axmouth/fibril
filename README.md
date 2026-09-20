@@ -1,5 +1,7 @@
 <div align="center">
 
+This experimental branch preserves [speculative queue delivery](experiments/SPECULATIVE_DELIVERY.md); it remains disabled by default and has open adoption gates.
+
 # Fibril
 **The connective tissue of distributed systems.**
 

@@ -48,7 +48,7 @@ fibril-tls = { path = "../tls" }
 ganglion = { git = "https://github.com/Axmouth/ganglion.git", branch = "main" }
 ganglion-openraft = { git = "https://github.com/Axmouth/ganglion.git", branch = "main", features = ["openraft"] }
 criterion = "0.8"
-stroma-core = { git = "https://github.com/Axmouth/keratin.git", branch = "main" }
+stroma-core = { git = "https://github.com/Axmouth/keratin.git", rev = "48af39327795726b661ab5aef5f4053954a13e90" }
 turmoil = "0.7"
 
 [package.metadata.ai]

@@ -1328,6 +1328,7 @@ dependencies = [
  "fibril-util",
  "futures",
  "hashbrown 0.17.1",
+ "hdrhistogram",
  "rmp-serde",
  "serde",
  "serde_json",
@@ -1919,6 +1920,7 @@ checksum = "765c9198f173dd59ce26ff9f95ef0aafd0a0fe01fb9d72841bc5066a4c06511d"
 dependencies = [
  "base64 0.21.7",
  "byteorder",
+ "crossbeam-channel",
  "flate2",
  "nom",
  "num-traits",

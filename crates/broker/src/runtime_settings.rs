@@ -493,6 +493,9 @@ impl RuntimeSettingsManager {
 impl BrokerConfig {
     pub fn from_runtime_settings(settings: &RuntimeSettings) -> Self {
         Self {
+            experimental_speculation: BrokerConfig::default().experimental_speculation,
+            experimental_commit_gate: None,
+            experimental_message_failure: false,
             inflight_ttl_ms: settings.delivery.inflight_ttl_ms,
             expiry_poll_min_ms: settings.delivery.expiry_poll_min_ms,
             expiry_batch_max: settings.delivery.expiry_batch_max,

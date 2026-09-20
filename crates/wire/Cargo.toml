@@ -8,7 +8,7 @@ repository.workspace = true
 
 [dependencies]
 fibril-common = { path = "../common" }
-stroma-common = { git = "https://github.com/Axmouth/keratin.git", branch = "main" }
+stroma-common = { git = "https://github.com/Axmouth/keratin.git", rev = "48af39327795726b661ab5aef5f4053954a13e90" }
 bytes = "1"
 uuid = { version = "1.19", features = ["serde", "v4", "v7"] }
 thiserror = "2.0"

@@ -158,6 +158,34 @@ pub trait QueueEngine {
         items: Vec<PublishItem>,
     ) -> Result<(), StromaError>;
 
+    async fn settle_batch_fenced(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        acks: Vec<AckEventMeta>,
+        nacks: Vec<NackEventMeta>,
+        fence: (
+            stroma_core::QueueHandle,
+            u64,
+            tokio_util::sync::CancellationToken,
+        ),
+    ) -> Result<(), StromaError> {
+        let _ = (tp, part, group, acks, nacks, fence);
+        Err(StromaError::Unsupported("speculative settlement".into()))
+    }
+
+    async fn publish_batch_observed(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        items: Vec<PublishItem>,
+        _observer: std::sync::Arc<dyn stroma_core::ExperimentalStageObserver>,
+    ) -> Result<(), StromaError> {
+        self.publish_batch(tp, part, group, items).await
+    }
+
     async fn next_expiry_hint(&self) -> Result<Option<UnixMillis>, StromaError>;
 
     async fn requeue_expired(
@@ -1056,6 +1084,61 @@ impl QueueEngine for StromaEngine {
     ) -> Result<(), StromaError> {
         self.inner
             .append_message_batch(tp, part, group, items)
+            .await
+    }
+
+    async fn settle_batch_fenced(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        acks: Vec<AckEventMeta>,
+        nacks: Vec<NackEventMeta>,
+        fence: (
+            stroma_core::QueueHandle,
+            u64,
+            tokio_util::sync::CancellationToken,
+        ),
+    ) -> Result<(), StromaError> {
+        if !acks.is_empty() {
+            let (completion, rx) = KeratinAppendCompletion::pair();
+            self.inner
+                .ack_enqueue_many_fenced(tp, part, group, acks, completion, Some(fence.clone()))
+                .await?;
+            rx.await
+                .map_err(|_| StromaError::Io("ack writer closed".into()))?
+                .map_err(|e| StromaError::Io(e.to_string()))?;
+        }
+        if !nacks.is_empty() {
+            let (completion, rx) = KeratinAppendCompletion::pair();
+            self.inner
+                .nack_enqueue_many_with_reason_fenced(
+                    tp,
+                    part,
+                    group,
+                    nacks,
+                    None,
+                    completion,
+                    Some(fence),
+                )
+                .await?;
+            rx.await
+                .map_err(|_| StromaError::Io("nack writer closed".into()))?
+                .map_err(|e| StromaError::Io(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    async fn publish_batch_observed(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        items: Vec<PublishItem>,
+        observer: std::sync::Arc<dyn stroma_core::ExperimentalStageObserver>,
+    ) -> Result<(), StromaError> {
+        self.inner
+            .append_message_batch_observed(tp, part, group, items, Some(observer))
             .await
     }
 

@@ -1,3 +1,9 @@
+#[path = "speculative.rs"]
+mod speculative;
+use speculative::{ConfirmReply, StageObserver};
+#[path = "speculative_metrics.rs"]
+mod speculative_metrics;
+
 use std::{
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
     sync::{
@@ -223,6 +229,7 @@ impl ConsumerHandle {
 }
 
 pub struct PublishRequest {
+    pub admitted: std::time::Instant,
     pub payload: Vec<u8>,
     pub reply: oneshot::Sender<Result<Offset, BrokerError>>,
     pub not_before: Option<UnixMillis>,
@@ -259,6 +266,7 @@ impl PublisherHandle {
 
         self.publisher
             .send(PublishRequest {
+                admitted: std::time::Instant::now(),
                 payload,
                 reply: tx,
                 require_confirm: true,
@@ -295,6 +303,7 @@ impl PublisherHandle {
 
         self.publisher
             .send(PublishRequest {
+                admitted: std::time::Instant::now(),
                 payload,
                 reply: tx,
                 require_confirm: false,
@@ -331,6 +340,7 @@ impl PublisherHandle {
 
         self.publisher
             .send(PublishRequest {
+                admitted: std::time::Instant::now(),
                 payload,
                 reply: tx,
                 require_confirm: true,
@@ -359,6 +369,7 @@ impl PublisherHandle {
 
         self.publisher
             .send(PublishRequest {
+                admitted: std::time::Instant::now(),
                 payload,
                 reply: tx,
                 require_confirm: false,
@@ -377,6 +388,12 @@ impl PublisherHandle {
 
 #[derive(Debug, Clone)]
 pub struct BrokerConfig {
+    /// ISOLATED EXPERIMENT: 0 off, 1 early delivery/durable confirm, 2 durable-or-processed.
+    pub experimental_speculation: u8,
+    /// Deterministic test barrier; absent in performance runs.
+    pub experimental_commit_gate: Option<Arc<tokio::sync::Semaphore>>,
+    /// Test only: exercise the failed-payload/cancel path after staging.
+    pub experimental_message_failure: bool,
     pub inflight_ttl_ms: u64,
     pub expiry_poll_min_ms: u64,
     pub expiry_batch_max: usize,
@@ -440,6 +457,13 @@ pub struct BrokerConfig {
 impl Default for BrokerConfig {
     fn default() -> Self {
         Self {
+            experimental_commit_gate: None,
+            experimental_message_failure: false,
+            experimental_speculation: std::env::var("FIBRIL_EXPERIMENTAL_QUEUE_SPECULATION")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|&v| v <= 2)
+                .unwrap_or(0),
             inflight_ttl_ms: 60_000,
             expiry_poll_min_ms: 200,
             expiry_batch_max: 8192,
@@ -856,9 +880,11 @@ pub(crate) struct QueueKey {
 /// Tag -> delivery record (so we can validate settle)
 #[derive(Debug, Clone)]
 struct TagRecord {
+    trace: Option<Arc<speculative_metrics::Trace>>,
     key: QueueKey,
     offset: Offset,
     consumer_id: ConsumerId,
+    speculative: Option<Arc<speculative::SpeculativePublish>>,
 }
 
 /// One loop per queue (tp,part,group)
@@ -869,6 +895,8 @@ pub(crate) struct QueueLoopState {
     consumers: DashMap<ConsumerId, Arc<ConsumerState>>,
     activity: Arc<QueueActivity>,
     eviction_lock: AsyncMutex<()>,
+    speculative_dispatch: AsyncMutex<()>,
+    speculative_lifecycle: Mutex<()>,
     owner_runtime_shutdown: CancellationToken,
     // used to wake the delivery loop
     notify: tokio::sync::Notify,
@@ -922,6 +950,8 @@ impl QueueLoopState {
             consumers: DashMap::new(),
             activity: Arc::new(QueueActivity::default()),
             eviction_lock: AsyncMutex::new(()),
+            speculative_dispatch: AsyncMutex::new(()),
+            speculative_lifecycle: Mutex::new(()),
             owner_runtime_shutdown: CancellationToken::new(),
             notify: tokio::sync::Notify::new(),
             replication_notify: tokio::sync::Notify::new(),
@@ -1488,6 +1518,11 @@ pub struct Broker<
     /// from the lease/poll `queues` loop.
     streams: DashMap<QueueKey, Arc<crate::stream::StreamChannel>>,
     records_by_tags: DashMap<DeliveryTag, TagRecord>,
+    speculative_telemetry: Arc<speculative_metrics::Telemetry>,
+    speculative_bytes: Arc<tokio::sync::Semaphore>,
+    speculative_count: Arc<tokio::sync::Semaphore>,
+    speculative_delivered: AtomicU64,
+    speculative_fallback: AtomicU64,
     queue_eviction_observations: DashMap<QueueKey, QueueEvictionObservation>,
     pub(crate) follower_replication_workers:
         DashMap<crate::coordination::QueueIdentity, Arc<FollowerReplicationWorkerRuntime>>,
@@ -1732,6 +1767,11 @@ impl<
             queues: DashMap::new(),
             streams: DashMap::new(),
             records_by_tags: DashMap::new(),
+            speculative_telemetry: speculative_metrics::Telemetry::new(),
+            speculative_bytes: Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            speculative_count: Arc::new(tokio::sync::Semaphore::new(4096)),
+            speculative_delivered: AtomicU64::new(0),
+            speculative_fallback: AtomicU64::new(0),
             queue_eviction_observations: DashMap::new(),
             follower_replication_workers: DashMap::new(),
             replication_progress: Arc::new(DashMap::new()),
@@ -2234,6 +2274,11 @@ impl<
         // Now stop tasks
         self.task_group.shutdown().await;
 
+        tracing::info!(
+            speculative_delivered = self.speculative_delivered.load(Ordering::Relaxed),
+            speculative_fallback = self.speculative_fallback.load(Ordering::Relaxed),
+            "speculative queue experiment totals"
+        );
         // Shutdown engine
         if let Err(e) = self.engine.shutdown().await {
             tracing::error!("engine shutdown error: {:?}", e);
@@ -2299,7 +2344,7 @@ impl<
         // TODO: make async by maybe making two tasks: one to receive publish requests and one to wait for completions and send confirms? Or use a bounded channel and backpressure?
         let (confirm_sink_tx, mut confirm_sink_rx) = mpsc::channel::<(
             oneshot::Receiver<Result<AppendResult, IoError>>,
-            oneshot::Sender<Result<u64, BrokerError>>,
+            ConfirmReply,
         )>(16384);
         let metrics = self.metrics.clone();
         let activity_lease = {
@@ -2322,6 +2367,9 @@ impl<
         let owner_runtime_shutdown = qs.owner_runtime_shutdown.clone();
         // Bounded: breaks on owner_runtime_shutdown (demotion/eviction) and the TaskGroup
         // cancel token (broker shutdown), and TaskTracker reaps finished tasks.
+        let speculative_broker = self.clone();
+        let speculative_mode = self.config_snapshot().experimental_speculation;
+        let failure_broker = self.clone();
         self.task_group.spawn("publisher_sink", async move {
             let _activity_lease = activity_lease;
             const MAX_BATCH: usize = 256;
@@ -2373,9 +2421,23 @@ impl<
                     }
                 }
 
+                let observer = (speculative_mode != 0).then(|| {
+                    StageObserver::new(
+                        speculative_broker.clone(),
+                        qs_publish.clone(),
+                        QueueKey {
+                            tp: tp.clone(),
+                            part,
+                            group: group.clone(),
+                        },
+                        &batch,
+                        speculative_mode,
+                    )
+                });
                 let mut items = Vec::with_capacity(batch.len());
                 let mut confirmations = Vec::with_capacity(batch.len());
                 for PublishRequest {
+                    admitted,
                     payload,
                     reply,
                     not_before,
@@ -2387,6 +2449,10 @@ impl<
                     extra,
                 } in batch
                 {
+                    let mut extra = extra;
+                    if observer.is_some() {
+                        extra.insert("fibril.message_id".into(), Uuid::now_v7().to_string());
+                    }
                     let headers = MessageHeaders {
                         published,
                         publish_received,
@@ -2395,6 +2461,11 @@ impl<
                     };
                     let (completion, rx_completion) = KeratinAppendCompletion::pair();
 
+                    let reply = if let Some(observer) = &observer {
+                        observer.push(&headers, &payload, reply, admitted)
+                    } else {
+                        ConfirmReply::Direct(reply)
+                    };
                     confirmations.push((rx_completion, reply));
                     items.push(stroma_core::PublishItem {
                         headers,
@@ -2410,13 +2481,20 @@ impl<
                 }
 
                 let batch_size = items.len();
-                if let Err(err) = engine
-                    .publish_batch(&tp, part.id(), group.as_deref(), items)
-                    .await
-                {
+                let published = if let Some(observer) = observer {
+                    engine
+                        .publish_batch_observed(&tp, part.id(), group.as_deref(), items, observer)
+                        .await
+                } else {
+                    engine
+                        .publish_batch(&tp, part.id(), group.as_deref(), items)
+                        .await
+                };
+                if let Err(err) = published {
                     tracing::error!("publish_batch failed: {err:?}");
                     let err_msg = err.to_string();
                     for (_, reply) in confirmations {
+                        reply.local_complete(false, &speculative_broker);
                         let res = Err(BrokerError::Engine(StromaError::Io(err_msg.clone())));
                         if let Err(e) = reply.send(res) {
                             tracing::error!("Failed to send publish error response: {e:?}");
@@ -2428,6 +2506,7 @@ impl<
                 for confirmation in confirmations {
                     if let Err(e) = confirm_sink_tx.send(confirmation).await {
                         let (_, reply) = e.0;
+                        reply.local_complete(false, &speculative_broker);
                         if let Err(e) = reply.send(Err(BrokerError::ChannelClosed)) {
                             tracing::error!("Failed to send publish error response: {e:?}");
                         }
@@ -2451,6 +2530,7 @@ impl<
                 // Wait for durability
                 match rx_completion.await {
                     Ok(Ok(append)) => {
+                        reply.local_complete(true, &failure_broker);
                         let offset = append.base_offset;
                         replication_timing.record_replication_wake();
                         qs_clone.wake_with_replication();
@@ -2466,6 +2546,7 @@ impl<
                         }
                     }
                     Ok(Err(e)) => {
+                        reply.local_complete(false, &failure_broker);
                         tracing::error!("Append failed: {e:?}");
                         qs_clone.wake();
                         let res = Err(BrokerError::Engine(StromaError::Io(e.to_string())));
@@ -2474,6 +2555,7 @@ impl<
                         }
                     }
                     Err(e) => {
+                        reply.local_complete(false, &failure_broker);
                         tracing::error!("Failed to receive append completion: {e:?}");
                         qs_clone.wake();
                         let res = Err(BrokerError::Engine(StromaError::Io(
@@ -2505,6 +2587,7 @@ impl<
             return None;
         };
 
+        let _lifecycle = qs.speculative_lifecycle.lock().unwrap();
         qs.cancel_owner_runtime();
         for consumer in qs.consumers.iter() {
             consumer.value().close(ConsumerCloseCause::OwnerMoved);
@@ -2654,6 +2737,13 @@ impl<
     }
 
     pub fn sparse_queue_observability_report(&self) -> SparseQueueObservabilitySnapshot {
+        tracing::info!(telemetry = %self.speculative_telemetry.snapshot(), "speculative diagnostics");
+        tracing::info!(
+            mode = self.config_snapshot().experimental_speculation,
+            speculative_delivered = self.speculative_delivered.load(Ordering::Relaxed),
+            speculative_fallback = self.speculative_fallback.load(Ordering::Relaxed),
+            "speculative queue experiment totals at inspection"
+        );
         let now = unix_millis();
         let mut active_queue_count = 0;
         let mut idle_queue_count = 0;
@@ -3488,37 +3578,49 @@ impl<
         partition: Partition,
         sub_id: ConsumerId,
     ) -> Result<(), BrokerError> {
+        tracing::info!(
+            speculative_delivered = self.speculative_delivered.load(Ordering::Relaxed),
+            speculative_fallback = self.speculative_fallback.load(Ordering::Relaxed),
+            "speculative queue experiment totals at consumer disconnect"
+        );
         let key = QueueKey {
             tp: topic.to_string(),
             part: partition,
             group: group.map(str::to_string),
         };
 
-        if let Some(qs) = self.queues.get(&key).map(|e| e.value().clone()) {
-            if let Some(consumer) = qs.consumers.get(&sub_id) {
-                consumer.value().close(ConsumerCloseCause::Unsubscribed);
+        let qs = self.queues.get(&key).map(|e| e.value().clone());
+        let records = {
+            let _lifecycle = qs.as_ref().map(|q| q.speculative_lifecycle.lock().unwrap());
+            if let Some(qs) = &qs {
+                if let Some(consumer) = qs.consumers.get(&sub_id) {
+                    consumer.value().close(ConsumerCloseCause::Unsubscribed);
+                }
+                qs.consumers.remove(&sub_id);
+                qs.wake();
             }
-            qs.consumers.remove(&sub_id);
-            qs.wake();
-        }
-
-        let mut tagged_tags = Vec::new();
-        for entry in self.records_by_tags.iter() {
-            let tag = *entry.key();
-            let rec = entry.value();
-            if rec.consumer_id == sub_id && rec.key == key {
-                tagged_tags.push((tag, rec.offset));
+            let tags: Vec<_> = self
+                .records_by_tags
+                .iter()
+                .filter(|r| r.consumer_id == sub_id && r.key == key)
+                .map(|r| *r.key())
+                .collect();
+            tags.into_iter()
+                .filter_map(|tag| self.records_by_tags.remove(&tag).map(|(_, r)| r))
+                .collect::<Vec<_>>()
+        };
+        let mut offsets = Vec::with_capacity(records.len());
+        for record in records {
+            if let Some(pending) = record.speculative {
+                pending.cancel.cancel();
+                if !pending.wait_local().await {
+                    continue;
+                }
             }
+            offsets.push(record.offset);
         }
-
-        if tagged_tags.is_empty() {
+        if offsets.is_empty() {
             return Ok(());
-        }
-
-        let mut offsets = Vec::with_capacity(tagged_tags.len());
-        for (tag, offset) in tagged_tags {
-            self.records_by_tags.remove(&tag);
-            offsets.push(offset);
         }
 
         let count = offsets.len();
@@ -3643,28 +3745,44 @@ impl<
         });
     }
 
-    async fn handle_settle_batch(&self, consumer: &Arc<ConsumerState>, reqs: Vec<SettleRequest>) {
+    async fn handle_settle_batch(
+        self: &Arc<Self>,
+        consumer: &Arc<ConsumerState>,
+        reqs: Vec<SettleRequest>,
+    ) {
         // Group by queue. Acks all go to one bucket per queue.
         // Nacks carry per-offset settlement metadata, including optional retry deadlines.
 
         let mut acks_by_queue: HashMap<QueueKey, Vec<Offset>> = HashMap::new();
         let mut nacks_by_queue: HashMap<QueueKey, Vec<NackEventMeta>> = HashMap::new();
+        let mut speculative_settles = Vec::new();
 
-        let submitted = reqs.len();
         for req in reqs {
-            // Check ownership under the same shard lock as removal. An invalid
-            // settlement must leave the rightful consumer's tag available.
-            let Some(tag_rec) = self
-                .records_by_tags
-                .remove_if(&req.delivery_tag, |_, record| {
-                    record.consumer_id == consumer.sub_id
-                })
+            let Some(tag_rec) = self.records_by_tags
+                .remove_if(&req.delivery_tag, |_, record| record.consumer_id == consumer.sub_id)
                 .map(|kv| kv.1)
             else {
                 tracing::warn!("Settle for unknown or differently owned tag {:?}", req.delivery_tag);
+                if self.pending_settles.fetch_sub(1, Ordering::AcqRel) == 1 {
+                    self.settle_drained.notify_waiters();
+                }
                 continue;
             };
 
+            if req.is_ack() {
+                if let Some(trace) = &tag_rec.trace { trace.record("ack"); }
+            }
+            if let Some(pending) = &tag_rec.speculative {
+                consumer.dec_inflight();
+                if let Some(qs) = self.queues.get(&tag_rec.key) {
+                    qs.wake();
+                }
+                if req.is_ack() && self.speculation_is_local(&tag_rec.key) {
+                    pending.processed(tag_rec.offset);
+                }
+                speculative_settles.push((tag_rec, req.settle_type));
+                continue;
+            }
             match req.settle_type {
                 SettleType::Ack => {
                     acks_by_queue
@@ -3700,13 +3818,8 @@ impl<
             }
         }
 
-        // Every admitted request increments pending_settles, including invalid
-        // and duplicate tags. Only accepted entries get durable callbacks below.
-        let settled: usize = acks_by_queue.values().map(Vec::len).sum::<usize>()
-            + nacks_by_queue.values().map(Vec::len).sum::<usize>();
-        let ignored = submitted - settled;
-        if ignored > 0 && self.pending_settles.fetch_sub(ignored, Ordering::AcqRel) == ignored {
-            self.settle_drained.notify_waiters();
+        if !speculative_settles.is_empty() {
+            self.defer_speculative_settles(speculative_settles);
         }
 
         // Release consumer flow-control credit at settle accept rather than in
@@ -3718,6 +3831,8 @@ impl<
         // offset stays marked inflight in the engine until the settle event
         // applies, so a poll cannot re-lease it. The durable completion below
         // still drives the settle-drain gate, metrics, and follower wakes.
+        let settled = acks_by_queue.values().map(Vec::len).sum::<usize>()
+            + nacks_by_queue.values().map(Vec::len).sum::<usize>();
         if settled > 0 {
             consumer.dec_inflight_many(settled);
         }
@@ -3889,6 +4004,9 @@ impl<
                         }
                     }
 
+                    let _speculative_dispatch = if broker.config_snapshot().experimental_speculation != 0 {
+                        Some(qs.speculative_dispatch.lock().await)
+                    } else { None };
                     let mut consumers: Vec<Arc<ConsumerState>> =
                         qs.consumers.iter().map(|e| e.value().clone()).collect();
                     // Exclusive consumer-group gate: when an assignee is set,
@@ -4019,6 +4137,8 @@ impl<
                                 key: key.clone(),
                                 offset: d.offset,
                                 consumer_id: c.sub_id,
+                                speculative: None,
+                                trace: d.extra_headers.get("fibril.message_id").and_then(|id| broker.speculative_telemetry.take(id)),
                             },
                         );
                         c.inc_inflight();
@@ -4053,6 +4173,12 @@ impl<
 
                     for (_, (c, batch)) in batches {
                         let n = batch.len() as u64;
+                        // Mark channel submission, not client receipt. Client latencies remain in the harness.
+                        for item in &batch {
+                            if let Some(rec) = broker.records_by_tags.get(&item.delivery_tag) {
+                                if let Some(trace) = &rec.trace { trace.dispatch(false); }
+                            }
+                        }
                         let delivered = match c.tx.load_full() {
                             Some(tx) => tx.send(batch).await.is_ok(),
                             None => false,
@@ -4535,11 +4661,16 @@ impl Broker<StromaEngine> {
             // Never force an existing follower into the owner role here. A
             // refused promotion must remain refused; declare_queue checks the
             // storage role before appending anything.
-            let result = if self.engine.is_materialized(&key.tp, key.part.id(), key.group.as_deref()) {
-                self.apply_owned_queue_declaration(&key).await
-            } else {
-                self.materialize_owned_queue(&key.tp, key.part, key.group.as_deref()).await
-            };
+            let result =
+                if self
+                    .engine
+                    .is_materialized(&key.tp, key.part.id(), key.group.as_deref())
+                {
+                    self.apply_owned_queue_declaration(&key).await
+                } else {
+                    self.materialize_owned_queue(&key.tp, key.part, key.group.as_deref())
+                        .await
+                };
             match result {
                 Ok(()) => {}
                 Err(BrokerError::NotOwner { .. }) => {

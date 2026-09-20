@@ -10,8 +10,8 @@ repository.workspace = true
 fibril-metrics = { path = "../metrics" }
 fibril-common = { path = "../common" }
 fibril-util = { path = "../util" }
-stroma-core = { git = "https://github.com/Axmouth/keratin.git", branch = "main" }
-stroma-common = { git = "https://github.com/Axmouth/keratin.git", branch = "main" }
+stroma-core = { git = "https://github.com/Axmouth/keratin.git", rev = "48af39327795726b661ab5aef5f4053954a13e90" }
+stroma-common = { git = "https://github.com/Axmouth/keratin.git", rev = "48af39327795726b661ab5aef5f4053954a13e90" }
 anyhow = "1.0"
 arc-swap = "1.9"
 async-trait = "0.1"
@@ -20,6 +20,7 @@ crossbeam = "0.8"
 console-subscriber = "0.5"
 dashmap = "6.1"
 fastrand = "2"
+hdrhistogram = "7"
 futures = "0.3"
 hashbrown = "0.17"
 rmp-serde = "1.3"

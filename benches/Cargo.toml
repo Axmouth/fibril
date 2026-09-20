@@ -33,7 +33,7 @@ path = "bin/stroma_poll.rs"
 
 [dependencies]
 fibril-broker = { path = "../crates/broker" }
-stroma-core = { git = "https://github.com/Axmouth/keratin.git", branch = "main" }
+stroma-core = { git = "https://github.com/Axmouth/keratin.git", rev = "48af39327795726b661ab5aef5f4053954a13e90" }
 fibril-client = { path = "../crates/client" }
 fibril-metrics = { path = "../crates/metrics" }
 fibril-util = { path = "../crates/util" }
