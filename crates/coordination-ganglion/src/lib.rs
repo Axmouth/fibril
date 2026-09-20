@@ -4723,6 +4723,16 @@ mod tests {
             .wait_for_leader(1, Duration::from_secs(10))
             .await
             .unwrap();
+        // Election precedes re-commit/application of the persisted WAL tail.
+        // Check recovery after replay reaches the generation we actually stored.
+        let mut replay = restarted.watch_committed();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while replay.borrow_and_update().generation < stored_generation {
+                replay.changed().await.expect("replay watch remains open");
+            }
+        })
+        .await
+        .expect("restart must replay the persisted recovery request");
         let recovered = GanglionCoordination::new("a-owner", restarted);
         assert_eq!(recovered.pending_recoveries().unwrap(), pending);
         let retry = recovered

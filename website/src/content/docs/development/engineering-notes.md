@@ -18,6 +18,14 @@ Each locally durable queue batch now wakes replication after its payload/enqueue
 
 A real-storage diagnostic confirmed a batch on owner A and follower B, then successfully promoted empty follower C after A stopped. Placement uses advisory heartbeat tails, while promotion establishes local completeness; neither establishes that the selected candidate contains every previously confirmed batch. Preserving that history across assignment changes is a recovery gate for clustered HA and for replication before owner durability.
 
+### Durable local recovery seals
+
+A persisted seal keeps queue and stream evidence intact across restart, eviction and interrupted fencing of the two logs. The storage primitive blocks ordinary reopening and cleanup and supports identical-request retries; it remains disconnected from automatic failover until history validation, installation and activation are implemented. Failure tests cover caller cancellation, a failed writer, partial fencing, damaged markers and startup suffix repair in [Keratin 617e1e8](https://github.com/Axmouth/keratin/commit/617e1e8).
+
+### Epoch persistence retries
+
+An epoch update changed the in-memory manifest before its disk write succeeded, allowing a retry to return success without retrying the failed write. The update now publishes the new in-memory epoch only after persistence succeeds; a filesystem fault test verifies repeated failure followed by successful durable retry in [Keratin 71b2f56](https://github.com/Axmouth/keratin/commit/71b2f56).
+
 ### Pending recovery before replicated assignment replacement
 
 The controller retains the previous assignment and persists a proposed replacement when ownership, replica membership or policy changes affect replicated confirmation. The request survives metadata restart and is exposed in controller status, preventing followers from switching to an unproven source. Fresh sealing, recovery and activation remain pending, so this first barrier pauses replicated failover while preserving its recovery evidence.

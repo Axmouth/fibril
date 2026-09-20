@@ -661,6 +661,7 @@ See also: [clustering](/concepts/clustering/) and
 | Epoch fencing | Implemented | Role transitions advance log epochs before serving or applying replicated batches |
 | Follower source refresh | Implemented | An owner or epoch change drains and retargets a remaining follower's worker while retaining its replication cursors |
 | Checkpoint epoch checks | Implemented | Both source epochs are validated before reset and checked again by each storage writer in command order |
+| Local recovery seal | Partial | Keratin preserves a sealed replica across restart and supports identical-request retry; Linux validated, other platforms reject sealing before mutation. Automatic broker failover does not invoke this primitive yet |
 | Checkpoint recovery | Partial | Backfill dependencies gate promotion and owner activation, including after restart; interruption-safe replacement of both logs and snapshot state remains pending |
 | Conflict diagnostics | Implemented | Bounded, payload-free control history, offsets and effective record identities accompany overlap reports; checkpoint logs show source epochs and continuation offsets |
 | Replica-durable confirms | Partial | Queues require the same follower to cover the payload batch and exact enqueue frontier; epoch/session-fenced progress feeds confirmation and delivery visibility, with timeout and ISR floor |

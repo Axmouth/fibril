@@ -6,7 +6,7 @@ description: Planned promotion evidence, eager failure detection and acceptance 
 This plan covers preservation of confirmed history during ownership changes and
 an optional faster failure detector. The controller now persists pending recovery
 requests and retains the previous assignment for changes involving replicated
-confirmation. Sealing, evidence collection, recovery and activation remain
+confirmation. Broker-driven sealing, evidence collection, recovery and activation remain
 implementation work; replicated failover currently pauses at this barrier.
 Current behavior and limitations are in [replication](/reliability/replication/).
 
@@ -22,7 +22,10 @@ durable evidence from enough previous replicas to intersect every possible
 confirmation quorum, validates compatible histories and payload/event
 dependencies, then recovers the candidate before activating ownership.
 Insufficient evidence keeps the partition unavailable with bounded retries and
-an explicit reason.
+an explicit reason. When missing replicas return and provide sufficient compatible
+evidence, recovery should select a source, catch up an eligible owner and activate
+automatically. Operator intervention is reserved for irrecoverable corruption,
+incompatible authoritative histories or unresolved evidence loss.
 
 The protocol must cover repeated failovers, controller and candidate restarts,
 and membership changes. Initial implementation should establish the proof for
@@ -38,6 +41,21 @@ the admin topology response. Heartbeat changes cannot replace an outstanding
 request, and ordinary followers keep their existing source. Existing healthy
 owners can continue under their unchanged active assignment; requests do not
 yet seal their logs or establish a recovery certificate.
+
+## Local seal foundation
+
+Keratin provides a local recovery seal with a durable transition identity and
+fencing epoch. It drains accepted operations, preserves both logs and prevents
+ordinary promotion, replay repair, snapshot replacement and compaction from
+changing the sealed source. Identical requests can resume after interruption or
+restart. The returned offsets describe local retained data, including potentially
+unconfirmed or incomplete records; they do not establish authoritative history.
+
+The primitive is validated on Linux and is not called by automatic broker
+failover. Other platforms currently reject sealing before changing storage.
+Authenticated request dispatch, retained data-history identity, compatible-history
+selection, atomic installation and activation remain required. The completed
+controller must coalesce retries per transition and resume work after restarts.
 
 ## Eager failure detection
 
