@@ -124,6 +124,11 @@ struct Args {
     #[arg(long, default_value_t = 1024)]
     confirm_window: usize,
 
+    /// Poll confirmations in FIFO order. Use only when all publishes complete
+    /// in order on one partition; unordered polling remains the default.
+    #[arg(long, requires = "confirmed")]
+    ordered_confirmations: bool,
+
     /// Broker TCP address to target.
     #[arg(long, default_value = "127.0.0.1:9876")]
     broker_addr: SocketAddr,
@@ -150,6 +155,10 @@ async fn main() {
     fibril_util::init_tracing();
 
     let args = Args::parse();
+    println!(
+        "Ordered confirmation polling: {}",
+        args.ordered_confirmations
+    );
     let preload_confirmed = !args.preload_unconfirmed;
     match args.mode {
         BenchMode::Mixed => {
@@ -250,6 +259,7 @@ async fn main() {
             args.size.max(1),
             args.confirmed,
             args.confirm_window,
+            args.ordered_confirmations,
             measure_start,
             measure_end,
             measured_sent_total.clone(),
@@ -265,6 +275,7 @@ async fn main() {
             args.size.max(1),
             args.confirmed,
             args.confirm_window,
+            args.ordered_confirmations,
             measure_start,
             measure_end,
             measured_sent_total.clone(),
@@ -461,6 +472,7 @@ async fn run_rate_limited_writers(
     payload_size: usize,
     confirmed: bool,
     confirm_window: usize,
+    ordered_confirmations: bool,
     measure_start: Instant,
     measure_end: Instant,
     measured_sent_total: Arc<AtomicU64>,
@@ -490,6 +502,56 @@ async fn run_rate_limited_writers(
             // gates the INPUT (publish only while in-flight < window) rather than
             // withholding confirm reads, so confirm latency reflects the real
             // round trip, not how long an already-arrived ack sat in a FIFO drain.
+            if confirmed && ordered_confirmations {
+                let mut pending = VecDeque::<PendingConfirm>::new();
+                loop {
+                    tokio::select! {
+                        biased;
+                        result = async { (&mut pending.front_mut().unwrap().confirmation).await }, if !pending.is_empty() => {
+                            let p = pending.pop_front().unwrap();
+                            match result {
+                                Ok(_) => {
+                                    stats.confirmed_total += 1;
+                                    if p.measured {
+                                        stats.confirm_latency_ms.push(p.sent_at.elapsed().as_millis() as u64);
+                                    }
+                                }
+                                Err(_) => stats.confirm_errors += 1,
+                            }
+                        }
+                        _ = tick.tick(), if Instant::now() < measure_end && pending.len() < confirm_window => {
+                            let now = Instant::now();
+                            if now >= measure_end {
+                                break;
+                            }
+                            let measured = now >= measure_start;
+                            let mut payload = vec![8u8; payload_size];
+                            if measured {
+                                payload[0] = 1;
+                            }
+                            let sent_at = Instant::now();
+                            match publisher.publish_with_confirmation(NewMessage::raw(payload)).await {
+                                Ok(confirmation) => {
+                                    stats.sent_total += 1;
+                                    if measured {
+                                        stats.measured_sent += 1;
+                                        measured_sent_total.fetch_add(1, Ordering::AcqRel);
+                                    }
+                                    pending.push_back(PendingConfirm {
+                                        confirmation,
+                                        measured,
+                                        sent_at,
+                                    });
+                                }
+                                Err(_) => stats.publish_errors += 1,
+                            }
+                        }
+                        else => break,
+                    }
+                }
+                drain_confirms(writer_id, &mut pending, &mut stats).await;
+                return stats;
+            }
             let mut inflight = FuturesUnordered::new();
 
             let record_confirm =

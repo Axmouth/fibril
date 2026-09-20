@@ -481,16 +481,30 @@ pub struct Publisher {
 ///
 /// Returned by [`Publisher::publish_with_confirmation`]. Await it when you need
 /// the broker-assigned offset without serializing every publish on the
-/// confirmation round trip.
+/// confirmation round trip. It can be awaited directly or through
+/// [`PublishConfirmation::confirmed`]. Polling by mutable reference retains the
+/// confirmation if a surrounding `select!` chooses another branch.
 #[derive(Debug)]
 pub struct PublishConfirmation {
     rx: oneshot::Receiver<FibrilResult<u64>>,
 }
 
+impl std::future::Future for PublishConfirmation {
+    type Output = FibrilResult<u64>;
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::pin::Pin::new(&mut self.rx)
+            .poll(cx)
+            .map(|result| result.unwrap_or(Err(FibrilError::BrokenPipe)))
+    }
+}
+
 impl PublishConfirmation {
     /// Wait for the broker-assigned topic offset.
     pub async fn confirmed(self) -> FibrilResult<u64> {
-        self.rx.await.map_err(|_e| FibrilError::BrokenPipe)?
+        self.await
     }
 }
 
@@ -7997,5 +8011,36 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+    #[tokio::test]
+    async fn pending_confirmation_retains_its_waker_and_can_be_polled_by_reference() {
+        let (tx, rx) = oneshot::channel();
+        let mut confirmation = PublishConfirmation { rx };
+        let mut pending = Box::pin(&mut confirmation);
+        assert!(futures::poll!(&mut pending).is_pending());
+        tx.send(Ok(17)).unwrap();
+        assert_eq!(pending.await.unwrap(), 17);
+    }
+
+    #[tokio::test]
+    async fn publish_confirmation_future_preserves_offset_error_and_closed_channel() {
+        let (tx, rx) = oneshot::channel();
+        tx.send(Ok(42)).unwrap();
+        let mut c = PublishConfirmation { rx };
+        assert_eq!((&mut c).await.unwrap(), 42);
+        let (tx, rx) = oneshot::channel();
+        tx.send(Err(FibrilError::Unexpected {
+            msg: "sentinel".into(),
+        }))
+        .unwrap();
+        assert!(
+            matches!((PublishConfirmation { rx }).await, Err(FibrilError::Unexpected { msg }) if msg == "sentinel")
+        );
+        let (tx, rx) = oneshot::channel();
+        drop(tx);
+        assert!(matches!(
+            (PublishConfirmation { rx }).await,
+            Err(FibrilError::BrokenPipe)
+        ));
     }
 }
