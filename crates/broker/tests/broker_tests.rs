@@ -8510,3 +8510,107 @@ async fn declaration_reconciliation_cannot_override_a_refused_promotion() {
         Err(StromaError::WrongQueueRole { actual: QueueRole::Follower, .. })));
     broker.shutdown().await;
 }
+
+#[tokio::test]
+async fn ignored_settlements_preserve_owner_tags_and_drain_pending_accounting() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (broker, _dir) = open_test_broker().await;
+        let publisher = broker
+            .get_publisher("settle-ownership", Partition::ZERO, &None)
+            .await
+            .unwrap();
+        for id in 0..3 {
+            publisher
+                .publish(
+                    vec![id],
+                    Default::default(),
+                    Default::default(),
+                    None,
+                    Default::default(),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        let mut owner = broker
+            .subscribe(
+                "settle-ownership",
+                Partition::ZERO,
+                None,
+                Uuid::now_v7(),
+                ConsumerConfig { prefetch: 3 },
+            )
+            .await
+            .unwrap();
+        let mut deliveries = Vec::new();
+        for _ in 0..3 {
+            deliveries.push(owner.recv().await.unwrap());
+        }
+        let other = broker
+            .subscribe(
+                "settle-ownership",
+                Partition::ZERO,
+                None,
+                Uuid::now_v7(),
+                ConsumerConfig { prefetch: 3 },
+            )
+            .await
+            .unwrap();
+        for kind in [
+            SettleType::Ack,
+            SettleType::Nack {
+                requeue: Some(false),
+                not_before: None,
+            },
+            SettleType::Reject { requeue: None },
+        ] {
+            other
+                .settle(SettleRequest {
+                    settle_type: kind,
+                    delivery_tag: deliveries[0].delivery_tag,
+                })
+                .await
+                .unwrap();
+        }
+        // Invalid requests complete their accounting without changing queue state
+        // or consuming the tag that the rightful consumer still needs.
+        broker.wait_for_pending_settles().await;
+        assert_eq!(
+            broker
+                .partition_lowest_unsettled_offset("settle-ownership", Partition::ZERO, None)
+                .await
+                .unwrap(),
+            0
+        );
+        for message in &deliveries {
+            // Valid and duplicate requests share the same settlement batch.
+            for _ in 0..2 {
+                owner
+                    .settle(SettleRequest {
+                        settle_type: SettleType::Ack,
+                        delivery_tag: message.delivery_tag,
+                    })
+                    .await
+                    .unwrap();
+            }
+        }
+        broker.wait_for_pending_settles().await;
+        // Durable completion enqueues state application; express state reads
+        // can overtake it. Wait for the actor to observe all accepted ACKs.
+        while broker.partition_lowest_unsettled_offset("settle-ownership", Partition::ZERO, None).await.unwrap() != 3 {
+            tokio::task::yield_now().await;
+        }
+        // An ignored-only batch must also finish; no later valid ACK can hide it.
+        owner
+            .settle(SettleRequest {
+                settle_type: SettleType::Ack,
+                delivery_tag: deliveries[0].delivery_tag,
+            })
+            .await
+            .unwrap();
+        broker.wait_for_pending_settles().await;
+        broker.shutdown_graceful().await;
+    })
+    .await
+    .expect("settlement ownership or pending accounting failed to drain");
+}

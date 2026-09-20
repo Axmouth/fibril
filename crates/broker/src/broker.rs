@@ -3650,19 +3650,20 @@ impl<
         let mut acks_by_queue: HashMap<QueueKey, Vec<Offset>> = HashMap::new();
         let mut nacks_by_queue: HashMap<QueueKey, Vec<NackEventMeta>> = HashMap::new();
 
+        let submitted = reqs.len();
         for req in reqs {
+            // Check ownership under the same shard lock as removal. An invalid
+            // settlement must leave the rightful consumer's tag available.
             let Some(tag_rec) = self
                 .records_by_tags
-                .remove(&req.delivery_tag)
+                .remove_if(&req.delivery_tag, |_, record| {
+                    record.consumer_id == consumer.sub_id
+                })
                 .map(|kv| kv.1)
             else {
-                tracing::warn!("Settle for unknown tag {:?}", req.delivery_tag);
+                tracing::warn!("Settle for unknown or differently owned tag {:?}", req.delivery_tag);
                 continue;
             };
-            if tag_rec.consumer_id != consumer.sub_id {
-                tracing::warn!("Settle from wrong consumer");
-                continue;
-            }
 
             match req.settle_type {
                 SettleType::Ack => {
@@ -3699,6 +3700,15 @@ impl<
             }
         }
 
+        // Every admitted request increments pending_settles, including invalid
+        // and duplicate tags. Only accepted entries get durable callbacks below.
+        let settled: usize = acks_by_queue.values().map(Vec::len).sum::<usize>()
+            + nacks_by_queue.values().map(Vec::len).sum::<usize>();
+        let ignored = submitted - settled;
+        if ignored > 0 && self.pending_settles.fetch_sub(ignored, Ordering::AcqRel) == ignored {
+            self.settle_drained.notify_waiters();
+        }
+
         // Release consumer flow-control credit at settle accept rather than in
         // the durable completion. Waiting for the ack fsync would cap a
         // prefetch-bound consumer at prefetch / group-commit-latency for no
@@ -3708,8 +3718,6 @@ impl<
         // offset stays marked inflight in the engine until the settle event
         // applies, so a poll cannot re-lease it. The durable completion below
         // still drives the settle-drain gate, metrics, and follower wakes.
-        let settled = acks_by_queue.values().map(Vec::len).sum::<usize>()
-            + nacks_by_queue.values().map(Vec::len).sum::<usize>();
         if settled > 0 {
             consumer.dec_inflight_many(settled);
         }
