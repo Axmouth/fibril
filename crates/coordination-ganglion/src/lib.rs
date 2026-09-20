@@ -638,9 +638,9 @@ pub struct ClientTopology {
 
 /// Heartbeat label prefix for per-assignment applied tails:
 /// `applied/<topic>/<partition>[/<group>] = "<message_next>:<event_next>"`.
-/// Advisory data for failover candidate selection — the broker-side checked
-/// promotion remains the safety authority (stale labels can only pick a worse
-/// candidate, never an unsafe one).
+/// Advisory data for failover candidate selection. Local promotion checks log
+/// and state completeness, but does not prove possession of every previously
+/// confirmed batch; stale labels can select a consistent but lagging candidate.
 pub const APPLIED_TAIL_LABEL_PREFIX: &str = "applied/";
 
 /// Label key for one queue's applied tails.
@@ -2763,9 +2763,9 @@ impl GanglionCoordination {
             // Failover candidate selection: when the committed owner is gone
             // (dead, or live but draining) and the planner moved ownership,
             // prefer the most caught-up LIVE committed follower (by
-            // heartbeat-label applied event tail). Advisory only — checked
-            // promotion on the broker is the safety gate; with one follower
-            // this is a no-op.
+            // heartbeat-label applied event tail). This is advisory: local
+            // promotion checks do not establish the cluster's confirmed prefix.
+            // With one follower this selection is a no-op.
             for (resource, planned) in desired.assignments.iter_mut() {
                 let Some(current) = committed.assignments.get(resource) else {
                     continue;

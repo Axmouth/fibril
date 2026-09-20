@@ -23,11 +23,12 @@ partition has one **owner** and one or more **followers**:
   message and event records over the protocol and applies them durably to its
   own log. If a follower falls too far behind the owner's retained log, it
   installs an owner checkpoint and resumes from there.
-- **Failover promotes a caught-up follower.** When the controller sees the owner
-  is gone, it reassigns the partition and bumps its fencing **epoch**. A follower
-  is promoted at its local durable tail. The old owner cannot keep serving,
-  because writes and replication carrying a stale epoch are rejected (no
-  split-brain).
+- **Failover selects a follower using reported progress.** When the controller
+  sees the owner is gone, it reassigns the partition and bumps its fencing
+  **epoch**. Promotion checks local log/state completeness and payload backfill.
+  Heartbeat tails can be stale; the selected follower is not yet proven to hold
+  every previously confirmed batch. Nodes that have advanced their epoch reject
+  older-epoch replication.
 - **Replica-durable publishes wait for replicas.** When the assignment's
   durability policy requires more than the owner, a confirmed publish does not
   return until enough followers have reported the required progress, subject to a
@@ -91,11 +92,12 @@ latency. See the [configuration](/configuration/) replication settings.
 
 - Replica-durable confirms add latency: a publish waits for follower progress,
   bounded by the follower poll interval and the confirm timeout.
-- This surface is experimental. Failover safety rests on assignment epochs plus
-  local promotion gates, and more failure testing is needed before treating it
-  as production-ready high availability. Checkpoint backfill is checked before
-  promotion and after restart; atomic replacement of both logs and checkpoint
-  state remains pending.
+- This surface is experimental. A follower can pass local promotion checks while
+  missing a batch confirmed by the old owner and another follower. Preserving
+  the cluster's confirmed history during promotion requires additional replica
+  evidence and fencing; heartbeat candidate selection alone is insufficient.
+  Checkpoint backfill is checked before promotion and after restart; atomic
+  replacement of both logs and checkpoint state also remains pending.
 - Cross-broker replication-lag aggregation into a single cluster view is still
   pending. A broker's own follower workers and their progress are visible on the
   [admin queues page](/admin-dashboard/).

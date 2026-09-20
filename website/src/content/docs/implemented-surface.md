@@ -207,7 +207,7 @@ See also: [reconnects](/reliability/reconnects/) and
 | Conservative subscription reconciliation | Implemented | Broker, Rust client, TypeScript client, Python client, Go client, C# client |
 | Restore-client-subscriptions policy | Implemented | Broker, Rust client, TypeScript client, Python client, Go client, C# client |
 | Reconnect observability | Implemented | Admin overview, TCP metrics log, structured reconciliation logs |
-| Planned restart drain | Implemented | `POST /admin/api/drain` broadcasts a `GoingAway` push (grace deadline + message) to connected clients, surfaced by the clients as an app-observable event. In coordinated mode the node also marks itself draining: the controller hands each partition with a caught-up follower to it through the same fenced promotion as failover, the draining node receives no new placements, and the call returns with handoff progress once ownership has moved or `connection.drain_handoff_timeout_ms` (default 30s) elapses. Follower-less partitions stay put and fail over reactively as before |
+| Planned restart drain | Implemented | `POST /admin/api/drain` broadcasts a `GoingAway` push (grace deadline + message) to connected clients, surfaced by the clients as an app-observable event. In coordinated mode the node also marks itself draining: the controller selects followers using heartbeat tails and the same local promotion checks as failover (confirmed-history preservation remains pending), the draining node receives no new placements, and the call returns with handoff progress once ownership has moved or `connection.drain_handoff_timeout_ms` (default 30s) elapses. Follower-less partitions stay put and fail over reactively as before |
 | Typed subscription closure | Implemented | Rust `SubEvent::Closed` and `close_reason()`, TypeScript/Python `SubscriptionClosedError`, Go `CloseReason()` after channel closure, C# `SubscriptionClosedException` |
 | Safe automatic resubscription | Implemented | Supervised subscriptions recreate on supported owner-move or broker-advised recreate outcomes; opt-out exposes the typed close instead |
 | Durable broker restart reconciliation | Implemented | Broker-local persisted session identity and subscription metadata; `resumed_after_restart` within `connection.resume_session_restart_ttl_ms` (default 60s, 0 disables) |
@@ -664,7 +664,7 @@ See also: [clustering](/concepts/clustering/) and
 | Checkpoint recovery | Partial | Backfill dependencies gate promotion and owner activation, including after restart; interruption-safe replacement of both logs and snapshot state remains pending |
 | Conflict diagnostics | Implemented | Bounded, payload-free control history, offsets and effective record identities accompany overlap reports; checkpoint logs show source epochs and continuation offsets |
 | Replica-durable confirms | Partial | Queues require the same follower to cover the payload batch and exact enqueue frontier; epoch/session-fenced progress feeds confirmation and delivery visibility, with timeout and ISR floor |
-| Durable stream replication (Plexus) | Partial | Tier-gated: the durable tier replicates record + cursor logs to `stream_replication_factor` followers (express tiers stay owner-only), durable publishes confirm on replica durability, and a caught-up follower is promoted on owner failover. Reuses the queue follower-worker, confirm gate, and failover-candidate selection |
+| Durable stream replication (Plexus) | Partial | Tier-gated: the durable tier replicates record + cursor logs to `stream_replication_factor` followers (express tiers stay owner-only), durable publishes confirm on replica durability, and owner loss triggers follower selection and local promotion checks. Reuses the queue follower-worker, confirm gate, and failover-candidate selection |
 | `min_in_sync_replicas` | Implemented | Runtime setting, fail-fast publish refusal when healthy ISR is below floor |
 | Live repartitioning | Partial | Grow or shrink a queue's partition count in Ganglion mode (versioned routing, in-flight transition serialization, drain-and-retire on shrink); admin control + API |
 | Topology visibility | Partial | Admin API/page (with repartition + coordination-membership controls) and `fibrilctl topology`. Cross-broker lag aggregation is pending |
@@ -683,8 +683,11 @@ Conditions and limits:
   ordered transport session.
 - Failover checks assignment epochs, completed application and payload dependencies
   in queue state. Checkpoints awaiting payload backfill remain followers after
-  restart, and client admission waits for explicit promotion. Atomic checkpoint
-  replacement and broader broker-level interruption coverage remain pending.
+  restart, and client admission waits for explicit promotion. A locally complete
+  candidate can still lack a batch confirmed on another replica: heartbeat tails
+  are advisory and promotion does not yet prove the cluster-wide confirmed
+  prefix. That proof, atomic checkpoint replacement and broader broker-level
+  interruption coverage remain pending.
 - Conflict diagnostics do not enable automatic repair of divergent histories.
   Checkpoint epoch checks protect authority but do not make replacement of both
   logs and queue state atomic.

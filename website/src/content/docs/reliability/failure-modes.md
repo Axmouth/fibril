@@ -11,8 +11,8 @@ survives which failure, and what to do about it. It synthesizes the
 [reconnects](/reliability/reconnects/) pages into one incident-time
 reference.
 
-Failure semantics are version-specific. This page describes the current release;
-treat it as the contract for the version you are running, not a forward promise.
+Failure semantics are version-specific. This page describes the current main
+branch; consult the matching documentation for a deployed version.
 Single-node durability is a real, tested part of the broker. The cluster path
 (replication and failover) is experimental and needs more failure testing before
 it is production-grade high availability.
@@ -33,17 +33,17 @@ Two distinct failures matter, and they are not the same:
 | Tier | Survives process restart | Survives node loss | Notes |
 | --- | --- | --- | --- |
 | Queue, single owner (`local_durable`) | Yes (fsync per durable write) | No | The partition is unavailable while the node is down. This is the default and the only mode for a standalone broker. |
-| Queue, replicated (`replica_durable` / `majority_durable`) | Yes | Yes | A confirmed publish waited for follower durability, so a caught-up follower is promoted on owner loss. Requires Ganglion coordination and assigned followers. |
+| Queue, replicated (`replica_durable` / `majority_durable`) | Yes | Copies survive; failover preservation incomplete | Confirmation waits for the required replicas. Promotion does not yet prove that its selected follower contains every confirmed batch. Requires Ganglion coordination and assigned followers. |
 | Stream, `durable` owner-only | Yes (fsync before deliver/confirm) | No | Survives restart, not node loss. Records and cursors are on the one owner. |
-| Stream, `durable` replicated (`stream_replication_factor` >= 2) | Yes | Yes | Record and cursor logs replicate to followers; a caught-up follower is promoted on owner loss. |
+| Stream, `durable` replicated (`stream_replication_factor` >= 2) | Yes | Copies survive; failover preservation incomplete | Record and cursor logs replicate; candidate selection and promotion share the confirmed-history limitation of queues. |
 | Stream, `speculative` | Partial | No | Delivers off the staged offset and defers the producer confirm until durable, so a confirmed record is durable, but unconfirmed records in flight at a crash can be lost. |
 | Stream, `ephemeral` | Partial | No | Lowest latency, `AfterWrite` (no per-record fsync). Recent records can be lost on a crash. Intended for where freshness beats durability. |
 
 Cross-cutting guarantees that hold across a restart or a clean failover:
 
-- **No split-brain.** Ownership changes bump a fencing **epoch**. A stale former
-  owner cannot keep serving or replicating: its writes and replication carrying
-  an old epoch are rejected at the storage layer.
+- **Assignment fencing.** Ownership changes bump an **epoch**. Nodes that have
+  advanced to it reject older-epoch replication. Cluster-wide preservation of
+  confirmed history during ownership changes remains an acceptance gate.
 - **Per-partition ordering** is preserved; there is no global order across
   partitions.
 - **Leased-but-unacked work survives a crash.** Inflight (offset, deadline) pairs
@@ -75,12 +75,11 @@ Use drain so in-flight work is not dropped:
 
 Reconnect grace (on by default, `connection.reconnect_grace_ms`, 5s) keeps a
 returning client's session and inflight work intact across the brief break.
-The handoff only moves partitions with a caught-up follower, through the same
-fenced promotion as failover: a partition with no follower stays put and
-fails over reactively as before, so a single-owner `local_durable` partition
-is still briefly unavailable across its restart. A draining node receives no
-new placements, which also keeps a concurrent repartition from deadlocking
-against the drain.
+Drain uses the same heartbeat-based candidate selection and local promotion
+checks as failover. Completion reports that ownership moved; it does not yet
+prove preservation of every confirmed batch on the selected owner. A partition
+with no reporting live follower stays put until reactive failover, and a draining
+node receives no new placements.
 
 ### An owner broker dies (cluster)
 
@@ -88,7 +87,9 @@ Failover is automatic when coordination is enabled and the partition has
 followers:
 
 - The controller reassigns the partition, bumps the epoch, and promotes a
-  caught-up follower at its local durable tail.
+  selected follower at its local durable tail after local completeness checks.
+- Candidate heartbeat tails can be stale. A locally complete candidate can lack
+  data confirmed on another replica; this failover case remains unresolved.
 - Producers and consumers are redirected to the new owner by the topology the
   broker pushes; the high-level clients re-resolve and reconnect.
 - Check the [admin queues page](/admin-dashboard/) for owner and in-sync

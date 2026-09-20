@@ -28,8 +28,9 @@ The remaining work is grouped below by dependency and operational impact.
 - Make checkpoint replacement interruption-safe across the message log, event
   log, queue state and persisted snapshot. Recovery must complete or refuse a
   partial installation before the partition can serve.
-- Prevent promotion until checkpoint-referenced messages have finished
-  backfilling, including after restart.
+- Require promotion to preserve the previously confirmed history, using current
+  replica evidence and assignment fencing. Cover stale heartbeat tails and a
+  lagging, internally consistent candidate that lacks a confirmed batch.
 - Cover each installation boundary with error, cancellation and process-kill
   tests, then exercise failover during checkpoint catch-up through real brokers.
 - Define source authority, acknowledged-history preservation, bounded retries
@@ -79,6 +80,10 @@ The compatibility work follows this order:
 - Improve bulk DLQ replay, message inspection and sparse-queue diagnostics.
 - Extend the shared benchmark harness with stream workloads, portable cluster/fault
   provisioning and repeated workload matrices.
+- Assess sending immutable staged batches to followers before owner fsync, after
+  promotion can distinguish and preserve committed history. Keep local durability
+  and complete replica dependencies as confirmation requirements, with bounded
+  buffering and recovery rules for tentative suffixes.
 - Add OpenTelemetry export.
 
 ## Longer-term options
