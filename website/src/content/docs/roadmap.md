@@ -30,7 +30,8 @@ The remaining work is grouped below by dependency and operational impact.
   partial installation before the partition can serve.
 - Require promotion to preserve the previously confirmed history, using current
   replica evidence and assignment fencing. Cover stale heartbeat tails and a
-  lagging, internally consistent candidate that lacks a confirmed batch.
+  lagging, internally consistent candidate that lacks a confirmed batch. See the
+  [failover plan](/development/failover-plan/).
 - Cover each installation boundary with error, cancellation and process-kill
   tests, then exercise failover during checkpoint catch-up through real brokers.
 - Define source authority, acknowledged-history preservation, bounded retries
@@ -60,6 +61,11 @@ The compatibility work follows this order:
 
 ## Cluster operations
 
+- Add an opt-in eager failover policy through cluster runtime settings, after
+  the promotion-safety gate is complete. Use explicit peer-failure signals,
+  bounded probing and grace, with heartbeat expiry as fallback; measure recovery
+  time, false reassignments and disruption under the
+  [failover acceptance scenarios](/development/failover-plan/#acceptance-scenarios).
 - Provide one-command node enrollment with short-lived invitations, trust
   verification and configuration exchange.
 - Aggregate replication lag and in-sync status across brokers in the CLI and
