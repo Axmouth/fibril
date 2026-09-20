@@ -9128,3 +9128,130 @@ async fn client_admission_cannot_promote_a_follower_before_the_watcher() {
     assert!(broker.get_publisher(topic, part, &None).await.is_ok());
     broker.shutdown().await;
 }
+
+#[tokio::test]
+async fn durable_batch_wakes_replication_while_earlier_confirm_waits() {
+    let (broker, _dir) = open_test_broker().await;
+    let topic = "replication-wake-behind-confirm";
+    let part = Partition::new(0);
+    broker.cache_queue_assignment(
+        &PartitionAssignment::new(
+            QueueIdentity::new(topic, part, None),
+            "a",
+            vec!["b".into()],
+            1,
+        )
+        .with_durability(fibril_broker::coordination::ReplicationDurabilityPolicy::MajorityDurable),
+    );
+    let publisher = broker.get_publisher(topic, part, &None).await.unwrap();
+    let mut first = publisher
+        .publish(
+            vec![1],
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    let initial = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let d = broker
+                .engine()
+                .queue_durable_frontiers(topic, 0, None)
+                .await
+                .unwrap();
+            if d.message_next == 1 {
+                break d;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), &mut first)
+            .await
+            .is_err()
+    );
+
+    // The reader is parked beyond batch A, whose remote confirmation stays
+    // pending. Batch B must wake it on local durability, independently of A.
+    let reader_broker = broker.clone();
+    let mut reader = tokio::spawn(async move {
+        reader_broker
+            .read_owner_replication_records(
+                topic,
+                part,
+                None,
+                initial.message_next,
+                initial.event_next,
+                10,
+                10,
+                usize::MAX,
+                10_000,
+            )
+            .await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut reader)
+            .await
+            .is_err()
+    );
+    let mut second = publisher
+        .publish(
+            vec![2],
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    let records = tokio::time::timeout(Duration::from_secs(1), reader)
+        .await
+        .expect("locally durable B must wake the follower while A awaits its replica")
+        .unwrap()
+        .unwrap();
+    let OwnerReplicationRead::Batch(messages) = records.messages else {
+        panic!("message checkpoint");
+    };
+    let OwnerReplicationRead::Batch(events) = records.events else {
+        panic!("event checkpoint");
+    };
+    assert_eq!(messages.next_offset, 2);
+    assert_eq!(messages.records.len(), 1);
+    assert_eq!(messages.records[0].1.payload, vec![2]);
+    assert!(events.next_offset > initial.event_next);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), &mut first)
+            .await
+            .is_err()
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), &mut second)
+            .await
+            .is_err()
+    );
+
+    broker.record_follower_replication_progress(topic, part, None, "b", 2, events.next_offset);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), first)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), second)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        1
+    );
+    broker.shutdown().await;
+}

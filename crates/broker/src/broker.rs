@@ -2467,6 +2467,7 @@ impl<
                 let assignments = publish_assignments.clone();
                 let key = publish_key.clone();
                 let qs_committed = qs_publish.clone();
+                let batch_replication_timing = replication_timing.clone();
                 let admitted_assignment = publish_assignments.get(&publish_key).map(|a| a.clone());
                 let observer = Box::new(move |commit: stroma_core::QueuePublishCommit| {
                     let _ = batch_commit.set((commit, admitted_assignment));
@@ -2499,6 +2500,13 @@ impl<
                                 }
                             }
                         }
+                    }
+                    // Notify once per durable batch, independently of older
+                    // publications waiting for remote confirmation. Register
+                    // its dependency first so readers see the complete proof.
+                    if !qs_committed.owner_runtime_shutdown.is_cancelled() {
+                        batch_replication_timing.record_replication_wake();
+                        qs_committed.wake_with_replication();
                     }
                 });
                 if let Err(err) = engine
@@ -2543,8 +2551,6 @@ impl<
                 match rx_completion.await {
                     Ok(Ok(append)) => {
                         let offset = append.base_offset;
-                        replication_timing.record_replication_wake();
-                        qs_clone.wake_with_replication();
                         // Local durability first, then the assignment's
                         // replication policy (replica/majority acks) before
                         // the producer sees the confirm.
