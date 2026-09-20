@@ -10,6 +10,10 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Transition-bound recovery witnesses
+
+Explicit seal calls now use fresh authenticated connections with whole-call deadlines, and witness admission binds each reply to the contacted old replica and exact pending transition. Duplicate retries count once, a smaller proposed configuration cannot lower the old threshold, and contradictory evidence from one sealed replica blocks the collection. Threshold completion remains `AwaitingHistoryValidation`; automatic dispatch, compatible-history proof and activation are still pending.
+
 ### Replication authorization boundary
 
 Internal replication handlers accepted ordinary authenticated clients, and unauthenticated clients when authentication was disabled; a real TCP regression reproduced a read of retained payloads. All replication and recovery controls now require the node principal on the physical connection before decoding or changing state. Tests cover refused reads/writes, every control opcode, resumed sessions, authenticated catch-up/checkpoints, TLS, streaming confirms and reauthentication after transport loss.

@@ -7075,6 +7075,52 @@ async fn recovery_seal_requires_node_auth_and_exact_committed_authority_over_tcp
         drop(conn);
         task.await.unwrap().unwrap();
     }
+    // The explicit collector transport reauthenticates on each retry and
+    // attributes evidence to the contacted old replica. Retries count once.
+    let mut witnesses = fibril_coordination_ganglion::recovery_witnesses::RecoveryWitnessSet::new(
+        &provider.consensus_node().committed_snapshot(),
+        &pending,
+    )
+    .unwrap();
+    for _ in 0..2 {
+        let (addr, task, returned, _) = start_protocol_listener_for_broker(
+            ConnectionSettings::new(Some(60)),
+            broker.clone(),
+            dir,
+            Some(node_auth()),
+        )
+        .await;
+        dir = returned;
+        let config =
+            ProtocolOwnerPeerResolverConfig::new(HashMap::from([("b".into(), addr.to_string())]))
+                .with_auth("@node", "secret");
+        let evidence = fibril_protocol::v1::replication::request_recovery_seal(
+            &config,
+            "b",
+            witnesses.command(),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+        witnesses
+            .record(
+                &provider.consensus_node().committed_snapshot(),
+                "b",
+                evidence,
+            )
+            .unwrap();
+        task.await.unwrap().unwrap();
+    }
+    assert_eq!(
+        witnesses
+            .progress(&provider.consensus_node().committed_snapshot())
+            .unwrap(),
+        fibril_coordination_ganglion::recovery_witnesses::SealCollectionProgress::AwaitingSeals {
+            received: 1,
+            required: 2,
+            missing: vec!["a".into(), "c".into()],
+        }
+    );
     assert_eq!(provider.pending_recoveries().unwrap(), vec![pending]);
     broker.shutdown().await;
     provider.consensus_node().shutdown().await.unwrap();

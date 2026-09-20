@@ -1824,3 +1824,175 @@ mod stream_transport_tests {
         assert_eq!(progress[2].credit_add_bytes, 100);
     }
 }
+
+/// Explicit recovery control call on a fresh authenticated connection. The
+/// target ID must come from the persisted old replica set; the receiver verifies
+/// the transition through consensus. No automatic controller calls this yet.
+///
+/// The deadline covers connection setup and the reply. Timeout/cancellation can
+/// leave an admitted seal running remotely; retry the identical command.
+pub async fn request_recovery_seal(
+    config: &ProtocolOwnerPeerResolverConfig,
+    replica_id: &str,
+    command: &fibril_broker::recovery::RecoverySealCommand,
+    deadline: std::time::Duration,
+) -> Result<fibril_broker::recovery::BrokerSealedReplica, BrokerError> {
+    let addr = config.nodes.get(replica_id).ok_or_else(|| {
+        BrokerError::InvalidArgument("recovery replica has no configured address".into())
+    })?;
+    let operation = async {
+        let mut conn = open_protocol_owner_conn(
+            addr.clone(),
+            config.auth.as_ref(),
+            config.tls.as_ref(),
+            &config.client_name,
+            &config.client_version,
+            config.owner_connect_timeout_ms,
+        )
+        .await?;
+        let request = crate::v1::RecoverySeal {
+            topic: command.topic.clone(),
+            partition: command.partition,
+            group: command.group.clone(),
+            stream: command.stream,
+            transition: command.transition,
+            fence_epoch: command.fence_epoch,
+        };
+        conn.send(try_encode(Op::RecoverySeal, 3, &request).map_err(protocol_error)?)
+            .await
+            .map_err(|err| BrokerError::Unknown(format!("recovery request send failed: {err}")))?;
+        let reply: crate::v1::RecoverySealOk = recv_response(&mut conn, 3, Op::RecoverySealOk)
+            .await
+            .map_err(|err| BrokerError::Unknown(format!("recovery seal failed: {err}")))?;
+        validate_recovery_seal_reply(replica_id, command, reply)
+    };
+    tokio::time::timeout(deadline, operation)
+        .await
+        .map_err(|_| {
+            BrokerError::Unknown(
+                "recovery seal deadline elapsed; retry the identical request".into(),
+            )
+        })?
+}
+
+fn validate_recovery_seal_reply(
+    replica_id: &str,
+    command: &fibril_broker::recovery::RecoverySealCommand,
+    reply: crate::v1::RecoverySealOk,
+) -> Result<fibril_broker::recovery::BrokerSealedReplica, BrokerError> {
+    use fibril_broker::recovery::{
+        BrokerSealedReplica, RecoverySealRequest, RetainedHistoryIdentity, SealedReplicaFrontiers,
+    };
+    if reply.replica_id != replica_id
+        || reply.transition != command.transition
+        || reply.fence_epoch != command.fence_epoch
+        || reply.history_version != 1
+        || reply.message_head > reply.message_next
+        || reply.event_head > reply.event_next
+    {
+        return Err(BrokerError::InvalidArgument(
+            "recovery reply identity, transition or bounds mismatch".into(),
+        ));
+    }
+    Ok(BrokerSealedReplica {
+        node_id: reply.replica_id,
+        seal: SealedReplicaFrontiers {
+            request: RecoverySealRequest {
+                transition: reply.transition,
+                fence_epoch: reply.fence_epoch,
+            },
+            history: RetainedHistoryIdentity {
+                version: reply.history_version,
+                id: reply.history_id,
+                message_digest: reply.message_digest,
+                event_digest: reply.event_digest,
+                snapshot_digest: reply.snapshot_digest,
+                message_head: reply.message_head,
+                message_next: reply.message_next,
+                event_head: reply.event_head,
+                event_next: reply.event_next,
+            },
+            message_head: reply.message_head,
+            message_next: reply.message_next,
+            event_head: reply.event_head,
+            event_next: reply.event_next,
+        },
+    })
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use crate::v1::RecoverySealOk;
+    use fibril_broker::recovery::RecoverySealCommand;
+
+    fn command() -> RecoverySealCommand {
+        RecoverySealCommand {
+            topic: "q".into(),
+            partition: Partition::new(0),
+            group: None,
+            stream: false,
+            transition: [1; 32],
+            fence_epoch: 8,
+        }
+    }
+
+    #[test]
+    fn recovery_reply_must_match_target_transition_version_and_bounds() {
+        let reply = RecoverySealOk {
+            replica_id: "b".into(),
+            transition: [1; 32],
+            fence_epoch: 8,
+            history_version: 1,
+            history_id: [2; 32],
+            message_digest: [3; 32],
+            event_digest: [4; 32],
+            snapshot_digest: None,
+            message_head: 0,
+            message_next: 0,
+            event_head: 0,
+            event_next: 0,
+        };
+        assert!(validate_recovery_seal_reply("b", &command(), reply.clone()).is_ok());
+        for mutation in 0..6 {
+            let mut bad = reply.clone();
+            match mutation {
+                0 => bad.replica_id = "c".into(),
+                1 => bad.transition[0] ^= 1,
+                2 => bad.fence_epoch += 1,
+                3 => bad.history_version += 1,
+                4 => bad.message_head = 1,
+                _ => bad.event_head = 1,
+            }
+            assert!(validate_recovery_seal_reply("b", &command(), bad).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_deadline_bounds_a_peer_that_accepts_but_never_replies() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let config =
+            ProtocolOwnerPeerResolverConfig::new(HashMap::from([("b".into(), addr.to_string())]))
+                .with_auth("@node", "secret");
+        let (release, hold) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            let _ = hold.await;
+        });
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            request_recovery_seal(
+                &config,
+                "b",
+                &command(),
+                std::time::Duration::from_millis(100),
+            ),
+        )
+        .await
+        .expect("whole-call deadline must bound handshake too");
+        assert!(result.unwrap_err().to_string().contains("deadline elapsed"));
+        let _ = release.send(());
+        server.await.unwrap();
+    }
+}

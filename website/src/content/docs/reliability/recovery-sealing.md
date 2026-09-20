@@ -36,6 +36,32 @@ The codecs use `RSL1` and `RSO1` version markers and reject trailing or truncate
 data. These internal messages are experimental and require matching broker
 revisions. Ordinary client frames are unchanged.
 
+## Explicit witness collection
+
+The explicit transport opens a fresh authenticated connection to the selected
+replica, checks its returned identity against that target, and enforces a deadline
+covering connection setup and the reply. Timeout or cancellation can leave an
+admitted remote seal running; the caller can retry the same command.
+
+A transition-bound collection admits at most one report per previous replica.
+Identical retries count once. Stale transitions, wrong identities, unsupported
+history versions and inconsistent bounds are refused. The previous replica set
+and its witness threshold remain fixed even when the proposed configuration is
+smaller. Contradictory replies from the same sealed replica block the collection
+and produce a payload-free error log.
+
+Reaching the old seal threshold yields `AwaitingHistoryValidation`. Different
+fingerprints remain available for comparison; equal fingerprints also require
+dependency and authority checks. The collection exposes no activation operation.
+Reports are currently held in memory and must be recollected after restart from
+the durable seals. Ordinary metadata changes preserve a matching transition;
+replacement or removal of that transition invalidates the collection when checked
+against the updated snapshot. An in-memory snapshot check alone supplies no fresh
+consensus authority for activation.
+
+These are explicit library operations. Automatic fan-out, retry scheduling,
+source comparison and recovery transfer are not enabled.
+
 ## Retained content identity
 
 After draining accepted work and fencing both logs, storage computes a versioned

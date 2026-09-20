@@ -26,6 +26,7 @@ use ganglion_openraft::{
 use tokio::sync::watch;
 
 pub mod promotion;
+pub mod recovery_witnesses;
 
 /// Namespace tag used for fibril queues inside ganglion resource identities.
 const QUEUE_NAMESPACE: &str = "fibril/queue";

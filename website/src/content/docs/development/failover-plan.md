@@ -40,11 +40,12 @@ explicit requests to committed transitions and persists exact retained-content
 identity. Recoverable local checkpoint installation is also available. Automatic
 recovery requires the following pieces:
 
-1. Dispatch seals with bounded backoff and restartable, coalesced progress for
-   each persisted transition. Preserve the old replica set and witness threshold.
-2. Collect fresh, distinct old-replica reports and establish compatible history,
-   including compacted prefixes and payload/event/checkpoint dependencies.
-   Exact content fingerprints alone cannot establish ancestry or authority.
+1. Build automatic dispatch with bounded backoff and restartable, coalesced
+   progress on the explicit seal transport and witness admission primitives.
+   Preserve the old replica set and witness threshold.
+2. Establish compatible history from the collected reports, including compacted
+   prefixes and payload/event/checkpoint dependencies. Exact content fingerprints
+   and the completed seal count alone cannot establish ancestry or authority.
 3. Transfer the selected history and durably install it on the new write quorum,
    including the candidate, before committing activation. Resume interrupted
    phases and isolate the old owner through repeated failovers.
