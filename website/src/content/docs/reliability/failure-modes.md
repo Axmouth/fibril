@@ -33,9 +33,9 @@ Two distinct failures matter, and they are not the same:
 | Tier | Survives process restart | Survives node loss | Notes |
 | --- | --- | --- | --- |
 | Queue, single owner (`local_durable`) | Yes (fsync per durable write) | No | The partition is unavailable while the node is down. This is the default and the only mode for a standalone broker. |
-| Queue, replicated (`replica_durable` / `majority_durable`) | Yes | Copies survive; failover preservation incomplete | Confirmation waits for the required replicas. Promotion does not yet prove that its selected follower contains every confirmed batch. Requires Ganglion coordination and assigned followers. |
+| Queue, replicated (`replica_durable` / `majority_durable`) | Yes | Copies survive; automatic failover paused | Confirmation waits for the required replicas. The controller retains the old assignment while a pending recovery request awaits confirmed-history proof. Requires Ganglion coordination and assigned followers. |
 | Stream, `durable` owner-only | Yes (fsync before deliver/confirm) | No | Survives restart, not node loss. Records and cursors are on the one owner. |
-| Stream, `durable` replicated (`stream_replication_factor` >= 2) | Yes | Copies survive; failover preservation incomplete | Record and cursor logs replicate; candidate selection and promotion share the confirmed-history limitation of queues. |
+| Stream, `durable` replicated (`stream_replication_factor` >= 2) | Yes | Copies survive; automatic failover paused | Record and cursor logs replicate; replicated ownership changes share the pending-recovery barrier of queues. |
 | Stream, `speculative` | Partial | No | Delivers off the staged offset and defers the producer confirm until durable, so a confirmed record is durable, but unconfirmed records in flight at a crash can be lost. |
 | Stream, `ephemeral` | Partial | No | Lowest latency, `AfterWrite` (no per-record fsync). Recent records can be lost on a crash. Intended for where freshness beats durability. |
 
@@ -75,23 +75,25 @@ Use drain so in-flight work is not dropped:
 
 Reconnect grace (on by default, `connection.reconnect_grace_ms`, 5s) keeps a
 returning client's session and inflight work intact across the brief break.
-Drain uses the same heartbeat-based candidate selection and local promotion
-checks as failover. Completion reports that ownership moved; it does not yet
-prove preservation of every confirmed batch on the selected owner. A partition
-with no reporting live follower stays put until reactive failover, and a draining
-node receives no new placements.
+Drain uses the same recovery barrier as failover for replicated assignments.
+Those assignments remain on the old owner while recovery is pending, so drain
+can time out with `handoff_complete = false`. Preserve that owner's data and
+inspect the pending recovery before stopping it. A draining node receives no new
+placements.
 
 ### An owner broker dies (cluster)
 
-Failover is automatic when coordination is enabled and the partition has
-followers:
+For replicated confirmation policies, automatic ownership replacement currently
+waits at the recovery barrier:
 
-- The controller reassigns the partition, bumps the epoch, and promotes a
-  selected follower at its local durable tail after local completeness checks.
-- Candidate heartbeat tails can be stale. A locally complete candidate can lack
-  data confirmed on another replica; this failover case remains unresolved.
-- Producers and consumers are redirected to the new owner by the topology the
-  broker pushes; the high-level clients re-resolve and reconnect.
+- The controller persists the previous and proposed assignments, preserving the
+  old replica set and replication source. The proposed owner cannot serve through
+  that unapproved assignment.
+- The partition remains unavailable while its owner is unavailable; fresh
+  sealing, history recovery and activation are still implementation work.
+- Inspect `consensus.controller.pending_recoveries` in the admin topology
+  response and retain every surviving replica's data. Returning the original
+  owner can restore service under the unchanged assignment.
 - Check the [admin queues page](/admin-dashboard/) for owner and in-sync
   replica status.
 

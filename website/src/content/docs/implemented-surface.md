@@ -207,7 +207,7 @@ See also: [reconnects](/reliability/reconnects/) and
 | Conservative subscription reconciliation | Implemented | Broker, Rust client, TypeScript client, Python client, Go client, C# client |
 | Restore-client-subscriptions policy | Implemented | Broker, Rust client, TypeScript client, Python client, Go client, C# client |
 | Reconnect observability | Implemented | Admin overview, TCP metrics log, structured reconciliation logs |
-| Planned restart drain | Implemented | `POST /admin/api/drain` broadcasts a `GoingAway` push (grace deadline + message) to connected clients, surfaced by the clients as an app-observable event. In coordinated mode the node also marks itself draining: the controller selects followers using heartbeat tails and the same local promotion checks as failover (confirmed-history preservation remains pending), the draining node receives no new placements, and the call returns with handoff progress once ownership has moved or `connection.drain_handoff_timeout_ms` (default 30s) elapses. Follower-less partitions stay put and fail over reactively as before |
+| Planned restart drain | Implemented | `POST /admin/api/drain` broadcasts a `GoingAway` push (grace deadline + message) to connected clients, surfaced by the clients as an app-observable event. In coordinated mode the node also marks itself draining: the controller holds replicated handoffs as pending recovery requests until confirmed-history proof is available, the draining node receives no new placements, and the call returns with handoff progress once ownership has moved or `connection.drain_handoff_timeout_ms` (default 30s) elapses. Follower-less partitions stay put and fail over reactively as before |
 | Typed subscription closure | Implemented | Rust `SubEvent::Closed` and `close_reason()`, TypeScript/Python `SubscriptionClosedError`, Go `CloseReason()` after channel closure, C# `SubscriptionClosedException` |
 | Safe automatic resubscription | Implemented | Supervised subscriptions recreate on supported owner-move or broker-advised recreate outcomes; opt-out exposes the typed close instead |
 | Durable broker restart reconciliation | Implemented | Broker-local persisted session identity and subscription metadata; `resumed_after_restart` within `connection.resume_session_restart_ttl_ms` (default 60s, 0 disables) |
@@ -656,7 +656,7 @@ See also: [clustering](/concepts/clustering/) and
 | Queue catalogue and placement controller | Partial | Declared queues register partitions, controller assigns owners and followers, placement is stable and anti-churn |
 | Partition ownership gate | Partial | Broker serves only assigned owners in Ganglion mode. Standalone mode owns all queues |
 | Follower pull replication | Partial | Follower workers pull owner records over protocol, apply durably, install checkpoints when needed |
-| Automatic failover | Partial | Dead owner can trigger epoch-bumped reassignment, follower promotion at local tail, stale owner demotion |
+| Automatic failover | Partial | Changes involving replicated confirmation persist a pending recovery request and retain the previous assignment/source; automatic recovery and activation await the confirmed-history protocol. Owner-only policy retains its existing failover behavior |
 | Cold-restart orphan reconciliation | Partial | A partition reassigned away while a node was down is retained as inert on-disk cold storage after restart (ownership-gated serving means it is never served or materialized) and surfaced at startup. Reclaim of that disk is still manual |
 | Epoch fencing | Implemented | Role transitions advance log epochs before serving or applying replicated batches |
 | Follower source refresh | Implemented | An owner or epoch change drains and retargets a remaining follower's worker while retaining its replication cursors |
@@ -688,6 +688,11 @@ Conditions and limits:
   are advisory and promotion does not yet prove the cluster-wide confirmed
   prefix. That proof, atomic checkpoint replacement and broader broker-level
   interruption coverage remain pending.
+- The placement controller holds ownership, follower-set and durability-policy
+  changes involving replicated confirmation, including replicated durable
+  streams. Pending recovery records survive metadata restart and are exposed in
+  controller status. This prevents automatic promotion of an unproven candidate;
+  it currently leaves replicated failover unavailable pending recovery support.
 - Conflict diagnostics do not enable automatic repair of divergent histories.
   Checkpoint epoch checks protect authority but do not make replacement of both
   logs and queue state atomic.

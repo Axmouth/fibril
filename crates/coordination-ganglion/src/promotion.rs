@@ -1,0 +1,239 @@
+//! Persisted recovery requests. Placement hints cannot activate a new history.
+//!
+//! The first stage deliberately retains the active assignment until the sealing,
+//! history transfer and activation protocol can supply a recovery certificate.
+//! This prevents ordinary follower refresh from overwriting surviving evidence.
+
+use ganglion_core::{
+    CoordinationSnapshot, PartitionAssignment, ReplicationDurabilityPolicy, ResourceIdentity,
+};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+
+pub const PENDING_RECOVERY_PREFIX: &str = "fibril/pending-recovery/";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingRecovery {
+    pub version: u32,
+    pub requested_generation: u64,
+    pub previous: PartitionAssignment,
+    pub proposed: PartitionAssignment,
+    /// Effective write counts, including the stream policy omitted by the
+    /// generic assignment projection. Both counts include their owner.
+    pub previous_write_nodes: usize,
+    pub proposed_write_nodes: usize,
+    /// Generic sufficient read/seal quorum: R + W > N for the old configuration.
+    /// The count alone does not establish history identity.
+    pub required_old_witnesses: usize,
+}
+
+pub fn pending_recovery_key(resource: &ResourceIdentity) -> String {
+    // A serialized structured identity avoids topic/group separator collisions.
+    format!(
+        "{PENDING_RECOVERY_PREFIX}{}",
+        serde_json::to_string(resource).expect("resource identity serializes")
+    )
+}
+
+fn write_requirement(assignment: &PartitionAssignment) -> Result<usize, String> {
+    let mut nodes = BTreeSet::from([assignment.owner.as_str()]);
+    if assignment.followers.iter().any(|id| !nodes.insert(id)) {
+        return Err("replica configuration contains duplicate identities".into());
+    }
+    // Stream assignments use the local-policy field in Ganglion's projection;
+    // their broker confirmation rule requires every assigned durable copy.
+    let policy = if assignment.resource.namespace == super::STREAM_NAMESPACE
+        && !assignment.followers.is_empty()
+    {
+        ReplicationDurabilityPolicy::ReplicaDurable { nodes: nodes.len() }
+    } else {
+        assignment.durability
+    };
+    policy
+        .resolve(nodes.len())
+        .map(|r| r.nodes)
+        .map_err(|e| format!("invalid replication policy: {e:?}"))
+}
+
+fn same_configuration(a: &PartitionAssignment, b: &PartitionAssignment) -> bool {
+    a.owner == b.owner
+        && a.durability == b.durability
+        && a.followers.iter().collect::<BTreeSet<_>>()
+            == b.followers.iter().collect::<BTreeSet<_>>()
+}
+
+fn recovery_witness_requirement(assignment: &PartitionAssignment) -> Result<usize, String> {
+    Ok(assignment.replica_set_size() - write_requirement(assignment)? + 1)
+}
+
+/// Hold changes affecting a replicated confirmation contract and persist the
+/// original configuration beside the proposed replacement in the same CAS.
+/// Existing requests are immutable across controller retries and restarts.
+pub(crate) fn retain_unproven_assignments(
+    committed: &CoordinationSnapshot,
+    desired: &mut CoordinationSnapshot,
+) -> Result<usize, String> {
+    let mut held = 0;
+    for (resource, proposed) in &mut desired.assignments {
+        let key = pending_recovery_key(resource);
+        let Some(previous) = committed.assignments.get(resource) else {
+            if committed.attributes.contains_key(&key) {
+                return Err(
+                    "pending recovery lost its previous assignment; explicit recovery required"
+                        .into(),
+                );
+            }
+            continue;
+        };
+        if let Some(raw) = committed.attributes.get(&key) {
+            let pending: PendingRecovery =
+                serde_json::from_str(raw).map_err(|e| format!("invalid pending recovery: {e}"))?;
+            if pending.version != 1
+                || pending.previous != *previous
+                || pending.proposed.resource != *resource
+            {
+                return Err("pending recovery does not match the active assignment".into());
+            }
+            *proposed = previous.clone();
+            held += 1;
+            continue;
+        }
+        let old_writes = write_requirement(previous)?;
+        let new_writes = write_requirement(proposed)?;
+        if same_configuration(previous, proposed) || old_writes == 1 && new_writes == 1 {
+            continue;
+        }
+        let mut replacement = proposed.clone();
+        replacement.epoch = previous
+            .epoch
+            .checked_add(1)
+            .ok_or("assignment epoch exhausted")?;
+        let pending = PendingRecovery {
+            version: 1,
+            requested_generation: desired.generation,
+            previous: previous.clone(),
+            proposed: replacement,
+            previous_write_nodes: old_writes,
+            proposed_write_nodes: new_writes,
+            required_old_witnesses: recovery_witness_requirement(previous)?,
+        };
+        desired.attributes.insert(
+            key,
+            serde_json::to_string(&pending).map_err(|e| e.to_string())?,
+        );
+        *proposed = previous.clone();
+        held += 1;
+    }
+    Ok(held)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assignment(owner: &str, followers: &[&str]) -> PartitionAssignment {
+        let mut a = PartitionAssignment::new(
+            ResourceIdentity::new(super::super::QUEUE_NAMESPACE, "q", 0, None),
+            owner,
+            followers.iter().map(|x| x.to_string()).collect(),
+            3,
+        );
+        a.durability = ReplicationDurabilityPolicy::MajorityDurable;
+        a
+    }
+    fn snapshot(a: PartitionAssignment) -> CoordinationSnapshot {
+        let mut s = CoordinationSnapshot::default();
+        s.assignments.insert(a.resource.clone(), a);
+        s
+    }
+    #[test]
+    fn pending_recovery_retains_old_membership_and_survives_serialization() {
+        let old = snapshot(assignment("a", &["b", "c"]));
+        let mut desired = snapshot(assignment("c", &["b"]));
+        desired.generation = 7;
+        assert_eq!(retain_unproven_assignments(&old, &mut desired).unwrap(), 1);
+        assert_eq!(desired.assignments, old.assignments);
+        let restored: CoordinationSnapshot =
+            serde_json::from_str(&serde_json::to_string(&desired).unwrap()).unwrap();
+        let request: PendingRecovery =
+            serde_json::from_str(restored.attributes.values().next().unwrap()).unwrap();
+        assert_eq!(request.required_old_witnesses, 2);
+        assert_eq!(request.proposed.owner, "c");
+        assert_eq!(request.proposed.epoch, 4);
+        assert_eq!(request.previous.followers, vec!["b", "c"]);
+        let mut retry = restored.clone();
+        retry.assignments = snapshot(assignment("b", &["c"])).assignments;
+        retain_unproven_assignments(&restored, &mut retry).unwrap();
+        assert_eq!(retry, restored);
+    }
+    #[test]
+    fn follower_only_and_policy_changes_require_recovery() {
+        let old = snapshot(assignment("a", &["b", "c"]));
+        for mut changed in [assignment("a", &["b", "d"]), assignment("a", &["b", "c"])] {
+            if changed.followers[1] == "c" {
+                changed.durability = ReplicationDurabilityPolicy::LocalDurable;
+            }
+            let mut desired = snapshot(changed);
+            assert_eq!(retain_unproven_assignments(&old, &mut desired).unwrap(), 1);
+            assert_eq!(desired.assignments, old.assignments);
+        }
+        let mut reordered = snapshot(assignment("a", &["c", "b"]));
+        assert_eq!(
+            retain_unproven_assignments(&old, &mut reordered).unwrap(),
+            0
+        );
+    }
+    #[test]
+    fn malformed_pending_request_never_unlocks_assignment() {
+        let mut old = snapshot(assignment("a", &["b", "c"]));
+        let key = pending_recovery_key(old.assignments.keys().next().unwrap());
+        old.attributes.insert(key, "{}".into());
+        assert!(retain_unproven_assignments(&old, &mut snapshot(assignment("c", &["b"]))).is_err());
+    }
+
+    #[test]
+    fn duplicate_replica_ids_cannot_shrink_the_recovery_requirement() {
+        let duplicate = assignment("a", &["b", "b"]);
+        assert!(recovery_witness_requirement(&duplicate).is_err());
+        let owner_repeated = assignment("a", &["a", "b"]);
+        assert!(recovery_witness_requirement(&owner_repeated).is_err());
+    }
+    #[test]
+    fn stream_replica_changes_are_guarded_despite_projection_policy() {
+        let mut a = assignment("a", &["b", "c"]);
+        a.resource.namespace = super::super::STREAM_NAMESPACE.into();
+        a.durability = ReplicationDurabilityPolicy::LocalDurable;
+        let old = snapshot(a.clone());
+        a.owner = "b".into();
+        a.followers = vec!["c".into()];
+        let mut desired = snapshot(a);
+        assert_eq!(retain_unproven_assignments(&old, &mut desired).unwrap(), 1);
+        assert_eq!(desired.assignments, old.assignments);
+        let request: PendingRecovery =
+            serde_json::from_str(desired.attributes.values().next().unwrap()).unwrap();
+        assert_eq!(request.previous_write_nodes, 3);
+        assert_eq!(request.proposed_write_nodes, 2);
+        assert_eq!(request.required_old_witnesses, 1);
+    }
+    #[test]
+    fn recovery_threshold_intersects_every_possible_write_quorum() {
+        for n in 1usize..=7 {
+            for w in 1usize..=n {
+                let mut config = assignment("owner", &[]);
+                config.followers = (1..n).map(|id| format!("follower-{id}")).collect();
+                config.durability = ReplicationDurabilityPolicy::ReplicaDurable { nodes: w };
+                let r = recovery_witness_requirement(&config).unwrap();
+                for writers in 0u32..1 << n {
+                    if writers.count_ones() as usize != w {
+                        continue;
+                    }
+                    for readers in 0u32..1 << n {
+                        if readers.count_ones() as usize == r {
+                            assert_ne!(writers & readers, 0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

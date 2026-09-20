@@ -25,6 +25,8 @@ use ganglion_openraft::{
 };
 use tokio::sync::watch;
 
+pub mod promotion;
+
 /// Namespace tag used for fibril queues inside ganglion resource identities.
 const QUEUE_NAMESPACE: &str = "fibril/queue";
 
@@ -908,6 +910,8 @@ pub struct ControllerStatus {
     pub active: bool,
     pub last_plan_generation: Option<u64>,
     pub last_error: Option<String>,
+    /// Assignment changes held until confirmed-history recovery can complete.
+    pub pending_recoveries: Vec<promotion::PendingRecovery>,
 }
 
 /// Controller-iteration failure surface.
@@ -2335,6 +2339,10 @@ impl GanglionCoordination {
                             status.active = true;
                             status.last_plan_generation = Some(snapshot.generation);
                             status.last_error = None;
+                            match provider.pending_recoveries() {
+                                Ok(requests) => status.pending_recoveries = requests,
+                                Err(error) => status.last_error = Some(error.to_string()),
+                            }
                         }
                         Ok(None) => status.active = false,
                         Err(error) => {
@@ -2842,9 +2850,17 @@ impl GanglionCoordination {
             desired.nodes = committed.nodes.clone();
             ganglion_core::stamp_assignment_epochs(&committed, &mut desired);
 
+            let held = promotion::retain_unproven_assignments(&committed, &mut desired)
+                .map_err(|error| ControlError::Consensus(OpenraftAdapterError::Storage(error)))?;
+            if held > 0 && desired.attributes != committed.attributes {
+                tracing::warn!(held, "replica assignment changes await confirmed-history recovery; previous sources retained");
+            }
+
             // Anti-churn: when the plan changes nothing, do not write at all.
             // Keeps idle controller ticks off the raft log entirely.
-            if desired.assignments == committed.assignments {
+            if desired.assignments == committed.assignments
+                && desired.attributes == committed.attributes
+            {
                 return Ok(Some(to_fibril_snapshot(&committed)));
             }
 
@@ -2865,6 +2881,25 @@ impl GanglionCoordination {
     /// Access the underlying raft node (membership changes, waits, shutdown).
     pub fn consensus_node(&self) -> &RaftMetadataNode {
         &self.node
+    }
+
+    /// Persisted blocked transitions, including the old replica configuration.
+    /// Reading these requests does not authorize promotion or data replacement.
+    pub fn pending_recoveries(
+        &self,
+    ) -> Result<Vec<promotion::PendingRecovery>, OpenraftAdapterError> {
+        self.node.read_committed(|snapshot| {
+            snapshot
+                .attributes
+                .iter()
+                .filter(|(key, _)| key.starts_with(promotion::PENDING_RECOVERY_PREFIX))
+                .map(|(_, raw)| {
+                    serde_json::from_str(raw).map_err(|e| {
+                        OpenraftAdapterError::Storage(format!("decode pending recovery: {e}"))
+                    })
+                })
+                .collect()
+        })
     }
 }
 
@@ -4548,6 +4583,175 @@ mod tests {
             .shutdown()
             .await
             .expect("shutdown");
+    }
+
+    /// Stale labels cannot authorize a majority-durable history replacement.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn majority_failover_preserves_old_assignment_until_recovery_proof() {
+        use fibril_broker::coordination::DeterministicPartitionPlacement;
+        let router = InProcessRouter::new();
+        let directory = std::env::temp_dir().join(format!(
+            "fibril-promotion-controller-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let raft =
+            RaftMetadataNode::start_durable(1, default_raft_config().unwrap(), &router, &directory)
+                .await
+                .unwrap();
+        raft.initialize(BTreeMap::from([(
+            1,
+            ganglion_openraft::openraft::BasicNode::new("n1"),
+        )]))
+        .await
+        .unwrap();
+        raft.wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .unwrap();
+        let provider = std::sync::Arc::new(GanglionCoordination::new("c-lagging", raft));
+        let queue = QueueIdentity::new("confirmed-history", Partition::new(0), None);
+        let info = |id: &str| NodeInfo {
+            node_id: id.into(),
+            broker_addr: "127.0.0.1:9000".into(),
+            admin_addr: None,
+        };
+        for (id, reported_tail) in [("a-owner", 9), ("b-durable", 0), ("c-lagging", 1)] {
+            provider
+                .register_self_with_labels(
+                    &info(id),
+                    BTreeMap::from([(
+                        applied_tail_label(&queue),
+                        format!("{reported_tail}:{reported_tail}"),
+                    )]),
+                )
+                .await
+                .unwrap();
+        }
+        provider.register_queue(&queue).await.unwrap();
+        let original = provider
+            .control_iteration(
+                &DeterministicPartitionPlacement,
+                &provider.registered_queues(),
+                &DeterministicStreamPlacement,
+                &provider.registered_streams(),
+                2,
+                2,
+                ReplicationDurabilityPolicy::MajorityDurable,
+                &provider.live_nodes(Duration::from_secs(30)),
+                8,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let before = original
+            .assignment_for(&queue.topic, queue.partition, None)
+            .unwrap()
+            .clone();
+        assert_eq!(before.owner, "a-owner");
+        // B's label predates its durable copy; C advertises the larger label.
+        // Neither label is an authoritative recovery witness.
+        let survivors = HashMap::from([
+            ("b-durable".into(), info("b-durable")),
+            ("c-lagging".into(), info("c-lagging")),
+        ]);
+        let after = provider
+            .control_iteration(
+                &DeterministicPartitionPlacement,
+                &provider.registered_queues(),
+                &DeterministicStreamPlacement,
+                &provider.registered_streams(),
+                2,
+                2,
+                ReplicationDurabilityPolicy::MajorityDurable,
+                &survivors,
+                8,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.assignment_for(&queue.topic, queue.partition, None),
+            Some(&before),
+            "an unproven candidate must not become owner or replication source"
+        );
+        let pending = provider.pending_recoveries().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].previous.owner, "a-owner");
+        assert_eq!(pending[0].proposed.owner, "c-lagging");
+        assert_eq!(pending[0].required_old_witnesses, 2);
+        // A cold candidate must also remain unservable: it has no local role
+        // history to make a follower-only promotion check reject admission.
+        use fibril_broker::{
+            broker::{Broker, BrokerConfig, BrokerError},
+            queue_engine::{KeratinConfig, SnapshotConfig, StromaEngine, StromaKeratinConfig},
+        };
+        let engine = StromaEngine::open(
+            directory.join("candidate"),
+            StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+            SnapshotConfig::default(),
+        )
+        .await
+        .unwrap();
+        let candidate =
+            Broker::new_with_ownership(engine, BrokerConfig::default(), None, provider.clone());
+        assert!(
+            matches!(
+                candidate
+                    .get_publisher(&queue.topic, queue.partition, &None)
+                    .await,
+                Err(BrokerError::NotOwner { .. })
+            ),
+            "a pending cold candidate must not create a new owner history"
+        );
+        candidate.shutdown().await;
+        drop(candidate);
+        let stored_generation = provider.consensus_node().committed_snapshot().generation;
+        provider.consensus_node().shutdown().await.unwrap();
+        drop(provider);
+        let restarted = RaftMetadataNode::start_durable(
+            1,
+            default_raft_config().unwrap(),
+            &InProcessRouter::new(),
+            &directory,
+        )
+        .await
+        .unwrap();
+        restarted
+            .wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .unwrap();
+        let recovered = GanglionCoordination::new("a-owner", restarted);
+        assert_eq!(recovered.pending_recoveries().unwrap(), pending);
+        let retry = recovered
+            .control_iteration(
+                &DeterministicPartitionPlacement,
+                &recovered.registered_queues(),
+                &DeterministicStreamPlacement,
+                &recovered.registered_streams(),
+                2,
+                2,
+                ReplicationDurabilityPolicy::MajorityDurable,
+                &survivors,
+                8,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            retry.assignment_for(&queue.topic, queue.partition, None),
+            Some(&before)
+        );
+        assert_eq!(
+            recovered.consensus_node().committed_snapshot().generation,
+            stored_generation,
+            "a pending transition must not write a fresh proposal every controller tick"
+        );
+        recovered.consensus_node().shutdown().await.unwrap();
+        drop(recovered);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     /// Drain evacuation: a live draining owner hands its partition to the

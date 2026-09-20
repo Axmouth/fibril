@@ -4,8 +4,11 @@ description: Planned promotion evidence, eager failure detection and acceptance 
 ---
 
 This plan covers preservation of confirmed history during ownership changes and
-an optional faster failure detector. Both remain implementation work. Current
-behavior and limitations are in [replication](/reliability/replication/).
+an optional faster failure detector. The controller now persists pending recovery
+requests and retains the previous assignment for changes involving replicated
+confirmation. Sealing, evidence collection, recovery and activation remain
+implementation work; replicated failover currently pauses at this barrier.
+Current behavior and limitations are in [replication](/reliability/replication/).
 
 ## Promotion safety
 
@@ -27,6 +30,14 @@ and membership changes. Initial implementation should establish the proof for
 Owner-only durability cannot guarantee recovery from another node. Transition
 records and history identity require a concrete storage/protocol design before
 this handshake can be considered implemented.
+
+Pending requests retain the complete previous and proposed replica sets, policies,
+the requested generation and the old recovery-witness threshold. They survive
+metadata restart and appear under `consensus.controller.pending_recoveries` in
+the admin topology response. Heartbeat changes cannot replace an outstanding
+request, and ordinary followers keep their existing source. Existing healthy
+owners can continue under their unchanged active assignment; requests do not
+yet seal their logs or establish a recovery certificate.
 
 ## Eager failure detection
 

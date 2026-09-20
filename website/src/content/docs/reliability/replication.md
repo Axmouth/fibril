@@ -23,12 +23,11 @@ partition has one **owner** and one or more **followers**:
   message and event records over the protocol and applies them durably to its
   own log. If a follower falls too far behind the owner's retained log, it
   installs an owner checkpoint and resumes from there.
-- **Failover selects a follower using reported progress.** When the controller
-  sees the owner is gone, it reassigns the partition and bumps its fencing
-  **epoch**. Promotion checks local log/state completeness and payload backfill.
-  Heartbeat tails can be stale; the selected follower is not yet proven to hold
-  every previously confirmed batch. Nodes that have advanced their epoch reject
-  older-epoch replication.
+- **Replicated failover waits for recovery proof.** The controller records a
+  proposed replacement and retains the previous assignment and replication
+  source. Fresh sealing, history transfer and activation are still pending, so
+  automatic replicated failover currently stops at this barrier. Heartbeat tails
+  can suggest a candidate but cannot authorize it to serve.
 - **Replica-durable publishes wait for replicas.** When the assignment's
   durability policy requires more than the owner, a confirmed publish does not
   return until enough followers have reported the required progress, subject to a
@@ -98,6 +97,12 @@ latency. See the [configuration](/configuration/) replication settings.
   evidence and fencing; heartbeat candidate selection alone is insufficient.
   Checkpoint backfill is checked before promotion and after restart; atomic
   replacement of both logs and checkpoint state also remains pending.
+- The controller now prevents that automatic reassignment by persisting pending
+  recovery metadata. It also holds follower-set and durability-policy changes
+  involving replicated confirmation. Existing healthy owners retain their active
+  configuration; an unavailable owner leaves the partition unavailable. Pending
+  requests appear in the admin topology's controller status. Do not discard a
+  surviving replica or clear a request to bypass this recovery requirement.
 - Cross-broker replication-lag aggregation into a single cluster view is still
   pending. A broker's own follower workers and their progress are visible on the
   [admin queues page](/admin-dashboard/).

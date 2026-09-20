@@ -18,6 +18,10 @@ Each locally durable queue batch now wakes replication after its payload/enqueue
 
 A real-storage diagnostic confirmed a batch on owner A and follower B, then successfully promoted empty follower C after A stopped. Placement uses advisory heartbeat tails, while promotion establishes local completeness; neither establishes that the selected candidate contains every previously confirmed batch. Preserving that history across assignment changes is a recovery gate for clustered HA and for replication before owner durability.
 
+### Pending recovery before replicated assignment replacement
+
+The controller retains the previous assignment and persists a proposed replacement when ownership, replica membership or policy changes affect replicated confirmation. The request survives metadata restart and is exposed in controller status, preventing followers from switching to an unproven source. Fresh sealing, recovery and activation remain pending, so this first barrier pauses replicated failover while preserving its recovery evidence.
+
 ### Complete durable cache tails
 
 The log reader now accepts a cache hit that contains every record up to the captured durable frontier, even when the requested batch is larger. Incomplete coverage, decode failures and offset discontinuities fall back to the file reader; rollover, eviction and reopen parity are covered by regression tests. The initial three-node SATA/NVMe screen found overlapping throughput and latency ranges, so this change carries no end-to-end speedup claim; see [Keratin dd7943e](https://github.com/Axmouth/keratin/commit/dd7943e).
