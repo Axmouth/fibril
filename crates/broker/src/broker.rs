@@ -476,6 +476,15 @@ impl Default for BrokerConfig {
 }
 
 pub trait QueueOwnership: std::fmt::Debug + Send + Sync {
+    /// Return this replica's node identity after consensus-backed authorization.
+    /// Standalone and providers without a recovery protocol must refuse it.
+    fn authorize_recovery_seal<'a>(
+        &'a self,
+        _command: &'a crate::recovery::RecoverySealCommand,
+    ) -> futures::future::BoxFuture<'a, Result<String, String>> {
+        Box::pin(async { Err("coordinated recovery sealing is unavailable".into()) })
+    }
+
     fn owns_queue(&self, topic: &str, partition: Partition, group: Option<&str>) -> bool;
 
     /// Committed queue settings. Standalone and legacy undeclared queues have
@@ -1512,6 +1521,8 @@ pub struct Broker<
     pub(crate) task_group: Arc<TaskGroup>,
 
     metrics: Option<Arc<BrokerStats>>,
+    pub(crate) recovery_seal_flight:
+        Arc<std::sync::Mutex<Option<crate::recovery::RecoverySealFlight>>>,
     pub(crate) ownership: Arc<dyn QueueOwnership>,
     pub(crate) stream_ownership: Arc<dyn StreamOwnership>,
 
@@ -1748,6 +1759,7 @@ impl<
             settings_epoch: AtomicU64::new(1),
             task_group: Arc::new(TaskGroup::new()),
             metrics,
+            recovery_seal_flight: Arc::new(std::sync::Mutex::new(None)),
             ownership,
             stream_ownership,
         });

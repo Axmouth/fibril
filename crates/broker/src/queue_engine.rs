@@ -624,6 +624,29 @@ impl StromaEngine {
             .await
     }
 
+    pub async fn seal_replica_for_recovery(
+        &self,
+        topic: &str,
+        partition: u32,
+        group: Option<&str>,
+        stream: bool,
+        request: stroma_core::RecoverySealRequest,
+    ) -> Result<stroma_core::SealedReplicaFrontiers, StromaError> {
+        self.inner
+            .seal_replica_for_recovery_checked(
+                topic,
+                partition,
+                group,
+                if stream {
+                    PartitionKind::Stream
+                } else {
+                    PartitionKind::Queue
+                },
+                request,
+            )
+            .await
+    }
+
     pub async fn become_queue_follower(
         &self,
         tp: &str,

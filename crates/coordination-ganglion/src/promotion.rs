@@ -237,3 +237,149 @@ mod tests {
         }
     }
 }
+
+impl PendingRecovery {
+    /// Deterministic identity of the complete transition, including its old
+    /// confirmation contract. Follower ordering is retained in this exact record.
+    pub fn transition_digest(&self) -> Result<[u8; 32], String> {
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"fibril-pending-recovery-v1\0");
+        hash.update(&serde_json::to_vec(self).map_err(|err| err.to_string())?);
+        Ok(*hash.finalize().as_bytes())
+    }
+
+    pub fn seal_command(&self) -> Result<fibril_broker::recovery::RecoverySealCommand, String> {
+        Ok(fibril_broker::recovery::RecoverySealCommand {
+            topic: self.previous.resource.name.clone(),
+            partition: fibril_broker::Partition::new(
+                u32::try_from(self.previous.resource.partition)
+                    .map_err(|_| "recovery partition exceeds wire range")?,
+            ),
+            group: self.previous.resource.group.clone(),
+            stream: self.previous.resource.namespace == super::STREAM_NAMESPACE,
+            transition: self.transition_digest()?,
+            fence_epoch: self.proposed.epoch,
+        })
+    }
+}
+
+pub(crate) fn validate_seal_command(
+    snapshot: &CoordinationSnapshot,
+    local_node: &str,
+    command: &fibril_broker::recovery::RecoverySealCommand,
+) -> Result<(String, String), String> {
+    if command
+        .group
+        .as_deref()
+        .is_some_and(|group| group.is_empty() || group == "default")
+        || command.stream && command.group.is_some()
+    {
+        return Err("noncanonical recovery resource identity".into());
+    }
+    let resource = ResourceIdentity::new(
+        if command.stream {
+            super::STREAM_NAMESPACE
+        } else {
+            super::QUEUE_NAMESPACE
+        },
+        &command.topic,
+        u64::from(command.partition.id()),
+        command.group.clone(),
+    );
+    let key = pending_recovery_key(&resource);
+    let raw = snapshot
+        .attributes
+        .get(&key)
+        .ok_or("no pending recovery for this resource")?;
+    let pending: PendingRecovery =
+        serde_json::from_str(raw).map_err(|e| format!("invalid pending recovery: {e}"))?;
+    if pending.version != 1
+        || pending.requested_generation > snapshot.generation
+        || pending.previous.resource != resource
+        || pending.proposed.resource != resource
+        || snapshot.assignments.get(&resource) != Some(&pending.previous)
+        || pending.previous.epoch.checked_add(1) != Some(pending.proposed.epoch)
+        || pending.previous_write_nodes != write_requirement(&pending.previous)?
+        || pending.proposed_write_nodes != write_requirement(&pending.proposed)?
+        || pending.required_old_witnesses != recovery_witness_requirement(&pending.previous)?
+        || pending.seal_command()? != *command
+    {
+        return Err("recovery request does not match the committed transition".into());
+    }
+    if pending.previous.owner != local_node
+        && !pending.previous.followers.iter().any(|n| n == local_node)
+    {
+        return Err("local node is not an old recovery replica".into());
+    }
+    Ok((key, raw.clone()))
+}
+
+#[cfg(test)]
+mod seal_tests {
+    use super::*;
+    fn pending() -> (CoordinationSnapshot, PendingRecovery) {
+        let resource = ResourceIdentity::new(super::super::QUEUE_NAMESPACE, "q", 0, None);
+        let mut old =
+            PartitionAssignment::new(resource.clone(), "a", vec!["b".into(), "c".into()], 7);
+        old.durability = ReplicationDurabilityPolicy::MajorityDurable;
+        let mut committed = CoordinationSnapshot::default();
+        committed.assignments.insert(resource.clone(), old.clone());
+        let mut desired = committed.clone();
+        desired.generation = 9;
+        let next = desired.assignments.get_mut(&resource).unwrap();
+        next.owner = "b".into();
+        next.followers = vec!["a".into(), "c".into()];
+        retain_unproven_assignments(&committed, &mut desired).unwrap();
+        let pending =
+            serde_json::from_str(&desired.attributes[&pending_recovery_key(&resource)]).unwrap();
+        (desired, pending)
+    }
+
+    #[test]
+    fn seal_authorization_binds_exact_transition_and_old_membership() {
+        let (snapshot, pending) = pending();
+        let command = pending.seal_command().unwrap();
+        for node in ["a", "b", "c"] {
+            validate_seal_command(&snapshot, node, &command).unwrap();
+        }
+        assert!(validate_seal_command(&snapshot, "outsider", &command).is_err());
+        for mutate in 0..6 {
+            let mut wrong = command.clone();
+            match mutate {
+                0 => wrong.transition[0] ^= 1,
+                1 => wrong.fence_epoch += 1,
+                2 => wrong.stream = true,
+                3 => wrong.group = Some("another".into()),
+                4 => wrong.partition = fibril_broker::Partition::new(1),
+                _ => wrong.topic = "other".into(),
+            }
+            assert!(validate_seal_command(&snapshot, "b", &wrong).is_err());
+        }
+        let mut newer = snapshot.clone();
+        newer
+            .assignments
+            .insert(pending.previous.resource.clone(), pending.proposed.clone());
+        assert!(validate_seal_command(&newer, "b", &command).is_err());
+    }
+
+    #[test]
+    fn seal_rejects_corrupt_contract_even_with_matching_digest() {
+        let (original, pending) = pending();
+        for mutation in 0..5 {
+            let mut bad = pending.clone();
+            match mutation {
+                0 => bad.previous_write_nodes = 1,
+                1 => bad.required_old_witnesses = 1,
+                2 => bad.requested_generation = original.generation + 1,
+                3 => bad.proposed.epoch = bad.previous.epoch,
+                _ => bad.proposed.followers = vec![bad.proposed.owner.clone()],
+            }
+            let mut snapshot = original.clone();
+            snapshot.attributes.insert(
+                pending_recovery_key(&bad.previous.resource),
+                serde_json::to_string(&bad).unwrap(),
+            );
+            assert!(validate_seal_command(&snapshot, "b", &bad.seal_command().unwrap()).is_err());
+        }
+    }
+}

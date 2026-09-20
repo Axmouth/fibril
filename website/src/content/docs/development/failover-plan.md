@@ -6,7 +6,7 @@ description: Planned promotion evidence, eager failure detection and acceptance 
 This plan covers preservation of confirmed history during ownership changes and
 an optional faster failure detector. The controller now persists pending recovery
 requests and retains the previous assignment for changes involving replicated
-confirmation. Broker-driven sealing, evidence collection, recovery and activation remain
+confirmation. Automatic seal dispatch, evidence collection, recovery and activation remain
 implementation work; replicated failover currently pauses at this barrier.
 Current behavior and limitations are in [replication](/reliability/replication/).
 
@@ -30,35 +30,31 @@ incompatible authoritative histories or unresolved evidence loss.
 The protocol must cover repeated failovers, controller and candidate restarts,
 and membership changes. Initial implementation should establish the proof for
 `majority_durable`; fixed-count policies require their own recovery thresholds.
-Owner-only durability cannot guarantee recovery from another node. Transition
-records and history identity require a concrete storage/protocol design before
-this handshake can be considered implemented.
+Owner-only durability cannot guarantee recovery from another node. Compatible-history selection must establish ancestry and confirmed dependencies
+across different retained ranges and checkpoint boundaries.
 
-Pending requests retain the complete previous and proposed replica sets, policies,
-the requested generation and the old recovery-witness threshold. They survive
-metadata restart and appear under `consensus.controller.pending_recoveries` in
-the admin topology response. Heartbeat changes cannot replace an outstanding
-request, and ordinary followers keep their existing source. Existing healthy
-owners can continue under their unchanged active assignment; requests do not
-yet seal their logs or establish a recovery certificate.
+## Remaining recovery work
 
-## Local seal foundation
+The implemented [recovery seal receiver](/reliability/recovery-sealing/) binds
+explicit requests to committed transitions and persists exact retained-content
+identity. Recoverable local checkpoint installation is also available. Automatic
+recovery requires the following pieces:
 
-Keratin provides a local recovery seal with a durable transition identity and
-fencing epoch. It drains accepted operations, preserves both logs and prevents
-ordinary promotion, replay repair, snapshot replacement and compaction from
-changing the sealed source. Identical requests can resume after interruption or
-restart. The returned offsets describe local retained data, including potentially
-unconfirmed or incomplete records; they do not establish authoritative history.
+1. Dispatch seals with bounded backoff and restartable, coalesced progress for
+   each persisted transition. Preserve the old replica set and witness threshold.
+2. Collect fresh, distinct old-replica reports and establish compatible history,
+   including compacted prefixes and payload/event/checkpoint dependencies.
+   Exact content fingerprints alone cannot establish ancestry or authority.
+3. Transfer the selected history and durably install it on the new write quorum,
+   including the candidate, before committing activation. Resume interrupted
+   phases and isolate the old owner through repeated failovers.
+4. Require node authentication on the older replication read, apply, checkpoint
+   and stream handlers. These currently check general authentication; the new
+   recovery-seal handler checks the node principal on each physical connection.
 
-The primitive is validated on Linux and is not called by automatic broker
-failover. Other platforms currently reject sealing before changing storage.
-Authenticated request dispatch, retained data-history identity, compatible-history
-selection, new-write-quorum installation and activation remain required. The completed
-controller must coalesce retries per transition and resume work after restarts.
-Local checkpoint interruption recovery is documented in
-[implemented surface](/implemented-surface/#experimental-cluster-and-replication-surface);
-it does not supply the coordinated history proof or activation decision.
+Automatic dispatch remains disabled until installation and activation can finish
+safely. Linux tests cover local seals and interrupted checkpoint replacement;
+other platforms need durable metadata support before these operations are enabled.
 
 ## Eager failure detection
 

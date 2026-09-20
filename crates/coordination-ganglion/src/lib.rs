@@ -2912,6 +2912,31 @@ impl Drop for GanglionCoordination {
 /// Queue-ownership gate view: in cluster mode brokers serve only queues the
 /// committed snapshot assigns to them.
 impl fibril_broker::broker::QueueOwnership for GanglionCoordination {
+    fn authorize_recovery_seal<'a>(
+        &'a self,
+        command: &'a fibril_broker::recovery::RecoverySealCommand,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let (key, raw) = self.node.read_committed(|snapshot| {
+                promotion::validate_seal_command(snapshot, &self.node_id, command)
+            })?;
+            // A same-value CAS goes through consensus without changing metadata
+            // generation. Its committed response supplies a fresh authority view,
+            // including when this broker must forward to the current leader.
+            let response = self
+                .forward_command(MetadataRaftCommand::CompareAndSetAttribute {
+                    key,
+                    expected: Some(raw.clone()),
+                    value: raw,
+                })
+                .await
+                .map_err(|err| err.to_string())?;
+            promotion::validate_seal_command(&response.snapshot, &self.node_id, command)?;
+            Ok(self.node_id.clone())
+        })
+    }
+
     fn owns_queue(
         &self,
         topic: &str,
@@ -4682,6 +4707,20 @@ mod tests {
         assert_eq!(pending[0].previous.owner, "a-owner");
         assert_eq!(pending[0].proposed.owner, "c-lagging");
         assert_eq!(pending[0].required_old_witnesses, 2);
+        let seal = pending[0].seal_command().unwrap();
+        let generation_before = provider.consensus_node().committed_snapshot().generation;
+        use fibril_broker::broker::QueueOwnership;
+        provider.authorize_recovery_seal(&seal).await.unwrap();
+        provider.authorize_recovery_seal(&seal).await.unwrap();
+        assert_eq!(
+            provider.consensus_node().committed_snapshot().generation,
+            generation_before,
+            "repeated seal authorization must not change metadata generation"
+        );
+        let mut stale = seal.clone();
+        stale.fence_epoch += 1;
+        assert!(provider.authorize_recovery_seal(&stale).await.is_err());
+
         // A cold candidate must also remain unservable: it has no local role
         // history to make a follower-only promotion check reject admission.
         use fibril_broker::{
@@ -4735,6 +4774,7 @@ mod tests {
         .expect("restart must replay the persisted recovery request");
         let recovered = GanglionCoordination::new("a-owner", restarted);
         assert_eq!(recovered.pending_recoveries().unwrap(), pending);
+        recovered.authorize_recovery_seal(&seal).await.unwrap();
         let retry = recovered
             .control_iteration(
                 &DeterministicPartitionPlacement,

@@ -2736,6 +2736,9 @@ where
         }
     }
     let logical = resume.logical.clone();
+    // Recovery control requires authentication on this transport. A resumed
+    // ordinary-client session must not inherit cluster control privileges.
+    let mut authenticated_principal: Option<String> = None;
     let transport_generation = logical.attach_transport(frame_tx_high_prio.clone());
     client_id = resume.client_id;
     // A TLS-verified certificate identity that the auth handler maps to a
@@ -2748,7 +2751,11 @@ where
             fibril_util::AuthDecision::Allow
         )
     {
-        logical.state.lock().await.authenticated = true;
+        {
+            let mut state = logical.state.lock().await;
+            state.authenticated = true;
+            authenticated_principal = Some(identity.clone());
+        }
         connection_stats.set_connection_auth(&conn_id, true);
         tracing::info!("conn {conn_id} authenticated as `{identity}` by client certificate");
     }
@@ -3070,7 +3077,11 @@ where
 
                         match decision {
                             fibril_util::AuthDecision::Allow => {
-                                logical.state.lock().await.authenticated = true;
+                                {
+                                    let mut state = logical.state.lock().await;
+                                    state.authenticated = true;
+                                    authenticated_principal = Some(auth_frame.username.clone());
+                                }
                                 frame_tx_high_prio
                                     .send(try_encode(Op::AuthOk, frame.request_id, &())?)
                                     .await?;
@@ -3391,6 +3402,70 @@ where
             x if x == Op::ReplicationStreamStop as u16 => {
                 // Dropping the control sender makes the sender task exit.
                 owner_streams.remove(&frame.request_id);
+            }
+
+            // Recovery always requires an authenticated cluster principal,
+            // including when ordinary client authentication is disabled.
+            x if x == Op::RecoverySeal as u16 => {
+                let is_node = authenticated_principal.as_deref()
+                    == Some(fibril_broker::auth_store::NODE_PRINCIPAL);
+                if !is_node {
+                    send_error_response_and_count(
+                        &frame_tx_high_prio,
+                        &metrics,
+                        frame.request_id,
+                        403,
+                        "recovery sealing requires an authenticated cluster peer",
+                    )
+                    .await;
+                    continue;
+                }
+                let request: RecoverySeal =
+                    decode_or_400!(frame, frame_tx_high_prio, metrics, RecoverySeal);
+                let command = fibril_broker::recovery::RecoverySealCommand {
+                    topic: request.topic,
+                    partition: request.partition,
+                    group: request.group,
+                    stream: request.stream,
+                    transition: request.transition,
+                    fence_epoch: request.fence_epoch,
+                };
+                match broker.seal_replica_for_recovery(command).await {
+                    Ok(sealed) => {
+                        let replica_id = sealed.node_id;
+                        let sealed = sealed.seal;
+                        let h = sealed.history;
+                        let reply = RecoverySealOk {
+                            replica_id,
+                            transition: sealed.request.transition,
+                            fence_epoch: sealed.request.fence_epoch,
+                            history_version: h.version,
+                            history_id: h.id,
+                            message_digest: h.message_digest,
+                            event_digest: h.event_digest,
+                            snapshot_digest: h.snapshot_digest,
+                            message_head: h.message_head,
+                            message_next: h.message_next,
+                            event_head: h.event_head,
+                            event_next: h.event_next,
+                        };
+                        frame_tx_high_prio
+                            .send(try_encode(Op::RecoverySealOk, frame.request_id, &reply)?)
+                            .await?;
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "recovery seal request refused or incomplete");
+                        let (code, message) = broker_error_response(&err);
+                        send_error_response_and_count(
+                            &frame_tx_high_prio,
+                            &metrics,
+                            frame.request_id,
+                            code,
+                            message,
+                        )
+                        .await;
+                    }
+                }
             }
 
             // -------- REPLICATION CHECKPOINT EXPORT ------------------------

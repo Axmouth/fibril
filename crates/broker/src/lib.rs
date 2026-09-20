@@ -2,6 +2,7 @@ pub mod auth_store;
 pub mod broker;
 pub mod coordination;
 pub mod queue_engine;
+pub mod recovery;
 pub mod replication;
 pub mod runtime_settings;
 pub mod storage;

@@ -3035,3 +3035,80 @@ mod tests {
         ));
     }
 }
+
+pub fn encode_recovery_seal(request_id: u64, req: &crate::RecoverySeal) -> WireResult<Frame> {
+    let mut out = payload_builder(b"RSL1");
+    put_queue_key(&mut out, &req.topic, req.partition, req.group.as_deref())?;
+    put_bool(&mut out, req.stream);
+    out.extend_from_slice(&req.transition);
+    out.put_u64(req.fence_epoch);
+    Ok(frame(Op::RecoverySeal, request_id, out.freeze()))
+}
+
+pub fn decode_recovery_seal(frame: &Frame) -> WireResult<crate::RecoverySeal> {
+    expect_op(frame, Op::RecoverySeal)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"RSL1", "recovery seal")?;
+    let (topic, partition, group) = reader.queue_key()?;
+    let stream = reader.bool()?;
+    let transition = reader.take(32)?.try_into().unwrap();
+    let fence_epoch = reader.u64()?;
+    reader.finish()?;
+    Ok(crate::RecoverySeal {
+        topic,
+        partition,
+        group,
+        stream,
+        transition,
+        fence_epoch,
+    })
+}
+
+pub fn encode_recovery_seal_ok(
+    request_id: u64,
+    reply: &crate::RecoverySealOk,
+) -> WireResult<Frame> {
+    let mut out = payload_builder(b"RSO1");
+    put_str(&mut out, &reply.replica_id)?;
+    out.extend_from_slice(&reply.transition);
+    out.put_u64(reply.fence_epoch);
+    out.put_u32(reply.history_version);
+    out.extend_from_slice(&reply.history_id);
+    out.extend_from_slice(&reply.message_digest);
+    out.extend_from_slice(&reply.event_digest);
+    put_bool(&mut out, reply.snapshot_digest.is_some());
+    if let Some(digest) = reply.snapshot_digest {
+        out.extend_from_slice(&digest);
+    }
+    out.put_u64(reply.message_head);
+    out.put_u64(reply.message_next);
+    out.put_u64(reply.event_head);
+    out.put_u64(reply.event_next);
+    Ok(frame(Op::RecoverySealOk, request_id, out.freeze()))
+}
+
+pub fn decode_recovery_seal_ok(frame: &Frame) -> WireResult<crate::RecoverySealOk> {
+    expect_op(frame, Op::RecoverySealOk)?;
+    let mut r = Reader::new(&frame.payload);
+    r.expect_magic(b"RSO1", "recovery seal response")?;
+    let reply = crate::RecoverySealOk {
+        replica_id: r.str()?.to_owned(),
+        transition: r.take(32)?.try_into().unwrap(),
+        fence_epoch: r.u64()?,
+        history_version: r.u32()?,
+        history_id: r.take(32)?.try_into().unwrap(),
+        message_digest: r.take(32)?.try_into().unwrap(),
+        event_digest: r.take(32)?.try_into().unwrap(),
+        snapshot_digest: if r.bool()? {
+            Some(r.take(32)?.try_into().unwrap())
+        } else {
+            None
+        },
+        message_head: r.u64()?,
+        message_next: r.u64()?,
+        event_head: r.u64()?,
+        event_next: r.u64()?,
+    };
+    r.finish()?;
+    Ok(reply)
+}

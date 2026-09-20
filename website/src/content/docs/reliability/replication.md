@@ -25,7 +25,7 @@ partition has one **owner** and one or more **followers**:
   installs an owner checkpoint and resumes from there.
 - **Replicated failover waits for recovery proof.** The controller records a
   proposed replacement and retains the previous assignment and replication
-  source. Fresh sealing, history transfer and activation are still pending, so
+  source. Automatic sealing, history transfer and activation are still pending, so
   automatic replicated failover currently stops at this barrier. Heartbeat tails
   can suggest a candidate but cannot authorize it to serve.
 - **Replica-durable publishes wait for replicas.** When the assignment's
@@ -113,6 +113,7 @@ latency. See the [configuration](/configuration/) replication settings.
 ## See also
 
 - [Clustering](/concepts/clustering/) for ownership, epochs, and coordination modes.
+- [Recovery sealing](/reliability/recovery-sealing/) for explicit seal authorization, retained identity and remaining recovery gates.
 - [Recovery quarantine](/reliability/recovery-quarantine/) for how a node handles a damaged log on restart.
 - [Configuration](/configuration/) for the replication and durability settings.
 - [Project status](/status/) and [implemented surface](/implemented-surface/) for what is wired.

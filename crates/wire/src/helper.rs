@@ -204,6 +204,12 @@ pub fn try_encode<T: Serialize + Any>(op: Op, req_id: u64, msg: &T) -> ProtocolR
         Op::ReplicationStreamEnd => encode_typed(msg, "ReplicationStreamEnd", |msg| {
             wire::encode_replication_stream_end(req_id, msg)
         }),
+        Op::RecoverySeal => encode_typed(msg, "RecoverySeal", |msg| {
+            wire::encode_recovery_seal(req_id, msg)
+        }),
+        Op::RecoverySealOk => encode_typed(msg, "RecoverySealOk", |msg| {
+            wire::encode_recovery_seal_ok(req_id, msg)
+        }),
         Op::Error => encode_error_like(op, req_id, msg),
     }
 }
@@ -343,6 +349,12 @@ pub fn try_decode<T: for<'de> Deserialize<'de> + Any>(frame: &Frame) -> Protocol
             .map_err(wire_decode_error)
             .and_then(cast_decoded),
         x if x == Op::Redirect as u16 => wire::decode_redirect(frame)
+            .map_err(wire_decode_error)
+            .and_then(cast_decoded),
+        x if x == Op::RecoverySeal as u16 => wire::decode_recovery_seal(frame)
+            .map_err(wire_decode_error)
+            .and_then(cast_decoded),
+        x if x == Op::RecoverySealOk as u16 => wire::decode_recovery_seal_ok(frame)
             .map_err(wire_decode_error)
             .and_then(cast_decoded),
         x if x == Op::Error as u16 => decode_error_like(frame),
@@ -967,5 +979,56 @@ mod tests {
             try_decode::<ReplicationCheckpointInstallOk>(&frame).unwrap(),
             msg
         );
+    }
+}
+
+#[cfg(test)]
+mod recovery_wire_tests {
+    use super::*;
+    #[test]
+    fn recovery_frames_roundtrip_and_reject_truncation_or_trailing_bytes() {
+        let request = RecoverySeal {
+            topic: "q".into(),
+            group: Some("g".into()),
+            partition: Partition::new(3),
+            stream: false,
+            transition: [19; 32],
+            fence_epoch: 8,
+        };
+        let encoded = try_encode(Op::RecoverySeal, 42, &request).unwrap();
+        assert_eq!(try_decode::<RecoverySeal>(&encoded).unwrap(), request);
+        for len in 0..encoded.payload.len() {
+            let mut broken = encoded.clone();
+            broken.payload = broken.payload.slice(..len);
+            assert!(try_decode::<RecoverySeal>(&broken).is_err());
+        }
+        let mut trailing = encoded.clone();
+        let mut bytes = trailing.payload.to_vec();
+        bytes.push(0);
+        trailing.payload = bytes.into();
+        assert!(try_decode::<RecoverySeal>(&trailing).is_err());
+        for snapshot_digest in [None, Some([22; 32])] {
+            let response = RecoverySealOk {
+                replica_id: "b".into(),
+                transition: [19; 32],
+                fence_epoch: 8,
+                history_version: 1,
+                history_id: [2; 32],
+                message_digest: [3; 32],
+                event_digest: [4; 32],
+                snapshot_digest,
+                message_head: 0,
+                message_next: 2,
+                event_head: 0,
+                event_next: 1,
+            };
+            let encoded = try_encode(Op::RecoverySealOk, 42, &response).unwrap();
+            assert_eq!(try_decode::<RecoverySealOk>(&encoded).unwrap(), response);
+            for len in 0..encoded.payload.len() {
+                let mut broken = encoded.clone();
+                broken.payload = broken.payload.slice(..len);
+                assert!(try_decode::<RecoverySealOk>(&broken).is_err());
+            }
+        }
     }
 }

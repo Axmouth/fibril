@@ -10,6 +10,10 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Authenticated recovery requests and retained history
+
+Explicit seal requests now require node authentication on the current transport and consensus authorization of the exact pending transition, with concurrent identical requests sharing one operation. Storage persists a fingerprint of the frozen records and snapshot, independent of fencing epochs and replica-local append times; retry reads bypass the cache so disk changes cannot hide behind cached contents. Authentication, cancellation, stale-transition and changed-record regressions cover this increment; automatic dispatch and compatible-history selection remain pending ([recovery sealing](/reliability/recovery-sealing/)).
+
 ### Recoverable follower checkpoint installation
 
 A crash between the two log resets could leave old queue state referring to removed message bodies. A durable installation journal now resumes replacement before ordinary recovery, and a completion receipt prevents retries from erasing later backfill; snapshot fencing rejects stale writes after installation or eviction. Linux fault, cancellation and six-boundary SIGKILL tests cover [Keratin 76f1469](https://github.com/Axmouth/keratin/commit/76f1469); coordinated history selection and activation remain pending.
@@ -48,7 +52,7 @@ Queue confirmation and delivery visibility require the same counted follower to 
 
 ### Checkpoint backfill and owner admission
 
-Promotion and direct owner activation check the payload frontier required by ready, delayed, inflight, settled and dead-letter state; recovery keeps a checkpoint with missing payload backfill in the follower role. Client admission cannot perform the watcher’s follower-to-owner transition. Recovery also replays retained event zero when a legacy snapshot’s inclusive zero could denote an empty checkpoint; atomic replacement of both logs and checkpoint state remains pending.
+Promotion and direct owner activation check the payload frontier required by ready, delayed, inflight, settled and dead-letter state; recovery keeps a checkpoint with missing payload backfill in the follower role. Client admission cannot perform the watcher’s follower-to-owner transition. Recovery also replays retained event zero when a legacy snapshot’s inclusive zero could denote an empty checkpoint; interrupted replacement of both logs and checkpoint state is covered by the recoverable installation journal described above.
 
 ### Durable publication application order
 

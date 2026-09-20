@@ -6808,3 +6808,258 @@ fn topology_adoption_tracker_reports_minimum_of_acked_connections() {
     tracker.remove(&b);
     assert_eq!(tracker.min_acked_generation(), None);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_seal_requires_node_auth_and_exact_committed_authority_over_tcp() {
+    use fibril_broker::coordination::{
+        DeterministicPartitionPlacement, DeterministicStreamPlacement,
+    };
+    use fibril_coordination_ganglion::GanglionCoordination;
+    use fibril_protocol::v1::{Auth, RecoverySeal, RecoverySealOk};
+    use ganglion_openraft::{InProcessRouter, RaftMetadataNode, default_raft_config};
+    use std::collections::BTreeMap;
+
+    let router = InProcessRouter::new();
+    let raft = RaftMetadataNode::start(1, default_raft_config().unwrap(), &router)
+        .await
+        .unwrap();
+    raft.initialize(BTreeMap::from([(
+        1,
+        ganglion_openraft::openraft::BasicNode::new("coordinator"),
+    )]))
+    .await
+    .unwrap();
+    raft.wait_for_leader(1, Duration::from_secs(10))
+        .await
+        .unwrap();
+    let provider = Arc::new(GanglionCoordination::new("b", raft));
+    let node = |id: &str| NodeInfo {
+        node_id: id.into(),
+        broker_addr: "127.0.0.1:1".into(),
+        admin_addr: None,
+    };
+    for id in ["a", "b", "c"] {
+        provider.register_self(&node(id)).await.unwrap();
+    }
+    let queue = QueueIdentity::new("seal-wire", Partition::new(0), None);
+    provider.register_queue(&queue).await.unwrap();
+    let mut live = HashMap::from([
+        ("a".into(), node("a")),
+        ("b".into(), node("b")),
+        ("c".into(), node("c")),
+    ]);
+    provider
+        .control_iteration(
+            &DeterministicPartitionPlacement,
+            &provider.registered_queues(),
+            &DeterministicStreamPlacement,
+            &provider.registered_streams(),
+            2,
+            2,
+            ReplicationDurabilityPolicy::MajorityDurable,
+            &live,
+            8,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    live.remove("a");
+    provider
+        .control_iteration(
+            &DeterministicPartitionPlacement,
+            &provider.registered_queues(),
+            &DeterministicStreamPlacement,
+            &provider.registered_streams(),
+            2,
+            2,
+            ReplicationDurabilityPolicy::MajorityDurable,
+            &live,
+            8,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let pending = provider.pending_recoveries().unwrap().remove(0);
+    let command = pending.seal_command().unwrap();
+    let request = RecoverySeal {
+        topic: command.topic,
+        partition: command.partition,
+        group: command.group,
+        stream: command.stream,
+        transition: command.transition,
+        fence_epoch: command.fence_epoch,
+    };
+    let (engine, mut dir) = open_test_engine().await;
+    let broker =
+        Broker::new_with_ownership(engine, BrokerConfig::default(), None, provider.clone());
+    broker
+        .become_replication_follower_with_epoch(
+            &request.topic,
+            request.partition,
+            None,
+            pending.previous.epoch,
+        )
+        .await
+        .unwrap();
+    for identity in [None, Some("ordinary-user"), Some("@node")] {
+        let auth = identity.map(|name| StaticAuthHandler::new(name.into(), "secret".into()));
+        let (addr, task, returned, _) = start_protocol_listener_for_broker(
+            ConnectionSettings::new(Some(60)),
+            broker.clone(),
+            dir,
+            auth,
+        )
+        .await;
+        dir = returned;
+        let mut conn = plain_conn(TcpStream::connect(addr).await.unwrap());
+        handshake(&mut conn).await;
+        if let Some(identity) = identity {
+            conn.send(
+                try_encode(
+                    Op::Auth,
+                    2,
+                    &Auth {
+                        username: identity.into(),
+                        password: "secret".into(),
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(recv_frame(&mut conn).await.opcode, Op::AuthOk as u16);
+        }
+        if identity == Some("@node") {
+            let mut stale = request.clone();
+            stale.transition[0] ^= 1;
+            conn.send(try_encode(Op::RecoverySeal, 3, &stale).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(recv_frame(&mut conn).await.opcode, Op::Error as u16);
+            broker
+                .become_replication_follower_with_epoch(
+                    &request.topic,
+                    request.partition,
+                    None,
+                    pending.previous.epoch,
+                )
+                .await
+                .unwrap();
+        }
+        conn.send(try_encode(Op::RecoverySeal, 4, &request).unwrap())
+            .await
+            .unwrap();
+        let reply = recv_frame(&mut conn).await;
+        if identity != Some("@node") {
+            let error: ErrorMsg = try_decode(&reply).unwrap();
+            assert_eq!(error.code, 403);
+            broker
+                .become_replication_follower_with_epoch(
+                    &request.topic,
+                    request.partition,
+                    None,
+                    pending.previous.epoch,
+                )
+                .await
+                .unwrap();
+        } else {
+            let sealed: RecoverySealOk = try_decode(&reply).unwrap();
+            assert_eq!(sealed.replica_id, "b");
+            assert_eq!(sealed.transition, request.transition);
+            assert_eq!(sealed.fence_epoch, request.fence_epoch);
+            assert_eq!(sealed.history_version, 1);
+            conn.send(try_encode(Op::RecoverySeal, 5, &request).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                try_decode::<RecoverySealOk>(&recv_frame(&mut conn).await).unwrap(),
+                sealed
+            );
+            assert!(
+                broker
+                    .become_replication_follower_with_epoch(
+                        &request.topic,
+                        request.partition,
+                        None,
+                        pending.previous.epoch
+                    )
+                    .await
+                    .is_err()
+            );
+        }
+        drop(conn);
+        task.await.unwrap().unwrap();
+    }
+    assert_eq!(provider.pending_recoveries().unwrap(), vec![pending]);
+    broker.shutdown().await;
+    provider.consensus_node().shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn recovery_seal_does_not_inherit_node_privileges_from_a_resumed_session() {
+    use fibril_protocol::v1::{Auth, RecoverySeal};
+    let settings = ConnectionSettings::new(Some(60)).with_reconnect_grace_ms(Some(5_000));
+    let (broker, dir) = open_test_broker().await;
+    let auth = StaticAuthHandler::new("@node".into(), "secret".into());
+    let (addr, task, dir, _) = start_protocol_listener_for_broker(
+        settings.clone(),
+        broker.clone(),
+        dir,
+        Some(auth.clone()),
+    )
+    .await;
+    let mut first = plain_conn(TcpStream::connect(addr).await.unwrap());
+    let hello = handshake_with_resume(&mut first, None).await;
+    first
+        .send(
+            try_encode(
+                Op::Auth,
+                2,
+                &Auth {
+                    username: "@node".into(),
+                    password: "secret".into(),
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recv_frame(&mut first).await.opcode, Op::AuthOk as u16);
+    drop(first);
+    task.await.unwrap().unwrap();
+    let (addr, task, _dir, _) =
+        start_protocol_listener_for_broker(settings, broker.clone(), dir, Some(auth)).await;
+    let mut second = plain_conn(TcpStream::connect(addr).await.unwrap());
+    let resumed = handshake_with_resume(
+        &mut second,
+        Some(ResumeIdentity {
+            owner_id: hello.owner_id,
+            client_id: hello.client_id,
+            resume_token: hello.resume_token,
+        }),
+    )
+    .await;
+    assert_eq!(resumed.resume_outcome, ResumeOutcome::Resumed);
+    second
+        .send(
+            try_encode(
+                Op::RecoverySeal,
+                3,
+                &RecoverySeal {
+                    topic: "q".into(),
+                    partition: Partition::new(0),
+                    group: None,
+                    stream: false,
+                    transition: [0; 32],
+                    fence_epoch: 1,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_error_frame(&mut second, 3, 403).await;
+    drop(second);
+    task.await.unwrap().unwrap();
+    broker.shutdown().await;
+}

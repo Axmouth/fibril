@@ -86,6 +86,10 @@ pub enum Op {
     ReplicationCheckpointInstall = 86,
     ReplicationCheckpointInstallOk = 87,
 
+    /// Cluster-peer recovery control; automatic dispatch is not enabled.
+    RecoverySeal = 88,
+    RecoverySealOk = 89,
+
     Topology = 90,
     TopologyOk = 91,
     Redirect = 92,
@@ -1130,4 +1134,32 @@ mod header_namespace_tests {
         assert!(HEADER_PRODUCER_ID.starts_with(CLIENT_HEADER_PREFIX));
         assert!(HEADER_PRODUCER_SEQ.starts_with(CLIENT_HEADER_PREFIX));
     }
+}
+
+/// Exact committed transition requested by an authenticated cluster peer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoverySeal {
+    pub topic: String,
+    pub partition: Partition,
+    pub group: Option<String>,
+    pub stream: bool,
+    pub transition: [u8; 32],
+    pub fence_epoch: u64,
+}
+
+/// Frozen retained content identity. This response is not a promotion certificate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoverySealOk {
+    pub replica_id: String,
+    pub transition: [u8; 32],
+    pub fence_epoch: u64,
+    pub history_version: u32,
+    pub history_id: [u8; 32],
+    pub message_digest: [u8; 32],
+    pub event_digest: [u8; 32],
+    pub snapshot_digest: Option<[u8; 32]>,
+    pub message_head: u64,
+    pub message_next: u64,
+    pub event_head: u64,
+    pub event_next: u64,
 }
