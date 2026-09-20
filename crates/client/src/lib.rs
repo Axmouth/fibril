@@ -7943,6 +7943,48 @@ mod tests {
         .unwrap();
     }
     #[tokio::test]
+    async fn ack_round_trip_drains_queued_tail_before_shutdown() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for count in [1, 257, 513] {
+                let (engine, mut server, _) = ack_test_engine().await;
+                // Enqueue without yielding, including more than one engine drain.
+                for i in 0..count {
+                    engine.tx.try_send(ack_test_command(i)).unwrap();
+                }
+                let (reply, ()) = tokio::join!(engine.fetch_topology(), async {
+                    for i in 0..count {
+                        let frame = server.next().await.unwrap().unwrap();
+                        assert_eq!(frame.opcode, Op::Ack as u16);
+                        assert_eq!(frame.request_id, 1000 + i);
+                    }
+                    let barrier = server.next().await.unwrap().unwrap();
+                    assert_eq!(barrier.opcode, Op::Topology as u16);
+                    server
+                        .send(
+                            try_encode(
+                                Op::TopologyOk,
+                                barrier.request_id,
+                                &TopologyOk {
+                                    generation: 0,
+                                    queues: vec![],
+                                    streams: vec![],
+                                },
+                            )
+                            .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                });
+                reply.unwrap();
+                engine.shutdown.notify_one();
+                assert!(server.next().await.is_none());
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn ack_write_batch_failed_flush_closes_engine() {
         tokio::time::timeout(Duration::from_secs(5), async {
             let (engine, server, _) = ack_test_engine().await;
