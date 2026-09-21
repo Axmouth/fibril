@@ -141,6 +141,32 @@ event batch; larger or unfamiliar encodings leave an explicit semantic gap.
 These limits bound one inspection, while aggregate scheduling remains future
 work. Source reads still rescan retained data per page.
 
+## Queue state at an exact boundary
+
+`inspect_recovery_pair_with_queue_replay` optionally reconstructs both queues at
+one common, exclusive `event_next` boundary, including the empty boundary zero.
+It applies sealed events in log order to isolated state and verifies both complete
+transferred logs, including records after that boundary. It requires message and
+event histories retained from zero; compacted origins need a proven checkpoint.
+Existing snapshot bytes are not treated as an authoritative baseline.
+
+The versioned canonical digest includes ready and settled ranges, inflight
+deadlines, delayed enqueues and retries, retry counts, TTL deadlines, pending DLQ
+targets and persisted policy. Unordered collections are sorted and delayed-entry
+multiplicity is preserved. Snapshot timestamps, wakeup objects and derived
+expiry caches are excluded. Reports carry the actual replay boundary, required
+payload frontier, event-prefix digest and verified message-history identity.
+Different bodies can produce equal settled state, so state equality still requires
+payload and lineage proof.
+
+An enqueue referencing a missing payload must be cancelled by the selected
+boundary. Missing non-enqueue dependencies, unsupported reset/snapshot/stream
+semantics, unknown encoding, offset overflow and exhausted budgets fail the
+replay. The default semantic-operation budget is one million per replica,
+counting every batch entry. Hashing/replay runs on blocking workers with two
+process-wide CPU slots held through caller cancellation; ordinary publishing and
+actor scheduling are unchanged. Automatic source selection remains pending.
+
 ## Cost and limits
 
 Hashing scans all retained records on each explicit seal or completed retry in

@@ -10,6 +10,7 @@ use fibril_broker::{
             RecoveryInspectionLimits, RecoveryOverlap, RecoveryPairInspection,
             RecoveryPairInspector, RecoverySide,
         },
+        replay::RecoveryReplayLimits,
     },
 };
 
@@ -29,6 +30,47 @@ pub async fn inspect_recovery_pair(
     left: &BrokerSealedReplica,
     right: &BrokerSealedReplica,
     limits: RecoveryInspectionLimits,
+    deadline: std::time::Duration,
+) -> Result<ProtocolRecoveryPairInspection, BrokerError> {
+    inspect_pair(config, command, left, right, limits, None, deadline).await
+}
+
+/// Reconstruct both fully retained queue histories at the same exclusive event
+/// boundary. This produces evidence only; compacted origins need a separately
+/// proven checkpoint. Full sealed contents are still verified after the target.
+pub async fn inspect_recovery_pair_with_queue_replay(
+    config: &ProtocolOwnerPeerResolverConfig,
+    command: &RecoverySealCommand,
+    left: &BrokerSealedReplica,
+    right: &BrokerSealedReplica,
+    limits: RecoveryInspectionLimits,
+    event_next: u64,
+    replay_limits: RecoveryReplayLimits,
+    deadline: std::time::Duration,
+) -> Result<ProtocolRecoveryPairInspection, BrokerError> {
+    inspect_pair(
+        config,
+        command,
+        left,
+        right,
+        limits,
+        Some((event_next, replay_limits)),
+        deadline,
+    )
+    .await
+}
+
+// Admission remains held by owned CPU work if its caller times out. This bounds
+// concurrent sorting/replay even when requests disconnect or deadlines expire.
+static INSPECTION_CPU_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+async fn inspect_pair(
+    config: &ProtocolOwnerPeerResolverConfig,
+    command: &RecoverySealCommand,
+    left: &BrokerSealedReplica,
+    right: &BrokerSealedReplica,
+    limits: RecoveryInspectionLimits,
+    replay: Option<(u64, RecoveryReplayLimits)>,
     deadline: std::time::Duration,
 ) -> Result<ProtocolRecoveryPairInspection, BrokerError> {
     if left.node_id.is_empty() || right.node_id.is_empty() || left.node_id == right.node_id {
@@ -55,6 +97,11 @@ pub async fn inspect_recovery_pair(
         limits,
     )
     .map_err(BrokerError::InvalidArgument)?;
+    if let Some((target, replay_limits)) = replay {
+        inspector = inspector
+            .with_queue_replay(target, replay_limits)
+            .map_err(BrokerError::InvalidArgument)?;
+    }
     let inspect = async {
         while let Some((side, request)) = inspector
             .next_read()
@@ -65,31 +112,48 @@ pub async fn inspect_recovery_pair(
                 RecoverySide::Right => right,
             };
             let page = request_recovery_read(config, command, replica, &request, deadline).await?;
-            inspector
-                .accept_page(
-                    side,
-                    RecoveryReadPage {
-                        history_id: page.history_id,
-                        source: request.source,
-                        from: page.from,
-                        next: page.next,
-                        end: page.end,
-                        snapshot_bytes: page.snapshot_bytes,
-                        records: page
-                            .records
-                            .into_iter()
-                            .map(|record| RecoveryRecord {
-                                offset: record.offset,
-                                flags: record.flags,
-                                headers: record.headers,
-                                payload: record.payload,
-                            })
-                            .collect(),
-                    },
-                )
-                .map_err(BrokerError::InvalidArgument)?;
+            let page = RecoveryReadPage {
+                history_id: page.history_id,
+                source: request.source,
+                from: page.from,
+                next: page.next,
+                end: page.end,
+                snapshot_bytes: page.snapshot_bytes,
+                records: page
+                    .records
+                    .into_iter()
+                    .map(|record| RecoveryRecord {
+                        offset: record.offset,
+                        flags: record.flags,
+                        headers: record.headers,
+                        payload: record.payload,
+                    })
+                    .collect(),
+            };
+            let permit = INSPECTION_CPU_SLOTS
+                .acquire()
+                .await
+                .map_err(|_| BrokerError::Unknown("inspection CPU admission closed".into()))?;
+            inspector = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                inspector.accept_page(side, page)?;
+                Ok::<_, String>(inspector)
+            })
+            .await
+            .map_err(|e| BrokerError::Unknown(format!("recovery inspection worker failed: {e}")))?
+            .map_err(BrokerError::InvalidArgument)?;
         }
-        let evidence = inspector.finish().map_err(BrokerError::InvalidArgument)?;
+        let permit = INSPECTION_CPU_SLOTS
+            .acquire()
+            .await
+            .map_err(|_| BrokerError::Unknown("inspection CPU admission closed".into()))?;
+        let evidence = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            inspector.finish()
+        })
+        .await
+        .map_err(|e| BrokerError::Unknown(format!("recovery digest worker failed: {e}")))?
+        .map_err(BrokerError::InvalidArgument)?;
         for (source, log) in [
             ("messages", &evidence.messages),
             ("events", &evidence.events),
@@ -108,9 +172,9 @@ pub async fn inspect_recovery_pair(
         }
         tracing::info!(left_replica=left.node_id,right_replica=right.node_id,
             topic=command.topic,partition=command.partition.id(),group=command.group.as_deref(),
-            messages=?evidence.messages,events=?evidence.events,references=?evidence.references,remaining_proofs=?evidence.remaining_proofs,
+            messages=?evidence.messages,events=?evidence.events,references=?evidence.references,queue_replay=?evidence.queue_replay,remaining_proofs=?evidence.remaining_proofs,
             pages=evidence.pages,records=evidence.records,bytes=evidence.bytes,
-            "sealed history inspection complete; ancestry and state proof remain required");
+            "sealed history inspection complete; unresolved proofs remain explicit");
         Ok(ProtocolRecoveryPairInspection {
             left_node: left.node_id.clone(),
             right_node: right.node_id.clone(),

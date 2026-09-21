@@ -62,18 +62,12 @@ other platforms need durable metadata support before these operations are enable
 
 ## State digests at a recovery boundary
 
-Evaluate a versioned canonical state digest after deterministic replay to an
-explicit exclusive event frontier. Bind it to the resource incarnation, installed
-lineage and required payload coverage/content identity. Equal state at that
-boundary can support checkpoint comparison; different histories can converge to
-the same state, so lineage remains part of the proof.
-
-Begin with isolated replay of sealed evidence during recovery. Canonical encoding
-must cover ready/settled state, inflight deadlines, retries, delayed work, TTLs,
-pending dead letters and persisted policy, sorting unordered collections and
-excluding local timing metadata and derived caches. Current snapshot bytes and
-the limited canonical debug view are insufficient for this purpose. Streams need
-their own complete state schema.
+Isolated queue replay and canonical digests for fully retained histories are
+implemented in [recovery sealing](/reliability/recovery-sealing/#queue-state-at-an-exact-boundary).
+Further work must bind this evidence to resource incarnation and installed
+lineage, support proven compacted checkpoints, and define complete stream state.
+Equal state can arise from different payload histories; preserve content identity
+and ancestry checks alongside the state digest.
 
 Measure replay time, hashing/sorting CPU, peak memory and recovery delay before
 adding periodic live-owner captures. A live capture must return state and the

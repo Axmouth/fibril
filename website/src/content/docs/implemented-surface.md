@@ -79,7 +79,7 @@ See also: [recovery quarantine](/reliability/recovery-quarantine/).
 | Recovery reference verification | Implemented | Recovery checks each replayed event's referenced message offset against the message log's durable tail, and decodes every event record |
 | `recovery.on_mismatch` policy | Implemented | Startup config: `quarantine` (default), `refuse`, or `ignore` |
 | Per-partition quarantine | Implemented | A bad partition is parked (its ops error) while the rest of the broker stays up |
-| Operator repair | Implemented | Admin quarantine banner + `/admin/api/quarantine/repair` truncate-to-valid, follower re-fetches the dropped suffix on next catch-up |
+| Operator repair | Implemented | Admin quarantine banner + `/admin/api/quarantine/repair`; journaled suffix truncation retains earlier events and resumes before log opening |
 | Readiness health | Implemented | `/readyz` reflects quarantine state and the configured policy |
 | Quarantine metric | Implemented | `recovery.quarantined` gauge and `quarantines_total` counter in the recovery snapshot, exported as `fibril_recovery_quarantined` and `fibril_recovery_quarantines_total` on `/metrics` |
 
@@ -89,10 +89,16 @@ Conditions and limits:
   It can discard an unconfirmed suffix left by interrupted parallel publication.
   Interrupted checkpoint installation is resolved from its durable installation
   record before this ordinary replay path. See checkpoint recovery below.
-- A corrupt event record is the genuine mid-log failure and uses the same
-  quarantine and truncate machinery.
+- Corrupt events and unexplained non-enqueue references to missing payloads use
+  the configured corruption policy. A preceding dangling enqueue does not hide
+  these failures or authorize automatic deletion.
 - `refuse` is lazy today (a mismatch is caught when the partition is first used);
   an eager whole-disk variant at boot is a tracked follow-up.
+
+- Explicit sealed inspection can reconstruct fully retained queue state at a
+  common exclusive event boundary, with canonical state and separate input-history
+  digests. Compacted checkpoint authority, resource lineage and automatic source
+  selection remain pending; see [recovery sealing](/reliability/recovery-sealing/).
 
 ## Publish
 

@@ -10,6 +10,14 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Restartable suffix repair preserves valid events
+
+The recovery helper used a whole-log checkpoint reset when it intended to remove only a bad suffix, leaving the valid prefix in memory but removing its durable records. Suffix repair now journals the cut, preserves earlier records and resumes before normal log opening; repeated restarts, I/O faults and six SIGKILL boundaries cover the fix. A dangling enqueue also no longer masks later corruption or unexplained missing settlement payloads.
+
+### Canonical queue state from sealed replay
+
+Explicit inspection can reconstruct fully retained queue histories at a common exclusive event frontier and hash their complete canonical state. Payload and input-history digests remain separate, while operation budgets and bounded CPU workers keep this work outside live actor scheduling. Equal state supports comparison but still requires resource lineage and checkpoint authority ([recovery sealing](/reliability/recovery-sealing/#queue-state-at-an-exact-boundary)).
+
 ### Sealed-history comparison and dependency diagnostics
 
 Explicit pair inspection now compares shared offsets across differently retained histories and verifies the complete transferred log digests, retaining only a page of unmatched record IDs. Whole-event reference checks expose incomplete payload batches and preserve explicit replay/checkpoint gaps; timeout, source loss and exhausted budgets discard partial results. Matching overlap remains subject to common-origin and state proof before source selection ([recovery sealing](/reliability/recovery-sealing/)).

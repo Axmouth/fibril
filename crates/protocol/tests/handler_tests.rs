@@ -7787,6 +7787,14 @@ async fn sealed_pair_inspection_compares_real_peers_and_discards_incomplete_read
             .remaining_proofs
             .contains(&RecoveryProofRequirement::CommonOriginAndInstalledLineage)
     );
+    let replay = fibril_protocol::v1::recovery_inspection::inspect_recovery_pair_with_queue_replay(
+        &config, &command, &seals[0], &seals[1], limits, 0, Default::default(), Duration::from_secs(10),
+    ).await.unwrap();
+    let [left, right] = replay.evidence.queue_replay.unwrap();
+    assert_eq!(left.event_next, 0);
+    assert_eq!(left.state_digest, right.state_digest);
+    assert_ne!(left.message_digest, right.message_digest);
+    assert_ne!(left.history_id, right.history_id);
     let error = inspect_recovery_pair(
         &config,
         &command,
