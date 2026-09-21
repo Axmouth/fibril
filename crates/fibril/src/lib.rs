@@ -1682,6 +1682,16 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         writer_buffer_factor: config.storage.keratin.writer_buffer_factor,
         ..keratin_default
     };
+    // Independently switchable so the experiment can compare durable versus
+    // early replication with the same bounded cache. Ordinary builds retain 0.
+    #[cfg(feature = "early-replication-experiment")]
+    let event_tail_cache_bytes = std::env::var("FIBRIL_EXPERIMENT_EVENT_TAIL_CACHE_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0)
+        .min(4 * 1024 * 1024);
+    #[cfg(not(feature = "early-replication-experiment"))]
+    let event_tail_cache_bytes = 0;
     let keratin_event_cfg = KeratinConfig {
         fsync_interval_ms: config.storage.keratin.fsync_interval_ms,
         min_fsync_interval_ms: config.storage.keratin.min_fsync_interval_ms,
@@ -1690,8 +1700,9 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         flush_target_bytes: keratin_default.flush_target_bytes / 8,
         max_batch_bytes: keratin_default.max_batch_bytes / 8,
         index_stride_bytes: keratin_default.index_stride_bytes / 8,
-        // The event log is not tail-followed by consumers, so no read cache.
-        tail_cache_bytes: 0,
+        // Replication can tail-follow enqueue/settlement events even though
+        // ordinary consumers only tail-follow the message log.
+        tail_cache_bytes: event_tail_cache_bytes,
         segment_preallocate_bytes: config.storage.keratin.segment_preallocate_bytes,
         max_inflight_fsyncs: config.storage.keratin.max_inflight_fsyncs,
         pipeline_commit_records: config.storage.keratin.pipeline_commit_records,
