@@ -28,7 +28,7 @@ A checkpoint reset could return before older fsync completions were consumed, al
 
 ### Empty fsync boundary
 
-An empty fsync job used the same inclusive offset as a job covering message zero. When its completion updated the manifest, it could invent a one-record tail; completion after a later append could also overstate durability. Fsync jobs and the log's internal durable boundary now use exclusive counts, with a deterministic regression for both sequences (Keratin `5ae3c4d`).
+An empty fsync job used the same inclusive offset as a job covering message zero. When its completion updated the manifest, it could invent a one-record tail; completion after a later append could also overstate durability. Fsync jobs and the log's internal durable boundary now use exclusive counts, with a deterministic regression for both sequences (Keratin `d8902a7`).
 
 ### Automatic queue enrollment and interrupted preparation
 
@@ -64,7 +64,7 @@ Version-two seals retain the original durable storage receipt, allowing recovery
 
 ### Log recovery buffer boundary
 
-The recovery scanner counted bytes from the next read position instead of the start of a buffered partial record, overstating the valid end when records crossed read chunks. Keratin `1ac4645` corrects the boundary; tests cover chunk-spanning records, padding and append after repeated reopen. Bound histories also refuse local repair that could discard records and reuse offsets under an unchanged writer session.
+The recovery scanner counted bytes from the next read position instead of the start of a buffered partial record, overstating the valid end when records crossed read chunks. Keratin `d45757f` corrects the boundary; tests cover chunk-spanning records, padding and append after repeated reopen. Bound histories also refuse local repair that could discard records and reuse offsets under an unchanged writer session.
 
 ### Exact initial activation and live replication
 
