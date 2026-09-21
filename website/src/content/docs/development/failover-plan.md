@@ -64,10 +64,13 @@ other platforms need durable metadata support before these operations are enable
 
 Exact queue checkpoint capture and bounded comparison from different checkpoint
 starts are implemented in [recovery sealing](/reliability/recovery-sealing/#queue-state-at-an-exact-boundary).
-New resource declarations now have a consensus incarnation ID bound into pending
-recovery transitions. Remaining proof must bind storage and snapshots to that
-incarnation and an accepted recovery history, including owner restart within an
-unchanged assignment. Existing resources still need a verified baseline; the
+New resource declarations have a consensus incarnation ID bound into pending
+recovery transitions. An explicit local storage primitive persists incarnation,
+history and writer-session IDs for pristine storage, and blocks ordinary access
+after restart while retaining recovery sealing. It is not enabled by ordinary
+broker creation. Remaining work must authorize those history/session IDs through
+consensus, bind snapshots and recovery installation to that authority, and readmit
+writers after recovery. Existing resources still need a verified baseline; the
 catalogue ID alone supplies no history authority.
 A trusted, quorum-installed checkpoint can replace older history; indefinite
 retention of settled payloads is not required.

@@ -18,7 +18,7 @@ pub use stroma_core::{
     OwnerStateCheckpoint, PartitionKind, PutOutcome, QuarantineInfo, QueueInspectionState,
     QueuePromotionOutcome, RecoveryMismatchPolicy, ReplicatedAppendOutcome, ReplicatedEventBatch,
     ReplicatedMessageBatch, ReplicatedQueueApplyOutcome, RetentionConfig, SnapshotConfig, Stroma,
-    StromaError, StromaEvent, StromaKeratinConfig,
+    StromaError, StromaEvent, StromaKeratinConfig, StorageHistoryBinding,
 };
 use tokio::sync::Notify;
 
@@ -548,6 +548,33 @@ impl StromaEngine {
         Ok(Self {
             inner: Arc::new(stroma),
         })
+    }
+
+    /// Explicit initial-history primitive. The caller must authorize all three
+    /// IDs through coordination before binding previously nonexistent storage.
+    /// Ordinary broker creation does not enable this until recovery can readmit
+    /// a restarted writer and install accepted history on the required quorum.
+    pub async fn initialize_empty_storage_history(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        kind: PartitionKind,
+        binding: StorageHistoryBinding,
+    ) -> Result<(), StromaError> {
+        self.inner
+            .initialize_empty_storage_history(tp, part, group, kind, binding)
+            .await
+    }
+
+    /// Inspect local identity without granting access or opening either log.
+    pub fn storage_history_binding(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<Option<StorageHistoryBinding>, StromaError> {
+        self.inner.storage_history_binding(tp, part, group)
     }
 
     /// Set the recovery dangling-reference policy (startup config).

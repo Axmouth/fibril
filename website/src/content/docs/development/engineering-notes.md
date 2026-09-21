@@ -10,6 +10,10 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Storage history and writer restart
+
+An explicit initialization primitive now persists incarnation, history and writer-session IDs before admitting pristine storage. Reopening that store blocks ordinary access even at the same assignment epoch, while recovery sealing remains available; conflicting IDs and ordinary checkpoint replacement cannot relabel it. Cancellation, corruption and Linux SIGKILL regressions cover the boundary, with automatic enrollment and recovery readmission still pending ([storage binding](/reliability/recovery-sealing/#local-storage-history-binding)).
+
 ### Resource recreation and recovery identity
 
 New queue and stream declarations now register their incarnation ID atomically, so concurrent declarations retain one identity and recreation after retirement receives a new one. Conditional deletion protects identified replacements from a delayed old delete, and recovery seal authorization rejects changed or missing incarnation metadata. Consensus snapshot restart and transition tests cover these cases; storage lineage and writer admission remain in the [failover plan](/development/failover-plan/).

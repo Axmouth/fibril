@@ -9255,3 +9255,37 @@ async fn durable_batch_wakes_replication_while_earlier_confirm_waits() {
     );
     broker.shutdown().await;
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn explicit_storage_history_binding_blocks_same_epoch_restart_admission() {
+    use fibril_broker::queue_engine::{PartitionKind, StorageHistoryBinding, StromaError};
+
+    let (engine, dir) = open_test_engine().await;
+    let binding = StorageHistoryBinding {
+        resource_incarnation: [1; 16],
+        accepted_history: [2; 16],
+        writer_session: [3; 16],
+    };
+    engine.initialize_empty_storage_history("bound", 0, None, PartitionKind::Queue, binding.clone())
+        .await.unwrap();
+    engine.ensure_queue_owner_epoch("bound", 0, None, Some(7)).await.unwrap();
+    engine.shutdown().await.unwrap();
+    drop(engine);
+
+    let reopened = StromaEngine::open(
+        &dir.root,
+        StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+        SnapshotConfig::default(),
+    ).await.unwrap();
+    assert_eq!(reopened.storage_history_binding("bound", 0, None).unwrap(), Some(binding.clone()));
+    assert!(matches!(reopened.ensure_queue_owner_epoch("bound", 0, None, Some(7)).await,
+        Err(StromaError::HistoryAdmissionRequired { .. })));
+    assert!(matches!(reopened.become_queue_owner_with_epoch("bound", 0, None, 8).await,
+        Err(StromaError::HistoryAdmissionRequired { .. })));
+    assert!(matches!(reopened.initialize_empty_storage_history("bound", 0, None, PartitionKind::Queue, binding).await,
+        Err(StromaError::HistoryAdmissionRequired { .. })));
+    // Unbound resources retain the legacy behavior during this staged rollout.
+    reopened.ensure_queue_owner_epoch("legacy", 0, None, Some(7)).await.unwrap();
+    reopened.shutdown().await.unwrap();
+}

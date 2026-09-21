@@ -50,11 +50,40 @@ available incarnation ID in their digest; a changed, missing or malformed ID
 invalidates seal authorization. Legacy transitions without an ID retain their
 previous encoding.
 
-This ID identifies a catalogue lifetime. Binding it to storage, accepted history,
-writer sessions and an authoritative checkpoint is still required before it can
-support source selection. Same-epoch owner restart admission and legacy baseline
-establishment remain pending. The new consensus commands require matching
+This ID identifies a catalogue lifetime. Source selection also requires accepted
+history, writer-session authority and an authoritative checkpoint. The local
+storage primitive below supplies an explicit binding; automatic enrollment,
+recovery readmission and legacy baseline establishment remain pending. The new consensus commands require matching
 metadata-node binaries; mixed-version rollout is not supported for this change.
+
+## Local storage history binding
+
+The explicit `initialize_empty_storage_history` library operation binds new local
+storage to a resource incarnation, accepted-history ID and writer-session ID.
+The caller must first obtain an authorized initial-history decision from
+coordination. Ordinary broker creation does not invoke this operation yet.
+
+Initialization requires previously nonexistent partition directories and takes
+both log locks before persisting a checksummed receipt. The receipt and directory
+entries are synchronized before local admission is published. Identical retries
+within the same storage instance are accepted; conflicting IDs and existing
+storage, including empty legacy logs, are refused. Admitted work survives caller
+cancellation.
+
+A private storage-instance token prevents a reopened store from inheriting writer
+permission. Ordinary access fails with `HistoryAdmissionRequired` before log
+opening or checkpoint recovery, including at the same assignment epoch. Explicit
+recovery sealing can still read and fence the retained logs. Ordinary checkpoint
+replacement of bound storage is blocked pending an installation protocol that
+carries the selected history and its authority.
+
+This primitive covers local binding and restart admission. Consensus allocation
+of accepted history and writer sessions, quorum initialization, legacy baseline
+validation and recovery readmission remain pending. Loss of the entire binding
+and log directory must be handled by that consensus protocol; local file absence
+cannot prove a new resource. Unbound resources retain their existing behavior.
+Linux tests include a SIGKILL restart; they do not simulate power loss. Older
+binaries do not enforce this receipt, so bound stores require compatible binaries.
 
 ## Explicit witness collection
 
