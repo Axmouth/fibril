@@ -10,6 +10,10 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Checkpoint rejection and cancelled captures
+
+Malformed queue checkpoints could panic on invalid ranges or a truncated custom-DLQ group, and a rejected load could partially replace existing actor state. Decoding now validates into isolated state before replacement, and a pause acquired for checkpoint export is released even when its caller is cancelled while draining active work. Owner capture also serializes with role changes and recovery sealing; malformed-field, cancellation and real broker checkpoint tests cover these paths.
+
 ### Restartable suffix repair preserves valid events
 
 The recovery helper used a whole-log checkpoint reset when it intended to remove only a bad suffix, leaving the valid prefix in memory but removing its durable records. Suffix repair now journals the cut, preserves earlier records and resumes before normal log opening; repeated restarts, I/O faults and six SIGKILL boundaries cover the fix. A dangling enqueue also no longer masks later corruption or unexplained missing settlement payloads.

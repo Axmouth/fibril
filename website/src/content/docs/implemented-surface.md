@@ -95,6 +95,9 @@ Conditions and limits:
 - `refuse` is lazy today (a mismatch is caught when the partition is first used);
   an eager whole-disk variant at boot is a tracked follow-up.
 
+- Queue checkpoint decoding rejects malformed fields before replacing actor state.
+  Cancelling a checkpoint capture releases its owner pause, and capture serializes
+  with role changes and recovery seals.
 - Explicit sealed inspection can reconstruct fully retained queue state at a
   common exclusive event boundary, with canonical state and separate input-history
   digests. Compacted checkpoint authority, resource lineage and automatic source

@@ -7715,7 +7715,19 @@ async fn sealed_pair_inspection_compares_real_peers_and_discards_incomplete_read
                         })
                         .collect(),
                 }),
-                None,
+                Some(stroma_core::ReplicatedEventBatch {
+                    epoch: pending.previous.epoch,
+                    first_offset: 0,
+                    durability: None,
+                    events: vec![
+                        stroma_core::StromaEvent::EnqueueMany { reqs: vec![
+                            stroma_core::EnqueueEventMeta { off: 0, retries: 0, expire_at: None },
+                            stroma_core::EnqueueEventMeta { off: 1, retries: 2, expire_at: Some(500) },
+                        ] },
+                        stroma_core::StromaEvent::MarkInflight { off: 0, deadline: 300 },
+                        stroma_core::StromaEvent::Ack { off: 0 },
+                    ],
+                }),
             )
             .await
             .unwrap();
@@ -7778,23 +7790,26 @@ async fn sealed_pair_inspection_compares_real_peers_and_discards_incomplete_read
     );
     assert_eq!(
         report.evidence.events.overlap,
-        RecoveryOverlap::NoSharedRecords
+        RecoveryOverlap::Matching { from: 0, next: 3 }
     );
-    assert_eq!(report.evidence.records, 5);
+    assert_eq!(report.evidence.records, 11);
     assert!(
         report
             .evidence
             .remaining_proofs
             .contains(&RecoveryProofRequirement::CommonOriginAndInstalledLineage)
     );
-    let replay = fibril_protocol::v1::recovery_inspection::inspect_recovery_pair_with_queue_replay(
-        &config, &command, &seals[0], &seals[1], limits, 0, Default::default(), Duration::from_secs(10),
-    ).await.unwrap();
-    let [left, right] = replay.evidence.queue_replay.unwrap();
-    assert_eq!(left.event_next, 0);
-    assert_eq!(left.state_digest, right.state_digest);
-    assert_ne!(left.message_digest, right.message_digest);
-    assert_ne!(left.history_id, right.history_id);
+    for target in [0, 3] {
+        let replay = fibril_protocol::v1::recovery_inspection::inspect_recovery_pair_with_queue_replay(
+            &config, &command, &seals[0], &seals[1], limits, target, Default::default(), Duration::from_secs(10),
+        ).await.unwrap();
+        let [left, right] = replay.evidence.queue_replay.unwrap();
+        assert_eq!(left.event_next, target);
+        assert_eq!(left.state_digest, right.state_digest);
+        assert_eq!(left.required_message_next, if target == 0 { 0 } else { 2 });
+        assert_ne!(left.message_digest, right.message_digest);
+        assert_ne!(left.history_id, right.history_id);
+    }
     let error = inspect_recovery_pair(
         &config,
         &command,
