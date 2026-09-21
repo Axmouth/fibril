@@ -8,7 +8,7 @@ enrolled queue histories, a bounded worker collects witnesses, verifies a source
 installs a new durable quorum and activates its exact process/storage instances.
 The previous assignment stays fenced until activation commits. Ordinary declarations
 still use their existing path; initial enrollment rollout and stream-state recovery
-remain separate gates. Automatic legacy migration is deferred.
+remain separate gates. Legacy migration is unsupported and is not planned.
 
 ## Request authority
 
@@ -507,8 +507,8 @@ its proposed owner to return; safely replacing that candidate is a further gate.
 
 Ordinary creation-time enrollment remains disabled. Initial preparation interrupted
 by owner-process replacement and wider membership/isolation testing require
-completion before general rollout. Automatic migration of existing queues is
-deferred; once ordinary enrollment is enabled, existing experimental queues must
+completion before general rollout. Migration of existing queues is unsupported;
+once ordinary enrollment is enabled, existing experimental queues must
 be drained and recreated to adopt the new recovery path. See the
 [transition policy](/development/failover-plan/#existing-experimental-queues).
 Retained generations

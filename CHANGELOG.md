@@ -10,6 +10,17 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ## [Unreleased]
 
+### Breaking changes
+
+- The new replicated-queue recovery path requires creation-time history
+  enrollment. Existing experimental queue histories have no supported migration
+  into this path. Drain queues on a compatible broker revision, retire them and
+  recreate them when ordinary enrollment becomes available; disposable test
+  queues can be recreated directly. Ordinary enrollment is still pending, and
+  current recovery is limited to explicitly enrolled queues. Cluster metadata
+  and broker nodes must run matching revisions; mixed-version recovery and
+  downgrade of enrolled histories are unsupported.
+
 ### Added
 
 - Startup `storage.keratin.writer_buffer_factor` and

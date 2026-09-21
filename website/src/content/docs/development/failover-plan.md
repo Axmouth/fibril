@@ -32,16 +32,12 @@ is insufficient; authoritative divergence requires investigation.
 
 ## Existing experimental queues
 
-Automatic migration of existing queue histories is deferred and does not block
-rollout for newly enrolled queues. Once ordinary enrollment is enabled, the
+Migration of existing queue histories is outside the supported scope. This is a
+breaking change for adoption of the new recovery path. Once ordinary enrollment is enabled, the
 supported transition is to drain existing queues using their compatible broker
 revision, retire them and recreate them with a fresh enrolled history. Disposable
 test data can be recreated directly. Retained data receives no automatic conversion
 or deletion; unsupported histories remain fenced during recovery.
-
-A future migration feature would need to establish a verified baseline, including
-older timer semantics. Implement it when an actual deployment needs to preserve
-an existing queue across the transition.
 
 ## State digests at a recovery boundary
 
@@ -61,8 +57,8 @@ and carries their identity on live replication. Version-two seals now bind retai
 evidence to that accepted storage history and original replica instance; process
 replacement requests recovery even without a placement change. Recovered activation
 establishes the next exact accepted history and supports repeated recoveries.
-Existing resources still need a verified baseline; the catalogue ID alone supplies
-no history authority.
+Existing resources require recreation to adopt this path; the catalogue ID alone
+supplies no history authority.
 A trusted, quorum-installed checkpoint can replace older history; indefinite
 retention of settled payloads is not required.
 
@@ -70,7 +66,7 @@ Owner-local leases have a separate comparison projection. Newly activated delaye
 work now moves to ready through an ordered event carrying an explicit clock
 boundary and bounded work count. Replay uses that recorded boundary and consumes
 the same timers, preserving retry and TTL state. Older histories can lack these
-transitions and still require baseline validation; complete stream-state proof
+transitions and are unsupported by this recovery path; complete stream-state proof
 is also pending.
 
 Measure checkpoint replay/hash CPU, peak memory and recovery delay before adding
