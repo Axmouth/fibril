@@ -1567,6 +1567,10 @@ pub struct Broker<
     /// replica set source for confirms). Maintained by the assignment watcher;
     /// empty for standalone brokers (local-durable confirms only).
     pub(crate) assignment_cache: Arc<DashMap<QueueKey, PartitionAssignment>>,
+    /// A routed assignment can precede local storage admission. Preserve the
+    /// predecessor of a rejected initial follower transition until it succeeds.
+    /// Retries are replanned against the latest snapshot, never replayed blindly.
+    pending_follower_admissions: DashMap<QueueIdentity, Option<PartitionAssignment>>,
     /// Queues this broker is actually serving owner writes for (set when the gate
     /// admits a publisher, cleared when the owner runtime stops). Broker-level so
     /// it survives QueueLoopState recreation. The assignment watcher reconciles
@@ -1780,6 +1784,7 @@ impl<
             replication_progress: Arc::new(DashMap::new()),
             replication_timing: Arc::new(ReplicationTimingMetrics::default()),
             assignment_cache: Arc::new(DashMap::new()),
+            pending_follower_admissions: DashMap::new(),
             locally_owned: Arc::new(DashMap::new()),
             retired_queues: DashMap::new(),
             applied_declarations: DashMap::new(),
@@ -4582,13 +4587,19 @@ impl Broker<StromaEngine> {
             previous = initial;
 
             loop {
-                if watch.changed().await.is_err() {
-                    tracing::debug!("assignment watcher exiting because coordination watch closed");
-                    break;
+                tokio::select! {
+                    changed = watch.changed() => {
+                        if changed.is_err() {
+                            tracing::debug!("assignment watcher exiting because coordination watch closed");
+                            break;
+                        }
+                    }
+                    _ = tokio::time::sleep(Duration::from_secs(1)),
+                        if !broker.pending_follower_admissions.is_empty() => {}
                 }
 
-                let next = watch.borrow().clone();
-                if next == previous {
+                let next = watch.borrow_and_update().clone();
+                if next == previous && broker.pending_follower_admissions.is_empty() {
                     continue;
                 }
 
@@ -4635,13 +4646,19 @@ impl Broker<StromaEngine> {
             previous = initial;
 
             loop {
-                if watch.changed().await.is_err() {
-                    tracing::debug!("assignment watcher exiting because coordination watch closed");
-                    break;
+                tokio::select! {
+                    changed = watch.changed() => {
+                        if changed.is_err() {
+                            tracing::debug!("assignment watcher exiting because coordination watch closed");
+                            break;
+                        }
+                    }
+                    _ = tokio::time::sleep(Duration::from_secs(1)),
+                        if !broker.pending_follower_admissions.is_empty() => {}
                 }
 
-                let next = watch.borrow().clone();
-                if next == previous {
+                let next = watch.borrow_and_update().clone();
+                if next == previous && broker.pending_follower_admissions.is_empty() {
                     continue;
                 }
 
@@ -4738,6 +4755,20 @@ impl Broker<StromaEngine> {
     ) -> Vec<Result<BrokerAssignmentTransitionApply, BrokerError>> {
         let previous = self.snapshot_with_cached_local_assignments(node_id, previous);
         let transitions = plan_local_assignment_transitions(node_id, &previous, next);
+        self.pending_follower_admissions.retain(|queue, _| {
+            let local = next
+                .assignments
+                .get(queue)
+                .is_some_and(|a| a.is_owned_by(node_id) || a.is_followed_by(node_id));
+            if !local {
+                self.assignment_cache.remove(&QueueKey {
+                    tp: queue.topic.clone(),
+                    part: queue.partition,
+                    group: queue.group.clone(),
+                });
+            }
+            local
+        });
         let mut outcomes = Vec::with_capacity(transitions.len());
         for transition in transitions {
             let result = self.apply_assignment_transition(&transition).await;
@@ -4766,6 +4797,20 @@ impl Broker<StromaEngine> {
     ) -> Vec<Result<BrokerAssignmentTransitionApply, BrokerError>> {
         let previous = self.snapshot_with_cached_local_assignments(node_id, previous);
         let transitions = plan_local_assignment_transitions(node_id, &previous, next);
+        self.pending_follower_admissions.retain(|queue, _| {
+            let local = next
+                .assignments
+                .get(queue)
+                .is_some_and(|a| a.is_owned_by(node_id) || a.is_followed_by(node_id));
+            if !local {
+                self.assignment_cache.remove(&QueueKey {
+                    tp: queue.topic.clone(),
+                    part: queue.partition,
+                    group: queue.group.clone(),
+                });
+            }
+            local
+        });
         let mut outcomes = Vec::with_capacity(transitions.len());
         for transition in transitions {
             let result = self.apply_assignment_transition(&transition).await;
@@ -4890,6 +4935,21 @@ impl Broker<StromaEngine> {
                 assignment.clone(),
             );
         }
+        // Routing cache entries are not proof of a completed local role change.
+        // Admission rejection happens before follower storage mutation, so the
+        // saved predecessor remains the correct basis for the next attempt.
+        for entry in self.pending_follower_admissions.iter() {
+            match entry.value() {
+                Some(assignment) => {
+                    previous
+                        .assignments
+                        .insert(entry.key().clone(), assignment.clone());
+                }
+                None => {
+                    previous.assignments.remove(entry.key());
+                }
+            }
+        }
         // Reconcile against real local state: any queue this broker is actually
         // serving as owner must appear owned in `previous`, even if no
         // BecomeOwner was ever observed (so the cache missed it). Otherwise a
@@ -4967,6 +5027,28 @@ impl Broker<StromaEngine> {
     }
 
     pub async fn apply_assignment_transition(
+        &self,
+        transition: &LocalAssignmentTransition,
+    ) -> Result<BrokerAssignmentTransitionApply, BrokerError> {
+        let result = self.apply_assignment_transition_inner(transition).await;
+        if transition.intent == LocalAssignmentIntent::BecomeFollower
+            && matches!(
+                &result,
+                Err(BrokerError::Engine(
+                    StromaError::HistoryAdmissionRequired { .. }
+                ))
+            )
+        {
+            self.pending_follower_admissions
+                .entry(transition.queue.clone())
+                .or_insert_with(|| transition.previous.clone());
+        } else if result.is_ok() {
+            self.pending_follower_admissions.remove(&transition.queue);
+        }
+        result
+    }
+
+    async fn apply_assignment_transition_inner(
         &self,
         transition: &LocalAssignmentTransition,
     ) -> Result<BrokerAssignmentTransitionApply, BrokerError> {

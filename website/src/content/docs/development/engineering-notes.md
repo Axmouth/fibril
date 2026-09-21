@@ -10,6 +10,10 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Follower transition before storage admission
+
+Initial follower setup could fail while history admission was pending, while the routing cache made subsequent reconciliation treat the role change as complete. The broker now retains that rejected transition's predecessor and retries against current metadata after local admission; removed assignments cancel the pending work. A regression holds metadata unchanged across admission, and a second checks assignment withdrawal.
+
 ### Recovery admission races and stale owners
 
 Authenticated tests now race learner admission against recovery and verify the resulting witness requirement at the unchanged write threshold. An owner whose metadata runtime has stopped cannot confirm further writes after its eligible follower is sealed; repeated learner broker/metadata restarts also preserve incomplete checkpoint backfill and reject stale receipts. These tests complement native process-kill coverage and leave packet-level partitions and whole-process interruption during transfer as separate acceptance work.

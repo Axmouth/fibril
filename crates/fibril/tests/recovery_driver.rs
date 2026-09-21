@@ -804,6 +804,31 @@ async fn three_node_owner_loss(recover: bool, learner: LearnerCase) {
                                 .await
                                 .is_err()
                         );
+                        // Registration commits on the metadata leader; its
+                        // forwarded reply need not mean this restarted follower
+                        // has replayed that prefix yet. Wait for the new process
+                        // registration before consulting its local history view.
+                        let old_process = uuid::Uuid::from_bytes(old_intent.process).to_string();
+                        tokio::time::timeout(Duration::from_secs(10), async {
+                            loop {
+                                let snapshot = providers[2].consensus_node().committed_snapshot();
+                                if snapshot
+                                    .nodes
+                                    .get("c")
+                                    .and_then(|node| {
+                                        node.labels.get(
+                                            fibril_coordination_ganglion::HISTORY_PROCESS_LABEL,
+                                        )
+                                    })
+                                    .is_some_and(|process| process != &old_process)
+                                {
+                                    break;
+                                }
+                                tokio::time::sleep(Duration::from_millis(10)).await;
+                            }
+                        })
+                        .await
+                        .expect("restarted metadata follower must replay its registration");
                         let renewed = providers[2].begin_queue_learner(&resource).await.unwrap();
                         let prepared = providers[2]
                             .prepare_queue_learner(&renewed, &brokers[2].engine())

@@ -9307,3 +9307,129 @@ async fn explicit_storage_history_binding_blocks_same_epoch_restart_admission() 
     reopened.ensure_queue_owner_epoch("legacy", 0, None, Some(7)).await.unwrap();
     reopened.shutdown().await.unwrap();
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn follower_admission_retries_without_a_new_metadata_snapshot() {
+    use fibril_broker::queue_engine::{PartitionKind, StorageHistoryBinding};
+    let (engine, _dir) = open_test_engine().await;
+    let prepared = engine
+        .prepare_empty_storage_history(
+            "late-admission",
+            0,
+            None,
+            PartitionKind::Queue,
+            StorageHistoryBinding {
+                resource_incarnation: [1; 16],
+                accepted_history: [2; 16],
+                writer_session: [3; 16],
+            },
+        )
+        .await
+        .unwrap();
+    let broker = Broker::new(engine, BrokerConfig::default(), None);
+    let assignment = PartitionAssignment::new(
+        QueueIdentity::new("late-admission", Partition::new(0), None),
+        "a",
+        vec!["b".into()],
+        1,
+    );
+    let mut snapshot = CoordinationSnapshot::default();
+    snapshot
+        .assignments
+        .insert(assignment.queue.clone(), assignment);
+    let rejected = broker
+        .apply_assignment_snapshot_transitions("b", &CoordinationSnapshot::default(), &snapshot)
+        .await;
+    assert!(matches!(
+        &rejected[0],
+        Err(BrokerError::Engine(
+            StromaError::HistoryAdmissionRequired { .. }
+        ))
+    ));
+    let coordination = Arc::new(StaticCoordination::new("b", snapshot));
+    broker.spawn_assignment_watcher(coordination);
+    // Admission is local storage state; it does not publish another metadata
+    // snapshot. The failed transition must remain pending across that boundary.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    broker
+        .engine()
+        .admit_prepared_storage_history(prepared)
+        .await
+        .unwrap();
+    let caught_up = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let debug = broker.engine().debug_snapshot().await.unwrap();
+            if debug
+                .queues
+                .iter()
+                .any(|q| q.topic == "late-admission" && q.role == QueueRole::Follower)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    broker.shutdown().await;
+    caught_up.expect("local admission must retry the previously failed follower transition");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn pending_follower_admission_does_not_replay_a_removed_assignment() {
+    use fibril_broker::queue_engine::{PartitionKind, StorageHistoryBinding};
+    let (engine, _dir) = open_test_engine().await;
+    let prepared = engine
+        .prepare_empty_storage_history(
+            "removed-admission",
+            0,
+            None,
+            PartitionKind::Queue,
+            StorageHistoryBinding {
+                resource_incarnation: [1; 16],
+                accepted_history: [2; 16],
+                writer_session: [3; 16],
+            },
+        )
+        .await
+        .unwrap();
+    let broker = Broker::new(engine, BrokerConfig::default(), None);
+    let assignment = PartitionAssignment::new(
+        QueueIdentity::new("removed-admission", Partition::new(0), None),
+        "a",
+        vec!["b".into()],
+        1,
+    );
+    let mut snapshot = CoordinationSnapshot::default();
+    snapshot
+        .assignments
+        .insert(assignment.queue.clone(), assignment);
+    let empty = CoordinationSnapshot::default();
+    assert!(
+        broker
+            .apply_assignment_snapshot_transitions("b", &empty, &snapshot)
+            .await[0]
+            .is_err()
+    );
+    assert!(
+        broker
+            .apply_assignment_snapshot_transitions("b", &snapshot, &empty)
+            .await
+            .is_empty()
+    );
+    broker
+        .engine()
+        .admit_prepared_storage_history(prepared)
+        .await
+        .unwrap();
+    assert!(
+        broker
+            .apply_assignment_snapshot_transitions("b", &empty, &empty)
+            .await
+            .is_empty()
+    );
+    let debug = broker.engine().debug_snapshot().await.unwrap();
+    assert!(debug.queues.iter().all(|q| q.role != QueueRole::Follower));
+    broker.shutdown().await;
+}
