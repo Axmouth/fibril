@@ -7573,3 +7573,305 @@ async fn owner_peer_reauthenticates_after_transport_loss() {
     server.await.unwrap().unwrap();
     broker.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sealed_pair_inspection_compares_real_peers_and_discards_incomplete_reads() {
+    use fibril_broker::coordination::{
+        DeterministicPartitionPlacement, DeterministicStreamPlacement,
+    };
+    use fibril_broker::recovery::inspection::{
+        RecoveryInspectionLimits, RecoveryOverlap, RecoveryProofRequirement,
+    };
+    use fibril_coordination_ganglion::GanglionCoordination;
+    use fibril_protocol::v1::recovery_inspection::inspect_recovery_pair;
+    use ganglion_openraft::{InProcessRouter, RaftMetadataNode, default_raft_config};
+    use std::collections::BTreeMap;
+
+    let router = InProcessRouter::new();
+    let raft = RaftMetadataNode::start(1, default_raft_config().unwrap(), &router)
+        .await
+        .unwrap();
+    let other = RaftMetadataNode::start(2, default_raft_config().unwrap(), &router)
+        .await
+        .unwrap();
+    // Raft replication uses the in-process router; follower authorization writes
+    // forward over real metadata TCP to the elected leader.
+    let metadata_stop = tokio_util::sync::CancellationToken::new();
+    let mut metadata_servers = vec![];
+    let mut members = BTreeMap::new();
+    for node in [&raft, &other] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        members.insert(
+            node.node_id(),
+            ganglion_openraft::openraft::BasicNode::new(listener.local_addr().unwrap().to_string()),
+        );
+        let handle = node.raft().clone();
+        let stopped = metadata_stop.clone();
+        metadata_servers.push(tokio::spawn(async move {
+            let mut connections=tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    _=stopped.cancelled()=>break,
+                    accepted=listener.accept()=>{
+                        let (socket,_)=accepted.unwrap();let handle=handle.clone();
+                        connections.spawn(async move { ganglion_openraft::serve_connection(socket,handle,ganglion_openraft::WireFormat::default()).await });
+                    }
+                    _=connections.join_next(), if !connections.is_empty()=>{}
+                }
+            }
+            connections.shutdown().await;
+        }));
+    }
+    raft.initialize(members).await.unwrap();
+    raft.wait_for_leader(1, Duration::from_secs(10))
+        .await
+        .unwrap();
+    let providers = [
+        Arc::new(GanglionCoordination::new("b", raft)),
+        Arc::new(GanglionCoordination::new("c", other)),
+    ];
+    let provider = &providers[0];
+    let node = |id: &str| NodeInfo {
+        node_id: id.into(),
+        broker_addr: "127.0.0.1:1".into(),
+        admin_addr: None,
+    };
+    for id in ["a", "b", "c"] {
+        provider.register_self(&node(id)).await.unwrap();
+    }
+    let queue = QueueIdentity::new("inspect-wire", Partition::new(0), None);
+    provider.register_queue(&queue).await.unwrap();
+    let mut live = HashMap::from([
+        ("a".into(), node("a")),
+        ("b".into(), node("b")),
+        ("c".into(), node("c")),
+    ]);
+    for remove in [false, true] {
+        if remove {
+            live.remove("a");
+        }
+        provider
+            .control_iteration(
+                &DeterministicPartitionPlacement,
+                &provider.registered_queues(),
+                &DeterministicStreamPlacement,
+                &provider.registered_streams(),
+                2,
+                2,
+                ReplicationDurabilityPolicy::MajorityDurable,
+                &live,
+                8,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let pending = provider.pending_recoveries().unwrap().remove(0);
+    let command = pending.seal_command().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while providers[1].pending_recoveries().unwrap() != vec![pending.clone()] {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let mut dirs = vec![];
+    let mut brokers = vec![];
+    let mut seals = vec![];
+    let mut servers = vec![];
+    let mut nodes = HashMap::new();
+    for (index, id) in ["b", "c"].into_iter().enumerate() {
+        let (engine, dir) = open_test_engine().await;
+        let broker = Broker::new_with_ownership(
+            engine.clone(),
+            BrokerConfig::default(),
+            None,
+            providers[index].clone(),
+        );
+        broker
+            .become_replication_follower_with_epoch(
+                &command.topic,
+                command.partition,
+                None,
+                pending.previous.epoch,
+            )
+            .await
+            .unwrap();
+        engine
+            .apply_replicated_queue_batch(
+                &command.topic,
+                0,
+                None,
+                Some(stroma_core::ReplicatedMessageBatch {
+                    epoch: pending.previous.epoch,
+                    first_offset: 0,
+                    durability: None,
+                    records: (0..index + 2)
+                        .map(|i| stroma_core::Message {
+                            flags: 0,
+                            headers: vec![],
+                            payload: vec![i as u8],
+                        })
+                        .collect(),
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        seals.push(
+            broker
+                .seal_replica_for_recovery(command.clone())
+                .await
+                .unwrap(),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        nodes.insert(id.into(), listener.local_addr().unwrap().to_string());
+        let serving = broker.clone();
+        let stop = tokio_util::sync::CancellationToken::new();
+        let cancelled = stop.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let (socket, peer) = tokio::select! { _=cancelled.cancelled()=>break, accepted=listener.accept()=>accepted.unwrap() };
+                let stats = ConnectionStats::new();
+                let conn_id = stats.add_connection(peer, Instant::now(), false);
+                handle_connection(
+                    socket,
+                    Some(peer),
+                    serving.clone(),
+                    TcpStats::new(10),
+                    stats,
+                    conn_id,
+                    Some(node_auth()),
+                    None,
+                    ConnectionSettings::new(Some(60)),
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            }
+        });
+        servers.push((stop, task));
+        brokers.push(broker);
+        dirs.push(dir);
+    }
+    let config = ProtocolOwnerPeerResolverConfig::new(nodes).with_auth("@node", "secret");
+    let limits = RecoveryInspectionLimits {
+        page_records: 1,
+        ..Default::default()
+    };
+    let report = inspect_recovery_pair(
+        &config,
+        &command,
+        &seals[0],
+        &seals[1],
+        limits,
+        Duration::from_secs(10),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        report.evidence.messages.overlap,
+        RecoveryOverlap::Matching { from: 0, next: 2 }
+    );
+    assert_eq!(
+        report.evidence.events.overlap,
+        RecoveryOverlap::NoSharedRecords
+    );
+    assert_eq!(report.evidence.records, 5);
+    assert!(
+        report
+            .evidence
+            .remaining_proofs
+            .contains(&RecoveryProofRequirement::CommonOriginAndInstalledLineage)
+    );
+    let error = inspect_recovery_pair(
+        &config,
+        &command,
+        &seals[0],
+        &seals[1],
+        RecoveryInspectionLimits {
+            total_pages: 1,
+            ..limits
+        },
+        Duration::from_secs(10),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("page budget"));
+    assert!(
+        inspect_recovery_pair(
+            &config,
+            &command,
+            &seals[0],
+            &seals[0],
+            limits,
+            Duration::from_secs(10)
+        )
+        .await
+        .is_err()
+    );
+
+    // Bound the whole operation when a peer accepts but never handshakes.
+    let hanging = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = hanging.local_addr().unwrap();
+    let (release, hold) = tokio::sync::oneshot::channel::<()>();
+    let hanging_task = tokio::spawn(async move {
+        let (_socket, _) = hanging.accept().await.unwrap();
+        let _ = hold.await;
+    });
+    let hang_config =
+        ProtocolOwnerPeerResolverConfig::new(HashMap::from([("b".into(), addr.to_string())]))
+            .with_auth("@node", "secret");
+    let error = tokio::time::timeout(
+        Duration::from_secs(2),
+        inspect_recovery_pair(
+            &hang_config,
+            &command,
+            &seals[0],
+            &seals[1],
+            limits,
+            Duration::from_millis(100),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(error.to_string().contains("deadline"));
+    release.send(()).unwrap();
+    hanging_task.await.unwrap();
+
+    // Losing the second source cannot return the first source's partial evidence.
+    let (stop, task) = servers.pop().unwrap();
+    stop.cancel();
+    task.await.unwrap();
+    assert!(
+        inspect_recovery_pair(
+            &config,
+            &command,
+            &seals[0],
+            &seals[1],
+            limits,
+            Duration::from_secs(10)
+        )
+        .await
+        .is_err()
+    );
+    let (stop, task) = servers.pop().unwrap();
+    stop.cancel();
+    task.await.unwrap();
+    assert_eq!(provider.pending_recoveries().unwrap(), vec![pending]);
+    for broker in brokers {
+        broker.shutdown().await;
+    }
+    metadata_stop.cancel();
+    for server in metadata_servers {
+        server.await.unwrap();
+    }
+    for provider in providers {
+        provider.consensus_node().shutdown().await.unwrap();
+    }
+    drop(dirs);
+}

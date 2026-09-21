@@ -37,9 +37,9 @@ across different retained ranges and checkpoint boundaries.
 
 The implemented [recovery seal receiver](/reliability/recovery-sealing/) binds
 explicit requests to committed transitions and persists exact retained-content
-identity. Read-only sealed-source pages and recoverable local checkpoint installation
-are also available. Automatic
-recovery requires the following pieces:
+identity. Read-only sealed-source pages, bounded retained-history comparison and
+recoverable local checkpoint installation are also available. Automatic recovery
+requires the following pieces:
 
 1. Build automatic dispatch with bounded backoff and restartable, coalesced
    progress on the explicit seal transport and witness admission primitives.
@@ -59,6 +59,29 @@ recovery requires the following pieces:
 Automatic dispatch remains disabled until installation and activation can finish
 safely. Linux tests cover local seals and interrupted checkpoint replacement;
 other platforms need durable metadata support before these operations are enabled.
+
+## State digests at a recovery boundary
+
+Evaluate a versioned canonical state digest after deterministic replay to an
+explicit exclusive event frontier. Bind it to the resource incarnation, installed
+lineage and required payload coverage/content identity. Equal state at that
+boundary can support checkpoint comparison; different histories can converge to
+the same state, so lineage remains part of the proof.
+
+Begin with isolated replay of sealed evidence during recovery. Canonical encoding
+must cover ready/settled state, inflight deadlines, retries, delayed work, TTLs,
+pending dead letters and persisted policy, sorting unordered collections and
+excluding local timing metadata and derived caches. Current snapshot bytes and
+the limited canonical debug view are insufficient for this purpose. Streams need
+their own complete state schema.
+
+Measure replay time, hashing/sorting CPU, peak memory and recovery delay before
+adding periodic live-owner captures. A live capture must return state and the
+actual durable applied frontier under an explicit application fence across actor
+priority lanes. Hash an immutable capture outside the actor; avoid adding a hash
+wait to every publish/confirmation batch. Requests for an already-passed boundary
+require a retained capture or replay, and a hash cannot retroactively establish
+that an arbitrary live state represented the requested offset.
 
 ## Eager failure detection
 

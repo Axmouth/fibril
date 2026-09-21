@@ -10,6 +10,10 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Sealed-history comparison and dependency diagnostics
+
+Explicit pair inspection now compares shared offsets across differently retained histories and verifies the complete transferred log digests, retaining only a page of unmatched record IDs. Whole-event reference checks expose incomplete payload batches and preserve explicit replay/checkpoint gaps; timeout, source loss and exhausted budgets discard partial results. Matching overlap remains subject to common-origin and state proof before source selection ([recovery sealing](/reliability/recovery-sealing/)).
+
 ### Read-only access to sealed evidence
 
 Recovery can now read bounded pages from live or restarted sealed replicas without opening queue actors, repairing files or lifting the seal. Every page verifies the complete retained logs and snapshot, while authentication, transition checks and cancellation-safe locks preserve the recovery boundary. Full rescans are deliberately confined to explicit recovery calls; compatible-history proof and efficient bulk installation remain pending ([recovery sealing](/reliability/recovery-sealing/)).

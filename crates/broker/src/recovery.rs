@@ -6,6 +6,7 @@ use crate::{
     queue_engine::StromaEngine,
 };
 use std::sync::{Arc, Mutex};
+pub use stroma_core::recovery_inspection as inspection;
 pub use stroma_core::{
     RecoveryReadPage, RecoveryReadRequest, RecoveryReadSource, RecoveryRecord, RecoverySealRequest,
     RetainedHistoryIdentity, SealedReplicaFrontiers,

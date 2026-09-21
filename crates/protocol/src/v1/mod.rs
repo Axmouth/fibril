@@ -8,5 +8,6 @@ pub mod client;
 mod connection_writer;
 pub mod handler;
 pub mod replication;
+pub mod recovery_inspection;
 pub mod replication_stream;
 pub mod session_store;

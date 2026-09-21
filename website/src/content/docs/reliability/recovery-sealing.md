@@ -60,7 +60,7 @@ against the updated snapshot. An in-memory snapshot check alone supplies no fres
 consensus authority for activation.
 
 These are explicit library operations. Automatic fan-out, retry scheduling,
-source comparison and selected-history installation are not enabled.
+automatic source selection and selected-history installation are not enabled.
 
 ## Retained content identity
 
@@ -107,6 +107,39 @@ Queue, stream, empty-range, nonzero-head, cold-restart, cancellation and real TC
 authorization tests cover this path. The data is available for subsequent history
 comparison; reads do not establish ancestry, dependency completeness or promotion
 authority.
+
+## Explicit retained-history inspection
+
+`inspect_recovery_pair` reads two distinct sealed witnesses through authenticated
+recovery control. It compares canonical records at shared message and event
+offsets, tolerates different page boundaries and retained ranges, and verifies
+each complete transferred log against its sealed digest. Results distinguish
+matching overlap, the first divergent offset with content IDs, and no shared
+records. Empty overlap supplies no compatibility evidence. Inspection retains at
+most one page of unmatched record IDs and produces payload-free diagnostics.
+
+Event-reference inspection checks all offsets in a recognized event, including
+whole enqueue batches and event zero. It reports references outside that replica's
+retained payload range and marks cancellation, reset, embedded snapshot, unknown
+encoding and stream-state cases for further interpretation. A reference below the
+retained head can be legitimate compaction; a later cancellation can eliminate a
+missing enqueue. These findings describe unresolved dependencies and do not
+establish corruption or authorize deleting an event suffix.
+
+Every result lists remaining common-origin/installed-lineage and state/dependency
+proofs. Nonzero retained heads and snapshot receipts add explicit compaction and
+checkpoint requirements. Snapshot digests are reported without interpreting the
+snapshot state. The inspector never combines independent maximum log tails,
+chooses a source, installs state or activates an owner.
+
+Default inspection limits are 256 records and 1 MiB per page, 1,024 pages,
+1,000,000 records and 256 MiB of canonical record bytes across both replicas.
+Callers supply a whole-operation deadline. Budget exhaustion, malformed pages,
+transferred-digest mismatch, timeout and source loss return an error without a
+partial success report. Dependency decoding accepts at most 65,536 entries in an
+event batch; larger or unfamiliar encodings leave an explicit semantic gap.
+These limits bound one inspection, while aggregate scheduling remains future
+work. Source reads still rescan retained data per page.
 
 ## Cost and limits
 
