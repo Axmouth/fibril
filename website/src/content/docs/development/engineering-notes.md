@@ -10,6 +10,10 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Persisted queue recovery intent
+
+A verified source selection can now be fixed in consensus before replacement storage work begins. The plan binds the exact state, witnesses, continuation offsets and new history/session IDs; retries retain the first decision while replicas remain fenced. Regressions cover zero boundaries, substituted evidence, stale transitions and consensus retries across three metadata nodes.
+
 ### Verified recovery source proposals
 
 Sealed queue replay can now produce deterministic snapshot artifacts that release old leases while preserving logical state and verified live-payload identity. Explicit source selection requires accepted origin authority, the old witness threshold, complete source coverage and consistent comparisons; it leaves installation and writer admission closed. Tests cover partial replay, divergence, crossed tails, stale transitions, older timer semantics and a single intersecting witness over authenticated TCP.

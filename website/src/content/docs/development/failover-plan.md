@@ -49,7 +49,8 @@ requires the following pieces:
    and authoritative comparisons now cover a complete dominating source, including
    compacted prefixes. Existing resources and version-one origins still need a
    verified baseline; a newly advanced fence cannot establish that baseline.
-3. Transfer the selected history and durably install it on the new write quorum,
+3. Transfer the history fixed by the persisted recovery plan and durably install
+   it on the new write quorum,
    including the candidate, before committing activation. Resume interrupted
    phases and isolate the old owner through repeated failovers. Bound aggregate
    transfer buffering and total verification work, and support records larger than the

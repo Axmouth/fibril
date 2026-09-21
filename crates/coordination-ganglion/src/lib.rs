@@ -31,6 +31,7 @@ pub mod history_activation;
 pub mod promotion;
 pub mod recovery_witnesses;
 pub mod recovery_selection;
+pub mod recovery_plan;
 
 /// Namespace tag used for fibril queues inside ganglion resource identities.
 const QUEUE_NAMESPACE: &str = "fibril/queue";

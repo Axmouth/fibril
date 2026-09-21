@@ -413,3 +413,19 @@ It grants no writer permission. Crossed incomplete tails require reconstruction;
 legacy origins, streams, recovered lineage, new-quorum installation and automatic
 activation still need further implementation. A larger heartbeat tail is never
 sufficient to authorize this proposal.
+
+## Persisted queue recovery intent
+
+The proposed owner can commit a verified source proposal with
+`persist_queue_recovery_plan`. The immutable record binds the exact pending
+transition, old activation and sealed witnesses, selected state and payload
+fingerprints, continuation offsets, and fresh history and writer-session IDs.
+A guarded consensus write keeps the first accepted plan; retries retain its IDs,
+and a conflicting selection cannot replace it. The old assignment and pending
+barrier remain in place.
+
+A restarted coordinator can read the saved plan and verify that a reconstructed
+artifact matches its exact source and state. Reading or deserializing a plan
+supplies no fresh installation or serving permission. Staged transfer, durable
+new-quorum receipts, replacement storage admission and activation remain pending;
+ordinary declarations still do not enable this lifecycle automatically.

@@ -1,8 +1,8 @@
 use fibril_broker::queue_engine::StromaEvent;
 use fibril_broker::recovery::{
+    RecoveryReadPage, RecoveryReadSource, RecoveryRecord,
     inspection::{RecoveryPairInspector, RecoverySide},
     replay::RecoveryQueueStateArtifact,
-    RecoveryReadPage, RecoveryReadSource, RecoveryRecord,
 };
 
 fn selecting(
@@ -193,17 +193,21 @@ fn source_selection_covers_observed_tails_and_rejects_missing_comparison_or_part
     let mut witnesses = RecoveryWitnessSet::new(&snapshot, &pending).unwrap();
     let mut artifacts =
         BTreeMap::from([("a".into(), artifact(&a, 1)), ("b".into(), artifact(&b, 2))]);
-    assert!(witnesses
-        .select_queue_source(&snapshot, &artifacts, &[])
-        .is_err());
+    assert!(
+        witnesses
+            .select_queue_source(&snapshot, &artifacts, &[])
+            .is_err()
+    );
     for s in [&a, &b] {
         witnesses
             .record(&snapshot, &s.report.node_id, s.report.clone())
             .unwrap();
     }
-    assert!(witnesses
-        .select_queue_source(&snapshot, &artifacts, &[])
-        .is_err());
+    assert!(
+        witnesses
+            .select_queue_source(&snapshot, &artifacts, &[])
+            .is_err()
+    );
     let pair = inspect(&a, &b, None).finish().unwrap();
     let chosen = witnesses
         .select_queue_source(&snapshot, &artifacts, &[pair.clone()])
@@ -220,16 +224,20 @@ fn source_selection_covers_observed_tails_and_rejects_missing_comparison_or_part
             .unwrap()
     );
     artifacts.insert("b".into(), artifact(&b, 1));
-    assert!(witnesses
-        .select_queue_source(&snapshot, &artifacts, &[pair])
-        .is_err());
+    assert!(
+        witnesses
+            .select_queue_source(&snapshot, &artifacts, &[pair])
+            .is_err()
+    );
     let mut changed = snapshot;
     changed
         .attributes
         .remove(&promotion::pending_recovery_key(&pending.previous.resource));
-    assert!(witnesses
-        .select_queue_source(&changed, &artifacts, &[])
-        .is_err());
+    assert!(
+        witnesses
+            .select_queue_source(&changed, &artifacts, &[])
+            .is_err()
+    );
 }
 
 #[test]
@@ -298,4 +306,127 @@ fn source_selection_refuses_divergence_and_crossed_incomplete_tails() {
             "{error}"
         );
     }
+}
+
+#[test]
+fn recovery_plan_binds_verified_state_and_preserves_the_pending_barrier() {
+    use crate::recovery_plan::QueueRecoveryPlan;
+    for count in [0, 2] {
+        let (mut snapshot, pending, quorum) = selecting(2);
+        let b = source(
+            &pending,
+            &quorum,
+            "b",
+            count,
+            (0..count).map(enqueue).collect(),
+        );
+        let state_artifact = artifact(&b, count);
+        let mut witnesses = RecoveryWitnessSet::new(&snapshot, &pending).unwrap();
+        witnesses.record(&snapshot, "b", b.report.clone()).unwrap();
+        let selected = witnesses
+            .select_queue_source(
+                &snapshot,
+                &BTreeMap::from([("b".into(), state_artifact.clone())]),
+                &[],
+            )
+            .unwrap();
+        let plan = QueueRecoveryPlan::proposed(&snapshot, &pending, &witnesses, &selected).unwrap();
+        plan.verify_artifact(&state_artifact).unwrap();
+        assert!(plan.validate_committed(&snapshot).is_err());
+        let key = crate::recovery_plan::key(&pending).unwrap();
+        let assignments = snapshot.assignments.clone();
+        let raw = serde_json::to_string(&plan).unwrap();
+        snapshot.attributes.insert(key, raw.clone());
+        let restored: QueueRecoveryPlan = serde_json::from_str(&raw).unwrap();
+        restored.validate_committed(&snapshot).unwrap();
+        assert_eq!(restored.digest().unwrap(), plan.digest().unwrap());
+        assert_eq!(
+            restored.binding().resource_incarnation,
+            quorum.reports["b"].storage.binding.resource_incarnation
+        );
+        assert_ne!(
+            restored.binding().writer_session,
+            quorum.reports["b"].storage.binding.writer_session
+        );
+        assert_eq!(snapshot.assignments, assignments);
+        assert!(
+            snapshot
+                .attributes
+                .contains_key(&promotion::pending_recovery_key(&pending.previous.resource))
+        );
+        assert!(accepted_history(&snapshot, &pending.previous.resource).is_err());
+        // A valid but different replay cannot be substituted after restart.
+        let another = source(
+            &pending,
+            &quorum,
+            "b",
+            count + 1,
+            (0..=count).map(enqueue).collect(),
+        );
+        assert!(
+            restored
+                .verify_artifact(&artifact(&another, count + 1))
+                .is_err()
+        );
+        snapshot
+            .attributes
+            .remove(&promotion::pending_recovery_key(&pending.previous.resource));
+        assert!(restored.validate_committed(&snapshot).is_err());
+    }
+}
+
+#[test]
+fn recovery_plan_rejects_substituted_sources_bindings_witnesses_and_transition() {
+    use crate::recovery_plan::QueueRecoveryPlan;
+    let (snapshot, pending, quorum) = selecting(2);
+    let b = source(&pending, &quorum, "b", 1, vec![enqueue(0)]);
+    let mut witnesses = RecoveryWitnessSet::new(&snapshot, &pending).unwrap();
+    witnesses.record(&snapshot, "b", b.report.clone()).unwrap();
+    let selected = witnesses
+        .select_queue_source(
+            &snapshot,
+            &BTreeMap::from([("b".into(), artifact(&b, 1))]),
+            &[],
+        )
+        .unwrap();
+    let plan = QueueRecoveryPlan::proposed(&snapshot, &pending, &witnesses, &selected).unwrap();
+    let original = serde_json::to_value(&plan).unwrap();
+    for mutation in 0..10 {
+        let mut value = original.clone();
+        match mutation {
+            0 => value["version"] = 2.into(),
+            1 => value["selected"]["event_next"] = 0.into(),
+            2 => value["selected"]["source_node"] = "a".into(),
+            3 => value["selected"]["witnesses"] = serde_json::json!({}),
+            4 => value["witnesses"] = serde_json::json!({}),
+            5 => {
+                value["binding"]["writer_session"] =
+                    serde_json::json!(quorum.reports["b"].storage.binding.writer_session)
+            }
+            6 => value["binding"]["accepted_history"] = serde_json::to_value([0u8; 16]).unwrap(),
+            7 => value["pending"]["proposed"]["epoch"] = 100.into(),
+            8 => {
+                value["witnesses"]["b"]["storage_history"]["storage_instance"] =
+                    serde_json::to_value([9u8; 16]).unwrap()
+            }
+            _ => {
+                value["binding"]["resource_incarnation"] = serde_json::to_value([9u8; 16]).unwrap()
+            }
+        }
+        let bad: QueueRecoveryPlan = serde_json::from_value(value).unwrap();
+        let mut stored = snapshot.clone();
+        stored.attributes.insert(
+            crate::recovery_plan::key(bad.pending()).unwrap(),
+            serde_json::to_string(&bad).unwrap(),
+        );
+        assert!(
+            bad.validate_committed(&stored).is_err(),
+            "mutation {mutation}"
+        );
+    }
+    // Source choice cannot outlive an added witness, even if the newly observed
+    // tail would otherwise tempt a coordinator to retain its earlier proposal.
+    let a = source(&pending, &quorum, "a", 2, vec![enqueue(0), enqueue(1)]);
+    witnesses.record(&snapshot, "a", a.report).unwrap();
+    assert!(QueueRecoveryPlan::proposed(&snapshot, &pending, &witnesses, &selected).is_err());
 }

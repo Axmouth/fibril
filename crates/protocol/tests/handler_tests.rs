@@ -8668,6 +8668,21 @@ async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_conse
     ).unwrap();
     assert_eq!(chosen.source_node(), "b");
     assert_eq!((chosen.event_next(), chosen.message_next()), (2, 2));
+    assert!(providers[0].persist_queue_recovery_plan(&pending, &witnesses, &chosen).await.is_err());
+    let plan = retry_metadata(|| providers[1].persist_queue_recovery_plan(&pending, &witnesses, &chosen)).await;
+    // Forwarded consensus completion can precede this provider's local watch.
+    // Wait for the actual intent rather than sampling a possibly older generation.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while providers.iter().any(|provider| provider.queue_recovery_plan(&pending).unwrap() != Some(plan.clone())) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }).await.unwrap();
+    assert_eq!(plan.source_node(), "b");
+    assert_eq!((plan.event_next(), plan.message_next()), (2, 2));
+    assert_ne!(plan.binding(), &decision.binding);
+    assert_eq!(providers[2].queue_recovery_plan(&pending).unwrap(), Some(plan.clone()));
+    // A lost response retries the exact intent, including its generated IDs.
+    assert_eq!(retry_metadata(|| providers[1].persist_queue_recovery_plan(&pending, &witnesses, &chosen)).await, plan);
     assert_eq!(providers[0].pending_recoveries().unwrap(), vec![pending.clone()]);
     stop_reads.cancel();
     reads.await.unwrap();

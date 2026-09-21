@@ -7,7 +7,7 @@ use fibril_broker::recovery::{
     replay::RecoveryQueueStateArtifact,
 };
 use ganglion_core::{CoordinationSnapshot, ResourceIdentity};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     initial_history::InitialHistoryDecision,
@@ -17,31 +17,36 @@ use crate::{
 /// Immutable proposal created from locally verified evidence. It deliberately
 /// cannot be deserialized as a proof or used directly to grant writer permission.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct QueueRecoverySelection {
-    transition: [u8; 32],
-    previous_activation: [u8; 32],
-    source_node: String,
-    source_history: [u8; 32],
-    event_next: u64,
-    message_head: u64,
-    message_next: u64,
-    snapshot_digest: [u8; 32],
-    state_digest: [u8; 32],
-    live_payload_digest: [u8; 32],
-    witnesses: BTreeMap<String, [u8; 32]>,
+#[serde(transparent)]
+pub struct QueueRecoverySelection(pub(crate) RecordedQueueSelection);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RecordedQueueSelection {
+    pub(crate) transition: [u8; 32],
+    pub(crate) previous_activation: [u8; 32],
+    pub(crate) source_node: String,
+    pub(crate) source_history: [u8; 32],
+    pub(crate) event_next: u64,
+    pub(crate) message_head: u64,
+    pub(crate) message_next: u64,
+    pub(crate) snapshot_digest: [u8; 32],
+    pub(crate) state_digest: [u8; 32],
+    pub(crate) live_payload_digest: [u8; 32],
+    pub(crate) witnesses: BTreeMap<String, [u8; 32]>,
 }
 impl QueueRecoverySelection {
     pub fn source_node(&self) -> &str {
-        &self.source_node
+        &self.0.source_node
     }
     pub fn event_next(&self) -> u64 {
-        self.event_next
+        self.0.event_next
     }
     pub fn message_next(&self) -> u64 {
-        self.message_next
+        self.0.message_next
     }
     pub fn snapshot_digest(&self) -> [u8; 32] {
-        self.snapshot_digest
+        self.0.snapshot_digest
     }
     pub fn digest(&self) -> Result<[u8; 32], String> {
         let mut hash = blake3::Hasher::new();
@@ -195,7 +200,7 @@ impl RecoveryWitnessSet {
                 }
             }
         }
-        let selection = QueueRecoverySelection {
+        let selection = QueueRecoverySelection(RecordedQueueSelection {
             transition: command.transition,
             previous_activation: accepted.activation,
             source_node: source_node.clone(),
@@ -210,7 +215,7 @@ impl RecoveryWitnessSet {
                 .iter()
                 .map(|(node, report)| (node.clone(), report.seal.history.id))
                 .collect(),
-        };
+        });
         tracing::info!(
             topic = command.topic,
             partition = command.partition.id(),
