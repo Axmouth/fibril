@@ -6,8 +6,9 @@ description: Explicit recovery authorization, durable local evidence and remaini
 Recovery sealing freezes a replica's retained records for inspection. The broker
 has an explicit internal receiver; the placement controller does not dispatch
 seals automatically. Replicated reassignment remains paused at the pending
-recovery barrier until compatible-history selection, installation and activation
-are implemented.
+recovery barrier until selected history is durably installed and freshly activated.
+Explicit source selection currently covers accepted initial queue histories;
+automatic orchestration and recovered-history readmission remain pending.
 
 ## Request authority
 
@@ -105,6 +106,11 @@ enrolled incarnation and its current assignment. The decision fixes the owner
 instance, history ID, writer-session ID and required write count. Repeated calls
 from that owner instance retain the committed IDs. A replacement provider using
 the same node name and assignment epoch must enter recovery readmission.
+
+New preparation decisions use version two to identify ordered durable timer
+semantics. Version-one decisions remain readable, but need a verified baseline
+before the new queue source-selection proof can accept them. Updated peers are
+required to prepare a version-two origin.
 
 Before preparing local storage, a generation-and-attribute guarded consensus
 update rechecks the decision. This merges one attribute and preserves advisory
@@ -382,3 +388,28 @@ returned replica ID is coordinator-derived, rather than a cryptographic identity
 proof against a malicious peer. Replication read, apply, checkpoint and streaming controls require the same
 node authentication on the current transport. Remaining work is tracked in the
 [failover plan](/development/failover-plan/).
+
+## Verified queue source proposals
+
+After complete sealed transfer and live-payload verification, the inspector can
+produce a bounded queue-state artifact. The snapshot releases old delivery leases
+and resets capture time while preserving retry, delayed, TTL, settled and DLQ
+state. Stable ordering makes its bytes and hash reproducible across retries.
+Round-trip validation checks that the existing snapshot codec preserves the exact
+projected state. Ordinary snapshot encoding retains its existing linear work.
+The explicit transport helper uses the same authenticated reads, deadlines and
+CPU admission as pair inspection; inspecting one source counts as one witness.
+
+`select_queue_source` requires an accepted version-two initial history and the
+fixed old witness threshold. The selected artifact must cover its source's complete
+event tail and both maximum observed tails. Every other collected witness needs
+an exact sealed-content comparison with that source. Divergent overlapping records
+and supplied state evidence that disagrees at a common boundary block selection.
+The accepted single-writer origin supplies ancestry for compacted prefixes.
+
+The result is an immutable proposal tied to the pending transition, previous
+activation, exact source, snapshot/state/live-payload digests and sealed witnesses.
+It grants no writer permission. Crossed incomplete tails require reconstruction;
+legacy origins, streams, recovered lineage, new-quorum installation and automatic
+activation still need further implementation. A larger heartbeat tail is never
+sufficient to authorize this proposal.

@@ -26,6 +26,8 @@ pub enum InitialHistoryPhase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InitialHistoryDecision {
+    /// Version 2 records origin under ordered durable timer semantics.
+    /// Version 1 remains readable, but cannot certify the new recovery replay.
     pub version: u32,
     pub phase: InitialHistoryPhase,
     pub incarnation: ResourceIncarnation,
@@ -292,7 +294,7 @@ impl InitialHistoryDecision {
     pub fn validate(&self, snapshot: &CoordinationSnapshot) -> Result<(), String> {
         let resource = &self.incarnation.resource;
         validate_resource(resource)?;
-        if self.version != 1
+        if !matches!(self.version, 1 | 2)
             || self.incarnation.version != 2
             || self.incarnation.retired
             || self.owner_process == [0; 16]
@@ -344,7 +346,7 @@ fn proposed_decision(
         existing
     } else {
         InitialHistoryDecision {
-            version: 1,
+            version: 2,
             phase: InitialHistoryPhase::Preparing,
             binding: StorageHistoryBinding {
                 resource_incarnation: incarnation.id,

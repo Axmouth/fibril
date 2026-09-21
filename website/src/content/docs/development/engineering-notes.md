@@ -10,6 +10,10 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Verified recovery source proposals
+
+Sealed queue replay can now produce deterministic snapshot artifacts that release old leases while preserving logical state and verified live-payload identity. Explicit source selection requires accepted origin authority, the old witness threshold, complete source coverage and consistent comparisons; it leaves installation and writer admission closed. Tests cover partial replay, divergence, crossed tails, stale transitions, older timer semantics and a single intersecting witness over authenticated TCP.
+
 ### Durable delayed-message activation
 
 An owner could activate a delayed publish locally, deliver it and record a NACK, while restart or follower replay missed the activation and lost the retry increment. Due timers now move to ready through a bounded, ordered event that consumes their heap entries; an elapsed deadline at broker admission becomes an ordinary enqueue. Regressions cover restart, follower application, different checkpoint starts, idle polls and retry deadlines; delayed retry also removes follower-ready state before waiting.

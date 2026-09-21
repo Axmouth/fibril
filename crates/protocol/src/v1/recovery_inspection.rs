@@ -1,16 +1,16 @@
 //! Explicit, read-only comparison of two previously collected sealed witnesses.
 //! This diagnostic path never selects a source, installs state or activates it.
 
-use super::replication::{ProtocolOwnerPeerResolverConfig, request_recovery_read};
+use super::replication::{request_recovery_read, ProtocolOwnerPeerResolverConfig};
 use fibril_broker::{
     broker::BrokerError,
     recovery::{
-        BrokerSealedReplica, RecoveryReadPage, RecoveryRecord, RecoverySealCommand,
         inspection::{
             RecoveryInspectionLimits, RecoveryOverlap, RecoveryPairInspection,
             RecoveryPairInspector, RecoverySide,
         },
-        replay::RecoveryReplayLimits,
+        replay::{RecoveryQueueStateArtifact, RecoveryReplayLimits},
+        BrokerSealedReplica, RecoveryReadPage, RecoveryRecord, RecoverySealCommand,
     },
 };
 
@@ -74,8 +74,53 @@ pub async fn inspect_recovery_pair_with_checkpoints(
     max_checkpoint_bytes: u32,
     deadline: std::time::Duration,
 ) -> Result<ProtocolRecoveryPairInspection, BrokerError> {
-    inspect_pair(config, command, left, right, limits,
-        Some((event_next, replay_limits, Some(max_checkpoint_bytes))), deadline).await
+    inspect_pair(
+        config,
+        command,
+        left,
+        right,
+        limits,
+        Some((event_next, replay_limits, Some(max_checkpoint_bytes))),
+        deadline,
+    )
+    .await
+}
+
+/// Reconstruct a single complete sealed queue source into bounded state bytes.
+/// The source is inspected against itself; it still contributes only one witness
+/// to recovery. This verifies content and replay, never quorum or lineage.
+pub async fn inspect_recovery_source_artifact(
+    config: &ProtocolOwnerPeerResolverConfig,
+    command: &RecoverySealCommand,
+    source: &BrokerSealedReplica,
+    limits: RecoveryInspectionLimits,
+    replay_limits: RecoveryReplayLimits,
+    max_checkpoint_bytes: u32,
+    max_artifact_bytes: usize,
+    deadline: std::time::Duration,
+) -> Result<RecoveryQueueStateArtifact, BrokerError> {
+    if max_artifact_bytes == 0 || max_artifact_bytes > 16 * 1024 * 1024 {
+        return Err(BrokerError::InvalidArgument(
+            "invalid recovery artifact limit".into(),
+        ));
+    }
+    let (_, [artifact, _]) = inspect_pair_inner(
+        config,
+        command,
+        source,
+        source,
+        limits,
+        Some((
+            source.seal.event_next,
+            replay_limits,
+            Some(max_checkpoint_bytes),
+        )),
+        deadline,
+        true,
+        move |inspector| inspector.finish_with_queue_artifacts(max_artifact_bytes),
+    )
+    .await?;
+    Ok(artifact)
 }
 
 // Admission remains held by owned CPU work if its caller times out. This bounds
@@ -91,7 +136,38 @@ async fn inspect_pair(
     replay: Option<(u64, RecoveryReplayLimits, Option<u32>)>,
     deadline: std::time::Duration,
 ) -> Result<ProtocolRecoveryPairInspection, BrokerError> {
-    if left.node_id.is_empty() || right.node_id.is_empty() || left.node_id == right.node_id {
+    inspect_pair_inner(
+        config,
+        command,
+        left,
+        right,
+        limits,
+        replay,
+        deadline,
+        false,
+        |inspector| inspector.finish().map(|report| (report, ())),
+    )
+    .await
+    .map(|(report, ())| report)
+}
+
+async fn inspect_pair_inner<T: Send + 'static>(
+    config: &ProtocolOwnerPeerResolverConfig,
+    command: &RecoverySealCommand,
+    left: &BrokerSealedReplica,
+    right: &BrokerSealedReplica,
+    limits: RecoveryInspectionLimits,
+    replay: Option<(u64, RecoveryReplayLimits, Option<u32>)>,
+    deadline: std::time::Duration,
+    allow_same_source: bool,
+    finish: impl FnOnce(RecoveryPairInspector) -> Result<(RecoveryPairInspection, T), String>
+        + Send
+        + 'static,
+) -> Result<(ProtocolRecoveryPairInspection, T), BrokerError> {
+    if left.node_id.is_empty()
+        || right.node_id.is_empty()
+        || (left.node_id == right.node_id && (!allow_same_source || left != right))
+    {
         return Err(BrokerError::InvalidArgument(
             "recovery inspection requires distinct contacted replicas".into(),
         ));
@@ -117,9 +193,12 @@ async fn inspect_pair(
     .map_err(BrokerError::InvalidArgument)?;
     if let Some((target, replay_limits, checkpoint_bytes)) = replay {
         inspector = match checkpoint_bytes {
-            Some(max_bytes) => inspector.with_queue_checkpoint_replay(target, replay_limits, max_bytes),
+            Some(max_bytes) => {
+                inspector.with_queue_checkpoint_replay(target, replay_limits, max_bytes)
+            }
             None => inspector.with_queue_replay(target, replay_limits),
-        }.map_err(BrokerError::InvalidArgument)?;
+        }
+        .map_err(BrokerError::InvalidArgument)?;
     }
     let inspect = async {
         while let Some((side, request)) = inspector
@@ -166,9 +245,9 @@ async fn inspect_pair(
             .acquire()
             .await
             .map_err(|_| BrokerError::Unknown("inspection CPU admission closed".into()))?;
-        let evidence = tokio::task::spawn_blocking(move || {
+        let (evidence, artifact) = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            inspector.finish()
+            finish(inspector)
         })
         .await
         .map_err(|e| BrokerError::Unknown(format!("recovery digest worker failed: {e}")))?
@@ -194,11 +273,14 @@ async fn inspect_pair(
             messages=?evidence.messages,events=?evidence.events,references=?evidence.references,queue_replay=?evidence.queue_replay,remaining_proofs=?evidence.remaining_proofs,
             pages=evidence.pages,records=evidence.records,bytes=evidence.bytes,
             "sealed history inspection complete; unresolved proofs remain explicit");
-        Ok(ProtocolRecoveryPairInspection {
-            left_node: left.node_id.clone(),
-            right_node: right.node_id.clone(),
-            evidence,
-        })
+        Ok((
+            ProtocolRecoveryPairInspection {
+                left_node: left.node_id.clone(),
+                right_node: right.node_id.clone(),
+                evidence,
+            },
+            artifact,
+        ))
     };
     tokio::time::timeout(deadline, inspect).await.map_err(|_| {
         BrokerError::Unknown(

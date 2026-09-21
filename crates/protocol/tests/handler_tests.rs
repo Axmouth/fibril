@@ -7843,6 +7843,14 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
         assert_eq!(left.live_payload_digest, right.live_payload_digest);
         assert!(left.live_payload_digest.is_some());
         assert_ne!(left.message_digest, right.message_digest);
+        let artifact = fibril_protocol::v1::recovery_inspection::inspect_recovery_source_artifact(
+            &config, &command, &seals[0], limits, Default::default(), 1024 * 1024,
+            1024 * 1024, Duration::from_secs(10),
+        ).await.unwrap();
+        assert_eq!(artifact.evidence().history_id, seals[0].seal.history.id);
+        assert_eq!(artifact.evidence().event_next, seals[0].seal.event_next);
+        assert_eq!(artifact.evidence().live_payload_digest, left.live_payload_digest);
+        assert!(!artifact.state_snapshot().is_empty());
     }
     let error = inspect_recovery_pair(
         &config,
@@ -8616,7 +8624,7 @@ async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_conse
         .record(
             &providers[0].consensus_node().committed_snapshot(),
             "b",
-            sealed,
+            sealed.clone(),
         )
         .unwrap();
     assert!(
@@ -8627,6 +8635,42 @@ async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_conse
     );
     assert_eq!(witnesses.progress(&providers[0].consensus_node().committed_snapshot()).unwrap(),
         fibril_coordination_ganglion::recovery_witnesses::SealCollectionProgress::AwaitingHistoryValidation {received:1,required:1});
+    // The same authenticated sealed-read path reconstructs an installable state
+    // artifact. One source contributes one witness even though the bounded pair
+    // inspector verifies it against itself internally.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let config = ProtocolOwnerPeerResolverConfig::new(HashMap::from([
+        ("b".into(), listener.local_addr().unwrap().to_string()),
+    ])).with_auth("@node", "secret");
+    let serving = brokers[1].clone();
+    let stop_reads = tokio_util::sync::CancellationToken::new();
+    let cancelled = stop_reads.clone();
+    let reads = tokio::spawn(async move {
+        loop {
+            let (socket, peer) = tokio::select! {
+                _ = cancelled.cancelled() => break,
+                accepted = listener.accept() => accepted.unwrap(),
+            };
+            let stats = ConnectionStats::new();
+            let conn_id = stats.add_connection(peer, Instant::now(), false);
+            handle_connection(socket, Some(peer), serving.clone(), TcpStats::new(10),
+                stats, conn_id, Some(node_auth()), None, ConnectionSettings::new(Some(60)),
+                None, None, None).await.unwrap();
+        }
+    });
+    let artifact = fibril_protocol::v1::recovery_inspection::inspect_recovery_source_artifact(
+        &config, &command, &sealed, Default::default(), Default::default(),
+        1024 * 1024, 1024 * 1024, Duration::from_secs(10),
+    ).await.unwrap();
+    let chosen = witnesses.select_queue_source(
+        &providers[0].consensus_node().committed_snapshot(),
+        &BTreeMap::from([("b".into(), artifact)]), &[],
+    ).unwrap();
+    assert_eq!(chosen.source_node(), "b");
+    assert_eq!((chosen.event_next(), chosen.message_next()), (2, 2));
+    assert_eq!(providers[0].pending_recoveries().unwrap(), vec![pending.clone()]);
+    stop_reads.cancel();
+    reads.await.unwrap();
     // Replacing storage under the same metadata/provider instance cannot reuse
     // the durable preparation receipt as permission for a fresh storage process.
     let follower_root = dirs[1].as_ref().unwrap().root.clone();

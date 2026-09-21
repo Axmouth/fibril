@@ -403,6 +403,8 @@ mod tests {
     use ganglion_core::{PartitionAssignment, ReplicationDurabilityPolicy, ResourceIdentity};
     use std::collections::BTreeMap;
 
+    include!("recovery_selection_tests.rs");
+
     fn activated() -> (
         CoordinationSnapshot,
         InitialHistoryDecision,
@@ -419,7 +421,7 @@ mod tests {
             PartitionAssignment::new(resource.clone(), "a", vec!["b".into(), "c".into()], 7);
         assignment.durability = ReplicationDurabilityPolicy::MajorityDurable;
         let decision = InitialHistoryDecision {
-            version: 1,
+            version: 2,
             phase: InitialHistoryPhase::Preparing,
             incarnation: incarnation.clone(),
             assignment: assignment.clone(),

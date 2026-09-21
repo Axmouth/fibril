@@ -44,12 +44,11 @@ requires the following pieces:
 1. Build automatic dispatch with bounded backoff and restartable, coalesced
    progress on the explicit seal transport and witness admission primitives.
    Preserve the old replica set and witness threshold.
-2. Establish compatible history from the collected reports, including compacted
-   prefixes and payload/event/checkpoint dependencies. Exact content fingerprints
-   and the completed seal count alone cannot establish ancestry or authority.
-   Define installed/activated lineage, checkpoint relationships and a trusted
-   baseline for existing resource incarnations; a newly advanced fence cannot
-   establish that baseline.
+2. Extend the explicit accepted-initial-queue source verifier to composite
+   reconstruction, recovered lineage and streams. Its deterministic artifacts
+   and authoritative comparisons now cover a complete dominating source, including
+   compacted prefixes. Existing resources and version-one origins still need a
+   verified baseline; a newly advanced fence cannot establish that baseline.
 3. Transfer the selected history and durably install it on the new write quorum,
    including the candidate, before committing activation. Resume interrupted
    phases and isolate the old owner through repeated failovers. Bound aggregate
