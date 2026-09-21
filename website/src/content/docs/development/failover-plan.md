@@ -10,32 +10,32 @@ installation, exact quorum activation and bounded recovery are documented in
 
 ## Remaining recovery work
 
-1. Complete ordinary initial-enrollment orchestration and safe recovery of an
-   initial preparation whose owner process is replaced before activation. Local
-   file absence cannot establish an empty origin.
-2. Support replacement of an unavailable candidate during a persisted pending
+1. Support replacement of an unavailable candidate during a persisted pending
    transition, preserving its witness proof and any completed stages. Extend
-   process-isolation and membership-change tests through that handoff.
-3. Add composite reconstruction for crossed payload/event tails and authoritative
+   process-isolation and membership-change tests through that handoff. Include
+   returning assigned replicas that were excluded from the initial activated quorum.
+2. Add composite reconstruction for crossed payload/event tails and authoritative
    stream-state recovery. Keep unsupported or contradictory histories fenced.
-4. Extend transfer support beyond the current 16 MiB record/page and snapshot
+3. Extend transfer support beyond the current 16 MiB record/page and snapshot
    bounds. Measure full-history rescans, checkpoint/hash CPU, peak memory and
    recovery latency on representative storage and replication configurations.
-5. Add safe reclamation and separate disk accounting for retained generations and
+4. Add safe reclamation and separate disk accounting for retained generations and
    stages. Establish durable metadata support before enabling the installation
    protocol on non-Unix platforms.
 
-The current worker applies to explicitly enrolled queue histories and retains the
-configured confirmation threshold. Owner-only durability still requires its
+Fresh Unix cluster queues enroll automatically. The worker prepares their write
+quorum, activates exact instances and retries local admission independently on
+all replicas. Owner-process replacement before activation renews the preparation;
+activated queues use verified history recovery and retain their configured
+confirmation threshold. Owner-only durability still requires its
 surviving storage. Pending plans retry with bounded backoff when reachable evidence
 is insufficient; authoritative divergence requires investigation.
 
 ## Existing experimental queues
 
 Migration of existing queue histories is outside the supported scope. This is a
-breaking change for adoption of the new recovery path. Once ordinary enrollment is enabled, the
-supported transition is to drain existing queues using their compatible broker
-revision, retire them and recreate them with a fresh enrolled history. Disposable
+breaking change for adoption of the new recovery path. Drain existing queues
+using their compatible broker revision, retire them and recreate them with a fresh enrolled history. Disposable
 test data can be recreated directly. Retained data receives no automatic conversion
 or deletion; unsupported histories remain fenced during recovery.
 
@@ -46,12 +46,13 @@ starts are implemented in [recovery sealing](/reliability/recovery-sealing/#queu
 New resource declarations have a consensus incarnation ID bound into pending
 recovery transitions. An explicit local storage primitive persists incarnation,
 history and writer-session IDs for pristine storage, and blocks ordinary access
-after restart while retaining recovery sealing. It is not enabled by ordinary
-broker creation. Explicit consensus preparation now fixes history/session IDs to
-an owner instance and assignment, and local preparation leaves admission closed.
-Explicit creation-time enrollment now withholds ordinary serving while preserving
-placement. Prepared quorum receipts persist under the immutable decision and
-require the owner and fixed write threshold. Authenticated remote preparation rechecks the exact decision through consensus.
+after restart while retaining recovery sealing. Ordinary Unix cluster queue
+creation uses this protocol. Consensus preparation fixes history/session IDs and
+withholds serving until activation. Before activation, a new owner process or
+placement can renew preparation with the same origin IDs and fresh quorum receipts.
+Local preparation leaves admission closed. Prepared quorum receipts persist under
+the current decision and require the owner and configured write threshold.
+Authenticated remote preparation rechecks the exact decision through consensus.
 Explicit initial activation now admits the exact prepared storage/process instances
 and carries their identity on live replication. Version-two seals now bind retained
 evidence to that accepted storage history and original replica instance; process

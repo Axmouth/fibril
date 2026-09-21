@@ -15,13 +15,21 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 - The new replicated-queue recovery path requires creation-time history
   enrollment. Existing experimental queue histories have no supported migration
   into this path. Drain queues on a compatible broker revision, retire them and
-  recreate them when ordinary enrollment becomes available; disposable test
-  queues can be recreated directly. Ordinary enrollment is still pending, and
-  current recovery is limited to explicitly enrolled queues. Cluster metadata
+  recreate them under the new enrollment rules; disposable test queues can be
+  recreated directly. Fresh Ganglion queue declarations enroll automatically on
+  Unix and remain fenced until a prepared write quorum activates. Non-Unix
+  cluster queues retain their previous declaration path pending durable metadata
+  support; they do not gain the new recovery authority. Standalone queues and
+  stream declarations retain their existing paths. Cluster metadata
   and broker nodes must run matching revisions; mixed-version recovery and
   downgrade of enrolled histories are unsupported.
 
 ### Added
+
+- Automatic initial history preparation and activation for fresh clustered
+  queues, with independent replica admission retries. Interrupted preparation
+  retains its origin IDs while renewing the owner and pristine storage instances
+  under fresh consensus; activated histories use the normal recovery path.
 
 - Startup `storage.keratin.writer_buffer_factor` and
   `FIBRIL_KERATIN_WRITER_BUFFER_FACTOR` scale the storage writer input and

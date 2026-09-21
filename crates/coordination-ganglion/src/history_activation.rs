@@ -1,6 +1,6 @@
 //! Initial activation authority binds the immutable preparation decision to the
-//! exact persisted quorum. Ordinary startup remains gated until recovery
-//! readmission is integrated.
+//! exact persisted quorum. The initial worker orchestrates activation and each
+//! replica independently retries its exact-process local admission.
 use crate::{
     GanglionCoordination,
     initial_history::{self, InitialHistoryDecision, InitialHistoryPreparedQuorum},
@@ -24,7 +24,7 @@ fn error(message: impl ToString) -> OpenraftAdapterError {
     OpenraftAdapterError::Storage(message.to_string())
 }
 
-fn key(decision: &InitialHistoryDecision) -> String {
+pub(crate) fn key(decision: &InitialHistoryDecision) -> String {
     format!(
         "{PREFIX}{}",
         serde_json::to_string(&decision.incarnation).expect("incarnation serializes")
@@ -46,7 +46,7 @@ fn prepared_quorum(
     Ok(quorum)
 }
 
-fn quorum_digest(quorum: &InitialHistoryPreparedQuorum) -> Result<[u8; 32], String> {
+pub(crate) fn quorum_digest(quorum: &InitialHistoryPreparedQuorum) -> Result<[u8; 32], String> {
     let mut hash = blake3::Hasher::new();
     hash.update(b"fibril-initial-prepared-quorum-v1\0");
     hash.update(&serde_json::to_vec(quorum).map_err(|e| e.to_string())?);
@@ -160,7 +160,6 @@ impl GanglionCoordination {
 
     /// Obtain fresh admission authority for one exact live replica. The stored
     /// quorum alone is insufficient: provider and storage instances must match.
-    /// Ordinary startup must wait for automatic recovery readmission integration.
     pub async fn admit_local_initial_history(
         &self,
         decision: &InitialHistoryDecision,
@@ -204,8 +203,8 @@ impl GanglionCoordination {
 }
 
 /// Read the exact currently accepted initial history. Missing activation and
-/// changed/pending assignments fail closed. Recovery histories will extend this
-/// accessor once installation can establish their continuation authority.
+/// changed/pending assignments fail closed. Recovered histories carry their
+/// installed continuation authority through the same accessor.
 pub(crate) fn accepted_history(
     snapshot: &CoordinationSnapshot,
     resource: &ganglion_core::ResourceIdentity,
@@ -332,6 +331,11 @@ pub(crate) fn replaced_initial_processes(
         return Err("initial decision has wrong incarnation".into());
     }
     initial_history::validate_committed(snapshot, &decision)?;
+    // Before activation no writer exists. Renew the initial preparation instead
+    // of creating a recovery fence with no accepted history to recover from.
+    if !snapshot.attributes.contains_key(&key(&decision)) {
+        return Ok(Vec::new());
+    }
     let mut expected = std::collections::BTreeMap::from([(
         decision.assignment.owner.clone(),
         decision.owner_process,

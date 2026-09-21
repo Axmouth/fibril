@@ -10,6 +10,18 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Checkpoint reset and outstanding fsync
+
+A checkpoint reset could return before older fsync completions were consumed, allowing one to restore a stale durable frontier after the cut. The writer now drains those completions before replacing files and resetting state. A queued-fsync regression reproduced a frontier of one after reset to zero and now verifies the reset remains at zero.
+
+### Empty fsync boundary
+
+An empty fsync job used the same inclusive offset as a job covering message zero. When its completion updated the manifest, it could invent a one-record tail; completion after a later append could also overstate durability. Fsync jobs and the log's internal durable boundary now use exclusive counts, with a deterministic regression for both sequences (Keratin `5ae3c4d`).
+
+### Automatic queue enrollment and interrupted preparation
+
+Fresh Unix cluster queues now prepare and activate their initial write quorum automatically. A guarded renewal preserves origin IDs across owner replacement before activation, while durable storage intent makes interrupted pristine preparation resumable; activated histories stay on the normal recovery path. Tests cover preparation SIGKILL boundaries, full broker/metadata restarts, and independent follower admission after owner shutdown.
+
 ### Recovery installation and quorum activation
 
 Recovery builds a verified storage generation and atomically publishes its route while retaining the old sealed source. Exact process/storage receipts gate new-quorum activation and local admission; bounded authenticated transfer can continue from a completed stage after source loss. Linux crash tests, resumed majority confirmations and consecutive recoveries cover the installed path; ordinary enrollment remains a rollout gate.

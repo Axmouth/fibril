@@ -2716,10 +2716,7 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
         .register_self(&node("b-follower", "127.0.0.1:1".parse().unwrap()))
         .await
         .unwrap();
-    coordination
-        .register_queue(&QueueIdentity::new(topic, Partition::new(0), None))
-        .await
-        .unwrap();
+    register_legacy_test_queue(&coordination, &QueueIdentity::new(topic, Partition::new(0), None)).await;
 
     // Follower broker: ONLY the supervised watcher — no manual transitions.
     let (follower_broker, _follower_dir) = open_test_broker().await;
@@ -2901,10 +2898,7 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
         .register_self(&node("b-follower", "127.0.0.1:1".parse().unwrap()))
         .await
         .unwrap();
-    coordination
-        .register_queue(&QueueIdentity::new(topic, Partition::new(0), None))
-        .await
-        .unwrap();
+    register_legacy_test_queue(&coordination, &QueueIdentity::new(topic, Partition::new(0), None)).await;
 
     let (follower_broker, _follower_dir) = open_test_broker().await;
     let resolver = Arc::new(
@@ -3112,10 +3106,7 @@ async fn ganglion_returning_old_owner_is_demoted_and_refuses_publishes() {
         .register_self(&node("b-follower", 9101))
         .await
         .unwrap();
-    coordination
-        .register_queue(&QueueIdentity::new(topic, Partition::new(0), None))
-        .await
-        .unwrap();
+    register_legacy_test_queue(&coordination, &QueueIdentity::new(topic, Partition::new(0), None)).await;
 
     // The owner broker runs the supervised watcher (it will see both the
     // initial ownership and, later, its own demotion).
@@ -6927,7 +6918,7 @@ async fn recovery_seal_requires_node_auth_and_exact_committed_authority_over_tcp
         provider.register_self(&node(id)).await.unwrap();
     }
     let queue = QueueIdentity::new("seal-wire", Partition::new(0), None);
-    provider.register_queue(&queue).await.unwrap();
+    register_legacy_test_queue(&provider, &queue).await;
     let mut live = HashMap::from([
         ("a".into(), node("a")),
         ("b".into(), node("b")),
@@ -7652,7 +7643,7 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
         provider.register_self(&node(id)).await.unwrap();
     }
     let queue = QueueIdentity::new("inspect-wire", Partition::new(0), None);
-    provider.register_queue(&queue).await.unwrap();
+    register_legacy_test_queue(&provider, &queue).await;
     let mut live = HashMap::from([
         ("a".into(), node("a")),
         ("b".into(), node("b")),
@@ -8905,4 +8896,19 @@ async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_conse
     for server in servers {
         server.shutdown();
     }
+}
+
+// These protocol fixtures intentionally exercise legacy unbound replication and
+// sealing. Fresh-queue enrollment is covered by the server worker lifecycle test.
+async fn register_legacy_test_queue(
+    provider: &fibril_coordination_ganglion::GanglionCoordination,
+    queue: &fibril_broker::coordination::QueueIdentity,
+) {
+    let mut snapshot = provider.consensus_node().committed_snapshot();
+    let generation = snapshot.generation;
+    snapshot.resources.insert(ganglion_core::ResourceIdentity::new(
+        "fibril/queue", queue.topic.clone(), u64::from(queue.partition.id()), queue.group.clone(),
+    ));
+    snapshot.generation += 1;
+    provider.consensus_node().write_snapshot_guarded(generation, snapshot).await.unwrap();
 }

@@ -1124,8 +1124,20 @@ impl GanglionCoordination {
 
     /// Add a queue to the cluster catalogue (forwarded merge; idempotent).
     pub async fn register_queue(&self, queue: &QueueIdentity) -> Result<(), OpenraftAdapterError> {
-        self.forward_merge(history_identity::registration(to_ganglion_resource(queue))?)
-            .await
+        if cfg!(unix) {
+            self.register_initial_history_resource(&to_ganglion_resource(queue))
+                .await.map(|_| ())
+        } else {
+            // Preserve the existing platform behavior until durable history
+            // metadata is supported. These queues make no accepted-origin claim.
+            self.forward_merge(history_identity::registration(to_ganglion_resource(queue))?).await
+        }
+    }
+
+    /// Legacy-only fixture for tests of the pre-enrollment controller surface.
+    #[cfg(test)]
+    async fn register_legacy_queue(&self, queue: &QueueIdentity) -> Result<(), OpenraftAdapterError> {
+        self.forward_merge(history_identity::registration(to_ganglion_resource(queue))?).await
     }
 
     /// Remove a queue from the cluster catalogue (forwarded merge).
@@ -4095,13 +4107,13 @@ mod tests {
 
         let queue = QueueIdentity::new("orders", Partition::new(0), Some("workers"));
         provider
-            .register_queue(&queue)
+            .register_legacy_queue(&queue)
             .await
             .expect("register queue");
         let resource = to_ganglion_resource(&queue);
         let incarnation = provider.node.read_committed(|snapshot|
             history_identity::resource_incarnation(snapshot, &resource).unwrap().unwrap());
-        let (left, right) = tokio::join!(provider.register_queue(&queue), provider.register_queue(&queue));
+        let (left, right) = tokio::join!(provider.register_legacy_queue(&queue), provider.register_legacy_queue(&queue));
         left.expect("concurrent registration");
         right.expect("concurrent registration");
         assert_eq!(provider.node.read_committed(|snapshot|
@@ -4368,7 +4380,7 @@ mod tests {
             .await
             .expect("b");
         let queue = QueueIdentity::new("orders", Partition::new(0), None);
-        provider.register_queue(&queue).await.expect("queue");
+        provider.register_legacy_queue(&queue).await.expect("queue");
 
         let (controller, status) = provider.spawn_controller(
             std::sync::Arc::new(DeterministicPartitionPlacement),
@@ -4667,7 +4679,7 @@ mod tests {
             .register_self_with_labels(&info("c-fast", 9002), tails(9, 9))
             .await
             .expect("c");
-        provider.register_queue(&queue).await.expect("queue");
+        provider.register_legacy_queue(&queue).await.expect("queue");
 
         // Healthy assignment: a owns, b and c follow.
         let all_live = provider.live_nodes(Duration::from_secs(30));
@@ -4779,7 +4791,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        provider.register_queue(&queue).await.unwrap();
+        provider.register_legacy_queue(&queue).await.unwrap();
         let original = provider
             .control_iteration(
                 &DeterministicPartitionPlacement,
@@ -4973,7 +4985,7 @@ mod tests {
             .register_self_with_labels(&info("c-fast", 9002), tails(9, 9))
             .await
             .expect("c");
-        provider.register_queue(&queue).await.expect("queue");
+        provider.register_legacy_queue(&queue).await.expect("queue");
 
         let mut live = std::collections::HashMap::new();
         live.insert("a-owner".to_string(), info("a-owner", 9000));
@@ -5032,7 +5044,7 @@ mod tests {
 
         // A queue declared mid-drain never lands on the draining node.
         let fresh = QueueIdentity::new("fresh", Partition::new(0), None);
-        provider.register_queue(&fresh).await.expect("fresh");
+        provider.register_legacy_queue(&fresh).await.expect("fresh");
         let committed = iterate(live).await;
         let placed = committed
             .assignment_for("fresh", Partition::new(0), None)
@@ -5086,7 +5098,7 @@ mod tests {
             .await
             .expect("b");
         let queue = QueueIdentity::new("solo", Partition::new(0), None);
-        provider.register_queue(&queue).await.expect("queue");
+        provider.register_legacy_queue(&queue).await.expect("queue");
 
         let mut live = std::collections::HashMap::new();
         live.insert("a-owner".to_string(), info("a-owner", 9000));

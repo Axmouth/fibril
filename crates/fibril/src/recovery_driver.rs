@@ -1,4 +1,4 @@
-//! Bounded recovery for explicitly enrolled queue histories. Legacy origins,
+//! Bounded creation and recovery for enrolled queue histories. Legacy origins,
 //! streams and crossed tails remain fenced with an actionable error.
 use fibril_broker::{
     broker::{Broker, QueueOwnership},
@@ -362,6 +362,7 @@ pub fn spawn(
     mut config: ProtocolOwnerPeerResolverConfig,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let mut initial_failures: HashMap<ganglion_core::ResourceIdentity, (tokio::time::Instant, u64, String)> = HashMap::new();
         let mut failures: HashMap<[u8; 32], (tokio::time::Instant, u64, String)> = HashMap::new();
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -374,6 +375,42 @@ pub fn spawn(
                 .iter()
                 .map(|(id, n)| (id.clone(), n.endpoint.clone()))
                 .collect();
+            // Activation can commit before the owner returns a reply. Every
+            // exact prepared process retries its own admission independently.
+            match provider.local_initial_history_admissions() {
+                Ok(admissions) => for (decision, prepared) in admissions {
+                    if broker.engine().verify_admitted_storage_history(&prepared).is_ok() { continue; }
+                    if let Err(e) = provider.admit_local_initial_history(&decision, &broker.engine()).await {
+                        tracing::debug!(error=%e, "initial history admission will retry");
+                    }
+                },
+                Err(e) => tracing::warn!(error=%e, "cannot inspect initial history admissions"),
+            }
+            match provider.initial_queue_work() {
+                Ok(work) => {
+                    let active: std::collections::HashSet<_> = work.iter().collect();
+                    initial_failures.retain(|resource, _| active.contains(resource));
+                    for resource in work {
+                        if initial_failures.get(&resource).is_some_and(|(at, _, _)| *at > tokio::time::Instant::now()) { continue; }
+                        let outcome = tokio::time::timeout(Duration::from_secs(120),
+                            crate::initial_history_driver::prepare_queue_once(&provider, &broker, &config, &resource)
+                        ).await.unwrap_or_else(|_| Err("initial preparation exceeded work budget; retry".into()));
+                        match outcome {
+                            Ok(()) => { initial_failures.remove(&resource); }
+                            Err(e) => {
+                                let previous = initial_failures.get(&resource);
+                                let delay = previous.map_or(1, |(_, d, _)| (d * 2).min(30));
+                                if previous.is_none_or(|(_, _, old)| old != &e) {
+                                    tracing::warn!(topic=resource.name, partition=resource.partition, retry_seconds=delay, error=%e,
+                                        "queue remains fenced during initial preparation");
+                                }
+                                initial_failures.insert(resource, (tokio::time::Instant::now() + Duration::from_secs(delay), delay, e));
+                            }
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!(error=%e, "cannot inspect initial queue work"),
+            }
             // Admission is independently retried on every target, so the owner
             // disappearing after activation cannot strand a successfully installed copy.
             match provider.local_queue_recovery_admissions() {

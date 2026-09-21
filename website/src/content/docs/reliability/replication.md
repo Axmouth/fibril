@@ -25,10 +25,9 @@ partition has one **owner** and one or more **followers**:
   installs an owner checkpoint and resumes from there.
 - **Replicated failover waits for recovery proof.** The controller records a
   proposed replacement and retains the previous assignment and replication
-  source. Explicitly enrolled queue histories have an automatic worker that seals
+  source. Fresh Unix cluster queues enroll automatically; a worker seals
   replicas, verifies a source, installs the recovered state and activates a new
-  quorum. Ordinary declarations still await enrollment support; legacy histories
-  have no automatic migration into this recovery path. Heartbeat tails can suggest a
+  quorum. Legacy histories have no supported migration into this recovery path. Heartbeat tails can suggest a
   candidate but cannot authorize it to serve.
 - **Replica-durable publishes wait for replicas.** When the assignment's
   durability policy requires more than the owner, a confirmed publish does not

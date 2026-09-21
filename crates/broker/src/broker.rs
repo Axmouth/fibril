@@ -486,6 +486,8 @@ pub trait QueueOwnership: std::fmt::Debug + Send + Sync {
     }
 
     /// Fresh consensus authority for non-writable initial preparation.
+    /// Must prove the exact enrolled origin has never activated. Authorization
+    /// permits renewal of pristine storage after restart, never writer admission.
     fn authorize_initial_history<'a>(
         &'a self,
         _command: &'a crate::initial_history::InitialHistoryPrepareCommand,
@@ -2287,6 +2289,7 @@ impl<
         self.shutdown_queue_eviction.cancel();
         self.stop_all_follower_replication_workers().await;
         self.task_group.shutdown().await;
+        crate::initial_history::drain(&self.initial_history_flight).await;
         self.recovery_transfer_stage.lock().await.take();
         self.engine
             .shutdown()
@@ -2343,6 +2346,7 @@ impl<
         self.task_group.shutdown().await;
 
         // Shutdown engine
+        crate::initial_history::drain(&self.initial_history_flight).await;
         self.recovery_transfer_stage.lock().await.take();
         if let Err(e) = self.engine.shutdown().await {
             tracing::error!("engine shutdown error: {:?}", e);

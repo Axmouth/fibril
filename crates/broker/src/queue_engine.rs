@@ -582,6 +582,14 @@ impl StromaEngine {
             .await
     }
 
+    /// Requires fresh authority proving this origin has never activated.
+    pub async fn resume_empty_storage_history(
+        &self, tp: &str, part: u32, group: Option<&str>,
+        kind: PartitionKind, binding: StorageHistoryBinding,
+    ) -> Result<PreparedStorageHistory, StromaError> {
+        self.inner.resume_empty_storage_history(tp, part, group, kind, binding).await
+    }
+
     pub fn verify_admitted_storage_history(&self, prepared: &PreparedStorageHistory) -> Result<(), StromaError> {
         self.inner.verify_admitted_storage_history(prepared)
     }

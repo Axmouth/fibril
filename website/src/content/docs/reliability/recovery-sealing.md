@@ -3,12 +3,12 @@ title: Recovery sealing
 description: Recovery authorization, verified staging, durable installation and exact quorum activation.
 ---
 
-Recovery sealing freezes a replica's retained records for inspection. For explicitly
-enrolled queue histories, a bounded worker collects witnesses, verifies a source,
-installs a new durable quorum and activates its exact process/storage instances.
-The previous assignment stays fenced until activation commits. Ordinary declarations
-still use their existing path; initial enrollment rollout and stream-state recovery
-remain separate gates. Legacy migration is unsupported and is not planned.
+Recovery sealing freezes a replica's retained records for inspection. Fresh Unix
+cluster queues enroll automatically; a bounded worker collects witnesses, verifies
+a source, installs a new durable quorum and activates its exact process/storage
+instances. The previous assignment stays fenced until activation commits.
+Stream-state recovery remains a separate gate. Legacy migration is unsupported
+and is not planned.
 
 ## Request authority
 
@@ -53,8 +53,8 @@ previous encoding.
 
 This ID identifies a catalogue lifetime. Source selection also requires accepted
 history, writer-session authority and an authoritative checkpoint. The local
-storage primitive below supplies an explicit binding. Automatic initial enrollment
-remains pending; existing histories have no automatic migration. The new consensus commands require matching
+storage primitive below supplies an explicit binding. Fresh Unix cluster queues
+receive this binding through automatic enrollment; existing histories have no migration. The new consensus commands require matching
 metadata-node binaries; mixed-version rollout is not supported for this change.
 
 ## Local storage history binding
@@ -62,7 +62,7 @@ metadata-node binaries; mixed-version rollout is not supported for this change.
 The explicit `initialize_empty_storage_history` library operation binds new local
 storage to a resource incarnation, accepted-history ID and writer-session ID.
 The caller must first obtain an authorized initial-history decision from
-coordination. Ordinary broker creation does not invoke this operation yet.
+coordination. The initial-preparation worker uses the non-admitting preparation form.
 
 Initialization requires previously nonexistent partition directories and takes
 both log locks before persisting a checksummed receipt. The receipt and directory
@@ -101,11 +101,19 @@ assignment out of serving until placement removes it. Recreation after retiremen
 gets a new ID, and a stale conditional deletion cannot erase the replacement.
 Malformed incarnation metadata also withholds the affected serving route.
 
-Explicit coordination APIs persist an immutable `Preparing` decision for an
-enrolled incarnation and its current assignment. The decision fixes the owner
-instance, history ID, writer-session ID and required write count. Repeated calls
-from that owner instance retain the committed IDs. A replacement provider using
-the same node name and assignment epoch must enter recovery readmission.
+Coordination persists a `Preparing` decision for an enrolled incarnation and its
+current assignment. It records the owner instance, history ID, writer-session ID
+and required write count. Before activation, a replacement owner process or changed
+placement can renew preparation through a guarded consensus command: history IDs
+stay fixed and obsolete quorum receipts are removed atomically. Activation prevents
+further renewal and sends subsequent restarts through history recovery.
+
+Storage persists preparation intent before creating logs. A never-admitted pristine
+baseline can renew its local storage instance after restart, while retaining the
+same history IDs. Snapshot state, non-pristine logs, seals and recovery markers
+refuse empty preparation. A permanent local admission marker prevents an activated
+empty queue from being recertified as a fresh origin. Shutdown drains admitted
+preparation work before stopping the engine.
 
 New preparation decisions use version two to identify ordered durable timer
 semantics. Version-one decisions remain readable, but need a verified baseline
@@ -124,8 +132,9 @@ The explicit receipt collector admits reports from the contacted replica, counts
 identical retries once, requires the owner alongside the write-count threshold,
 and blocks on contradictory process or storage-instance reports. The original
 owner can persist the exact prepared quorum through a generation-and-attribute
-guarded consensus update. Identical retries preserve the record; conflicting
-receipts cannot overwrite it. The record survives metadata restart and remains
+guarded consensus update. Identical retries preserve the record. A fresh collection
+can replace obsolete receipts before activation; generation checks serialize that
+replacement against activation. Activated quorum evidence is immutable. The record survives metadata restart and remains
 historical evidence: activation still needs fresh authority for the recorded
 processes and storage instances. Prepared quorum evidence leaves serving and
 storage admission closed.
@@ -143,9 +152,13 @@ can leave admitted preparation running, so retries use the same decision. The
 transport deadline covers setup and the response, and replies must match the target,
 resource, decision and storage binding with nonzero process/storage instances.
 
-Ordinary broker declarations do not enroll resources automatically. Explicitly
-enrolled queues support recovery installation and readmission. Existing resources
-require a verified baseline.
+Ordinary Unix cluster queue declarations enroll automatically. The worker prepares
+replicas over authenticated connections, persists the configured write quorum and
+activates it. Every replica independently retries local admission, including after
+an owner disappears following activation. Existing experimental queues require
+retirement and recreation. Non-Unix cluster queues retain their previous declaration
+path until durable metadata support is available, without the new recovery authority.
+Standalone queues and stream declarations retain their existing paths.
 Matching broker and metadata binaries are required; older brokers do not enforce
 the enrollment projection and the retirement command requires updated metadata
 nodes. Mixed-version enrollment and downgrade are unsupported.
@@ -161,9 +174,8 @@ Identical admission retries preserve subsequent writes.
 Activated assignments carry the history binding and exact replica instances.
 The full configured replica count still determines confirmation requirements;
 unprepared members cannot serve or report progress. Enrolled resources also
-require recovery when an owner-only assignment changes. Ordinary declaration
-continues to use the existing path while initial enrollment and interrupted initial
-preparation remain rollout gates.
+require recovery when an owner-only assignment changes. Ordinary queue declaration
+uses the automatic initial-preparation and activation worker.
 
 The internal `HistoryReplication` envelope (opcode 109) binds live replication to
 resource incarnation, accepted history, writer session, activation and both peer
@@ -505,11 +517,10 @@ histories, crossed tails without a complete source, unsupported legacy origins a
 stream state remain fenced. Recovering a fixed pending transition also requires
 its proposed owner to return; safely replacing that candidate is a further gate.
 
-Ordinary creation-time enrollment remains disabled. Initial preparation interrupted
-by owner-process replacement and wider membership/isolation testing require
-completion before general rollout. Migration of existing queues is unsupported;
-once ordinary enrollment is enabled, existing experimental queues must
-be drained and recreated to adopt the new recovery path. See the
+Ordinary Unix cluster queues enroll automatically. Wider membership/isolation
+coverage, recovery-candidate replacement and retained-data reclamation remain
+rollout work. Migration of existing queues is unsupported; existing experimental
+queues must be drained and recreated to adopt the new recovery path. See the
 [transition policy](/development/failover-plan/#existing-experimental-queues).
 Retained generations
 and stages currently require additional disk and have no automatic reclamation.

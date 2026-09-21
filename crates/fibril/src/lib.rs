@@ -4,6 +4,7 @@
 //! reusable coordination primitives live in ganglion.
 
 pub mod recovery_driver;
+pub mod initial_history_driver;
 
 use std::collections::BTreeMap;
 use std::num::ParseIntError;

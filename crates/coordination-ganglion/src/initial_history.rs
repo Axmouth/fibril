@@ -1,6 +1,6 @@
-//! Explicit consensus preparation of a fresh history. Preparing a baseline does
-//! not activate a writer or establish an installed quorum. Ordinary startup does
-//! not invoke these APIs while recovery readmission remains incomplete.
+//! Consensus preparation of a fresh history. Preparing a baseline never admits
+//! a writer. The server orchestrates preparation, exact quorum activation and
+//! local admission; unactivated origins can renew after process replacement.
 
 use fibril_broker::queue_engine::{PartitionKind, StorageHistoryBinding, StromaEngine};
 use ganglion_core::{CoordinationSnapshot, PartitionAssignment, ResourceIdentity};
@@ -21,8 +21,9 @@ pub enum InitialHistoryPhase {
     Preparing,
 }
 
-/// Immutable initial decision. Membership, policy and owner process are fixed
-/// through retries. It authorizes preparation only, never ordinary writes.
+/// Initial preparation decision. Ordinary retries retain it; guarded renewal
+/// before activation can replace owner/placement while keeping the origin IDs.
+/// It authorizes preparation only, never ordinary writes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InitialHistoryDecision {
@@ -399,6 +400,9 @@ impl GanglionCoordination {
         let decision: InitialHistoryDecision =
             serde_json::from_str(raw).map_err(|e| e.to_string())?;
         validate_committed(&snapshot, &decision)?;
+        if snapshot.attributes.contains_key(&crate::history_activation::key(&decision)) {
+            return Err("activated history cannot be prepared again".into());
+        }
         if decision.prepare_command(&self.node_id)? != *command {
             return Err("initial preparation does not match the exact committed decision".into());
         }
@@ -440,8 +444,9 @@ impl GanglionCoordination {
     }
 
     /// Commit exactly the authenticated receipts collected for this owner round.
-    /// Retrying a lost reply keeps the first record; a different receipt set
-    /// cannot replace it. No storage admission or serving route is published.
+    /// Before activation, a fresh receipt set may replace restarted replicas.
+    /// Activation and replacement are serialized by the metadata generation.
+    /// No storage admission or serving route is published.
     pub async fn persist_initial_history_quorum(
         &self,
         receipts: &InitialHistoryReceiptSet,
@@ -463,16 +468,10 @@ impl GanglionCoordination {
                 let existing: InitialHistoryPreparedQuorum =
                     serde_json::from_str(raw).map_err(error)?;
                 existing.validate(&snapshot, decision).map_err(error)?;
-                if existing != quorum {
-                    tracing::warn!(
-                        node_id = self.node_id,
-                        topic = decision.incarnation.resource.name,
-                        partition = decision.incarnation.resource.partition,
-                        "initial history receipt set conflicts with persisted quorum; recovery required"
-                    );
-                    return Err(error(
-                        "prepared quorum differs from the persisted receipts; recovery required",
-                    ));
+                if existing != quorum
+                    && snapshot.attributes.contains_key(&crate::history_activation::key(decision))
+                {
+                    return Err(error("activated quorum cannot be replaced"));
                 }
             }
             let value = serde_json::to_string(&quorum).map_err(error)?;
@@ -586,6 +585,169 @@ impl GanglionCoordination {
         ))
     }
 
+    /// Queues whose current owner should prepare their enrolled origin.
+    pub fn initial_queue_work(&self) -> Result<Vec<ResourceIdentity>, String> {
+        let snapshot = self.node.committed_snapshot();
+        let mut work = Vec::new();
+        for resource in &snapshot.resources {
+            if resource.namespace != crate::QUEUE_NAMESPACE {
+                continue;
+            }
+            let Some(identity) = resource_incarnation(&snapshot, resource)? else {
+                continue;
+            };
+            if identity.version != 2
+                || identity.retired
+                || snapshot
+                    .assignments
+                    .get(resource)
+                    .is_none_or(|a| a.owner != self.node_id)
+                || snapshot
+                    .attributes
+                    .contains_key(&promotion::pending_recovery_key(resource))
+            {
+                continue;
+            }
+            if let Some(raw) = snapshot.attributes.get(&key(&identity)) {
+                let decision: InitialHistoryDecision =
+                    serde_json::from_str(raw).map_err(|e| e.to_string())?;
+                if decision.incarnation != identity {
+                    return Err("initial decision has wrong incarnation".into());
+                }
+                if snapshot
+                    .attributes
+                    .contains_key(&crate::history_activation::key(&decision))
+                {
+                    continue;
+                }
+            }
+            work.push(resource.clone());
+        }
+        Ok(work)
+    }
+
+    /// Exact-process local admissions can retry independently of the owner.
+    pub fn local_initial_history_admissions(
+        &self,
+    ) -> Result<
+        Vec<(
+            InitialHistoryDecision,
+            fibril_broker::queue_engine::PreparedStorageHistory,
+        )>,
+        String,
+    > {
+        let snapshot = self.node.committed_snapshot();
+        let mut work = Vec::new();
+        for resource in &snapshot.resources {
+            if resource.namespace != crate::QUEUE_NAMESPACE {
+                continue;
+            }
+            let Some(identity) = resource_incarnation(&snapshot, resource)? else {
+                continue;
+            };
+            let Some(raw) = snapshot.attributes.get(&key(&identity)) else {
+                continue;
+            };
+            let decision: InitialHistoryDecision =
+                serde_json::from_str(raw).map_err(|e| e.to_string())?;
+            if validate_committed(&snapshot, &decision).is_err() {
+                continue;
+            }
+            let Some(raw) = snapshot
+                .attributes
+                .get(&crate::history_activation::key(&decision))
+            else {
+                continue;
+            };
+            let activation: crate::history_activation::InitialHistoryActivation =
+                serde_json::from_str(raw).map_err(|e| e.to_string())?;
+            activation.validate(&snapshot, &decision)?;
+            let quorum: InitialHistoryPreparedQuorum =
+                serde_json::from_str(&snapshot.attributes[&quorum_key(&identity)])
+                    .map_err(|e| e.to_string())?;
+            if let Some(report) = quorum
+                .reports
+                .get(&self.node_id)
+                .filter(|r| r.replica_process == self.history_process)
+            {
+                work.push((decision, report.storage.clone()));
+            }
+        }
+        Ok(work)
+    }
+
+    /// Continue an unactivated origin after owner-process or placement changes.
+    /// The original history IDs are retained. Consensus serializes replacement
+    /// against activation, and obsolete quorum receipts are discarded atomically.
+    pub async fn resume_initial_history(
+        &self,
+        resource: &ResourceIdentity,
+    ) -> Result<InitialHistoryDecision, OpenraftAdapterError> {
+        for _ in 0..8 {
+            let snapshot = self.node.committed_snapshot();
+            let incarnation = resource_incarnation(&snapshot, resource)
+                .map_err(error)?
+                .ok_or_else(|| error("initial history requires enrolled metadata"))?;
+            let Some(raw) = snapshot.attributes.get(&key(&incarnation)) else {
+                return self.prepare_initial_history(resource).await;
+            };
+            let old: InitialHistoryDecision = serde_json::from_str(raw).map_err(error)?;
+            if snapshot
+                .attributes
+                .contains_key(&crate::history_activation::key(&old))
+            {
+                return Err(error("activated history requires recovery"));
+            }
+            if old.incarnation != incarnation || old.version != 2 {
+                return Err(error(
+                    "initial preparation origin differs from enrolled history",
+                ));
+            }
+            let assignment = snapshot
+                .assignments
+                .get(resource)
+                .ok_or_else(|| error("initial preparation awaits placement"))?;
+            if assignment.owner != self.node_id {
+                return Err(error(
+                    "only the assigned owner can resume initial preparation",
+                ));
+            }
+            let mut decision = old.clone();
+            decision.assignment = assignment.clone();
+            decision.owner_process = self.history_process;
+            decision.required_write_nodes =
+                promotion::write_requirement(assignment).map_err(error)?;
+            decision.validate(&snapshot).map_err(error)?;
+            if decision == old {
+                return self.prepare_initial_history(resource).await;
+            }
+            let command = MetadataRaftCommand::UpdatePartitionGuarded {
+                expected_generation: snapshot.generation,
+                assignment: assignment.clone(),
+                attributes: std::collections::BTreeMap::from([
+                    (
+                        key(&incarnation),
+                        Some(serde_json::to_string(&decision).map_err(error)?),
+                    ),
+                    (quorum_key(&incarnation), None),
+                ]),
+            };
+            match self.forward_command(command).await {
+                Ok(response) => {
+                    validate_committed(&response.snapshot, &decision).map_err(error)?;
+                    return Ok(decision);
+                }
+                Err(OpenraftAdapterError::GenerationMismatch { .. }) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(error(
+            "initial preparation renewal raced metadata changes; retry",
+        ))
+    }
+
     /// Prepare this replica's empty storage against a freshly committed decision.
     /// Assignment/incarnation changes reject before local I/O. Changes after
     /// authorization can leave inert preparation, but cannot activate a writer.
@@ -605,7 +767,7 @@ impl GanglionCoordination {
             PartitionKind::Queue
         };
         let storage = engine
-            .prepare_empty_storage_history(
+            .resume_empty_storage_history(
                 &resource.name,
                 resource.partition as u32,
                 resource.group.as_deref(),
@@ -660,6 +822,172 @@ mod tests {
         (snapshot, resource)
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn owner_restart_before_activation_renews_origin_and_fences_old_grants() {
+        use fibril_broker::queue_engine::{
+            KeratinConfig, QueueEngine, SnapshotConfig, StromaKeratinConfig,
+        };
+        use ganglion_openraft::{InProcessRouter, RaftMetadataNode, default_raft_config};
+        use std::time::Duration;
+        for new_owner in ["a", "b"] {
+            let root =
+                std::env::temp_dir().join(format!("initial-renewal-{}", uuid::Uuid::now_v7()));
+            let router = InProcessRouter::new();
+            let node = RaftMetadataNode::start_durable(
+                1,
+                default_raft_config().unwrap(),
+                &router,
+                root.join("metadata"),
+            )
+            .await
+            .unwrap();
+            node.initialize(BTreeMap::from([(
+                1,
+                ganglion_openraft::openraft::BasicNode::new("n1"),
+            )]))
+            .await
+            .unwrap();
+            node.wait_for_leader(1, Duration::from_secs(10))
+                .await
+                .unwrap();
+            let old = GanglionCoordination::new("a", node);
+            let resource = ResourceIdentity::new(crate::QUEUE_NAMESPACE, "q", 0, None::<String>);
+            old.register_initial_history_resource(&resource)
+                .await
+                .unwrap();
+            let mut state = old.node.committed_snapshot();
+            let generation = state.generation;
+            state.assignments.insert(
+                resource.clone(),
+                PartitionAssignment::new(resource.clone(), "a", vec![], 1),
+            );
+            state.generation += 1;
+            old.node
+                .write_snapshot_guarded(generation, state)
+                .await
+                .unwrap();
+            let engine = StromaEngine::open(
+                root.join("data"),
+                StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+                SnapshotConfig::default(),
+            )
+            .await
+            .unwrap();
+            let original = old.prepare_initial_history(&resource).await.unwrap();
+            let receipt = old
+                .prepare_local_initial_history(&original, &engine)
+                .await
+                .unwrap();
+            let mut set =
+                InitialHistoryReceiptSet::new(&old.node.committed_snapshot(), original.clone())
+                    .unwrap();
+            set.record(&old.node.committed_snapshot(), "a", receipt)
+                .unwrap();
+            old.persist_initial_history_quorum(&set).await.unwrap();
+            if new_owner == "b" {
+                let mut state = old.node.committed_snapshot();
+                let generation = state.generation;
+                let assignment = state.assignments.get_mut(&resource).unwrap();
+                assignment.owner = "b".into();
+                assignment.epoch += 1;
+                state.generation += 1;
+                old.node
+                    .write_snapshot_guarded(generation, state)
+                    .await
+                    .unwrap();
+            }
+            engine.shutdown().await.unwrap();
+            drop(engine);
+            old.node.shutdown().await.unwrap();
+            old.forwarder.abort();
+            let router = InProcessRouter::new();
+            let node = RaftMetadataNode::start_durable(
+                1,
+                default_raft_config().unwrap(),
+                &router,
+                root.join("metadata"),
+            )
+            .await
+            .unwrap();
+            node.wait_for_leader(1, Duration::from_secs(10))
+                .await
+                .unwrap();
+            let fresh = GanglionCoordination::new(new_owner, node);
+            let renewed = fresh.resume_initial_history(&resource).await.unwrap();
+            assert_eq!(original.binding, renewed.binding);
+            assert_ne!(original.owner_process, renewed.owner_process);
+            assert!(
+                fresh
+                    .prepared_initial_history_quorum(&renewed)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                fresh
+                    .authorize_initial_history_command(&original.prepare_command("a").unwrap())
+                    .await
+                    .is_err()
+            );
+            let engine = StromaEngine::open(
+                root.join("data"),
+                StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+                SnapshotConfig::default(),
+            )
+            .await
+            .unwrap();
+            assert!(
+                fresh
+                    .commit_initial_history_activation(&original, &engine)
+                    .await
+                    .is_err()
+            );
+            let receipt = fresh
+                .prepare_local_initial_history(&renewed, &engine)
+                .await
+                .unwrap();
+            let mut set =
+                InitialHistoryReceiptSet::new(&fresh.node.committed_snapshot(), renewed.clone())
+                    .unwrap();
+            set.record(&fresh.node.committed_snapshot(), new_owner, receipt)
+                .unwrap();
+            fresh.persist_initial_history_quorum(&set).await.unwrap();
+            fresh
+                .commit_initial_history_activation(&renewed, &engine)
+                .await
+                .unwrap();
+            let mut changed =
+                InitialHistoryReceiptSet::new(&fresh.node.committed_snapshot(), renewed.clone())
+                    .unwrap();
+            let mut altered = set.reports[new_owner].clone();
+            altered.storage.storage_instance = [9; 16];
+            changed
+                .record(&fresh.node.committed_snapshot(), new_owner, altered)
+                .unwrap();
+            assert!(
+                fresh
+                    .persist_initial_history_quorum(&changed)
+                    .await
+                    .is_err()
+            );
+            assert!(fresh.resume_initial_history(&resource).await.is_err());
+            assert!(
+                fresh
+                    .prepare_local_initial_history(&renewed, &engine)
+                    .await
+                    .is_err()
+            );
+            fresh
+                .admit_local_initial_history(&renewed, &engine)
+                .await
+                .unwrap();
+            engine.shutdown().await.unwrap();
+            fresh.node.shutdown().await.unwrap();
+            old.forwarder.abort();
+            fresh.forwarder.abort();
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
     #[test]
     fn replaced_process_requests_recovery_even_when_placement_is_unchanged() {
         let (mut snapshot, resource) = fixture(false);
@@ -695,6 +1023,17 @@ mod tests {
             quorum_key(&decision.incarnation),
             serde_json::to_string(&set.prepared_quorum(&snapshot).unwrap()).unwrap(),
         );
+        // Process replacement before activation is initial preparation, not
+        // recovery from an accepted history.
+        let mut unactivated = snapshot.clone();
+        unactivated.nodes.get_mut("a").unwrap().labels.insert(crate::HISTORY_PROCESS_LABEL.into(), uuid::Uuid::from_bytes([9; 16]).to_string());
+        let mut desired = unactivated.clone();
+        assert_eq!(promotion::retain_unproven_assignments(&unactivated, &mut desired).unwrap(), 0);
+        let activation = crate::history_activation::InitialHistoryActivation {
+            version: 1, decision: decision.digest().unwrap(),
+            prepared_quorum: crate::history_activation::quorum_digest(&set.prepared_quorum(&snapshot).unwrap()).unwrap(),
+        };
+        snapshot.attributes.insert(crate::history_activation::key(&decision), serde_json::to_string(&activation).unwrap());
         let mut unchanged = snapshot.clone();
         assert_eq!(
             promotion::retain_unproven_assignments(&snapshot, &mut unchanged).unwrap(),
@@ -1056,7 +1395,7 @@ mod tests {
             enrolled
         );
         let legacy_queue = QueueIdentity::new("legacy", Partition::new(0), None);
-        provider.register_queue(&legacy_queue).await.unwrap();
+        provider.register_legacy_queue(&legacy_queue).await.unwrap();
         let legacy_resource = crate::to_ganglion_resource(&legacy_queue);
         assert!(
             provider
@@ -1261,13 +1600,10 @@ mod tests {
         changed
             .record(&provider.node.committed_snapshot(), "a", changed_receipt)
             .unwrap();
-        assert!(
-            provider
-                .persist_initial_history_quorum(&changed)
-                .await
-                .is_err(),
-            "a replacement receipt cannot overwrite the original quorum"
-        );
+        provider.persist_initial_history_quorum(&changed).await.unwrap();
+        // A fresh pre-activation receipt set replaces an obsolete storage
+        // instance. Restore the real receipt before activating this fixture.
+        provider.persist_initial_history_quorum(&complete).await.unwrap();
         assert_eq!(
             provider
                 .prepared_initial_history_quorum(&stream_decision)

@@ -139,6 +139,11 @@ pub(crate) fn retain_unproven_assignments(
         let new_writes = write_requirement(proposed)?;
         let incarnation = crate::history_identity::resource_incarnation(committed, resource)?;
         let enrolled = incarnation.as_ref().is_some_and(|id| id.version == 2);
+        if enrolled && crate::history_activation::previous_initial_history(committed, resource)?.is_none() {
+            // Serving has never been enabled. Placement may change freely;
+            // the new owner renews preparation while retaining the origin IDs.
+            continue;
+        }
         let replaced = if enrolled {
             crate::history_activation::replaced_initial_processes(committed, resource)?
         } else {
@@ -242,7 +247,7 @@ mod tests {
         );
     }
     #[test]
-    fn enrolled_local_writer_changes_require_recovery() {
+    fn unactivated_enrollment_allows_placement_changes_without_recovery() {
         let mut original = assignment("a", &[]);
         original.durability = ReplicationDurabilityPolicy::LocalDurable;
         let resource = original.resource.clone();
@@ -261,13 +266,14 @@ mod tests {
         changed.owner = "b".into();
         let mut desired = old.clone();
         desired.assignments.insert(resource.clone(), changed);
-        assert_eq!(retain_unproven_assignments(&old, &mut desired).unwrap(), 1);
-        assert_eq!(desired.assignments, old.assignments);
+        assert_eq!(retain_unproven_assignments(&old, &mut desired).unwrap(), 0);
+        assert_eq!(desired.assignments[&resource].owner, "b");
+        assert!(!desired.attributes.contains_key(&pending_recovery_key(&resource)));
         let mut epoch_change = old.clone();
         epoch_change.assignments.get_mut(&resource).unwrap().epoch += 1;
         assert_eq!(
             retain_unproven_assignments(&old, &mut epoch_change).unwrap(),
-            1
+            0
         );
         let mut identical = old.clone();
         assert_eq!(

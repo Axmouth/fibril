@@ -67,6 +67,17 @@ impl Drop for FlightGuard {
     }
 }
 
+/// Shutdown closes admission before calling this. Already-owned preparation
+/// must finish before the engine is stopped, including after caller cancellation.
+pub(crate) async fn drain(flight: &Arc<Mutex<Option<InitialHistoryFlight>>>) {
+    let pending = flight.lock().unwrap().as_ref().map(|f| f.result.clone());
+    if let Some(mut result) = pending {
+        while result.borrow().is_none() {
+            if result.changed().await.is_err() { break; }
+        }
+    }
+}
+
 impl Broker<StromaEngine> {
     /// Bound admitted preparation to one operation per broker. Identical calls
     /// share work; caller cancellation cannot drop admitted storage work.
@@ -76,6 +87,9 @@ impl Broker<StromaEngine> {
     ) -> Result<InitialHistoryLocalReceipt, BrokerError> {
         let mut result = {
             let mut current = self.initial_history_flight.lock().unwrap();
+            if self.is_shutting_down() {
+                return Err(BrokerError::InvalidArgument("broker is shutting down".into()));
+            }
             if let Some(flight) = &*current {
                 if flight.command != command {
                     return Err(BrokerError::InvalidArgument(
@@ -109,7 +123,7 @@ impl Broker<StromaEngine> {
                             );
                         }
                         let storage = engine
-                            .prepare_empty_storage_history(
+                            .resume_empty_storage_history(
                                 &command.topic,
                                 command.partition.id(),
                                 command.group.as_deref(),
@@ -234,9 +248,14 @@ mod tests {
         assert!(futures::poll!(&mut second).is_pending());
         assert!(futures::poll!(&mut third).is_pending());
         assert_eq!(authority.calls.load(Ordering::Relaxed), 1);
+        let shutdown = broker.shutdown();
+        tokio::pin!(shutdown);
+        assert!(futures::poll!(&mut shutdown).is_pending());
+        assert!(broker.prepare_initial_history_replica(command.clone()).await.is_err());
         authority.release.notify_one();
         let (second, third) = tokio::join!(second, third);
         assert_eq!(second.unwrap(), third.unwrap());
+        shutdown.await;
         assert!(broker.initial_history_flight.lock().unwrap().is_none());
         assert!(matches!(
             engine.ensure_queue_owner_epoch("q", 0, None, Some(1)).await,
