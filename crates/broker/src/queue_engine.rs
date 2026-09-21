@@ -581,6 +581,19 @@ impl StromaEngine {
             .await
     }
 
+    pub fn verify_admitted_storage_history(&self, prepared: &PreparedStorageHistory) -> Result<(), StromaError> {
+        self.inner.verify_admitted_storage_history(prepared)
+    }
+
+    pub fn verify_prepared_storage_history(&self, prepared: &PreparedStorageHistory) -> Result<(), StromaError> {
+        self.inner.verify_prepared_storage_history(prepared)
+    }
+
+    /// The caller must first obtain fresh activation authority for this exact receipt.
+    pub async fn admit_prepared_storage_history(&self, prepared: PreparedStorageHistory) -> Result<(), StromaError> {
+        self.inner.admit_prepared_storage_history(prepared).await
+    }
+
     /// Inspect local identity without granting access or opening either log.
     pub fn storage_history_binding(
         &self,

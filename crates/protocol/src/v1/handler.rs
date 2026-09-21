@@ -625,6 +625,7 @@ fn to_replication_read_ok(
 struct BrokerOwnerStreamSource {
     broker: Arc<Broker<StromaEngine>>,
     progress: Option<fibril_broker::replication::ReplicationProgressSession>,
+    history: Option<fibril_broker::history_replication::HistoryReplicationSession>,
 }
 
 #[async_trait::async_trait]
@@ -641,6 +642,8 @@ impl replication_stream::OwnerStreamSource for BrokerOwnerStreamSource {
         max_bytes: usize,
         max_wait_ms: u64,
     ) -> Result<ReplicationReadOk, String> {
+        crate::v1::history_replication::check_resource(&self.broker, self.history.as_ref(), topic, partition, group, true)
+            .map_err(|e| e.to_string())?;
         let records = self
             .broker
             .read_owner_replication_records(
@@ -656,6 +659,8 @@ impl replication_stream::OwnerStreamSource for BrokerOwnerStreamSource {
             )
             .await
             .map_err(|err| broker_error_response(&err).1.to_string())?;
+        crate::v1::history_replication::check_resource(&self.broker, self.history.as_ref(), topic, partition, group, true)
+            .map_err(|e| e.to_string())?;
         to_replication_read_ok(records).map_err(|err| err.to_string())
     }
 
@@ -668,7 +673,8 @@ impl replication_stream::OwnerStreamSource for BrokerOwnerStreamSource {
         durable_message_next: u64,
         durable_event_next: u64,
     ) {
-        let _ = (topic, partition, group, reporter);
+        if crate::v1::history_replication::check_resource(&self.broker, self.history.as_ref(), topic, partition, group, true).is_err()
+            || crate::v1::history_replication::check_reporter(self.history.as_ref(), Some(reporter)).is_err() { return; }
         if let Some(session) = &self.progress {
             self.broker.record_replication_session_progress(
                 session,
@@ -2913,6 +2919,7 @@ where
     // Owner-side replication streams opened by followers on this connection,
     // keyed by stream id (the frame request_id). Dropping a control sender (on
     // Stop or when this map drops at connection end) makes its sender task exit.
+    let mut owner_stream_histories: HashMap<u64, Option<fibril_broker::history_replication::HistoryReplicationSession>> = HashMap::new();
     let mut owner_streams: HashMap<u64, mpsc::Sender<replication_stream::OwnerStreamControl>> =
         HashMap::new();
     let mut pull_progress: HashMap<
@@ -2961,7 +2968,7 @@ where
             }
         };
 
-        let frame = match loop_event {
+        let mut frame = match loop_event {
             LoopEvent::Frame(f) => f,
             LoopEvent::Timeout => break,
             LoopEvent::Disconnect => break,
@@ -3050,6 +3057,7 @@ where
             || x == Op::RecoverySeal as u16
             || x == Op::RecoveryRead as u16
             || x == Op::InitialHistoryPrepare as u16
+            || x == Op::HistoryReplication as u16
         );
         if node_control
             && authenticated_principal.as_deref()
@@ -3061,6 +3069,84 @@ where
                 frame.request_id,
                 403,
                 "replication control requires an authenticated cluster peer",
+            )
+            .await;
+            continue;
+        }
+
+        let history = if frame.opcode == Op::HistoryReplication as u16 {
+            match crate::v1::history_replication::decode_frame(frame.clone()) {
+                Ok((history, inner)) => {
+                    frame = inner;
+                    Some(history)
+                }
+                Err(error) => {
+                    send_error_response_and_count(
+                        &frame_tx_high_prio,
+                        &metrics,
+                        frame.request_id,
+                        400,
+                        error.to_string(),
+                    )
+                    .await;
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        let history_guard = (|| -> Result<(), BrokerError> {
+            if let Some(history) = &history {
+                let owner_is_receiver = wire::history_replication_owner_is_receiver(frame.opcode)
+                    .map_err(|e| BrokerError::InvalidArgument(e.to_string()))?;
+                // The streaming transport and checkpoint endpoints currently use
+                // queue actors; Plexus uses only its distinct pull-read endpoint.
+                if (frame.opcode == Op::StreamReplicationRead as u16) != history.stream {
+                    return Err(BrokerError::InvalidArgument(
+                        "replication resource kind mismatch".into(),
+                    ));
+                }
+                broker.authorize_history_replication(history, owner_is_receiver)?;
+            }
+            if let Some((topic, partition, group)) = wire::replication_resource_prefix(&frame)
+                .map_err(|e| BrokerError::InvalidArgument(e.to_string()))?
+            {
+                crate::v1::history_replication::check_resource(
+                    &broker,
+                    history.as_ref(),
+                    &topic,
+                    partition,
+                    group.as_deref(),
+                    wire::history_replication_owner_is_receiver(frame.opcode)
+                        .map_err(|e| BrokerError::InvalidArgument(e.to_string()))?,
+                )?;
+            }
+            if [
+                Op::ReplicationStreamProgress,
+                Op::ReplicationStreamReset,
+                Op::ReplicationStreamStop,
+            ]
+            .iter()
+            .any(|op| *op as u16 == frame.opcode)
+            {
+                if let Some(expected) = owner_stream_histories.get(&frame.request_id) {
+                    if expected.as_ref() != history.as_ref() {
+                        return Err(BrokerError::InvalidArgument(
+                            "replication stream history changed".into(),
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = history_guard {
+            let (code, message) = broker_error_response(&error);
+            send_error_response_and_count(
+                &frame_tx_high_prio,
+                &metrics,
+                frame.request_id,
+                code,
+                message,
             )
             .await;
             continue;
@@ -3169,6 +3255,11 @@ where
 
                 // A stamped read doubles as the follower's durable-progress
                 // report (followers apply durably; pull offsets = watermarks).
+                if let Err(error) = crate::v1::history_replication::check_reporter(history.as_ref(), read.reporter_node_id.as_deref()) {
+                    let (code, message) = broker_error_response(&error);
+                    send_error_response_and_count(&frame_tx_high_prio, &metrics, frame.request_id, code, message).await;
+                    continue;
+                }
                 if let (Some(reporter), Some(epoch)) = (&read.reporter_node_id, read.reporter_epoch)
                 {
                     let key = (
@@ -3216,6 +3307,11 @@ where
                         read.max_wait_ms as u64,
                     )
                     .await
+                    .and_then(|records| {
+                        crate::v1::history_replication::check_resource(&broker, history.as_ref(),
+                            &read.topic, read.partition, read.group.as_deref(), true)?;
+                        Ok(records)
+                    })
                 {
                     Ok(records) => {
                         let response = match to_replication_read_ok(records) {
@@ -3269,6 +3365,11 @@ where
                 // A stamped read doubles as the stream follower's durable-progress
                 // report (group None), feeding the owner's replica-durable confirm
                 // gate exactly as the queue ReplicationRead path does.
+                if let Err(error) = crate::v1::history_replication::check_reporter(history.as_ref(), read.reporter_node_id.as_deref()) {
+                    let (code, message) = broker_error_response(&error);
+                    send_error_response_and_count(&frame_tx_high_prio, &metrics, frame.request_id, code, message).await;
+                    continue;
+                }
                 if let (Some(reporter), Some(epoch)) = (&read.reporter_node_id, read.reporter_epoch)
                 {
                     let key = (
@@ -3320,6 +3421,11 @@ where
                         read.max_wait_ms as u64,
                     )
                     .await
+                    .and_then(|records| {
+                        crate::v1::history_replication::check_resource(&broker, history.as_ref(),
+                            &read.topic, read.partition, read.group.as_deref(), true)?;
+                        Ok(records)
+                    })
                 {
                     Ok(records) => match to_replication_read_ok(records) {
                         Ok(response) => {
@@ -3367,10 +3473,16 @@ where
                     metrics,
                     wire::decode_replication_stream_start
                 );
+                if let Err(error) = crate::v1::history_replication::check_reporter(history.as_ref(), start.reporter_node_id.as_deref()) {
+                    let (code, message) = broker_error_response(&error);
+                    send_error_response_and_count(&frame_tx_high_prio, &metrics, frame.request_id, code, message).await;
+                    continue;
+                }
                 let stream_id = frame.request_id;
                 let (control_tx, control_rx) = mpsc::channel(64);
                 // Replace any existing stream on this id (drops the old sender,
                 // which makes the old task exit).
+                owner_stream_histories.insert(stream_id, history.clone());
                 owner_streams.insert(stream_id, control_tx);
                 let progress = start
                     .reporter_node_id
@@ -3388,6 +3500,7 @@ where
                 let source = Arc::new(BrokerOwnerStreamSource {
                     broker: broker.clone(),
                     progress,
+                    history: history.clone(),
                 });
                 tokio::spawn(replication_stream::run_owner_replication_stream(
                     source,
@@ -3434,6 +3547,7 @@ where
             x if x == Op::ReplicationStreamStop as u16 => {
                 // Dropping the control sender makes the sender task exit.
                 owner_streams.remove(&frame.request_id);
+                owner_stream_histories.remove(&frame.request_id);
             }
 
             // Recovery always requires an authenticated cluster principal,

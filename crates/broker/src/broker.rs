@@ -476,6 +476,15 @@ impl Default for BrokerConfig {
 }
 
 pub trait QueueOwnership: std::fmt::Debug + Send + Sync {
+    fn replication_node_id(&self) -> Option<&str> { None }
+
+    fn permits_legacy_replication(&self, _topic: &str, _partition: Partition, _group: Option<&str>) -> bool { true }
+
+    fn authorize_history_replication(&self, _session: &crate::history_replication::HistoryReplicationSession,
+        _owner_is_receiver: bool) -> Result<(), String> {
+        Err("accepted-history replication is unavailable".into())
+    }
+
     /// Fresh consensus authority for non-writable initial preparation.
     fn authorize_initial_history<'a>(
         &'a self,
@@ -4798,12 +4807,13 @@ impl Broker<StromaEngine> {
                 )) => {
                     if let Some(assignment) = transition.next.clone() {
                         let queue = Self::stream_worker_identity(&assignment.stream);
-                        let synth = PartitionAssignment::new(
+                        let mut synth = PartitionAssignment::new(
                             queue,
                             assignment.owner,
                             assignment.followers,
                             assignment.epoch,
                         );
+                        synth.history = assignment.history;
                         if let Err(err) = self.spawn_follower_replication_worker_loop(
                             synth,
                             resolver.clone(),
@@ -4869,6 +4879,7 @@ impl Broker<StromaEngine> {
                     followers: Vec::new(),
                     epoch: 0,
                     durability: ReplicationDurabilityPolicy::LocalDurable,
+                    history: None,
                 });
         }
         previous
@@ -5235,13 +5246,14 @@ impl Broker<StromaEngine> {
         match &transition.next {
             Some(next) => {
                 let durability = self.stream_durability_policy(&topic, next.followers.len());
-                let assignment = PartitionAssignment::new(
+                let mut assignment = PartitionAssignment::new(
                     identity.clone(),
                     next.owner.clone(),
                     next.followers.clone(),
                     next.epoch,
                 )
                 .with_durability(durability);
+                assignment.history = next.history.clone();
                 self.cache_queue_assignment(&assignment);
             }
             None => {

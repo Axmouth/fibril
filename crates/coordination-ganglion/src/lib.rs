@@ -27,6 +27,7 @@ use tokio::sync::watch;
 
 pub mod history_identity;
 pub mod initial_history;
+pub mod history_activation;
 pub mod promotion;
 pub mod recovery_witnesses;
 
@@ -785,9 +786,14 @@ fn project_snapshot(
         .iter()
         .filter_map(|(resource, assignment)| {
             let queue = to_fibril_queue(resource)?;
-            if serving && !history_identity::permits_legacy_serving(snapshot, resource) {
-                return None;
-            }
+            let history =
+                if serving && !history_identity::permits_legacy_serving(snapshot, resource) {
+                    Some(std::sync::Arc::new(
+                        history_activation::accepted_history(snapshot, resource).ok()?,
+                    ))
+                } else {
+                    None
+                };
             let mut mapped = PartitionAssignment::new(
                 queue.clone(),
                 assignment.owner.clone(),
@@ -795,6 +801,7 @@ fn project_snapshot(
                 assignment.epoch,
             );
             mapped.durability = to_fibril_durability(assignment.durability);
+            mapped.history = history;
             Some((queue, mapped))
         })
         .collect();
@@ -806,18 +813,22 @@ fn project_snapshot(
         .iter()
         .filter_map(|(resource, assignment)| {
             let stream = to_fibril_stream(resource)?;
-            if serving && !history_identity::permits_legacy_serving(snapshot, resource) {
-                return None;
-            }
-            Some((
+            let history =
+                if serving && !history_identity::permits_legacy_serving(snapshot, resource) {
+                    Some(std::sync::Arc::new(
+                        history_activation::accepted_history(snapshot, resource).ok()?,
+                    ))
+                } else {
+                    None
+                };
+            let mut mapped = StreamAssignment::new(
                 stream.clone(),
-                StreamAssignment::new(
-                    stream,
-                    assignment.owner.clone(),
-                    assignment.followers.clone(),
-                    assignment.epoch,
-                ),
-            ))
+                assignment.owner.clone(),
+                assignment.followers.clone(),
+                assignment.epoch,
+            );
+            mapped.history = history;
+            Some((stream, mapped))
         })
         .collect();
 
@@ -827,6 +838,26 @@ fn project_snapshot(
         stream_assignments,
         generation: snapshot.generation,
     }
+}
+
+/// A restarted provider cannot consume an activation for an earlier process.
+/// The global topology still retains the full configured replica count.
+fn local_serving_snapshot(
+    snapshot: &ganglion_core::CoordinationSnapshot,
+    node: &str,
+    process: [u8; 16],
+) -> CoordinationSnapshot {
+    let mut mapped = to_fibril_snapshot(snapshot);
+    let restrict = |history: &mut Option<std::sync::Arc<fibril_broker::history_replication::AcceptedHistory>>| {
+        if let Some(history) = history {
+            if !history.replicas.get(node).is_some_and(|replica| replica.process == process) {
+                std::sync::Arc::make_mut(history).blocked_local_replica = Some(node.to_owned());
+            }
+        }
+    };
+    for assignment in mapped.assignments.values_mut() { restrict(&mut assignment.history); }
+    for assignment in mapped.stream_assignments.values_mut() { restrict(&mut assignment.history); }
+    mapped
 }
 
 fn to_ganglion_resource(queue: &QueueIdentity) -> ganglion_core::ResourceIdentity {
@@ -1009,21 +1040,24 @@ impl GanglionCoordination {
         wire_format: WireFormat,
         forwarded_write_policy: ForwardedWritePolicy,
     ) -> Self {
+        let node_id = node_id.into();
+        let history_process = *uuid::Uuid::now_v7().as_bytes();
         let mut ganglion_rx = node.watch_committed();
-        let initial = to_fibril_snapshot(&ganglion_rx.borrow_and_update());
+        let initial = local_serving_snapshot(&ganglion_rx.borrow_and_update(), &node_id, history_process);
         let (tx, _rx) = watch::channel(initial);
 
         let forward_tx = tx.clone();
+        let forward_node = node_id.clone();
         let forwarder = tokio::spawn(async move {
             while ganglion_rx.changed().await.is_ok() {
-                let mapped = to_fibril_snapshot(&ganglion_rx.borrow_and_update());
+                let mapped = local_serving_snapshot(&ganglion_rx.borrow_and_update(), &forward_node, history_process);
                 forward_tx.send_replace(mapped);
             }
         });
 
         Self {
-            node_id: node_id.into(),
-            history_process: *uuid::Uuid::now_v7().as_bytes(),
+            node_id,
+            history_process,
             node,
             tx,
             forwarder,
@@ -2948,6 +2982,23 @@ impl Drop for GanglionCoordination {
 /// Queue-ownership gate view: in cluster mode brokers serve only queues the
 /// committed snapshot assigns to them.
 impl fibril_broker::broker::QueueOwnership for GanglionCoordination {
+    fn replication_node_id(&self) -> Option<&str> { Some(&self.node_id) }
+
+    fn permits_legacy_replication(&self, topic: &str, partition: Partition, group: Option<&str>) -> bool {
+        let group = group.filter(|group| !group.is_empty() && *group != "default");
+        self.node.read_committed(|snapshot| {
+            let queue = ganglion_core::ResourceIdentity::new(QUEUE_NAMESPACE, topic, u64::from(partition.id()), group.map(str::to_owned));
+            let stream = ganglion_core::ResourceIdentity::new(STREAM_NAMESPACE, topic, u64::from(partition.id()), None::<String>);
+            history_identity::permits_legacy_serving(snapshot, &queue)
+                && (group.is_some() || history_identity::permits_legacy_serving(snapshot, &stream))
+        })
+    }
+
+    fn authorize_history_replication(&self, session: &fibril_broker::history_replication::HistoryReplicationSession,
+        owner_is_receiver: bool) -> Result<(), String> {
+        self.validate_history_replication(session, owner_is_receiver)
+    }
+
     fn authorize_initial_history<'a>(
         &'a self,
         command: &'a fibril_broker::initial_history::InitialHistoryPrepareCommand,

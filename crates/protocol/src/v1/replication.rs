@@ -220,7 +220,7 @@ pub struct StaticProtocolOwnerPeerResolver {
     cfg: ProtocolOwnerPeerResolverConfig,
     // Keyed by (owner, kind): a stream peer reads via the stream-mode pull op, so
     // it is cached separately from a queue peer to the same owner.
-    peers: Mutex<HashMap<(String, ReplicationResourceKind), Arc<ProtocolOwnerReplicationPeer>>>,
+    peers: Mutex<HashMap<(String, ReplicationResourceKind, Option<fibril_broker::coordination::QueueIdentity>), Arc<ProtocolOwnerReplicationPeer>>>,
 }
 
 impl StaticProtocolOwnerPeerResolver {
@@ -263,11 +263,18 @@ impl BrokerOwnerReplicationPeerResolver for StaticProtocolOwnerPeerResolver {
                 return Ok(None);
             };
 
-            let cache_key = (assignment.owner.clone(), kind);
+            let history = assignment.history.as_ref().map(|history| {
+                let sender = self.cfg.reporter_node_id.as_deref().ok_or_else(|| BrokerError::InvalidArgument("history replication requires local replica identity".into()))?;
+                history.session(&assignment.queue.topic, assignment.queue.partition, assignment.queue.group.as_deref(),
+                    kind == ReplicationResourceKind::Stream, sender, &assignment.owner).map_err(BrokerError::InvalidArgument)
+            }).transpose()?;
+            let cache_key = (assignment.owner.clone(), kind, history.as_ref().map(|_| assignment.queue.clone()));
             let mut peers = self.peers.lock().await;
             if let Some(peer) = peers.get(&cache_key) {
-                let peer: Arc<dyn BrokerOwnerReplicationPeer> = peer.clone();
-                return Ok(Some(peer));
+                if peer.history == history {
+                    let peer: Arc<dyn BrokerOwnerReplicationPeer> = peer.clone();
+                    return Ok(Some(peer));
+                }
             }
 
             let mut built = ProtocolOwnerReplicationPeer::new_reconnecting(
@@ -278,6 +285,7 @@ impl BrokerOwnerReplicationPeerResolver for StaticProtocolOwnerPeerResolver {
             )
             .with_read_timeout_slack_ms(self.cfg.read_timeout_slack_ms)
             .with_owner_connect_timeout_ms(self.cfg.owner_connect_timeout_ms);
+            built.history = history;
             if let Some(reporter) = &self.cfg.reporter_node_id {
                 built = built.with_reporter(reporter.clone());
             }
@@ -311,7 +319,7 @@ pub struct CoordinationProtocolOwnerPeerResolver {
     cfg: ProtocolOwnerPeerResolverConfig,
     // Keyed by (owner, kind): a stream peer reads via the stream-mode pull op, so
     // it is cached separately from a queue peer to the same owner.
-    peers: Mutex<HashMap<(String, ReplicationResourceKind), CachedProtocolOwnerPeer>>,
+    peers: Mutex<HashMap<(String, ReplicationResourceKind, Option<fibril_broker::coordination::QueueIdentity>), CachedProtocolOwnerPeer>>,
 }
 
 impl CoordinationProtocolOwnerPeerResolver {
@@ -360,7 +368,16 @@ impl BrokerOwnerReplicationPeerResolver for CoordinationProtocolOwnerPeerResolve
         Result<Option<Arc<dyn BrokerOwnerReplicationPeer>>, BrokerError>,
     > {
         Box::pin(async move {
-            let cache_key = (assignment.owner.clone(), kind);
+            if assignment.history.is_some()
+                && self.cfg.reporter_node_id.as_deref() != Some(self.coordination.node_id()) {
+                return Err(BrokerError::InvalidArgument("history reporter must identify the local coordination node".into()));
+            }
+            let history = assignment.history.as_ref().map(|history| {
+                let sender = self.cfg.reporter_node_id.as_deref().ok_or_else(|| BrokerError::InvalidArgument("history replication requires local replica identity".into()))?;
+                history.session(&assignment.queue.topic, assignment.queue.partition, assignment.queue.group.as_deref(),
+                    kind == ReplicationResourceKind::Stream, sender, &assignment.owner).map_err(BrokerError::InvalidArgument)
+            }).transpose()?;
+            let cache_key = (assignment.owner.clone(), kind, history.as_ref().map(|_| assignment.queue.clone()));
             let snapshot = self.coordination.snapshot();
             let Some(node) = snapshot.nodes.get(&assignment.owner) else {
                 self.peers.lock().await.remove(&cache_key);
@@ -370,7 +387,7 @@ impl BrokerOwnerReplicationPeerResolver for CoordinationProtocolOwnerPeerResolve
 
             let mut peers = self.peers.lock().await;
             if let Some(cached) = peers.get(&cache_key) {
-                if cached.addr == addr {
+                if cached.addr == addr && cached.peer.history == history {
                     let peer: Arc<dyn BrokerOwnerReplicationPeer> = cached.peer.clone();
                     return Ok(Some(peer));
                 }
@@ -384,6 +401,7 @@ impl BrokerOwnerReplicationPeerResolver for CoordinationProtocolOwnerPeerResolve
             )
             .with_read_timeout_slack_ms(self.cfg.read_timeout_slack_ms)
             .with_owner_connect_timeout_ms(self.cfg.owner_connect_timeout_ms);
+            built.history = history;
             if let Some(reporter) = &self.cfg.reporter_node_id {
                 built = built.with_reporter(reporter.clone());
             }
@@ -623,6 +641,7 @@ pub const DEFAULT_READ_TIMEOUT_SLACK_MS: u64 = 10_000;
 pub const DEFAULT_OWNER_CONNECT_TIMEOUT_MS: u64 = 5_000;
 
 pub struct ProtocolOwnerReplicationPeer {
+    history: Option<fibril_broker::history_replication::HistoryReplicationSession>,
     conn: Mutex<Option<Conn>>,
     request_lock: Mutex<()>,
     next_request_id: AtomicU64,
@@ -640,8 +659,21 @@ pub struct ProtocolOwnerReplicationPeer {
 }
 
 impl ProtocolOwnerReplicationPeer {
+    pub fn with_history_session(mut self, history: fibril_broker::history_replication::HistoryReplicationSession) -> Self {
+        self.history = Some(history);
+        self
+    }
+
+    fn history_frame(&self, frame: Frame) -> Result<Frame, BrokerError> {
+        match &self.history {
+            Some(history) => crate::v1::history_replication::encode_frame(history, frame).map_err(protocol_error),
+            None => Ok(frame),
+        }
+    }
+
     pub fn new(conn: Conn) -> Self {
         Self {
+            history: None,
             conn: Mutex::new(Some(conn)),
             request_lock: Mutex::new(()),
             next_request_id: AtomicU64::new(20_000),
@@ -689,6 +721,7 @@ impl ProtocolOwnerReplicationPeer {
         client_version: String,
     ) -> Self {
         Self {
+            history: None,
             conn: Mutex::new(None),
             request_lock: Mutex::new(()),
             next_request_id: AtomicU64::new(20_000),
@@ -817,7 +850,7 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
             let mut conn = self.take_conn().await?;
             if let Err(err) = conn
                 .send(
-                    try_encode(
+                    self.history_frame(try_encode(
                         read_op,
                         request_id,
                         &ReplicationRead {
@@ -834,7 +867,7 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
                             reporter_node_id: self.reporter_node_id.clone(),
                         },
                     )
-                    .map_err(protocol_error)?,
+                    .map_err(protocol_error)?)?,
                 )
                 .await
             {
@@ -900,7 +933,7 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
             let mut conn = self.take_conn().await?;
             if let Err(err) = conn
                 .send(
-                    try_encode(
+                    self.history_frame(try_encode(
                         Op::ReplicationCheckpointExport,
                         request_id,
                         &ReplicationCheckpointExport {
@@ -909,7 +942,7 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
                             partition,
                         },
                     )
-                    .map_err(protocol_error)?,
+                    .map_err(protocol_error)?)?,
                 )
                 .await
             {
@@ -1002,7 +1035,7 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
             let conn = self.take_conn().await?;
             let stream_id = self.next_request_id();
             let sink = Arc::new(StreamApplyAdapterSink { apply });
-            let exit = run_follower_replication_stream(
+            let exit = run_follower_replication_stream_with_history(
                 conn,
                 sink,
                 topic.to_string(),
@@ -1017,6 +1050,7 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
                 stream_id,
                 buffer_batches,
                 shutdown,
+                self.history.clone(),
             )
             .await;
             // The connection is consumed/closed by the transport on exit; the
@@ -1501,6 +1535,43 @@ pub async fn run_follower_replication_stream<S: FollowerStreamSink>(
     buffer_batches: usize,
     shutdown: CancellationToken,
 ) -> FollowerStreamExit {
+    run_follower_replication_stream_with_history(
+        conn,
+        sink,
+        topic,
+        partition,
+        group,
+        message_from,
+        event_from,
+        credit_bytes,
+        tunables,
+        reporter_node_id,
+        reporter_epoch,
+        stream_id,
+        buffer_batches,
+        shutdown,
+        None,
+    )
+    .await
+}
+
+async fn run_follower_replication_stream_with_history<S: FollowerStreamSink>(
+    conn: Conn,
+    sink: Arc<S>,
+    topic: String,
+    partition: Partition,
+    group: Option<String>,
+    message_from: Offset,
+    event_from: Offset,
+    credit_bytes: u64,
+    tunables: StreamApplyTunablesFn,
+    reporter_node_id: Option<String>,
+    reporter_epoch: Option<u64>,
+    stream_id: u64,
+    buffer_batches: usize,
+    shutdown: CancellationToken,
+    history: Option<fibril_broker::history_replication::HistoryReplicationSession>,
+) -> FollowerStreamExit {
     let (mut conn_sink, mut conn_stream) = conn.split();
 
     let start = ReplicationStreamStart {
@@ -1513,7 +1584,12 @@ pub async fn run_follower_replication_stream<S: FollowerStreamSink>(
         credit_bytes,
         reporter_node_id,
     };
-    match wire::encode_replication_stream_start(stream_id, &start) {
+    match wire::encode_replication_stream_start(stream_id, &start).and_then(
+        |frame| match &history {
+            Some(history) => crate::v1::history_replication::encode_frame(history, frame),
+            None => Ok(frame),
+        },
+    ) {
         Ok(frame) => {
             if conn_sink.send(frame).await.is_err() {
                 return FollowerStreamExit::Error("failed to send stream start".into());
@@ -1526,10 +1602,20 @@ pub async fn run_follower_replication_stream<S: FollowerStreamSink>(
     let (control_tx, mut control_rx) = mpsc::channel::<FollowerStreamControl>(64);
 
     // Reader: demux pushed frames into the buffer; return the stream-end reason.
-    let reader = tokio::spawn(async move {
+    let reader = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
         loop {
             match conn_stream.next().await {
                 Some(Ok(frame)) => {
+                    if frame.request_id != stream_id {
+                        continue;
+                    }
+                    if frame.opcode == Op::Error as u16 {
+                        return FollowerStreamExit::Error(
+                            try_decode::<ErrorMsg>(&frame)
+                                .map(|e| e.message)
+                                .unwrap_or_else(|e| format!("invalid stream error: {e}")),
+                        );
+                    }
                     if frame.opcode == Op::ReplicationStreamBatch as u16 {
                         match wire::decode_replication_stream_batch(&frame) {
                             Ok(batch) => {
@@ -1561,10 +1647,10 @@ pub async fn run_follower_replication_stream<S: FollowerStreamSink>(
                 None => return FollowerStreamExit::Error("connection closed".into()),
             }
         }
-    });
+    }));
 
     // Control writer: encode progress/reset back to the owner.
-    let writer = tokio::spawn(async move {
+    let writer = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
         while let Some(control) = control_rx.recv().await {
             let frame = match control {
                 FollowerStreamControl::Progress {
@@ -1590,6 +1676,10 @@ pub async fn run_follower_replication_stream<S: FollowerStreamSink>(
                     },
                 ),
             };
+            let frame = frame.and_then(|frame| match &history {
+                Some(history) => crate::v1::history_replication::encode_frame(history, frame),
+                None => Ok(frame),
+            });
             match frame {
                 Ok(frame) => {
                     if conn_sink.send(frame).await.is_err() {
@@ -1599,7 +1689,7 @@ pub async fn run_follower_replication_stream<S: FollowerStreamSink>(
                 Err(_) => break,
             }
         }
-    });
+    }));
 
     let applier_exit = tokio::select! {
         _ = shutdown.cancelled() => None,
@@ -1725,6 +1815,77 @@ mod stream_transport_tests {
                 next_offset: 0,
                 records: Vec::new(),
             },
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_rejection_exits_and_parent_cancellation_closes_transport_tasks() {
+        for cancel in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let socket = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            let (server, _) = listener.accept().await.unwrap();
+            let mut owner = helper::plain_conn(server);
+            let sink = Arc::new(RecordingSink {
+                applied: StdMutex::new(Vec::new()),
+            });
+            let follower = tokio::spawn(run_follower_replication_stream(
+                helper::plain_conn(socket),
+                sink.clone(),
+                "orders".into(),
+                Partition::new(0),
+                None,
+                0,
+                0,
+                1024,
+                Arc::new(|| fibril_broker::replication::StreamApplyTunables {
+                    keepalive_ms: 0,
+                    apply_linger_us: 0,
+                    max_merge_bytes: 1,
+                }),
+                Some("b".into()),
+                Some(1),
+                42,
+                4,
+                CancellationToken::new(),
+            ));
+            let start = owner.next().await.unwrap().unwrap();
+            assert_eq!(start.opcode, Op::ReplicationStreamStart as u16);
+            if cancel {
+                follower.abort();
+                assert!(follower.await.unwrap_err().is_cancelled());
+            } else {
+                owner
+                    .send(
+                        try_encode(
+                            Op::Error,
+                            42,
+                            &ErrorMsg {
+                                code: 400,
+                                message: "history replaced".into(),
+                            },
+                        )
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    tokio::time::timeout(std::time::Duration::from_secs(5), follower)
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    FollowerStreamExit::Error("history replaced".into())
+                );
+            }
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(5), owner.next())
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "both transport tasks must release their socket halves"
+            );
+            assert!(sink.applied.lock().unwrap().is_empty());
         }
     }
 

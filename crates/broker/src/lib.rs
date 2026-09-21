@@ -4,6 +4,7 @@ pub mod coordination;
 pub mod queue_engine;
 pub mod recovery;
 pub mod initial_history;
+pub mod history_replication;
 pub mod replication;
 pub mod runtime_settings;
 pub mod storage;

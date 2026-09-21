@@ -138,6 +138,8 @@ pub trait BrokerOwnerReplicationPeer: Send + Sync {
 struct AssignmentReplicationPeer<'p> {
     peer: &'p dyn BrokerOwnerReplicationPeer,
     epoch: u64,
+    broker: Arc<Broker<StromaEngine>>,
+    history: Option<crate::history_replication::HistoryReplicationSession>,
 }
 impl BrokerOwnerReplicationPeer for AssignmentReplicationPeer<'_> {
     fn read_owner_replication_records<'a>(
@@ -152,18 +154,26 @@ impl BrokerOwnerReplicationPeer for AssignmentReplicationPeer<'_> {
         max_bytes: usize,
         max_wait_ms: u64,
     ) -> BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
-        self.peer.read_owner_replication_records_fenced(
-            topic,
-            partition,
-            group,
-            message_from,
-            event_from,
-            max_messages,
-            max_events,
-            max_bytes,
-            max_wait_ms,
-            Some(self.epoch),
-        )
+        Box::pin(async move {
+            self.check_history()?;
+            let records = self
+                .peer
+                .read_owner_replication_records_fenced(
+                    topic,
+                    partition,
+                    group,
+                    message_from,
+                    event_from,
+                    max_messages,
+                    max_events,
+                    max_bytes,
+                    max_wait_ms,
+                    Some(self.epoch),
+                )
+                .await?;
+            self.check_history()?;
+            Ok(records)
+        })
     }
     fn export_owner_state_checkpoint<'a>(
         &'a self,
@@ -171,8 +181,15 @@ impl BrokerOwnerReplicationPeer for AssignmentReplicationPeer<'_> {
         partition: Partition,
         group: Option<&'a str>,
     ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
-        self.peer
-            .export_owner_state_checkpoint(topic, partition, group)
+        Box::pin(async move {
+            self.check_history()?;
+            let checkpoint = self
+                .peer
+                .export_owner_state_checkpoint(topic, partition, group)
+                .await?;
+            self.check_history()?;
+            Ok(checkpoint)
+        })
     }
     fn stream_replication<'a>(
         &'a self,
@@ -187,6 +204,15 @@ impl BrokerOwnerReplicationPeer for AssignmentReplicationPeer<'_> {
         apply: Arc<dyn BrokerReplicationStreamApply>,
         shutdown: CancellationToken,
     ) -> BoxFuture<'a, Result<FollowerStreamExit, BrokerError>> {
+        let apply: Arc<dyn BrokerReplicationStreamApply> = if let Some(history) = &self.history {
+            Arc::new(HistoryStreamApply {
+                broker: self.broker.clone(),
+                history: history.clone(),
+                inner: apply,
+            })
+        } else {
+            apply
+        };
         self.peer.stream_replication_fenced(
             topic,
             partition,
@@ -200,6 +226,36 @@ impl BrokerOwnerReplicationPeer for AssignmentReplicationPeer<'_> {
             shutdown,
             Some(self.epoch),
         )
+    }
+}
+
+impl AssignmentReplicationPeer<'_> {
+    fn check_history(&self) -> Result<(), BrokerError> {
+        if let Some(history) = &self.history {
+            self.broker.authorize_history_replication(history, false)?;
+        }
+        Ok(())
+    }
+}
+
+struct HistoryStreamApply {
+    broker: Arc<Broker<StromaEngine>>,
+    history: crate::history_replication::HistoryReplicationSession,
+    inner: Arc<dyn BrokerReplicationStreamApply>,
+}
+impl BrokerReplicationStreamApply for HistoryStreamApply {
+    fn apply_stream_batch<'a>(
+        &'a self,
+        records: BrokerOwnerReplicationRecords,
+    ) -> BoxFuture<'a, Result<ReplicatedStreamApply, BrokerError>> {
+        Box::pin(async move {
+            self.broker
+                .authorize_history_replication(&self.history, false)?;
+            let outcome = self.inner.apply_stream_batch(records).await?;
+            self.broker
+                .authorize_history_replication(&self.history, false)?;
+            Ok(outcome)
+        })
     }
 }
 
@@ -2547,10 +2603,20 @@ impl Broker<StromaEngine> {
                 return Ok(FollowerReplicationWorkerLoopExit::Cancelled { ticks });
             }
 
+            let history = assignment.history.as_ref().map(|history| {
+                let receiver = self.ownership.replication_node_id().ok_or_else(||
+                    BrokerError::InvalidArgument("history replication requires local replica identity".into()))?;
+                history.session(&assignment.queue.topic, assignment.queue.partition,
+                    assignment.queue.group.as_deref(), kind == ReplicationResourceKind::Stream,
+                    &assignment.owner, receiver).map_err(BrokerError::InvalidArgument)
+            }).transpose()?;
             let scoped_owner = AssignmentReplicationPeer {
                 peer: owner.as_ref(),
                 epoch: assignment.epoch,
+                broker: self.clone(),
+                history,
             };
+            scoped_owner.check_history()?;
             let tick_result = tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => {

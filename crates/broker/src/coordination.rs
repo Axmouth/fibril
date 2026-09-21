@@ -42,6 +42,7 @@ pub struct PartitionAssignment {
     pub followers: Vec<String>,
     pub epoch: u64,
     pub durability: ReplicationDurabilityPolicy,
+    pub history: Option<Arc<crate::history_replication::AcceptedHistory>>,
 }
 
 impl PartitionAssignment {
@@ -57,6 +58,7 @@ impl PartitionAssignment {
             followers,
             epoch,
             durability: ReplicationDurabilityPolicy::LocalDurable,
+            history: None,
         }
     }
 
@@ -66,11 +68,12 @@ impl PartitionAssignment {
     }
 
     pub fn is_owned_by(&self, node_id: &str) -> bool {
-        self.owner == node_id
+        self.owner == node_id && self.history.as_ref().is_none_or(|h| h.permits_role(node_id))
     }
 
     pub fn is_followed_by(&self, node_id: &str) -> bool {
         self.followers.iter().any(|follower| follower == node_id)
+            && self.history.as_ref().is_none_or(|history| history.permits_role(node_id))
     }
 
     pub fn replica_set_size(&self) -> usize {
@@ -432,6 +435,7 @@ pub struct StreamAssignment {
     /// Fencing epoch: bumps when ownership moves so a deposed owner can be
     /// fenced. Holds steady while the owner is unchanged.
     pub epoch: u64,
+    pub history: Option<Arc<crate::history_replication::AcceptedHistory>>,
 }
 
 impl StreamAssignment {
@@ -446,15 +450,17 @@ impl StreamAssignment {
             owner: owner.into(),
             followers,
             epoch,
+            history: None,
         }
     }
 
     pub fn is_owned_by(&self, node_id: &str) -> bool {
-        self.owner == node_id
+        self.owner == node_id && self.history.as_ref().is_none_or(|h| h.permits_role(node_id))
     }
 
     pub fn is_followed_by(&self, node_id: &str) -> bool {
         self.followers.iter().any(|follower| follower == node_id)
+            && self.history.as_ref().is_none_or(|history| history.permits_role(node_id))
     }
 }
 

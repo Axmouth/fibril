@@ -10,6 +10,14 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Exact initial activation and live replication
+
+Explicit activation now admits only the prepared provider and storage instances, while live replication carries the accepted history through pull and streaming paths. A three-node TCP regression verifies majority confirmation, stale-identity rejection and replacement-storage fencing; automatic recovery readmission remains in the [failover plan](/development/failover-plan/).
+
+### Replication stream rejection and cancellation
+
+A rejected stream-start request previously left the follower waiting because the transport ignored ordinary error responses. The reader now reports that rejection, and both transport tasks abort when their parent is dropped; TCP tests verify prompt exit and socket closure.
+
 ### Authenticated initial preparation
 
 Remote preparation now verifies the exact target and committed decision through consensus before creating a non-writable storage baseline. Requests use fresh node authentication, bounded frames and deadlines; identical calls share one broker operation that survives caller cancellation. Real three-node TCP tests cover majority receipt collection, retries, stale decisions, wrong targets and reopened storage ([initial preparation](/reliability/recovery-sealing/#initial-history-preparation)).
@@ -20,7 +28,7 @@ Explicit enrollment now blocks ordinary serving from catalogue creation while pr
 
 ### Consensus preparation without writer admission
 
-Initial-history decisions persist fixed history/session IDs bound to the owner instance and exact assignment. Replica preparation leaves storage non-writable; receipt collection deduplicates replies, requires the owner and blocks contradictory replica identities. A durable metadata restart regression covers rejection of the old owner grant; writer activation and recovery readmission remain pending ([initial preparation](/reliability/recovery-sealing/#initial-history-preparation)).
+Initial-history decisions persist fixed history/session IDs bound to the owner instance and exact assignment. Replica preparation leaves storage non-writable; receipt collection deduplicates replies, requires the owner and blocks contradictory replica identities. A durable metadata restart regression covers rejection of the old owner grant; automatic enrollment and recovery readmission remain pending ([initial preparation](/reliability/recovery-sealing/#initial-history-preparation)).
 
 ### Storage history and writer restart
 

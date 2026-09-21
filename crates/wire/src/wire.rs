@@ -3445,3 +3445,178 @@ mod initial_history_tests {
         }
     }
 }
+
+/// Returns the required direction, or refuses operations outside live replication.
+pub fn history_replication_owner_is_receiver(opcode: u16) -> WireResult<bool> {
+    if [
+        Op::ReplicationRead,
+        Op::StreamReplicationRead,
+        Op::ReplicationCheckpointExport,
+        Op::ReplicationStreamStart,
+        Op::ReplicationStreamProgress,
+        Op::ReplicationStreamReset,
+        Op::ReplicationStreamStop,
+    ]
+    .iter()
+    .any(|op| *op as u16 == opcode)
+    {
+        return Ok(true);
+    }
+    if [Op::ReplicationApply, Op::ReplicationCheckpointInstall]
+        .iter()
+        .any(|op| *op as u16 == opcode)
+    {
+        return Ok(false);
+    }
+    Err(WireError::InvalidRecordSequence(
+        "invalid history replication operation",
+    ))
+}
+
+pub fn encode_history_replication(id: u64, req: &crate::HistoryReplication) -> WireResult<Frame> {
+    history_replication_owner_is_receiver(req.opcode)?;
+    let mut out = payload_builder(b"HRP1");
+    let h = &req.history;
+    put_queue_key(&mut out, &h.topic, h.partition, h.group.as_deref())?;
+    put_bool(&mut out, h.stream);
+    out.extend_from_slice(&h.activation);
+    out.extend_from_slice(&h.resource_incarnation);
+    out.extend_from_slice(&h.accepted_history);
+    out.extend_from_slice(&h.writer_session);
+    put_str(&mut out, &h.sender)?;
+    out.extend_from_slice(&h.sender_process);
+    out.extend_from_slice(&h.sender_storage);
+    put_str(&mut out, &h.receiver)?;
+    out.extend_from_slice(&h.receiver_process);
+    out.extend_from_slice(&h.receiver_storage);
+    out.put_u16(req.opcode);
+    out.put_u32(req.flags);
+    put_bytes(&mut out, &req.body)?;
+    if out.len() > crate::MAX_HISTORY_REPLICATION_FRAME_BYTES {
+        return Err(WireError::InvalidRecordSequence(
+            "history replication envelope exceeds limit",
+        ));
+    }
+    Ok(frame(Op::HistoryReplication, id, out.freeze()))
+}
+
+pub fn decode_history_replication(f: &Frame) -> WireResult<crate::HistoryReplication> {
+    expect_op(f, Op::HistoryReplication)?;
+    if f.payload.len() > crate::MAX_HISTORY_REPLICATION_FRAME_BYTES {
+        return Err(WireError::InvalidRecordSequence(
+            "history replication envelope exceeds limit",
+        ));
+    }
+    let mut r = Reader::new(&f.payload);
+    r.expect_magic(b"HRP1", "history replication")?;
+    let (topic, partition, group) = r.queue_key()?;
+    let history = crate::ReplicationHistoryContext {
+        topic,
+        partition,
+        group,
+        stream: r.bool()?,
+        activation: r.take(32)?.try_into().unwrap(),
+        resource_incarnation: r.take(16)?.try_into().unwrap(),
+        accepted_history: r.take(16)?.try_into().unwrap(),
+        writer_session: r.take(16)?.try_into().unwrap(),
+        sender: r.str()?.to_owned(),
+        sender_process: r.take(16)?.try_into().unwrap(),
+        sender_storage: r.take(16)?.try_into().unwrap(),
+        receiver: r.str()?.to_owned(),
+        receiver_process: r.take(16)?.try_into().unwrap(),
+        receiver_storage: r.take(16)?.try_into().unwrap(),
+    };
+    let opcode = r.u16()?;
+    history_replication_owner_is_receiver(opcode)?;
+    let flags = r.u32()?;
+    let body = r.bytes()?.to_vec();
+    r.finish()?;
+    Ok(crate::HistoryReplication {
+        history,
+        opcode,
+        flags,
+        body,
+    })
+}
+
+/// Inspect only the resource prefix; callers still fully decode before applying.
+/// This avoids decoding/copying a replication batch twice for authorization.
+pub fn replication_resource_prefix(
+    f: &Frame,
+) -> WireResult<Option<(String, Partition, Option<String>)>> {
+    let magic: &[u8; 4] = match f.opcode {
+        x if x == Op::ReplicationRead as u16 => b"FRQ1",
+        x if x == Op::StreamReplicationRead as u16 => b"FSQ1",
+        x if x == Op::ReplicationApply as u16 => b"FRA1",
+        x if x == Op::ReplicationCheckpointExport as u16 => b"FCE1",
+        x if x == Op::ReplicationCheckpointInstall as u16 => b"FCI1",
+        x if x == Op::ReplicationStreamStart as u16 => b"FSS1",
+        _ => return Ok(None),
+    };
+    let mut r = Reader::new(&f.payload);
+    r.expect_magic(magic, "replication resource prefix")?;
+    Ok(Some(r.queue_key()?))
+}
+
+#[cfg(test)]
+mod history_replication_tests {
+    use super::*;
+
+    #[test]
+    fn history_envelope_roundtrip_rejects_truncation_trailing_bytes_and_nested_operations() {
+        let request = crate::HistoryReplication {
+            history: crate::ReplicationHistoryContext {
+                topic: "orders".into(),
+                partition: Partition::new(2),
+                group: Some("workers".into()),
+                stream: false,
+                activation: [1; 32],
+                resource_incarnation: [2; 16],
+                accepted_history: [3; 16],
+                writer_session: [4; 16],
+                sender: "b".into(),
+                sender_process: [5; 16],
+                sender_storage: [6; 16],
+                receiver: "a".into(),
+                receiver_process: [7; 16],
+                receiver_storage: [8; 16],
+            },
+            opcode: Op::ReplicationRead as u16,
+            flags: 19,
+            body: vec![0, 1, 2],
+        };
+        let encoded = encode_history_replication(81, &request).unwrap();
+        assert_eq!(encoded.request_id, 81);
+        assert_eq!(decode_history_replication(&encoded).unwrap(), request);
+        for length in 0..encoded.payload.len() {
+            let mut short = encoded.clone();
+            short.payload = short.payload.slice(..length);
+            assert!(
+                decode_history_replication(&short).is_err(),
+                "length {length}"
+            );
+        }
+        let mut extra = encoded.clone();
+        let mut bytes = extra.payload.to_vec();
+        bytes.push(0);
+        extra.payload = bytes.into();
+        assert!(decode_history_replication(&extra).is_err());
+        for opcode in [
+            Op::HistoryReplication,
+            Op::Auth,
+            Op::Publish,
+            Op::RecoverySeal,
+        ] {
+            let mut invalid = request.clone();
+            invalid.opcode = opcode as u16;
+            assert!(encode_history_replication(81, &invalid).is_err());
+            let mut bytes = encoded.payload.to_vec();
+            let offset = bytes.len() - request.body.len() - 4 - 4 - 2;
+            bytes[offset..offset + 2].copy_from_slice(&(opcode as u16).to_be_bytes());
+            extra.payload = bytes.into();
+            assert!(decode_history_replication(&extra).is_err());
+        }
+        assert!(history_replication_owner_is_receiver(Op::ReplicationRead as u16).unwrap());
+        assert!(!history_replication_owner_is_receiver(Op::ReplicationApply as u16).unwrap());
+    }
+}

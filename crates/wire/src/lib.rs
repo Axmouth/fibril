@@ -145,6 +145,7 @@ pub enum Op {
 
     InitialHistoryPrepare = 107,
     InitialHistoryPrepareOk = 108,
+    HistoryReplication = 109,
 
     Error = 255,
 }
@@ -1222,3 +1223,33 @@ pub struct InitialHistoryPrepareOk {
 }
 
 pub const MAX_INITIAL_HISTORY_FRAME_BYTES: usize = 64 * 1024;
+
+/// History-bound internal replication envelope. Its request ID is also the
+/// enclosed operation's request/stream ID; nested envelopes are invalid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplicationHistoryContext {
+    pub topic: String,
+    pub partition: Partition,
+    pub group: Option<String>,
+    pub stream: bool,
+    pub activation: [u8; 32],
+    pub resource_incarnation: [u8; 16],
+    pub accepted_history: [u8; 16],
+    pub writer_session: [u8; 16],
+    pub sender: String,
+    pub sender_process: [u8; 16],
+    pub sender_storage: [u8; 16],
+    pub receiver: String,
+    pub receiver_process: [u8; 16],
+    pub receiver_storage: [u8; 16],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryReplication {
+    pub history: ReplicationHistoryContext,
+    pub opcode: u16,
+    pub flags: u32,
+    pub body: Vec<u8>,
+}
+
+pub const MAX_HISTORY_REPLICATION_FRAME_BYTES: usize = 64 * 1024 * 1024;

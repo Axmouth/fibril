@@ -10,5 +10,6 @@ pub mod handler;
 pub mod replication;
 pub mod recovery_inspection;
 pub mod initial_history;
+pub mod history_replication;
 pub mod replication_stream;
 pub mod session_store;

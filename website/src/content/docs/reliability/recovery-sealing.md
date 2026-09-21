@@ -137,11 +137,40 @@ can leave admitted preparation running, so retries use the same decision. The
 transport deadline covers setup and the response, and replies must match the target,
 resource, decision and storage binding with nonzero process/storage instances.
 
-These operations are not used by ordinary broker startup. Writer activation,
-identity on live replication, recovery installation and readmission remain pending. Existing resources require a verified baseline.
+These operations are not used by ordinary broker startup. Recovery installation
+and readmission remain pending. Existing resources require a verified baseline.
 Matching broker and metadata binaries are required; older brokers do not enforce
 the enrollment projection and the retirement command requires updated metadata
 nodes. Mixed-version enrollment and downgrade are unsupported.
+
+## Initial activation and live replication
+
+The original owner can commit an immutable activation of its exact persisted
+prepared quorum. Each replica then obtains fresh consensus authorization and
+admits only its recorded provider and storage instance. A replacement process,
+missing receipt or different storage instance requires recovery readmission.
+Identical admission retries preserve subsequent writes.
+
+Activated assignments carry the history binding and exact replica instances.
+The full configured replica count still determines confirmation requirements;
+unprepared members cannot serve or report progress. Enrolled resources also
+require recovery when an owner-only assignment changes. Ordinary declaration
+continues to use the existing path until automatic recovery can complete.
+
+The internal `HistoryReplication` envelope (opcode 109) binds live replication to
+resource incarnation, accepted history, writer session, activation and both peer
+instances. Only authenticated node connections may use it. Unstamped requests,
+default-group aliases, wrong resource kinds and mismatched progress reporters
+cannot access an enrolled resource. Streams retain their history context for
+progress and reset controls; reads and follower applies recheck authority across
+awaits. Frame headers enforce a 64 MiB envelope limit.
+
+A real three-node TCP regression activates a prepared majority, writes and copies
+a record, and releases its confirmation only after durable follower progress.
+It also rejects stale identities, changed assignments and reopened storage.
+Transport rejection terminates follower streams; cancelling their parent releases
+both transport tasks and the connection. This explicit initial-activation path
+does not yet supply recovered-history installation or automatic failover.
 
 ## Explicit witness collection
 

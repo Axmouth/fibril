@@ -106,7 +106,15 @@ pub(crate) fn retain_unproven_assignments(
         }
         let old_writes = write_requirement(previous)?;
         let new_writes = write_requirement(proposed)?;
-        if same_configuration(previous, proposed) || old_writes == 1 && new_writes == 1 {
+        let incarnation = crate::history_identity::resource_incarnation(committed, resource)?;
+        let enrolled = incarnation.as_ref().is_some_and(|id| id.version == 2);
+        // An enrolled activation binds the exact assignment, even for one local
+        // writer. Moving/replacing that writer needs a continuation certificate.
+        if if enrolled {
+            previous == proposed
+        } else {
+            same_configuration(previous, proposed) || old_writes == 1 && new_writes == 1
+        } {
             continue;
         }
         let mut replacement = proposed.clone();
@@ -116,9 +124,7 @@ pub(crate) fn retain_unproven_assignments(
             .ok_or("assignment epoch exhausted")?;
         let pending = PendingRecovery {
             version: 1,
-            resource_incarnation: crate::history_identity::resource_incarnation(
-                committed, resource,
-            )?,
+            resource_incarnation: incarnation,
             requested_generation: desired.generation,
             previous: previous.clone(),
             proposed: replacement,
@@ -192,6 +198,41 @@ mod tests {
             0
         );
     }
+    #[test]
+    fn enrolled_local_writer_changes_require_recovery() {
+        let mut original = assignment("a", &[]);
+        original.durability = ReplicationDurabilityPolicy::LocalDurable;
+        let resource = original.resource.clone();
+        let mut old = snapshot(original.clone());
+        let identity = crate::history_identity::ResourceIncarnation {
+            version: 2,
+            resource: resource.clone(),
+            id: [1; 16],
+            retired: false,
+        };
+        old.attributes.insert(
+            crate::history_identity::key(&resource),
+            serde_json::to_string(&identity).unwrap(),
+        );
+        let mut changed = original.clone();
+        changed.owner = "b".into();
+        let mut desired = old.clone();
+        desired.assignments.insert(resource.clone(), changed);
+        assert_eq!(retain_unproven_assignments(&old, &mut desired).unwrap(), 1);
+        assert_eq!(desired.assignments, old.assignments);
+        let mut epoch_change = old.clone();
+        epoch_change.assignments.get_mut(&resource).unwrap().epoch += 1;
+        assert_eq!(
+            retain_unproven_assignments(&old, &mut epoch_change).unwrap(),
+            1
+        );
+        let mut identical = old.clone();
+        assert_eq!(
+            retain_unproven_assignments(&old, &mut identical).unwrap(),
+            0
+        );
+    }
+
     #[test]
     fn malformed_pending_request_never_unlocks_assignment() {
         let mut old = snapshot(assignment("a", &["b", "c"]));

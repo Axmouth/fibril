@@ -7322,6 +7322,7 @@ async fn assert_replication_controls_forbidden(conn: &mut Conn) {
         Op::RecoverySeal,
         Op::RecoveryRead,
         Op::InitialHistoryPrepare,
+        Op::HistoryReplication,
     ] {
         conn.send(Frame {
             version: PROTOCOL_V1,
@@ -7938,11 +7939,35 @@ async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_conse
         InitialHistoryLocalReceipt, InitialHistoryPrepareCommand,
     };
     use fibril_coordination_ganglion::{
-        initial_history::InitialHistoryReceiptSet, GanglionCoordination,
+        GanglionCoordination, initial_history::InitialHistoryReceiptSet,
     };
     use fibril_protocol::v1::initial_history::request_preparation;
-    use ganglion_openraft::{default_raft_config, RaftMetadataNode};
+    use ganglion_openraft::{RaftMetadataNode, default_raft_config};
     use std::collections::BTreeMap;
+
+    async fn retry_metadata<T, F, Fut>(mut operation: F) -> T
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T, ganglion_openraft::OpenraftAdapterError>>,
+    {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match operation().await {
+                    Ok(value) => break value,
+                    Err(
+                        ganglion_openraft::OpenraftAdapterError::NotLeader
+                        | ganglion_openraft::OpenraftAdapterError::GenerationMismatch { .. }
+                        | ganglion_openraft::OpenraftAdapterError::AttributeMismatch { .. },
+                    ) => {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                    Err(error) => panic!("metadata operation failed: {error}"),
+                }
+            }
+        })
+        .await
+        .unwrap()
+    }
 
     async fn call(
         broker: Arc<Broker<StromaEngine>>,
@@ -8161,10 +8186,7 @@ async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_conse
             Err(stroma_core::StromaError::HistoryAdmissionRequired { .. })
         ));
     }
-    let quorum = providers[0]
-        .persist_initial_history_quorum(&receipts)
-        .await
-        .unwrap();
+    let quorum = retry_metadata(|| providers[0].persist_initial_history_quorum(&receipts)).await;
     assert_eq!(quorum.reports.len(), 2);
     assert!(quorum.reports.contains_key("a") && quorum.reports.contains_key("b"));
     // Misrouting to another member must reject even with correct node credentials.
@@ -8176,10 +8198,324 @@ async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_conse
     .await;
     dirs[2] = Some(dir);
     assert!(wrong.is_err());
-    assert!(engines[2]
-        .storage_history_binding("initial-wire", 0, None)
+    assert!(
+        engines[2]
+            .storage_history_binding("initial-wire", 0, None)
+            .unwrap()
+            .is_none()
+    );
+    // Activate the fixed majority without weakening its configured threshold.
+    use fibril_broker::coordination::Coordination;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while providers[0]
+            .prepared_initial_history_quorum(&decision)
+            .unwrap()
+            .is_none()
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    retry_metadata(|| providers[0].commit_initial_history_activation(&decision, &engines[0])).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while providers.iter().any(|provider| {
+            provider
+                .initial_history_activation(&decision)
+                .unwrap()
+                .is_none()
+        }) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let generation = providers[0]
+        .consensus_node()
+        .committed_snapshot()
+        .generation;
+    synced(&providers, generation).await;
+    for index in 0..2 {
+        retry_metadata(|| providers[index].admit_local_initial_history(&decision, &engines[index]))
+            .await;
+    }
+    assert!(
+        providers[2]
+            .admit_local_initial_history(&decision, &engines[2])
+            .await
+            .is_err()
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while providers[0]
+            .snapshot()
+            .assignment_for("initial-wire", Partition::new(0), None)
+            .is_none()
+            || providers[1]
+                .snapshot()
+                .assignment_for("initial-wire", Partition::new(0), None)
+                .is_none()
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let assignment = providers[0]
+        .snapshot()
+        .assignment_for("initial-wire", Partition::new(0), None)
         .unwrap()
-        .is_none());
+        .clone();
+    assert_eq!(assignment.replica_set_size(), 3);
+    assert_eq!(assignment.durability_requirement().unwrap().nodes, 2);
+    assert!(assignment.is_followed_by("b"));
+    assert!(!assignment.is_followed_by("c"));
+    let unprepared_view = providers[2].snapshot();
+    let remote_route = unprepared_view.assignment_for("initial-wire", Partition::new(0), None).unwrap();
+    assert_eq!(remote_route.owner, "a");
+    assert!(!remote_route.is_followed_by("c"));
+    let history = assignment.history.as_ref().unwrap();
+    let session = history
+        .session("initial-wire", Partition::new(0), None, false, "b", "a")
+        .unwrap();
+    for (index, id) in ["a", "b"].into_iter().enumerate() {
+        for result in brokers[index]
+            .apply_assignment_snapshot_transitions(
+                id,
+                &CoordinationSnapshot::default(),
+                &providers[index].snapshot(),
+            )
+            .await
+        {
+            result.unwrap();
+        }
+    }
+    let (mut connection, owner_task, owner_dir, _) = open_node_connection_for_broker(
+        ConnectionSettings::new(Some(60)),
+        brokers[0].clone(),
+        dirs[0].take().unwrap(),
+    )
+    .await;
+    dirs[0] = Some(owner_dir);
+    node_handshake(&mut connection).await;
+    let read = ReplicationRead {
+        topic: "initial-wire".into(),
+        group: None,
+        partition: Partition::new(0),
+        message_from: 0,
+        event_from: 0,
+        max_messages: 8,
+        max_events: 8,
+        max_bytes: 65536,
+        max_wait_ms: 0,
+        reporter_node_id: Some("b".into()),
+        reporter_epoch: Some(1),
+    };
+    // An authenticated node cannot fall back to an unstamped request, including
+    // aliases for the physical default group.
+    for group in [None, Some("default".into()), Some("".into())] {
+        let mut legacy = read.clone();
+        legacy.group = group;
+        connection
+            .send(try_encode(Op::ReplicationRead, 70, &legacy).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(recv_frame(&mut connection).await.opcode, Op::Error as u16);
+    }
+    for mutation in 0..10 {
+        let mut bad = session.clone();
+        match mutation {
+            0 => bad.activation[0] ^= 1,
+            1 => bad.binding.resource_incarnation[0] ^= 1,
+            2 => bad.binding.accepted_history[0] ^= 1,
+            3 => bad.binding.writer_session[0] ^= 1,
+            4 => bad.sender_instance.process[0] ^= 1,
+            5 => bad.sender_instance.storage[0] ^= 1,
+            6 => bad.receiver_instance.process[0] ^= 1,
+            7 => bad.receiver_instance.storage[0] ^= 1,
+            8 => bad.sender = "c".into(),
+            _ => bad.stream = true,
+        }
+        let frame = fibril_protocol::v1::history_replication::encode_frame(
+            &bad,
+            try_encode(Op::ReplicationRead, 71, &read).unwrap(),
+        )
+        .unwrap();
+        connection.send(frame).await.unwrap();
+        assert_eq!(
+            recv_frame(&mut connection).await.opcode,
+            Op::Error as u16,
+            "mutation {mutation}"
+        );
+    }
+    for mutation in 0..3 {
+        let mut bad = read.clone();
+        match mutation {
+            0 => bad.topic = "other".into(),
+            1 => bad.partition = Partition::new(1),
+            _ => bad.reporter_node_id = Some("c".into()),
+        }
+        let frame = fibril_protocol::v1::history_replication::encode_frame(
+            &session,
+            try_encode(Op::ReplicationRead, 72, &bad).unwrap(),
+        )
+        .unwrap();
+        connection.send(frame).await.unwrap();
+        assert_eq!(recv_frame(&mut connection).await.opcode, Op::Error as u16);
+    }
+    let publisher = brokers[0]
+        .get_publisher("initial-wire", Partition::new(0), &None)
+        .await
+        .unwrap();
+    let mut confirmed = publisher
+        .publish(
+            b"activated-history".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    let peer = ProtocolOwnerReplicationPeer::new(connection)
+        .with_reporter("b")
+        .with_history_session(session.clone());
+    // A durable owner write is insufficient for this majority confirmation.
+    let records = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let records = peer.read_owner_replication_records_fenced("initial-wire", Partition::new(0), None, 0, 0, 8, 8, 65536, 20, Some(1)).await.unwrap();
+            if matches!(&records.messages, OwnerReplicationRead::Batch(batch) if !batch.records.is_empty())
+                && matches!(&records.events, OwnerReplicationRead::Batch(batch) if !batch.records.is_empty()) { break records; }
+        }
+    }).await.unwrap();
+    assert!(matches!(
+        confirmed.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    brokers[1]
+        .apply_follower_replication_records(
+            "initial-wire",
+            Partition::new(0),
+            None,
+            ReplicationResourceKind::Queue,
+            records,
+        )
+        .await
+        .unwrap();
+    peer.read_owner_replication_records_fenced(
+        "initial-wire",
+        Partition::new(0),
+        None,
+        1,
+        1,
+        8,
+        8,
+        65536,
+        0,
+        Some(1),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), confirmed)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        0
+    );
+    // Exercise the stamped streaming sender and progress path too.
+    struct ApplyHistory(
+        Arc<Broker<StromaEngine>>,
+        fibril_broker::history_replication::HistoryReplicationSession,
+    );
+    impl fibril_broker::broker::BrokerReplicationStreamApply for ApplyHistory {
+        fn apply_stream_batch<'a>(
+            &'a self,
+            records: fibril_broker::broker::BrokerOwnerReplicationRecords,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<
+                fibril_broker::broker::ReplicatedStreamApply,
+                fibril_broker::broker::BrokerError,
+            >,
+        > {
+            Box::pin(async move {
+                self.0.authorize_history_replication(&self.1, false)?;
+                self.0
+                    .apply_replicated_stream_batch("initial-wire", Partition::new(0), None, records)
+                    .await
+            })
+        }
+    }
+    let (mut stream_connection, stream_task, dir, _) = open_node_connection_for_broker(
+        ConnectionSettings::new(Some(60)),
+        brokers[0].clone(),
+        dirs[0].take().unwrap(),
+    )
+    .await;
+    dirs[0] = Some(dir);
+    node_handshake(&mut stream_connection).await;
+    let streaming_peer = ProtocolOwnerReplicationPeer::new(stream_connection)
+        .with_reporter("b")
+        .with_history_session(session.clone());
+    let apply = Arc::new(ApplyHistory(
+        brokers[1].clone(),
+        history
+            .session("initial-wire", Partition::new(0), None, false, "a", "b")
+            .unwrap(),
+    ));
+    let stop = CancellationToken::new();
+    let streaming = tokio::spawn({
+        let stop = stop.clone();
+        async move {
+            streaming_peer
+                .stream_replication_fenced(
+                    "initial-wire",
+                    Partition::new(0),
+                    None,
+                    1,
+                    1,
+                    65536,
+                    Arc::new(|| fibril_broker::replication::StreamApplyTunables {
+                        keepalive_ms: 20,
+                        apply_linger_us: 0,
+                        max_merge_bytes: 65536,
+                    }),
+                    4,
+                    apply,
+                    stop,
+                    Some(1),
+                )
+                .await
+        }
+    });
+    let second = publisher
+        .publish(
+            b"streamed-history".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), second)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        1
+    );
+    stop.cancel();
+    tokio::time::timeout(Duration::from_secs(5), streaming)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    stream_task.await.unwrap().unwrap();
     // Replacing storage under the same metadata/provider instance cannot reuse
     // the durable preparation receipt as permission for a fresh storage process.
     let follower_root = dirs[1].as_ref().unwrap().root.clone();
@@ -8205,11 +8541,43 @@ async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_conse
     .await;
     dirs[1] = Some(dir);
     assert!(failed.is_err());
+    assert!(
+        providers[1]
+            .admit_local_initial_history(&decision, &reopened)
+            .await
+            .is_err()
+    );
+    let reverse = history
+        .session("initial-wire", Partition::new(0), None, false, "a", "b")
+        .unwrap();
+    assert!(
+        replacement
+            .authorize_history_replication(&reverse, false)
+            .is_err()
+    );
     replacement.shutdown().await;
     // Assignment changes invalidate the old command through a fresh consensus
     // check, including on a replica that had not prepared any storage yet.
     let generation = set_assignment(&providers, &resource, 2).await;
     synced(&providers, generation).await;
+    assert!(
+        peer.read_owner_replication_records_fenced(
+            "initial-wire",
+            Partition::new(0),
+            None,
+            1,
+            1,
+            8,
+            8,
+            65536,
+            0,
+            Some(1)
+        )
+        .await
+        .is_err()
+    );
+    drop(peer);
+    owner_task.await.unwrap().unwrap();
     let (stale, dir) = call(
         brokers[2].clone(),
         dirs[2].take().unwrap(),
@@ -8218,10 +8586,12 @@ async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_conse
     .await;
     dirs[2] = Some(dir);
     assert!(stale.is_err());
-    assert!(engines[2]
-        .storage_history_binding("initial-wire", 0, None)
-        .unwrap()
-        .is_none());
+    assert!(
+        engines[2]
+            .storage_history_binding("initial-wire", 0, None)
+            .unwrap()
+            .is_none()
+    );
     for broker in &brokers {
         broker.shutdown().await;
     }
