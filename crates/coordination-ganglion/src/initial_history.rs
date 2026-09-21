@@ -896,6 +896,7 @@ mod tests {
                     .await
                     .unwrap();
             }
+            let persisted = old.node.committed_snapshot();
             engine.shutdown().await.unwrap();
             drop(engine);
             old.node.shutdown().await.unwrap();
@@ -912,6 +913,16 @@ mod tests {
             node.wait_for_leader(1, Duration::from_secs(10))
                 .await
                 .unwrap();
+            // Election can be observed before the durable metadata log has
+            // replayed. Await its actual applied generation, then verify all
+            // persisted evidence before attempting renewal.
+            let mut committed = node.watch_committed();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while committed.borrow().generation < persisted.generation {
+                    committed.changed().await.unwrap();
+                }
+            }).await.unwrap();
+            assert_eq!(node.committed_snapshot(), persisted);
             let fresh = GanglionCoordination::new(new_owner, node);
             let renewed = fresh.resume_initial_history(&resource).await.unwrap();
             assert_eq!(original.binding, renewed.binding);

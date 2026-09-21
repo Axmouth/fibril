@@ -46,6 +46,7 @@ pub use fibril_broker::recovery_transfer::QueueRecoveryLocalReceipt;
 pub struct QueueRecoveryActivation {
     version: u32,
     plan: QueueRecoveryPlan,
+    assignment: ganglion_core::PartitionAssignment,
     reports: BTreeMap<String, QueueRecoveryLocalReceipt>,
 }
 impl QueueRecoveryActivation {
@@ -57,13 +58,16 @@ impl QueueRecoveryActivation {
     }
     pub fn digest(&self) -> Result<[u8; 32], String> {
         let mut h = blake3::Hasher::new();
-        h.update(b"fibril-recovered-activation-v1\0");
+        h.update(b"fibril-recovered-activation-v2\0");
         h.update(&serde_json::to_vec(self).map_err(|e| e.to_string())?);
         Ok(*h.finalize().as_bytes())
     }
     fn validate_receipts(&self, snapshot: &CoordinationSnapshot) -> Result<(), String> {
-        let assignment = &self.plan.pending().proposed;
-        if self.version != 1
+        let assignment = &self.assignment;
+        if crate::recovery_candidate::assignment(snapshot, self.plan.pending())? != *assignment {
+            return Err("activation differs from the current recovery candidate".into());
+        }
+        if self.version != 2
             || self.reports.len() < self.plan.pending().proposed_write_nodes
             || !self.reports.contains_key(&assignment.owner)
         {
@@ -101,7 +105,7 @@ impl QueueRecoveryActivation {
         Ok(())
     }
     fn validate_active(&self, snapshot: &CoordinationSnapshot) -> Result<(), String> {
-        self.plan.validate_activated(snapshot)?;
+        self.plan.validate_activated(snapshot, &self.assignment)?;
         self.validate_receipts(snapshot)?;
         let raw = serde_json::to_string(self).map_err(|e| e.to_string())?;
         if snapshot.attributes.get(&active_key(&self.plan)?) != Some(&raw)
@@ -115,7 +119,7 @@ impl QueueRecoveryActivation {
         Ok(AcceptedHistory {
             activation: self.digest()?,
             binding: self.plan.binding().clone(),
-            owner: self.plan.pending().proposed.owner.clone(),
+            owner: self.assignment.owner.clone(),
             blocked_local_replica: None,
             replicas: self
                 .reports
@@ -236,17 +240,18 @@ impl GanglionCoordination {
         plan: &QueueRecoveryPlan,
         engine: &StromaEngine,
     ) -> Result<QueueRecoveryActivation, OpenraftAdapterError> {
-        if plan.pending().proposed.owner != self.node_id {
-            return Err(error("only the proposed owner may activate recovery"));
-        }
         for _ in 0..8 {
             let snapshot = self.node.committed_snapshot();
+            let assignment = crate::recovery_candidate::assignment(&snapshot, plan.pending())
+                .map_err(error)?;
+            if assignment.owner != self.node_id {
+                return Err(error("only the current recovery candidate may activate recovery"));
+            }
             if let Some(activation) = self.queue_recovery_activation(plan)? {
                 self.verify_local_recovery(&activation, engine)?;
                 return Ok(activation);
             }
             plan.validate_committed(&snapshot).map_err(error)?;
-            let assignment = &plan.pending().proposed;
             let mut reports = BTreeMap::new();
             for node in std::iter::once(&assignment.owner).chain(assignment.followers.iter()) {
                 if let Some(raw) = snapshot
@@ -257,8 +262,9 @@ impl GanglionCoordination {
                 }
             }
             let activation = QueueRecoveryActivation {
-                version: 1,
+                version: 2,
                 plan: plan.clone(),
+                assignment: assignment.clone(),
                 reports,
             };
             activation.validate_receipts(&snapshot).map_err(error)?;

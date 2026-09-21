@@ -7935,6 +7935,15 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_consensus() {
+    authenticated_recovery_scenario(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recovery_candidate_handoff_preserves_completed_stage_and_fences_old_candidate() {
+    authenticated_recovery_scenario(true).await;
+}
+
+async fn authenticated_recovery_scenario(handoff: bool) {
     use fibril_broker::initial_history::{
         InitialHistoryLocalReceipt, InitialHistoryPrepareCommand,
     };
@@ -8060,6 +8069,7 @@ async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_conse
         providers: &[Arc<GanglionCoordination>],
         resource: &ganglion_core::ResourceIdentity,
         activation: [u8; 32],
+        candidate: &str,
     ) -> fibril_coordination_ganglion::promotion::PendingRecovery {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -8071,8 +8081,8 @@ async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_conse
                     let generation = snapshot.generation;
                     let previous = snapshot.assignments[resource].clone();
                     let mut proposed = previous.clone();
-                    proposed.owner = "b".into();
-                    proposed.followers = vec!["a".into(), "c".into()];
+                    proposed.owner = candidate.into();
+                    proposed.followers = ["a", "b", "c"].into_iter().filter(|n| *n != candidate).map(str::to_owned).collect();
                     proposed.epoch += 1;
                     let pending = fibril_coordination_ganglion::promotion::PendingRecovery {
                         version: 1,
@@ -8584,7 +8594,7 @@ async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_conse
     // Fencing closes the live session but retains the accepted certificate.
     // The one surviving prepared follower is enough: every previous majority
     // confirm needed both prepared replicas, and c was never eligible to vote.
-    let pending = persist_pending(&providers, &resource, history.activation).await;
+    let pending = persist_pending(&providers, &resource, history.activation, if handoff { "c" } else { "b" }).await;
     synced(&providers, pending.requested_generation).await;
     let command = pending.seal_command().unwrap();
     let (addr, task, dir, _) = start_protocol_listener_for_broker(
@@ -8667,7 +8677,8 @@ async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_conse
     assert_eq!(chosen.source_node(), "b");
     assert_eq!((chosen.event_next(), chosen.message_next()), (2, 2));
     assert!(providers[0].persist_queue_recovery_plan(&pending, &witnesses, &chosen).await.is_err());
-    let plan = retry_metadata(|| providers[1].persist_queue_recovery_plan(&pending, &witnesses, &chosen)).await;
+    let original_candidate = if handoff { 2 } else { 1 };
+    let plan = retry_metadata(|| providers[original_candidate].persist_queue_recovery_plan(&pending, &witnesses, &chosen)).await;
     // Forwarded consensus completion can precede this provider's local watch.
     // Wait for the actual intent rather than sampling a possibly older generation.
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -8680,7 +8691,7 @@ async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_conse
     assert_ne!(plan.binding(), &decision.binding);
     assert_eq!(providers[2].queue_recovery_plan(&pending).unwrap(), Some(plan.clone()));
     // A lost response retries the exact intent, including its generated IDs.
-    assert_eq!(retry_metadata(|| providers[1].persist_queue_recovery_plan(&pending, &witnesses, &chosen)).await, plan);
+    assert_eq!(retry_metadata(|| providers[original_candidate].persist_queue_recovery_plan(&pending, &witnesses, &chosen)).await, plan);
     assert_eq!(providers[0].pending_recoveries().unwrap(), vec![pending.clone()]);
     // A proposed replica receives the selected state and native-log payloads in
     // non-serving staging. The old source stays sealed and readable throughout.
@@ -8750,6 +8761,77 @@ async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_conse
         let expected = [serde_json::to_string(&installed_b).unwrap(),serde_json::to_string(&installed_c).unwrap()];
         while providers.iter().any(|p| expected.iter().any(|r| !p.consensus_node().committed_snapshot().attributes.values().any(|v|v==r))) {tokio::time::sleep(Duration::from_millis(5)).await;}
     }).await.unwrap();
+    if handoff {
+        // Both targets are fully installed. The old candidate could activate at
+        // this point; removing it from liveness must fence that exact attempt.
+        let live = HashMap::from([(
+            "b".into(),
+            NodeInfo {
+                node_id: "b".into(),
+                broker_addr: "127.0.0.1:1".into(),
+                admin_addr: None,
+            },
+        )]);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                for provider in &providers {
+                    let _ = provider
+                        .control_iteration(
+                            &fibril_broker::coordination::DeterministicPartitionPlacement,
+                            &[QueueIdentity::new("initial-wire", Partition::new(0), None)],
+                            &fibril_broker::coordination::DeterministicStreamPlacement,
+                            &[],
+                            2,
+                            2,
+                            ReplicationDurabilityPolicy::MajorityDurable,
+                            &live,
+                            8,
+                        )
+                        .await;
+                }
+                if providers.iter().all(|p| {
+                    p.queue_recovery_candidate(&pending)
+                        .is_ok_and(|a| a.owner == "b")
+                }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            providers[1].queue_recovery_plan(&pending).unwrap(),
+            Some(plan.clone())
+        );
+        assert_eq!(
+            providers[1].pending_recoveries().unwrap(),
+            vec![pending.clone()]
+        );
+        assert!(
+            providers[2]
+                .persist_queue_recovery_plan(&pending, &witnesses, &chosen)
+                .await
+                .is_err()
+        );
+        assert!(
+            providers[2]
+                .activate_queue_recovery(&plan, &engines[2])
+                .await
+                .is_err()
+        );
+        let (result, dir) = transfer(
+            brokers[2].clone(),
+            dirs[2].take().unwrap(),
+            &request("c", RecoveryOp::Finish),
+        )
+        .await;
+        dirs[2] = Some(dir);
+        let RecoveryReply::Complete(completed) = result.unwrap() else {
+            panic!("expected completed stage")
+        };
+        assert_eq!(completed, staged);
+    }
     let recovered = retry_metadata(|| providers[1].activate_queue_recovery(&plan,&engines[1])).await;
     tokio::time::timeout(Duration::from_secs(10),async {
         while providers.iter().any(|p|p.queue_recovery_activation(&plan).unwrap()!=Some(recovered.clone())) {tokio::time::sleep(Duration::from_millis(5)).await;}
@@ -8803,7 +8885,7 @@ async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_conse
     assert_eq!(engines[1].queue_durable_frontiers("initial-wire",0,None).await.unwrap().message_next,3);
     // Seal the recovered generation under a second transition. Its authority
     // comes from the recovered quorum, rather than the old initial assignment.
-    let again = persist_pending(&providers,&resource,recovered.digest().unwrap()).await;
+    let again = persist_pending(&providers,&resource,recovered.digest().unwrap(),"b").await;
     synced(&providers,again.requested_generation).await;
     let again_sealed = brokers[1].seal_replica_for_recovery(again.seal_command().unwrap()).await.unwrap();
     assert_eq!(again_sealed.seal.history.storage_history.as_ref().unwrap().binding,*plan.binding());

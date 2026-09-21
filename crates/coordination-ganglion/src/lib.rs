@@ -33,6 +33,7 @@ pub mod recovery_witnesses;
 pub mod recovery_selection;
 pub mod recovery_plan;
 pub mod recovery_activation;
+mod recovery_candidate;
 
 /// Namespace tag used for fibril queues inside ganglion resource identities.
 const QUEUE_NAMESPACE: &str = "fibril/queue";
@@ -2945,6 +2946,10 @@ impl GanglionCoordination {
 
             let held = promotion::retain_unproven_assignments(&committed, &mut desired)
                 .map_err(|error| ControlError::Consensus(OpenraftAdapterError::Storage(error)))?;
+            recovery_candidate::replace_unavailable(&mut desired, |node| {
+                live_nodes.contains_key(node) && !draining.contains(node)
+            })
+            .map_err(|error| ControlError::Consensus(OpenraftAdapterError::Storage(error)))?;
             if held > 0 && desired.attributes != committed.attributes {
                 tracing::warn!(held, "replica assignment changes await confirmed-history recovery; previous sources retained");
             }

@@ -90,8 +90,9 @@ pub async fn recover_queue_once(
     let local = provider
         .replication_node_id()
         .ok_or("local node identity absent")?;
-    if pending.proposed.owner != local {
-        return Err("only the proposed owner drives recovery".into());
+    let candidate = provider.queue_recovery_candidate(pending)?;
+    if candidate.owner != local {
+        return Err("only the current recovery candidate drives recovery".into());
     }
     if pending.proposed.resource.namespace != "fibril/queue"
         || pending.previous_activation.is_none()
@@ -180,8 +181,8 @@ pub async fn recover_queue_once(
             .await
             .map_err(err)?
     };
-    let members: Vec<_> = std::iter::once(&pending.proposed.owner)
-        .chain(pending.proposed.followers.iter())
+    let members: Vec<_> = std::iter::once(&candidate.owner)
+        .chain(candidate.followers.iter())
         .cloned()
         .collect();
     // Prefer a completed transferred copy; it survives loss of the old source.
@@ -449,7 +450,12 @@ pub fn spawn(
                 .collect();
             failures.retain(|id, _| active.contains(id));
             for pending in requests {
-                if provider.replication_node_id() != Some(pending.proposed.owner.as_str())
+                // Let the original driver report malformed/stale authority via
+                // the existing bounded error path instead of silently skipping it.
+                // recover_queue_once always validates the candidate again.
+                let candidate = provider.queue_recovery_candidate(&pending)
+                    .unwrap_or_else(|_| pending.proposed.clone());
+                if provider.replication_node_id() != Some(candidate.owner.as_str())
                     || pending.previous_activation.is_none()
                 {
                     continue;

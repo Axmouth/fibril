@@ -10,6 +10,10 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Recovery candidate handoff
+
+A persisted recovery could stall indefinitely after its proposed owner disappeared, even with sufficient surviving evidence and completed transfers. The controller now selects another available member of the fixed replica set without changing seals, staged data or quorum requirements; activation binds the selected owner through fresh consensus. Three-node tests cover a stopped candidate, preserved staged data, stale-candidate rejection and resumed replicated confirms.
+
 ### Checkpoint reset and outstanding fsync
 
 A checkpoint reset could return before older fsync completions were consumed, allowing one to restore a stale durable frontier after the cut. The writer now drains those completions before replacing files and resetting state. A queued-fsync regression reproduced a frontier of one after reset to zero and now verifies the reset remains at zero.

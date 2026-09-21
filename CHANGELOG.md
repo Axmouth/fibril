@@ -22,9 +22,17 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   support; they do not gain the new recovery authority. Standalone queues and
   stream declarations retain their existing paths. Cluster metadata
   and broker nodes must run matching revisions; mixed-version recovery and
-  downgrade of enrolled histories are unsupported.
+  downgrade of enrolled histories are unsupported. Recovered activation
+  certificates now use version two and bind the final owner assignment separately
+  from the immutable transfer plan; version-one recovered certificates are not
+  migrated.
 
 ### Added
+
+- Automatic handoff of unfinished queue recovery to another available member of
+  the fixed proposed replica set. Existing witness evidence, plans and completed
+  stages are retained; stale candidates cannot activate and confirmation
+  thresholds remain unchanged.
 
 - Automatic initial history preparation and activation for fresh clustered
   queues, with independent replica admission retries. Interrupted preparation

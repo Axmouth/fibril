@@ -340,6 +340,13 @@ fn recovery_plan_binds_verified_state_and_preserves_the_pending_barrier() {
         let restored: QueueRecoveryPlan = serde_json::from_str(&raw).unwrap();
         restored.validate_committed(&snapshot).unwrap();
         assert_eq!(restored.digest().unwrap(), plan.digest().unwrap());
+        let spec = restored.stage_spec().unwrap();
+        crate::recovery_candidate::replace_unavailable(&mut snapshot, |node| node == "c").unwrap();
+        assert_eq!(crate::recovery_candidate::assignment(&snapshot, &pending).unwrap().owner, "c");
+        restored.validate_committed(&snapshot).unwrap();
+        restored.verify_artifact(&state_artifact).unwrap();
+        assert_eq!(restored.stage_spec().unwrap(), spec);
+        assert_eq!(witnesses.command(), &pending.seal_command().unwrap());
         assert_eq!(
             restored.binding().resource_incarnation,
             quorum.reports["b"].storage.binding.resource_incarnation

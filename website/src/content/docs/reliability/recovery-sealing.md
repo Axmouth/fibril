@@ -488,7 +488,7 @@ pending transition. Linux SIGKILL tests cover handle retirement, message copying
 completed generation persistence and route publication.
 
 Each proposed target records its exact plan, coordinator process and storage
-instance through consensus. The proposed owner requires its own live receipt and
+instance through consensus. The current recovery candidate requires its own live receipt and
 the configured new write quorum. One guarded metadata operation publishes the new
 assignment and immutable activation certificate while clearing the matching pending
 fence; advisory heartbeat updates are preserved. Every activated target performs a
@@ -504,7 +504,7 @@ broker and metadata revisions are required.
 
 ## Automatic recovery bounds and rollout gates
 
-The proposed owner's worker processes accepted queue histories sequentially. It
+The current recovery candidate's worker processes accepted queue histories sequentially. It
 retains an immutable plan across retries, resumes staged offsets and prefers a
 completed transferred source. Attempts have a two-minute deadline and exponential
 backoff capped at 30 seconds; admitted storage work survives caller cancellation.
@@ -514,11 +514,22 @@ a lost activation response or an owner disappearing before all admission replies
 Current automatic limits are 16 replicas, a 16 MiB page/snapshot, one million
 records and 1 GiB of logical staged payloads. Oversized records, incompatible
 histories, crossed tails without a complete source, unsupported legacy origins and
-stream state remain fenced. Recovering a fixed pending transition also requires
-its proposed owner to return; safely replacing that candidate is a further gate.
+stream state remain fenced. When the recovery candidate becomes unavailable or
+starts draining, the controller can select another live, non-draining member of
+the fixed proposed replica set. The guarded metadata update preserves the pending
+transition, old witness threshold, selected plan, completed stages and new write
+requirement. A healthy replacement remains selected when the original candidate
+returns.
+
+Activation records the selected assignment separately from the immutable storage
+plan. Its fresh generation check prevents an obsolete candidate from activating
+after a committed handoff; activation and handoff racing the same generation
+cannot both commit. The selected owner must still have its own installed receipt
+and the full configured write quorum. If no planned member is available, recovery
+waits; replacement outside that fixed set needs additional membership work.
 
 Ordinary Unix cluster queues enroll automatically. Wider membership/isolation
-coverage, recovery-candidate replacement and retained-data reclamation remain
+coverage, recovery membership expansion and retained-data reclamation remain
 rollout work. Migration of existing queues is unsupported; existing experimental
 queues must be drained and recreated to adopt the new recovery path. See the
 [transition policy](/development/failover-plan/#existing-experimental-queues).

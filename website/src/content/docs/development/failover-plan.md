@@ -10,10 +10,10 @@ installation, exact quorum activation and bounded recovery are documented in
 
 ## Remaining recovery work
 
-1. Support replacement of an unavailable candidate during a persisted pending
-   transition, preserving its witness proof and any completed stages. Extend
-   process-isolation and membership-change tests through that handoff. Include
-   returning assigned replicas that were excluded from the initial activated quorum.
+1. Extend process-isolation and membership-change tests through candidate
+   handoff, including replacement outside the fixed proposed replica set. Add
+   admission and catch-up for returning assigned replicas excluded from the
+   initial activated quorum.
 2. Add composite reconstruction for crossed payload/event tails and authoritative
    stream-state recovery. Keep unsupported or contradictory histories fenced.
 3. Extend transfer support beyond the current 16 MiB record/page and snapshot

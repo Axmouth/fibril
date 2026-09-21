@@ -70,14 +70,19 @@ impl QueueRecoveryPlan {
         };
         Ok(spec)
     }
-    pub(crate) fn validate_activated(&self, snapshot: &CoordinationSnapshot) -> Result<(), String> {
+    pub(crate) fn validate_activated(
+        &self,
+        snapshot: &CoordinationSnapshot,
+        assignment: &ganglion_core::PartitionAssignment,
+    ) -> Result<(), String> {
         let resource = &self.pending.proposed.resource;
         if self.version != 1
             || resource.namespace != crate::QUEUE_NAMESPACE
             || !snapshot.resources.contains(resource)
             || self.pending.resource_incarnation
                 != crate::history_identity::resource_incarnation(snapshot, resource)?
-            || snapshot.assignments.get(resource) != Some(&self.pending.proposed)
+            || snapshot.assignments.get(resource) != Some(assignment)
+            || crate::recovery_candidate::assignment(snapshot, &self.pending)? != *assignment
             || snapshot
                 .attributes
                 .contains_key(&crate::promotion::pending_recovery_key(resource))
@@ -382,13 +387,13 @@ impl GanglionCoordination {
         witnesses: &RecoveryWitnessSet,
         selection: &QueueRecoverySelection,
     ) -> Result<QueueRecoveryPlan, OpenraftAdapterError> {
-        if pending.proposed.owner != self.node_id {
-            return Err(error(
-                "only the proposed owner may persist queue recovery intent",
-            ));
-        }
         for _ in 0..8 {
             let snapshot = self.node.committed_snapshot();
+            if crate::recovery_candidate::assignment(&snapshot, pending)
+                .map_err(error)?.owner != self.node_id
+            {
+                return Err(error("only the current recovery candidate may persist intent"));
+            }
             let proposed = QueueRecoveryPlan::proposed(&snapshot, pending, witnesses, selection)
                 .map_err(error)?;
             let key = key(pending).map_err(error)?;

@@ -83,17 +83,20 @@ placements.
 
 ### An owner broker dies (cluster)
 
-For replicated confirmation policies, automatic ownership replacement currently
-waits at the recovery barrier:
+For enrolled queue histories, automatic ownership replacement uses the recovery
+barrier until verified history and an installed write quorum are available:
 
 - The controller persists the previous and proposed assignments, preserving the
   old replica set and replication source. The proposed owner cannot serve through
   that unapproved assignment.
-- The partition remains unavailable while its owner is unavailable; fresh
-  sealing, history recovery and activation are still implementation work.
+- The recovery worker seals eligible survivors, verifies a complete source,
+  transfers its state and activates the installed quorum. If its candidate becomes
+  unavailable, the controller can choose another member of the fixed proposed set.
 - Inspect `consensus.controller.pending_recoveries` in the admin topology
-  response and retain every surviving replica's data. Returning the original
-  owner can restore service under the unchanged assignment.
+  response and retain every surviving replica's data. These records preserve the
+  original proposal; candidate-replacement logs identify a subsequent handoff.
+  Returning replicas can supply missing evidence. Serving resumes only after
+  verified activation and exact local admission.
 - Check the [admin queues page](/admin-dashboard/) for owner and in-sync
   replica status.
 

@@ -458,6 +458,15 @@ async fn automatic_recovery_repeats_and_preserves_confirmed_messages() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn automatic_three_node_enrollment_admits_followers_after_owner_stops() {
+    three_node_owner_loss(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn automatic_recovery_replaces_stopped_candidate_without_weakening_quorum() {
+    three_node_owner_loss(true).await;
+}
+
+async fn three_node_owner_loss(recover: bool) {
     use fibril_broker::coordination::{NodeInfo, QueueIdentity};
     let root = std::env::temp_dir().join(format!(
         "fibril-three-node-enrollment-{}",
@@ -610,6 +619,7 @@ async fn automatic_three_node_enrollment_admits_followers_after_owner_stops() {
     owner_worker.abort();
     let _ = owner_worker.await;
     brokers[0].shutdown().await;
+    listeners[0].abort();
     let mut workers = Vec::new();
     for i in 1..3 {
         workers.push(fibril::recovery_driver::spawn(
@@ -636,6 +646,144 @@ async fn automatic_three_node_enrollment_admits_followers_after_owner_stops() {
     })
     .await
     .unwrap();
+    if recover {
+        use fibril_broker::coordination::{
+            DeterministicPartitionPlacement, DeterministicStreamPlacement,
+            ReplicationDurabilityPolicy,
+        };
+        // Persist an unfinished transition whose candidate has actually stopped.
+        // The controller must choose another member while leaving its proof fixed.
+        let pending = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                for provider in &providers {
+                    if !provider.consensus_node().is_leader().await {
+                        continue;
+                    }
+                    let mut snapshot = provider.consensus_node().committed_snapshot();
+                    let previous = snapshot.assignments[&resource].clone();
+                    let activation = provider
+                        .snapshot()
+                        .assignment_for("q", Partition::new(0), None)
+                        .unwrap()
+                        .history
+                        .as_ref()
+                        .unwrap()
+                        .activation;
+                    let mut proposed = previous.clone();
+                    proposed.epoch += 1;
+                    let pending = PendingRecovery {
+                        version: 1,
+                        resource_incarnation: resource_incarnation(&snapshot, &resource).unwrap(),
+                        previous_activation: Some(activation),
+                        requested_generation: snapshot.generation + 1,
+                        previous,
+                        proposed,
+                        previous_write_nodes: 2,
+                        proposed_write_nodes: 2,
+                        required_old_witnesses: 2,
+                    };
+                    let generation = snapshot.generation;
+                    snapshot.generation += 1;
+                    snapshot.attributes.insert(
+                        pending_recovery_key(&resource),
+                        serde_json::to_string(&pending).unwrap(),
+                    );
+                    match provider
+                        .consensus_node()
+                        .write_snapshot_guarded(generation, snapshot)
+                        .await
+                    {
+                        Ok(_) => return pending,
+                        Err(
+                            ganglion::OpenraftAdapterError::NotLeader
+                            | ganglion::OpenraftAdapterError::GenerationMismatch { .. },
+                        ) => {}
+                        Err(e) => panic!("pending setup failed: {e}"),
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let live: HashMap<_, _> = providers[0]
+            .live_nodes(Duration::from_secs(300))
+            .into_iter()
+            .filter(|(node, _)| node != "a")
+            .collect();
+        assert_eq!(live.len(), 2);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                for provider in &providers {
+                    let _ = provider
+                        .control_iteration(
+                            &DeterministicPartitionPlacement,
+                            &[QueueIdentity::new("q", Partition::new(0), None)],
+                            &DeterministicStreamPlacement,
+                            &[],
+                            2,
+                            2,
+                            ReplicationDurabilityPolicy::MajorityDurable,
+                            &live,
+                            8,
+                        )
+                        .await;
+                }
+                if providers.iter().all(|p| {
+                    p.queue_recovery_candidate(&pending)
+                        .is_ok_and(|a| a.owner == "b")
+                }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            providers[1].pending_recoveries().unwrap(),
+            vec![pending.clone()]
+        );
+        tokio::time::timeout(Duration::from_secs(70), async {
+            loop {
+                if (1..3).all(|i| {
+                    providers[i]
+                        .pending_recoveries()
+                        .is_ok_and(|p| p.is_empty())
+                        && providers[i]
+                            .local_queue_recovery_admissions()
+                            .is_ok_and(|a| {
+                                a.len() == 1
+                                    && a.iter().all(|(_, r)| {
+                                        brokers[i]
+                                            .engine()
+                                            .verify_admitted_storage_history(&r.storage)
+                                            .is_ok()
+                                    })
+                            })
+                }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let assignment = providers[1]
+            .snapshot()
+            .assignment_for("q", Partition::new(0), None)
+            .unwrap()
+            .clone();
+        assert_eq!(assignment.owner, "b");
+        assert_eq!(assignment.epoch, pending.proposed.epoch);
+        let history = assignment.history.as_ref().unwrap();
+        assert_eq!(history.replicas.len(), 2);
+        assert!(history.replicas.contains_key("b") && history.replicas.contains_key("c"));
+        assert_eq!(
+            assignment.durability,
+            ReplicationDurabilityPolicy::MajorityDurable
+        );
+    }
     for w in workers {
         w.abort();
         let _ = w.await;
