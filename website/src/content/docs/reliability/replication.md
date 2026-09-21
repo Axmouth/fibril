@@ -27,8 +27,8 @@ partition has one **owner** and one or more **followers**:
   proposed replacement and retains the previous assignment and replication
   source. Explicitly enrolled queue histories have an automatic worker that seals
   replicas, verifies a source, installs the recovered state and activates a new
-  quorum. Ordinary declarations and legacy histories still stop at this barrier
-  pending enrollment and migration support. Heartbeat tails can suggest a
+  quorum. Ordinary declarations still await enrollment support; legacy histories
+  have no automatic migration into this recovery path. Heartbeat tails can suggest a
   candidate but cannot authorize it to serve.
 - **Replica-durable publishes wait for replicas.** When the assignment's
   durability policy requires more than the owner, a confirmed publish does not

@@ -7,8 +7,8 @@ Recovery sealing freezes a replica's retained records for inspection. For explic
 enrolled queue histories, a bounded worker collects witnesses, verifies a source,
 installs a new durable quorum and activates its exact process/storage instances.
 The previous assignment stays fenced until activation commits. Ordinary declarations
-still use their existing path; legacy baseline migration, initial enrollment rollout
-and stream-state recovery remain separate gates.
+still use their existing path; initial enrollment rollout and stream-state recovery
+remain separate gates. Automatic legacy migration is deferred.
 
 ## Request authority
 
@@ -54,7 +54,7 @@ previous encoding.
 This ID identifies a catalogue lifetime. Source selection also requires accepted
 history, writer-session authority and an authoritative checkpoint. The local
 storage primitive below supplies an explicit binding. Automatic initial enrollment
-and legacy baseline establishment remain pending. The new consensus commands require matching
+remains pending; existing histories have no automatic migration. The new consensus commands require matching
 metadata-node binaries; mixed-version rollout is not supported for this change.
 
 ## Local storage history binding
@@ -506,8 +506,12 @@ stream state remain fenced. Recovering a fixed pending transition also requires
 its proposed owner to return; safely replacing that candidate is a further gate.
 
 Ordinary creation-time enrollment remains disabled. Initial preparation interrupted
-by owner-process replacement, migration of existing queues and wider membership/
-isolation testing require completion before general rollout. Retained generations
+by owner-process replacement and wider membership/isolation testing require
+completion before general rollout. Automatic migration of existing queues is
+deferred; once ordinary enrollment is enabled, existing experimental queues must
+be drained and recreated to adopt the new recovery path. See the
+[transition policy](/development/failover-plan/#existing-experimental-queues).
+Retained generations
 and stages currently require additional disk and have no automatic reclamation.
 Per-queue disk estimates describe active logs; retained recovery data needs separate
 accounting. Process-crash tests do not establish hardware power-loss behavior.

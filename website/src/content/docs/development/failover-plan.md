@@ -11,9 +11,8 @@ installation, exact quorum activation and bounded recovery are documented in
 ## Remaining recovery work
 
 1. Complete ordinary initial-enrollment orchestration and safe recovery of an
-   initial preparation whose owner process is replaced before activation. Existing
-   queues need a verified baseline; local file absence cannot establish an empty
-   origin.
+   initial preparation whose owner process is replaced before activation. Local
+   file absence cannot establish an empty origin.
 2. Support replacement of an unavailable candidate during a persisted pending
    transition, preserving its witness proof and any completed stages. Extend
    process-isolation and membership-change tests through that handoff.
@@ -30,6 +29,19 @@ The current worker applies to explicitly enrolled queue histories and retains th
 configured confirmation threshold. Owner-only durability still requires its
 surviving storage. Pending plans retry with bounded backoff when reachable evidence
 is insufficient; authoritative divergence requires investigation.
+
+## Existing experimental queues
+
+Automatic migration of existing queue histories is deferred and does not block
+rollout for newly enrolled queues. Once ordinary enrollment is enabled, the
+supported transition is to drain existing queues using their compatible broker
+revision, retire them and recreate them with a fresh enrolled history. Disposable
+test data can be recreated directly. Retained data receives no automatic conversion
+or deletion; unsupported histories remain fenced during recovery.
+
+A future migration feature would need to establish a verified baseline, including
+older timer semantics. Implement it when an actual deployment needs to preserve
+an existing queue across the transition.
 
 ## State digests at a recovery boundary
 
