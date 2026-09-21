@@ -1813,6 +1813,26 @@ mod replication_byte_limit_tests {
 // ---------------- impl Broker<StromaEngine>: replication engine methods ----------------
 
 impl Broker<StromaEngine> {
+    #[cfg(feature = "early-replication-experiment")]
+    fn early_replication_enabled(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+    ) -> bool {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var("FIBRIL_EXPERIMENT_EARLY_REPLICATION").as_deref() == Ok("1")
+        }) && self
+            .assignment_cache
+            .get(&QueueKey {
+                tp: topic.into(),
+                part: partition,
+                group: group.map(str::to_owned),
+            })
+            .is_some_and(|a| a.history.is_some())
+    }
+
     pub async fn read_owner_replication_records(
         &self,
         topic: &str,
@@ -1852,6 +1872,26 @@ impl Broker<StromaEngine> {
             group: group.map(str::to_string),
         };
         let qs = self.queue(&key).await;
+        // Watch receivers register before the first read; writes during that
+        // read remain observable even if the select has not been polled yet.
+        #[cfg(feature = "early-replication-experiment")]
+        let mut written = if self.early_replication_enabled(topic, partition, group) {
+            Some(
+                self.engine
+                    .subscribe_owner_written(topic, partition.id(), group)
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let early_wake = async {
+            #[cfg(feature = "early-replication-experiment")]
+            if let Some((messages, events)) = &mut written {
+                tokio::select! { _ = messages.changed() => {}, _ = events.changed() => {} }
+                return;
+            }
+            std::future::pending::<()>().await;
+        };
         let notified = qs.replication_notify.notified();
         tokio::pin!(notified);
 
@@ -1873,6 +1913,7 @@ impl Broker<StromaEngine> {
 
         tokio::select! {
             _ = &mut notified => {}
+            _ = early_wake => {}
             _ = self.shutdown_publishers.cancelled() => {}
             _ = tokio::time::sleep(Duration::from_millis(max_wait_ms)) => {}
         }
@@ -1903,6 +1944,34 @@ impl Broker<StromaEngine> {
     ) -> Result<BrokerOwnerReplicationRecords, BrokerError> {
         self.ensure_replication_source_owner(topic, partition, group)?;
         let _owner_read_timer = self.replication_timing.owner_read.timer();
+        #[cfg(feature = "early-replication-experiment")]
+        if self.early_replication_enabled(topic, partition, group) {
+            let messages = self
+                .engine
+                .read_owner_message_records_early(
+                    topic,
+                    partition.id(),
+                    group,
+                    message_from,
+                    max_messages,
+                )
+                .await?;
+            let events = self
+                .engine
+                .read_owner_event_records_early(
+                    topic,
+                    partition.id(),
+                    group,
+                    event_from,
+                    max_events,
+                )
+                .await?;
+            self.ensure_replication_source_owner(topic, partition, group)?;
+            return Ok(cap_owner_replication_records(
+                BrokerOwnerReplicationRecords { messages, events },
+                max_bytes,
+            ));
+        }
         let messages = self
             .engine
             .read_owner_message_records(topic, partition.id(), group, message_from, max_messages)

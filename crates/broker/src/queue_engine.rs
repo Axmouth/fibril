@@ -809,6 +809,50 @@ impl StromaEngine {
         self.inner.global_store().await
     }
 
+    #[cfg(feature = "early-replication-experiment")]
+    pub async fn subscribe_owner_written(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<
+        (
+            tokio::sync::watch::Receiver<()>,
+            tokio::sync::watch::Receiver<()>,
+        ),
+        StromaError,
+    > {
+        self.inner.subscribe_owner_written(tp, part, group).await
+    }
+
+    #[cfg(feature = "early-replication-experiment")]
+    pub async fn read_owner_message_records_early(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        from: Offset,
+        max: usize,
+    ) -> Result<OwnerReplicationRead<Message>, StromaError> {
+        self.inner
+            .read_owner_message_records_early(tp, part, group, from, max)
+            .await
+    }
+
+    #[cfg(feature = "early-replication-experiment")]
+    pub async fn read_owner_event_records_early(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        from: Offset,
+        max: usize,
+    ) -> Result<OwnerReplicationRead<StromaEvent>, StromaError> {
+        self.inner
+            .read_owner_event_records_early(tp, part, group, from, max)
+            .await
+    }
+
     pub async fn read_owner_message_records(
         &self,
         tp: &str,
