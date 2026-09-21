@@ -2047,7 +2047,7 @@ fn validate_recovery_seal_reply(
     if reply.replica_id != replica_id
         || reply.transition != command.transition
         || reply.fence_epoch != command.fence_epoch
-        || reply.history_version != 1
+        || !matches!((reply.history_version, reply.storage_history.is_some()), (1, false) | (2, true))
         || reply.message_head > reply.message_next
         || reply.event_head > reply.event_next
     {
@@ -2064,6 +2064,12 @@ fn validate_recovery_seal_reply(
             },
             history: RetainedHistoryIdentity {
                 version: reply.history_version,
+                storage_history: reply.storage_history.map(|h| fibril_broker::queue_engine::PreparedStorageHistory {
+                    topic: command.topic.clone(), partition: command.partition.id(), group: command.group.clone(), stream: command.stream,
+                    binding: fibril_broker::queue_engine::StorageHistoryBinding {
+                        resource_incarnation: h.resource_incarnation, accepted_history: h.accepted_history, writer_session: h.writer_session,
+                    }, storage_instance: h.storage_instance,
+                }),
                 id: reply.history_id,
                 message_digest: reply.message_digest,
                 event_digest: reply.event_digest,
@@ -2101,6 +2107,7 @@ mod recovery_tests {
     #[test]
     fn recovery_reply_must_match_target_transition_version_and_bounds() {
         let reply = RecoverySealOk {
+            storage_history: None,
             replica_id: "b".into(),
             transition: [1; 32],
             fence_epoch: 8,
@@ -2298,6 +2305,7 @@ mod recovery_read_tests {
     #[test]
     fn read_reply_rejects_wrong_identity_holes_bounds_and_budget_violations() {
         let history = RetainedHistoryIdentity {
+            storage_history: None,
             version: 1,
             id: [2; 32],
             message_digest: [3; 32],

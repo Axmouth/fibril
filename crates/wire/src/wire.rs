@@ -3068,6 +3068,9 @@ pub fn encode_recovery_seal_ok(
     request_id: u64,
     reply: &crate::RecoverySealOk,
 ) -> WireResult<Frame> {
+    if !matches!((reply.history_version, reply.storage_history.is_some()), (1, false) | (2, true)) {
+        return Err(WireError::InvalidRecordSequence("invalid sealed history version or binding"));
+    }
     let mut out = payload_builder(b"RSO1");
     put_str(&mut out, &reply.replica_id)?;
     out.extend_from_slice(&reply.transition);
@@ -3084,6 +3087,12 @@ pub fn encode_recovery_seal_ok(
     out.put_u64(reply.message_next);
     out.put_u64(reply.event_head);
     out.put_u64(reply.event_next);
+    if let Some(history) = &reply.storage_history {
+        out.extend_from_slice(&history.resource_incarnation);
+        out.extend_from_slice(&history.accepted_history);
+        out.extend_from_slice(&history.writer_session);
+        out.extend_from_slice(&history.storage_instance);
+    }
     Ok(frame(Op::RecoverySealOk, request_id, out.freeze()))
 }
 
@@ -3091,7 +3100,8 @@ pub fn decode_recovery_seal_ok(frame: &Frame) -> WireResult<crate::RecoverySealO
     expect_op(frame, Op::RecoverySealOk)?;
     let mut r = Reader::new(&frame.payload);
     r.expect_magic(b"RSO1", "recovery seal response")?;
-    let reply = crate::RecoverySealOk {
+    let mut reply = crate::RecoverySealOk {
+        storage_history: None,
         replica_id: r.str()?.to_owned(),
         transition: r.take(32)?.try_into().unwrap(),
         fence_epoch: r.u64()?,
@@ -3109,6 +3119,16 @@ pub fn decode_recovery_seal_ok(frame: &Frame) -> WireResult<crate::RecoverySealO
         event_head: r.u64()?,
         event_next: r.u64()?,
     };
+    match reply.history_version {
+        1 => {},
+        2 => reply.storage_history = Some(crate::RecoveryStorageHistory {
+            resource_incarnation: r.take(16)?.try_into().unwrap(),
+            accepted_history: r.take(16)?.try_into().unwrap(),
+            writer_session: r.take(16)?.try_into().unwrap(),
+            storage_instance: r.take(16)?.try_into().unwrap(),
+        }),
+        _ => return Err(WireError::InvalidRecordSequence("unsupported sealed history version")),
+    }
     r.finish()?;
     Ok(reply)
 }
@@ -3618,5 +3638,27 @@ mod history_replication_tests {
         }
         assert!(history_replication_owner_is_receiver(Op::ReplicationRead as u16).unwrap());
         assert!(!history_replication_owner_is_receiver(Op::ReplicationApply as u16).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod bound_seal_tests {
+    use super::*;
+    #[test]
+    fn sealed_history_versions_preserve_legacy_frames_and_require_complete_binding() {
+        let mut reply = crate::RecoverySealOk {replica_id:"b".into(),transition:[1;32],fence_epoch:8,history_version:1,
+            storage_history:None,history_id:[2;32],message_digest:[3;32],event_digest:[4;32],snapshot_digest:None,
+            message_head:0,message_next:7,event_head:0,event_next:9};
+        let legacy=encode_recovery_seal_ok(1,&reply).unwrap();
+        assert_eq!(decode_recovery_seal_ok(&legacy).unwrap(),reply);
+        reply.history_version=2;
+        assert!(encode_recovery_seal_ok(1,&reply).is_err());
+        reply.storage_history=Some(crate::RecoveryStorageHistory {resource_incarnation:[5;16],accepted_history:[6;16],writer_session:[7;16],storage_instance:[8;16]});
+        let bound=encode_recovery_seal_ok(1,&reply).unwrap();
+        assert_eq!(bound.payload.len(),legacy.payload.len()+64);
+        assert_eq!(decode_recovery_seal_ok(&bound).unwrap(),reply);
+        for size in 0..bound.payload.len() {let mut truncated=bound.clone();truncated.payload=truncated.payload.slice(..size);assert!(decode_recovery_seal_ok(&truncated).is_err());}
+        reply.history_version=1;
+        assert!(encode_recovery_seal_ok(1,&reply).is_err());
     }
 }

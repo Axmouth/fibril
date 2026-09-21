@@ -3589,6 +3589,12 @@ where
                             transition: sealed.request.transition,
                             fence_epoch: sealed.request.fence_epoch,
                             history_version: h.version,
+                            storage_history: h.storage_history.map(|receipt| crate::v1::RecoveryStorageHistory {
+                                resource_incarnation: receipt.binding.resource_incarnation,
+                                accepted_history: receipt.binding.accepted_history,
+                                writer_session: receipt.binding.writer_session,
+                                storage_instance: receipt.storage_instance,
+                            }),
                             history_id: h.id,
                             message_digest: h.message_digest,
                             event_digest: h.event_digest,

@@ -174,6 +174,25 @@ does not yet supply recovered-history installation or automatic failover.
 
 ## Explicit witness collection
 
+For activated histories, version-two seals include the original durable storage
+receipt, even after process restart. Admission checks its incarnation, accepted
+history, writer session and original storage instance against the committed
+activation. Missing or substituted receipts and unprepared replicas cannot count.
+Legacy version-one seals retain their encoding and supply diagnostic evidence.
+
+Let E be the number of eligible replicas in the accepted activation and W the
+configured write threshold. Recovery requires E−W+1 distinct eligible seals,
+which intersects every possible acknowledged write set. W still uses the full
+configured assignment. The pending transition binds the previous activation;
+seal-count completion still requires source validation before installation.
+
+A registered replacement process requests recovery even if placement is unchanged.
+Its heartbeat identity can close admission but cannot grant it. Bound storage
+reopen verifies complete contiguous records and permits zero preallocation;
+partial or corrupt records, missing retained segments and semantic tail repair
+are refused before destructive repair. Those bytes remain available for diagnosis
+and recovery from other replicas.
+
 The explicit transport opens a fresh authenticated connection to the selected
 replica, checks its returned identity against that target, and enforces a deadline
 covering connection setup and the reply. Timeout or cancellation can leave an

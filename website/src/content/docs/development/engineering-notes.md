@@ -10,6 +10,14 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Sealed history authority and process replacement
+
+Version-two seals retain the original durable storage receipt, allowing recovery to check the exact accepted history and replica instance after restart. Recovery witness thresholds use the eligible write set while confirmations retain the configured write threshold; a changed registered process requests recovery even when placement is unchanged. Three-node authenticated TCP tests cover sealed receipt admission after majority-confirmed replication.
+
+### Log recovery buffer boundary
+
+The recovery scanner counted bytes from the next read position instead of the start of a buffered partial record, overstating the valid end when records crossed read chunks. Keratin `1ac4645` corrects the boundary; tests cover chunk-spanning records, padding and append after repeated reopen. Bound histories also refuse local repair that could discard records and reuse offsets under an unchanged writer session.
+
 ### Exact initial activation and live replication
 
 Explicit activation now admits only the prepared provider and storage instances, while live replication carries the accepted history through pull and streaming paths. A three-node TCP regression verifies majority confirmation, stale-identity rejection and replacement-storage fencing; automatic recovery readmission remains in the [failover plan](/development/failover-plan/).

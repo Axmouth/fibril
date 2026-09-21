@@ -299,3 +299,298 @@ impl GanglionCoordination {
         Ok(())
     }
 }
+
+/// Heartbeats can request a recovery fence when a known prepared process has
+/// been replaced, even if placement is unchanged. They never authorize the new
+/// process, choose its history, or clear an existing recovery decision.
+pub(crate) fn replaced_initial_processes(
+    snapshot: &CoordinationSnapshot,
+    resource: &ganglion_core::ResourceIdentity,
+) -> Result<Vec<String>, String> {
+    let Some(incarnation) = crate::history_identity::resource_incarnation(snapshot, resource)?
+    else {
+        return Ok(Vec::new());
+    };
+    if incarnation.version != 2 || incarnation.retired {
+        return Ok(Vec::new());
+    }
+    let Some(raw) = snapshot.attributes.get(&initial_history::key(&incarnation)) else {
+        return Ok(Vec::new());
+    };
+    let decision: InitialHistoryDecision = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+    if decision.incarnation != incarnation {
+        return Err("initial decision has wrong incarnation".into());
+    }
+    initial_history::validate_committed(snapshot, &decision)?;
+    let mut expected = std::collections::BTreeMap::from([(
+        decision.assignment.owner.clone(),
+        decision.owner_process,
+    )]);
+    if let Some(raw) = snapshot
+        .attributes
+        .get(&initial_history::quorum_key(&incarnation))
+    {
+        let quorum: InitialHistoryPreparedQuorum =
+            serde_json::from_str(raw).map_err(|e| e.to_string())?;
+        quorum.validate(snapshot, &decision)?;
+        expected.extend(
+            quorum
+                .reports
+                .into_iter()
+                .map(|(id, report)| (id, report.replica_process)),
+        );
+    }
+    Ok(expected
+        .into_iter()
+        .filter_map(|(id, previous)| {
+            let current = snapshot
+                .nodes
+                .get(&id)?
+                .labels
+                .get(crate::HISTORY_PROCESS_LABEL)?;
+            let current = uuid::Uuid::parse_str(current).ok()?;
+            (!current.is_nil() && current.as_bytes() != &previous).then_some(id)
+        })
+        .collect())
+}
+
+/// Recover the immutable authority of the previous assignment. A pending fence
+/// closes serving, but must not erase the certificate needed to prove ancestry.
+pub(crate) fn previous_initial_history(
+    snapshot: &CoordinationSnapshot,
+    resource: &ganglion_core::ResourceIdentity,
+) -> Result<Option<fibril_broker::history_replication::AcceptedHistory>, String> {
+    let Some(incarnation) = crate::history_identity::resource_incarnation(snapshot, resource)?
+    else {
+        return Ok(None);
+    };
+    if incarnation.version != 2 || incarnation.retired {
+        return Ok(None);
+    }
+    let Some(raw) = snapshot.attributes.get(&initial_history::key(&incarnation)) else {
+        return Ok(None);
+    };
+    let decision: InitialHistoryDecision = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+    if decision.incarnation != incarnation {
+        return Err("initial decision has wrong incarnation".into());
+    }
+    if !snapshot.attributes.contains_key(&key(&decision)) {
+        return Ok(None);
+    }
+    let mut previous = snapshot.clone();
+    previous
+        .attributes
+        .remove(&crate::promotion::pending_recovery_key(resource));
+    accepted_history(&previous, resource).map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        history_identity::ResourceIncarnation,
+        initial_history::{InitialHistoryLocalReceipt, InitialHistoryPhase},
+        promotion,
+        recovery_witnesses::{RecoveryWitnessSet, SealCollectionProgress},
+    };
+    use fibril_broker::{
+        queue_engine::StorageHistoryBinding,
+        recovery::{
+            BrokerSealedReplica, RecoverySealRequest, RetainedHistoryIdentity,
+            SealedReplicaFrontiers,
+        },
+    };
+    use ganglion_core::{PartitionAssignment, ReplicationDurabilityPolicy, ResourceIdentity};
+    use std::collections::BTreeMap;
+
+    fn activated() -> (
+        CoordinationSnapshot,
+        InitialHistoryDecision,
+        InitialHistoryPreparedQuorum,
+    ) {
+        let resource = ResourceIdentity::new(crate::QUEUE_NAMESPACE, "q", 0, None::<String>);
+        let incarnation = ResourceIncarnation {
+            version: 2,
+            resource: resource.clone(),
+            id: [1; 16],
+            retired: false,
+        };
+        let mut assignment =
+            PartitionAssignment::new(resource.clone(), "a", vec!["b".into(), "c".into()], 7);
+        assignment.durability = ReplicationDurabilityPolicy::MajorityDurable;
+        let decision = InitialHistoryDecision {
+            version: 1,
+            phase: InitialHistoryPhase::Preparing,
+            incarnation: incarnation.clone(),
+            assignment: assignment.clone(),
+            owner_process: [2; 16],
+            binding: StorageHistoryBinding {
+                resource_incarnation: [1; 16],
+                accepted_history: [3; 16],
+                writer_session: [4; 16],
+            },
+            required_write_nodes: 2,
+        };
+        let reports = [("a", [2; 16], [5; 16]), ("b", [6; 16], [7; 16])]
+            .into_iter()
+            .map(|(node, process, storage)| {
+                (
+                    node.into(),
+                    InitialHistoryLocalReceipt {
+                        decision: decision.digest().unwrap(),
+                        node_id: node.into(),
+                        replica_process: process,
+                        storage: PreparedStorageHistory {
+                            topic: "q".into(),
+                            partition: 0,
+                            group: None,
+                            stream: false,
+                            binding: decision.binding.clone(),
+                            storage_instance: storage,
+                        },
+                    },
+                )
+            })
+            .collect();
+        let quorum = InitialHistoryPreparedQuorum {
+            version: 1,
+            decision: decision.digest().unwrap(),
+            reports,
+        };
+        let activation = InitialHistoryActivation {
+            version: 1,
+            decision: decision.digest().unwrap(),
+            prepared_quorum: quorum_digest(&quorum).unwrap(),
+        };
+        let mut snapshot = CoordinationSnapshot::default();
+        snapshot.resources.insert(resource.clone());
+        snapshot.assignments.insert(resource.clone(), assignment);
+        snapshot.attributes = BTreeMap::from([
+            (
+                crate::history_identity::key(&resource),
+                serde_json::to_string(&incarnation).unwrap(),
+            ),
+            (
+                initial_history::key(&incarnation),
+                serde_json::to_string(&decision).unwrap(),
+            ),
+            (
+                initial_history::quorum_key(&incarnation),
+                serde_json::to_string(&quorum).unwrap(),
+            ),
+            (key(&decision), serde_json::to_string(&activation).unwrap()),
+        ]);
+        activation.validate(&snapshot, &decision).unwrap();
+        (snapshot, decision, quorum)
+    }
+
+    #[test]
+    fn recovery_uses_exact_eligible_replicas_and_keeps_the_configured_write_threshold() {
+        let (snapshot, decision, quorum) = activated();
+        let resource = &decision.incarnation.resource;
+        let history = accepted_history(&snapshot, resource).unwrap();
+        assert_eq!(
+            promotion::write_requirement(&decision.assignment).unwrap(),
+            2
+        );
+        assert_eq!(history.replicas.len(), 2);
+        let mut recovering = snapshot.clone();
+        recovering.generation += 1;
+        recovering.assignments.get_mut(resource).unwrap().owner = "b".into();
+        recovering.assignments.get_mut(resource).unwrap().followers = vec!["a".into(), "c".into()];
+        assert_eq!(
+            promotion::retain_unproven_assignments(&snapshot, &mut recovering).unwrap(),
+            1
+        );
+        let pending: promotion::PendingRecovery = serde_json::from_str(
+            &recovering.attributes[&promotion::pending_recovery_key(resource)],
+        )
+        .unwrap();
+        assert_eq!(pending.previous_activation, Some(history.activation));
+        // Both a and b were needed for every confirm. Either surviving sealed
+        // copy intersects that exact write set; unprepared c supplies no proof.
+        assert_eq!(pending.required_old_witnesses, 1);
+        assert!(accepted_history(&recovering, resource).is_err());
+        assert_eq!(
+            previous_initial_history(&recovering, resource).unwrap(),
+            Some(history.clone())
+        );
+        let mut witnesses = RecoveryWitnessSet::new(&recovering, &pending).unwrap();
+        let report = BrokerSealedReplica {
+            node_id: "b".into(),
+            seal: SealedReplicaFrontiers {
+                request: RecoverySealRequest {
+                    transition: pending.transition_digest().unwrap(),
+                    fence_epoch: 8,
+                },
+                history: RetainedHistoryIdentity {
+                    version: 2,
+                    storage_history: Some(quorum.reports["b"].storage.clone()),
+                    id: [9; 32],
+                    message_digest: [10; 32],
+                    event_digest: [11; 32],
+                    snapshot_digest: None,
+                    message_head: 0,
+                    message_next: 5,
+                    event_head: 0,
+                    event_next: 7,
+                },
+                message_head: 0,
+                message_next: 5,
+                event_head: 0,
+                event_next: 7,
+            },
+        };
+        for mutation in 0..5 {
+            let mut wrong = report.clone();
+            match mutation {
+                0 => wrong.seal.history.storage_history = None,
+                1 => {
+                    wrong
+                        .seal
+                        .history
+                        .storage_history
+                        .as_mut()
+                        .unwrap()
+                        .binding
+                        .writer_session = [8; 16]
+                }
+                2 => {
+                    wrong
+                        .seal
+                        .history
+                        .storage_history
+                        .as_mut()
+                        .unwrap()
+                        .storage_instance = [8; 16]
+                }
+                3 => wrong.seal.history.storage_history.as_mut().unwrap().topic = "other".into(),
+                _ => wrong.node_id = "c".into(),
+            }
+            assert!(witnesses.record(&recovering, "b", wrong).is_err());
+        }
+        let mut outsider = report.clone();
+        outsider.node_id = "c".into();
+        assert!(witnesses.record(&recovering, "c", outsider).is_err());
+        witnesses.record(&recovering, "b", report).unwrap();
+        assert_eq!(
+            witnesses.progress(&recovering).unwrap(),
+            SealCollectionProgress::AwaitingHistoryValidation {
+                received: 1,
+                required: 1
+            }
+        );
+        assert_eq!(
+            witnesses.accepted_history(&recovering).unwrap(),
+            Some(&history)
+        );
+        let mut forged = pending.clone();
+        forged.previous_activation = Some([8; 32]);
+        let mut forged_snapshot = recovering.clone();
+        forged_snapshot.attributes.insert(
+            promotion::pending_recovery_key(resource),
+            serde_json::to_string(&forged).unwrap(),
+        );
+        assert!(RecoveryWitnessSet::new(&forged_snapshot, &forged).is_err());
+    }
+}

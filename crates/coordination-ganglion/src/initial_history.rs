@@ -659,6 +659,94 @@ mod tests {
     }
 
     #[test]
+    fn replaced_process_requests_recovery_even_when_placement_is_unchanged() {
+        let (mut snapshot, resource) = fixture(false);
+        let decision = proposed_decision(&snapshot, &resource, "a", [2; 16]).unwrap();
+        snapshot.attributes.insert(
+            key(&decision.incarnation),
+            serde_json::to_string(&decision).unwrap(),
+        );
+        let mut set = InitialHistoryReceiptSet::new(&snapshot, decision.clone()).unwrap();
+        for (id, process) in [("a", [2; 16]), ("b", [3; 16])] {
+            let report = InitialHistoryLocalReceipt {
+                decision: decision.digest().unwrap(),
+                node_id: id.into(),
+                replica_process: process,
+                storage: PreparedStorageHistory {
+                    topic: "q".into(),
+                    partition: 0,
+                    group: None,
+                    stream: false,
+                    binding: decision.binding.clone(),
+                    storage_instance: process,
+                },
+            };
+            set.record(&snapshot, id, report).unwrap();
+            let mut node = ganglion_core::NodeInfo::new(id, "127.0.0.1:1", None);
+            node.labels.insert(
+                crate::HISTORY_PROCESS_LABEL.into(),
+                uuid::Uuid::from_bytes(process).to_string(),
+            );
+            snapshot.nodes.insert(id.into(), node);
+        }
+        snapshot.attributes.insert(
+            quorum_key(&decision.incarnation),
+            serde_json::to_string(&set.prepared_quorum(&snapshot).unwrap()).unwrap(),
+        );
+        let mut unchanged = snapshot.clone();
+        assert_eq!(
+            promotion::retain_unproven_assignments(&snapshot, &mut unchanged).unwrap(),
+            0
+        );
+        for id in ["a", "b"] {
+            let mut replaced = snapshot.clone();
+            replaced.nodes.get_mut(id).unwrap().labels.insert(
+                crate::HISTORY_PROCESS_LABEL.into(),
+                uuid::Uuid::from_bytes([9; 16]).to_string(),
+            );
+            let mut desired = replaced.clone();
+            desired.generation += 1;
+            assert_eq!(
+                promotion::retain_unproven_assignments(&replaced, &mut desired).unwrap(),
+                1
+            );
+            assert_eq!(desired.assignments, snapshot.assignments);
+            let pending: promotion::PendingRecovery = serde_json::from_str(
+                &desired.attributes[&promotion::pending_recovery_key(&resource)],
+            )
+            .unwrap();
+            assert_eq!(pending.proposed.owner, "a");
+            assert_eq!(pending.proposed.followers, vec!["b", "c"]);
+            assert_eq!(pending.proposed.epoch, decision.assignment.epoch + 1);
+            // An old heartbeat cannot undo the persisted decision.
+            let mut old_heartbeat = desired.clone();
+            old_heartbeat.nodes = snapshot.nodes.clone();
+            assert_eq!(
+                promotion::retain_unproven_assignments(&desired, &mut old_heartbeat).unwrap(),
+                1
+            );
+            assert_eq!(old_heartbeat.attributes, desired.attributes);
+        }
+        for label in [
+            None,
+            Some("invalid"),
+            Some("00000000-0000-0000-0000-000000000000"),
+        ] {
+            let mut unknown = snapshot.clone();
+            let labels = &mut unknown.nodes.get_mut("a").unwrap().labels;
+            labels.remove(crate::HISTORY_PROCESS_LABEL);
+            if let Some(label) = label {
+                labels.insert(crate::HISTORY_PROCESS_LABEL.into(), label.into());
+            }
+            assert!(
+                crate::history_activation::replaced_initial_processes(&unknown, &resource)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
     fn preparation_is_stable_and_binds_process_incarnation_membership_and_policy() {
         let (mut snapshot, resource) = fixture(false);
         let decision = proposed_decision(&snapshot, &resource, "a", [2; 16]).unwrap();
@@ -1304,7 +1392,8 @@ mod tests {
         );
         assert!(
             crate::local_serving_snapshot(&provider.node.committed_snapshot(), "a", [9; 16])
-                .streams_owned_by("a").is_empty(),
+                .streams_owned_by("a")
+                .is_empty(),
             "a different process cannot use the activated assignment"
         );
         engine.shutdown().await.unwrap();
@@ -1326,6 +1415,11 @@ mod tests {
             .await
             .unwrap();
         let reopened = GanglionCoordination::new("a", node);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while reopened.node.committed_snapshot().generation < activation_snapshot.generation {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.unwrap();
         let snapshot = reopened.node.committed_snapshot();
         assert_eq!(
             reopened
@@ -1348,7 +1442,8 @@ mod tests {
         );
         assert!(
             crate::local_serving_snapshot(&snapshot, "a", reopened.history_process)
-                .streams_owned_by("a").is_empty()
+                .streams_owned_by("a")
+                .is_empty()
         );
         assert_eq!(
             serde_json::from_str::<InitialHistoryDecision>(

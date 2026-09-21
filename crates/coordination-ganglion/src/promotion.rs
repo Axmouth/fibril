@@ -19,6 +19,9 @@ pub struct PendingRecovery {
     /// transition serialization and remains an unresolved origin requirement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_incarnation: Option<crate::history_identity::ResourceIncarnation>,
+    /// Exact immutable authority for the previous eligible replica set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_activation: Option<[u8; 32]>,
     pub requested_generation: u64,
     pub previous: PartitionAssignment,
     pub proposed: PartitionAssignment,
@@ -70,6 +73,34 @@ fn recovery_witness_requirement(assignment: &PartitionAssignment) -> Result<usiz
     Ok(assignment.replica_set_size() - write_requirement(assignment)? + 1)
 }
 
+fn history_and_witness_requirement(
+    snapshot: &CoordinationSnapshot,
+    assignment: &PartitionAssignment,
+) -> Result<
+    (
+        Option<fibril_broker::history_replication::AcceptedHistory>,
+        usize,
+    ),
+    String,
+> {
+    let history =
+        crate::history_activation::previous_initial_history(snapshot, &assignment.resource)?;
+    let required = if let Some(history) = &history {
+        // Only these exact prepared instances could supply confirmation progress.
+        // W still comes from the full configured assignment; excluded replicas
+        // must not raise R and block recovery from a sufficient surviving copy.
+        history
+            .replicas
+            .len()
+            .checked_sub(write_requirement(assignment)?)
+            .and_then(|n| n.checked_add(1))
+            .ok_or("accepted set cannot satisfy previous write policy")?
+    } else {
+        recovery_witness_requirement(assignment)?
+    };
+    Ok((history, required))
+}
+
 /// Hold changes affecting a replicated confirmation contract and persist the
 /// original configuration beside the proposed replacement in the same CAS.
 /// Existing requests are immutable across controller retries and restarts.
@@ -108,29 +139,41 @@ pub(crate) fn retain_unproven_assignments(
         let new_writes = write_requirement(proposed)?;
         let incarnation = crate::history_identity::resource_incarnation(committed, resource)?;
         let enrolled = incarnation.as_ref().is_some_and(|id| id.version == 2);
+        let replaced = if enrolled {
+            crate::history_activation::replaced_initial_processes(committed, resource)?
+        } else {
+            Vec::new()
+        };
         // An enrolled activation binds the exact assignment, even for one local
         // writer. Moving/replacing that writer needs a continuation certificate.
         if if enrolled {
-            previous == proposed
+            previous == proposed && replaced.is_empty()
         } else {
             same_configuration(previous, proposed) || old_writes == 1 && new_writes == 1
         } {
             continue;
+        }
+        if !replaced.is_empty() {
+            tracing::warn!(topic = resource.name, partition = resource.partition,
+                replicas = ?replaced, "replica process changed; requesting history recovery without changing placement");
         }
         let mut replacement = proposed.clone();
         replacement.epoch = previous
             .epoch
             .checked_add(1)
             .ok_or("assignment epoch exhausted")?;
+        let (history, required_old_witnesses) =
+            history_and_witness_requirement(committed, previous)?;
         let pending = PendingRecovery {
             version: 1,
+            previous_activation: history.map(|h| h.activation),
             resource_incarnation: incarnation,
             requested_generation: desired.generation,
             previous: previous.clone(),
             proposed: replacement,
             previous_write_nodes: old_writes,
             proposed_write_nodes: new_writes,
-            required_old_witnesses: recovery_witness_requirement(previous)?,
+            required_old_witnesses,
         };
         desired.attributes.insert(
             key,
@@ -343,7 +386,10 @@ pub(crate) fn validate_seal_command(
         .ok_or("no pending recovery for this resource")?;
     let pending: PendingRecovery =
         serde_json::from_str(raw).map_err(|e| format!("invalid pending recovery: {e}"))?;
+    let (history, required_old_witnesses) =
+        history_and_witness_requirement(snapshot, &pending.previous)?;
     if pending.version != 1
+        || pending.previous_activation != history.map(|h| h.activation)
         || pending.requested_generation > snapshot.generation
         || pending.previous.resource != resource
         || pending.proposed.resource != resource
@@ -353,7 +399,7 @@ pub(crate) fn validate_seal_command(
         || pending.previous.epoch.checked_add(1) != Some(pending.proposed.epoch)
         || pending.previous_write_nodes != write_requirement(&pending.previous)?
         || pending.proposed_write_nodes != write_requirement(&pending.proposed)?
-        || pending.required_old_witnesses != recovery_witness_requirement(&pending.previous)?
+        || pending.required_old_witnesses != required_old_witnesses
         || pending.seal_command()? != *command
     {
         return Err("recovery request does not match the committed transition".into());

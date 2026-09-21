@@ -66,6 +66,8 @@ pub const DRAINING_LABEL: &str = "fibril/draining";
 /// Advisory label carrying the node's raft id, so observability can correlate
 /// broker node ids with consensus membership.
 pub const RAFT_ID_LABEL: &str = "fibril/raft-id";
+/// Process replacement hint. This may request recovery but never grants admission.
+pub const HISTORY_PROCESS_LABEL: &str = "fibril/history-process";
 /// Advisory labels carrying a broker's coarse throughput - messages per
 /// second since its previous heartbeat - for the admin topology view.
 pub const RATE_PUB_LABEL: &str = "fibril/rate-pub";
@@ -1090,6 +1092,12 @@ impl GanglionCoordination {
             info.admin_addr.clone(),
         );
         node.labels = labels;
+        // Never copy an application-supplied session identity. Tests and admin
+        // callers can register another node; only this provider can report itself.
+        node.labels.remove(HISTORY_PROCESS_LABEL);
+        if info.node_id == self.node_id {
+            node.labels.insert(HISTORY_PROCESS_LABEL.into(), uuid::Uuid::from_bytes(self.history_process).to_string());
+        }
         node.labels
             .insert(HEARTBEAT_LABEL.to_string(), unix_millis_now().to_string());
 

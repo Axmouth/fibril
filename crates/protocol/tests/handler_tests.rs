@@ -8050,6 +8050,63 @@ async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_conse
         .await
         .unwrap()
     }
+    async fn persist_pending(
+        providers: &[Arc<GanglionCoordination>],
+        resource: &ganglion_core::ResourceIdentity,
+        activation: [u8; 32],
+    ) -> fibril_coordination_ganglion::promotion::PendingRecovery {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                for provider in providers {
+                    if !provider.consensus_node().is_leader().await {
+                        continue;
+                    }
+                    let mut snapshot = provider.consensus_node().committed_snapshot();
+                    let generation = snapshot.generation;
+                    let previous = snapshot.assignments[resource].clone();
+                    let mut proposed = previous.clone();
+                    proposed.owner = "b".into();
+                    proposed.followers = vec!["a".into(), "c".into()];
+                    proposed.epoch += 1;
+                    let pending = fibril_coordination_ganglion::promotion::PendingRecovery {
+                        version: 1,
+                        resource_incarnation:
+                            fibril_coordination_ganglion::history_identity::resource_incarnation(
+                                &snapshot, resource,
+                            )
+                            .unwrap(),
+                        previous_activation: Some(activation),
+                        requested_generation: generation + 1,
+                        previous,
+                        proposed,
+                        previous_write_nodes: 2,
+                        proposed_write_nodes: 2,
+                        required_old_witnesses: 1,
+                    };
+                    snapshot.attributes.insert(
+                        fibril_coordination_ganglion::promotion::pending_recovery_key(resource),
+                        serde_json::to_string(&pending).unwrap(),
+                    );
+                    snapshot.generation += 1;
+                    match provider
+                        .consensus_node()
+                        .write_snapshot_guarded(generation, snapshot)
+                        .await
+                    {
+                        Ok(_) => return pending,
+                        Err(
+                            ganglion_openraft::OpenraftAdapterError::NotLeader
+                            | ganglion_openraft::OpenraftAdapterError::GenerationMismatch { .. },
+                        ) => {}
+                        Err(error) => panic!("pending recovery write failed: {error}"),
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
     let metadata_dir = TempDir {
         root: std::env::current_dir()
             .unwrap()
@@ -8270,7 +8327,9 @@ async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_conse
     assert!(assignment.is_followed_by("b"));
     assert!(!assignment.is_followed_by("c"));
     let unprepared_view = providers[2].snapshot();
-    let remote_route = unprepared_view.assignment_for("initial-wire", Partition::new(0), None).unwrap();
+    let remote_route = unprepared_view
+        .assignment_for("initial-wire", Partition::new(0), None)
+        .unwrap();
     assert_eq!(remote_route.owner, "a");
     assert!(!remote_route.is_followed_by("c"));
     let history = assignment.history.as_ref().unwrap();
@@ -8516,6 +8575,58 @@ async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_conse
         .unwrap()
         .unwrap();
     stream_task.await.unwrap().unwrap();
+    // Fencing closes the live session but retains the accepted certificate.
+    // The one surviving prepared follower is enough: every previous majority
+    // confirm needed both prepared replicas, and c was never eligible to vote.
+    let pending = persist_pending(&providers, &resource, history.activation).await;
+    synced(&providers, pending.requested_generation).await;
+    let command = pending.seal_command().unwrap();
+    let (addr, task, dir, _) = start_protocol_listener_for_broker(
+        ConnectionSettings::new(Some(60)),
+        brokers[1].clone(),
+        dirs[1].take().unwrap(),
+        Some(node_auth()),
+    )
+    .await;
+    dirs[1] = Some(dir);
+    let config =
+        ProtocolOwnerPeerResolverConfig::new(HashMap::from([("b".into(), addr.to_string())]))
+            .with_auth("@node", "secret");
+    let sealed = fibril_protocol::v1::replication::request_recovery_seal(
+        &config,
+        "b",
+        &command,
+        Duration::from_secs(10),
+    )
+    .await
+    .unwrap();
+    task.await.unwrap().unwrap();
+    assert_eq!(sealed.seal.history.version, 2);
+    assert_eq!(
+        sealed.seal.history.storage_history.as_ref().unwrap(),
+        &quorum.reports["b"].storage
+    );
+    assert_eq!((sealed.seal.message_next, sealed.seal.event_next), (2, 2));
+    let mut witnesses = fibril_coordination_ganglion::recovery_witnesses::RecoveryWitnessSet::new(
+        &providers[0].consensus_node().committed_snapshot(),
+        &pending,
+    )
+    .unwrap();
+    witnesses
+        .record(
+            &providers[0].consensus_node().committed_snapshot(),
+            "b",
+            sealed,
+        )
+        .unwrap();
+    assert!(
+        witnesses
+            .accepted_history(&providers[0].consensus_node().committed_snapshot())
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(witnesses.progress(&providers[0].consensus_node().committed_snapshot()).unwrap(),
+        fibril_coordination_ganglion::recovery_witnesses::SealCollectionProgress::AwaitingHistoryValidation {received:1,required:1});
     // Replacing storage under the same metadata/provider instance cannot reuse
     // the durable preparation receipt as permission for a fresh storage process.
     let follower_root = dirs[1].as_ref().unwrap().root.clone();

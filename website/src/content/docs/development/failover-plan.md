@@ -74,8 +74,10 @@ Explicit creation-time enrollment now withholds ordinary serving while preservin
 placement. Prepared quorum receipts persist under the immutable decision and
 require the owner and fixed write threshold. Authenticated remote preparation rechecks the exact decision through consensus.
 Explicit initial activation now admits the exact prepared storage/process instances
-and carries their identity on live replication. Remaining work must bind sealed
-evidence, snapshots and recovery installation to that authority and readmit
+and carries their identity on live replication. Version-two seals now bind retained
+evidence to that accepted storage history and original replica instance; process
+replacement requests recovery even without a placement change. Remaining work
+must establish checkpoint compatibility, install selected history and readmit
 writers after recovery. Existing resources still need a verified baseline; the
 catalogue ID alone supplies no history authority.
 A trusted, quorum-installed checkpoint can replace older history; indefinite

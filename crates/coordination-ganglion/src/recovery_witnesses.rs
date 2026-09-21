@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use fibril_broker::recovery::{BrokerSealedReplica, RecoverySealCommand};
 use ganglion_core::CoordinationSnapshot;
 
-use crate::promotion::{validate_seal_command, PendingRecovery};
+use crate::promotion::{PendingRecovery, validate_seal_command};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SealCollectionProgress {
@@ -30,6 +30,7 @@ pub struct RecoveryWitnessSet {
     old_replicas: BTreeSet<String>,
     required: usize,
     reports: BTreeMap<String, BrokerSealedReplica>,
+    accepted_history: Option<fibril_broker::history_replication::AcceptedHistory>,
     contradiction: Option<String>,
 }
 
@@ -37,9 +38,17 @@ impl RecoveryWitnessSet {
     pub fn new(snapshot: &CoordinationSnapshot, pending: &PendingRecovery) -> Result<Self, String> {
         let command = pending.seal_command()?;
         validate_seal_command(snapshot, &pending.previous.owner, &command)?;
-        let old_replicas: BTreeSet<_> = std::iter::once(pending.previous.owner.clone())
-            .chain(pending.previous.followers.iter().cloned())
-            .collect();
+        let accepted_history = crate::history_activation::previous_initial_history(
+            snapshot,
+            &pending.previous.resource,
+        )?;
+        let old_replicas: BTreeSet<_> = if let Some(history) = &accepted_history {
+            history.replicas.keys().cloned().collect()
+        } else {
+            std::iter::once(pending.previous.owner.clone())
+                .chain(pending.previous.followers.iter().cloned())
+                .collect()
+        };
         if old_replicas.iter().any(|id| id.is_empty()) {
             return Err("empty old replica identity".into());
         }
@@ -48,6 +57,7 @@ impl RecoveryWitnessSet {
             old_owner: pending.previous.owner.clone(),
             old_replicas,
             required: pending.required_old_witnesses,
+            accepted_history,
             reports: BTreeMap::new(),
             contradiction: None,
         })
@@ -79,9 +89,31 @@ impl RecoveryWitnessSet {
         }
         let seal = &report.seal;
         let history = &seal.history;
+        if let Some(accepted) = &self.accepted_history {
+            let receipt = history
+                .storage_history
+                .as_ref()
+                .ok_or("accepted recovery requires a storage-bound sealed history")?;
+            let expected = accepted
+                .replicas
+                .get(contacted_node)
+                .ok_or("replica is outside accepted history")?;
+            if receipt.binding != accepted.binding
+                || receipt.storage_instance != expected.storage
+                || receipt.topic != self.command.topic
+                || receipt.partition != self.command.partition.id()
+                || receipt.group != self.command.group
+                || receipt.stream != self.command.stream
+            {
+                return Err(
+                    "sealed storage receipt differs from accepted history or replica instance"
+                        .into(),
+                );
+            }
+        }
         if seal.request.transition != self.command.transition
             || seal.request.fence_epoch != self.command.fence_epoch
-            || history.version != 1
+            || !history.valid_version()
             || history.message_head > history.message_next
             || history.event_head > history.event_next
             || (
@@ -151,6 +183,16 @@ impl RecoveryWitnessSet {
         })
     }
 
+    /// Authority of the previous eligible replicas. None retains diagnostic-only
+    /// legacy behavior and cannot authorize automatic source selection.
+    pub fn accepted_history(
+        &self,
+        snapshot: &CoordinationSnapshot,
+    ) -> Result<Option<&fibril_broker::history_replication::AcceptedHistory>, String> {
+        self.ensure_current(snapshot)?;
+        Ok(self.accepted_history.as_ref())
+    }
+
     /// Revalidates the exact active transition before exposing evidence to a
     /// future history verifier. The snapshot itself is not a fresh-consensus proof.
     pub fn reports(
@@ -211,6 +253,7 @@ mod tests {
                     fence_epoch: set.command.fence_epoch,
                 },
                 history: RetainedHistoryIdentity {
+                    storage_history: None,
                     version: 1,
                     id: [1; 32],
                     message_digest: [2; 32],
@@ -274,9 +317,10 @@ mod tests {
             assert!(set.record(&snapshot, "f1", bad).is_err());
             assert!(set.reports(&snapshot).unwrap().is_empty());
         }
-        assert!(set
-            .record(&snapshot, "new-node", report(&set, "new-node"))
-            .is_err());
+        assert!(
+            set.record(&snapshot, "new-node", report(&set, "new-node"))
+                .is_err()
+        );
     }
 
     #[test]

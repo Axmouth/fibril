@@ -1161,6 +1161,7 @@ pub struct RecoverySealOk {
     pub transition: [u8; 32],
     pub fence_epoch: u64,
     pub history_version: u32,
+    pub storage_history: Option<RecoveryStorageHistory>,
     pub history_id: [u8; 32],
     pub message_digest: [u8; 32],
     pub event_digest: [u8; 32],
@@ -1169,6 +1170,15 @@ pub struct RecoverySealOk {
     pub message_next: u64,
     pub event_head: u64,
     pub event_next: u64,
+}
+
+/// Original storage identity carried by version-two retained-history receipts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryStorageHistory {
+    pub resource_incarnation: [u8; 16],
+    pub accepted_history: [u8; 16],
+    pub writer_session: [u8; 16],
+    pub storage_instance: [u8; 16],
 }
 
 /// Wire payload caps checked from frame headers before buffering recovery bodies.
