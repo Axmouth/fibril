@@ -91,6 +91,18 @@ The compatibility work follows this order:
   buffering and recovery rules for tentative suffixes.
 - Add OpenTelemetry export.
 
+## Dashboard demo and interactive documentation
+
+An important follow-up after the early-replication work is a public dashboard
+demo linked from the docs. Reuse the production dashboard pages and components
+with representative demo data so users can explore current behavior.
+
+Embed relevant read-only dashboard views alongside their documentation, sharing
+the same components and demo data adapter. Keep navigation, filtering and other
+useful local interactions where appropriate; use isolated demo data with writes
+disabled. Build and test the demo and inline views with the dashboard so interface
+changes carry through to the documentation and reduce reliance on screenshots.
+
 ## Longer-term options
 
 These require a concrete use case or further design:
