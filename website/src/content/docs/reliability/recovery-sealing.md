@@ -426,6 +426,29 @@ barrier remain in place.
 
 A restarted coordinator can read the saved plan and verify that a reconstructed
 artifact matches its exact source and state. Reading or deserializing a plan
-supplies no fresh installation or serving permission. Staged transfer, durable
-new-quorum receipts, replacement storage admission and activation remain pending;
-ordinary declarations still do not enable this lifecycle automatically.
+supplies no fresh installation or serving permission. Durable new-quorum receipts,
+replacement storage admission and activation remain pending; ordinary declarations
+still do not enable this lifecycle automatically.
+
+## Non-serving recovery staging
+
+A proposed replica can open a stage after a fresh guarded consensus check of the
+exact recovery plan. Payload pages append to a separate native Keratin log under
+the plan's ID, alongside its immutable snapshot and intent. Existing partition
+files, seals and storage bindings remain untouched. The source remains readable
+while a replacement copy is prepared.
+
+One stage is open per storage instance. Pages are bounded to 4096 records and
+16 MiB, with configurable total logical-byte and record budgets; defaults are
+1 GiB and one million records. Native framing, indexes and preallocation consume
+additional disk. Exact page retries are idempotent, while conflicting records,
+gaps, partial overlaps and substituted source identities are rejected. An append
+error requires reopening the stage to reconstruct its durable progress.
+
+Completion verifies the full retained payload hash and the snapshot's live-payload
+subset from disk before synchronizing a receipt. Sequential scans bound record
+allocation and bypass the tail cache. Staging resumes from its saved snapshot without requiring the original source
+to return. Completed staging uses preserving reopen and refuses silent repair of lost data.
+Linux tests cover four SIGKILL boundaries and authenticated transfer to a proposed
+replica. Completion certifies staged data only. New-quorum persistence, atomic
+replacement, repeated-history admission and automatic activation remain pending.

@@ -10,6 +10,10 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Resumable recovery staging
+
+Selected queue state and payloads can now be staged in a separate native log while the old sealed source stays readable. Exact page retries, immutable metadata and sequential disk verification preserve the selected baseline through restart; four SIGKILL boundaries and authenticated transfer are covered. A fresh consensus plan check authorizes staging, with replacement and writer admission remaining separate gates.
+
 ### Persisted queue recovery intent
 
 A verified source selection can now be fixed in consensus before replacement storage work begins. The plan binds the exact state, witnesses, continuation offsets and new history/session IDs; retries retain the first decision while replicas remain fenced. Regressions cover zero boundaries, substituted evidence, stale transitions and consensus retries across three metadata nodes.

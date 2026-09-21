@@ -19,6 +19,7 @@ pub use stroma_core::{
     QueuePromotionOutcome, RecoveryMismatchPolicy, ReplicatedAppendOutcome, ReplicatedEventBatch,
     ReplicatedMessageBatch, ReplicatedQueueApplyOutcome, RetentionConfig, SnapshotConfig, Stroma,
     StromaError, StromaEvent, StromaKeratinConfig, StorageHistoryBinding, PreparedStorageHistory,
+    QueueRecoveryStage, QueueRecoveryStageSpec, QueueRecoveryStageReceipt, RecoveryStageLimits,
 };
 use tokio::sync::Notify;
 
@@ -592,6 +593,19 @@ impl StromaEngine {
     /// The caller must first obtain fresh activation authority for this exact receipt.
     pub async fn admit_prepared_storage_history(&self, prepared: PreparedStorageHistory) -> Result<(), StromaError> {
         self.inner.admit_prepared_storage_history(prepared).await
+    }
+
+    /// Stage a recovery baseline separately after fresh plan authorization.
+    pub async fn open_queue_recovery_stage(
+        &self, spec: QueueRecoveryStageSpec, snapshot: Vec<u8>, limits: RecoveryStageLimits,
+    ) -> Result<QueueRecoveryStage, StromaError> {
+        self.inner.open_queue_recovery_stage(spec, snapshot, limits).await
+    }
+
+    pub async fn resume_queue_recovery_stage(
+        &self, spec: QueueRecoveryStageSpec, limits: RecoveryStageLimits,
+    ) -> Result<QueueRecoveryStage, StromaError> {
+        self.inner.resume_queue_recovery_stage(spec, limits).await
     }
 
     /// Inspect local identity without granting access or opening either log.

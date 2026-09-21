@@ -8664,7 +8664,7 @@ async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_conse
     ).await.unwrap();
     let chosen = witnesses.select_queue_source(
         &providers[0].consensus_node().committed_snapshot(),
-        &BTreeMap::from([("b".into(), artifact)]), &[],
+        &BTreeMap::from([("b".into(), artifact.clone())]), &[],
     ).unwrap();
     assert_eq!(chosen.source_node(), "b");
     assert_eq!((chosen.event_next(), chosen.message_next()), (2, 2));
@@ -8684,8 +8684,40 @@ async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_conse
     // A lost response retries the exact intent, including its generated IDs.
     assert_eq!(retry_metadata(|| providers[1].persist_queue_recovery_plan(&pending, &witnesses, &chosen)).await, plan);
     assert_eq!(providers[0].pending_recoveries().unwrap(), vec![pending.clone()]);
+    // A proposed replica receives the selected state and native-log payloads in
+    // non-serving staging. The old source stays sealed and readable throughout.
+    let stage = retry_metadata(|| providers[2].open_local_queue_recovery_stage(
+        &plan, &engines[2], &artifact, Default::default())).await;
+    while stage.next_offset().await < plan.message_next() {
+        let reply = fibril_protocol::v1::replication::request_recovery_read(
+            &config, &command, &sealed,
+            &fibril_broker::recovery::RecoveryReadRequest {
+                seal: sealed.seal.request.clone(), history_id: sealed.seal.history.id,
+                source: fibril_broker::recovery::RecoveryReadSource::Messages,
+                from: stage.next_offset().await, max_records:1, max_bytes:65536,
+            }, Duration::from_secs(10),
+        ).await.unwrap();
+        stage.append(fibril_broker::recovery::RecoveryReadPage {
+            history_id: reply.history_id,
+            source: fibril_broker::recovery::RecoveryReadSource::Messages,
+            from: reply.from, next: reply.next, end: reply.end,
+            snapshot_bytes: reply.snapshot_bytes,
+            records: reply.records.into_iter().map(|r| fibril_broker::recovery::RecoveryRecord {
+                offset:r.offset, flags:r.flags, headers:r.headers, payload:r.payload,
+            }).collect(),
+        }).await.unwrap();
+    }
+    let staged = stage.finish().await.unwrap();
+    assert_eq!(staged.plan, plan.digest().unwrap());
+    assert_eq!((staged.event_next, staged.message_next), (2,2));
+    assert!(providers[2].admit_local_initial_history(&decision, &engines[2]).await.is_err());
+    drop(stage);
     stop_reads.cancel();
     reads.await.unwrap();
+    let resumed = retry_metadata(|| providers[2].resume_local_queue_recovery_stage(
+        &plan, &engines[2], Default::default())).await;
+    assert_eq!(resumed.finish().await.unwrap(), staged);
+    drop(resumed);
     // Replacing storage under the same metadata/provider instance cannot reuse
     // the durable preparation receipt as permission for a fresh storage process.
     let follower_root = dirs[1].as_ref().unwrap().root.clone();
@@ -8730,6 +8762,10 @@ async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_conse
     // check, including on a replica that had not prepared any storage yet.
     let generation = set_assignment(&providers, &resource, 2).await;
     synced(&providers, generation).await;
+    assert!(providers[2].open_local_queue_recovery_stage(
+        &plan, &engines[2], &artifact, Default::default()).await.is_err());
+    assert!(providers[2].resume_local_queue_recovery_stage(
+        &plan, &engines[2], Default::default()).await.is_err());
     assert!(
         peer.read_owner_replication_records_fenced(
             "initial-wire",

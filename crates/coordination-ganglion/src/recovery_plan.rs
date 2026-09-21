@@ -219,6 +219,83 @@ impl QueueRecoveryPlan {
 }
 
 impl GanglionCoordination {
+    /// Freshly authorize non-serving staging on one proposed replica. A saved
+    /// local metadata view or a deserialized plan is insufficient. The returned
+    /// stage cannot replace active data or grant writer/replication admission.
+    pub async fn open_local_queue_recovery_stage(
+        &self,
+        plan: &QueueRecoveryPlan,
+        engine: &fibril_broker::queue_engine::StromaEngine,
+        artifact: &RecoveryQueueStateArtifact,
+        limits: fibril_broker::queue_engine::RecoveryStageLimits,
+    ) -> Result<fibril_broker::queue_engine::QueueRecoveryStage, OpenraftAdapterError> {
+        plan.verify_artifact(artifact).map_err(error)?;
+        let spec = self.authorize_local_queue_recovery_stage(plan).await?;
+        engine
+            .open_queue_recovery_stage(spec, artifact.state_snapshot().to_vec(), limits)
+            .await
+            .map_err(error)
+    }
+
+    /// Resume an existing stage from its durable snapshot without contacting
+    /// the old source. Fresh consensus still gates the exact pending plan.
+    pub async fn resume_local_queue_recovery_stage(
+        &self,
+        plan: &QueueRecoveryPlan,
+        engine: &fibril_broker::queue_engine::StromaEngine,
+        limits: fibril_broker::queue_engine::RecoveryStageLimits,
+    ) -> Result<fibril_broker::queue_engine::QueueRecoveryStage, OpenraftAdapterError> {
+        let spec = self.authorize_local_queue_recovery_stage(plan).await?;
+        engine
+            .resume_queue_recovery_stage(spec, limits)
+            .await
+            .map_err(error)
+    }
+
+    async fn authorize_local_queue_recovery_stage(
+        &self,
+        plan: &QueueRecoveryPlan,
+    ) -> Result<fibril_broker::queue_engine::QueueRecoveryStageSpec, OpenraftAdapterError> {
+        let assignment = &plan.pending.proposed;
+        if assignment.owner != self.node_id && !assignment.followers.contains(&self.node_id) {
+            return Err(error("recovery staging requires a proposed replica"));
+        }
+        let snapshot = self.node.committed_snapshot();
+        plan.validate_committed(&snapshot).map_err(error)?;
+        let key = key(&plan.pending).map_err(error)?;
+        let raw = snapshot.attributes[&key].clone();
+        let response = self
+            .forward_command(MetadataRaftCommand::CompareAndSetAttributeGuarded {
+                expected_generation: snapshot.generation,
+                key,
+                expected: Some(raw.clone()),
+                value: raw,
+            })
+            .await?;
+        plan.validate_committed(&response.snapshot).map_err(error)?;
+        let s = &plan.selected;
+        let source = plan
+            .source_history()
+            .ok_or_else(|| error("recovery source is missing"))?;
+        let spec = fibril_broker::queue_engine::QueueRecoveryStageSpec {
+            plan: plan.digest().map_err(error)?,
+            topic: assignment.resource.name.clone(),
+            partition: u32::try_from(assignment.resource.partition).map_err(error)?,
+            group: assignment.resource.group.clone(),
+            binding: plan.binding.clone(),
+            fence_epoch: assignment.epoch,
+            source_history: s.source_history,
+            message_head: s.message_head,
+            message_next: s.message_next,
+            event_next: s.event_next,
+            message_digest: source.message_digest,
+            snapshot_digest: s.snapshot_digest,
+            state_digest: s.state_digest,
+            live_payload_digest: s.live_payload_digest,
+        };
+        Ok(spec)
+    }
+
     /// Read an existing intent after restart. This is a historical read, not
     /// fresh permission for storage mutation or writer admission.
     pub fn queue_recovery_plan(
