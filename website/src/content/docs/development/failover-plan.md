@@ -83,11 +83,12 @@ catalogue ID alone supplies no history authority.
 A trusted, quorum-installed checkpoint can replace older history; indefinite
 retention of settled payloads is not required.
 
-Owner-local leases have a separate comparison projection. Delayed work can move
-to ready state under a local clock without a log event, so a full timer-state
-comparison still needs a defined common-time projection or equivalent replay
-semantics. Preserve retry, TTL and DLQ decisions when defining that projection.
-Complete stream-state proof is also pending.
+Owner-local leases have a separate comparison projection. Newly activated delayed
+work now moves to ready through an ordered event carrying an explicit clock
+boundary and bounded work count. Replay uses that recorded boundary and consumes
+the same timers, preserving retry and TTL state. Older histories can lack these
+transitions and still require baseline validation; complete stream-state proof
+is also pending.
 
 Measure checkpoint replay/hash CPU, peak memory and recovery delay before adding
 periodic state hashes or larger recovery fan-out. The ordered-application benchmark

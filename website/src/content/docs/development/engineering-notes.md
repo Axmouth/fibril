@@ -10,6 +10,10 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Durable delayed-message activation
+
+An owner could activate a delayed publish locally, deliver it and record a NACK, while restart or follower replay missed the activation and lost the retry increment. Due timers now move to ready through a bounded, ordered event that consumes their heap entries; an elapsed deadline at broker admission becomes an ordinary enqueue. Regressions cover restart, follower application, different checkpoint starts, idle polls and retry deadlines; delayed retry also removes follower-ready state before waiting.
+
 ### Sealed history authority and process replacement
 
 Version-two seals retain the original durable storage receipt, allowing recovery to check the exact accepted history and replica instance after restart. Recovery witness thresholds use the eligible write set while confirmations retain the configured write threshold; a changed registered process requests recovery even when placement is unchanged. Three-node authenticated TCP tests cover sealed receipt admission after majority-confirmed replication.

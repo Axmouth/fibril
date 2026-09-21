@@ -6384,6 +6384,24 @@ async fn broker_delivers_messages_in_order() {
 }
 
 #[tokio::test]
+async fn delayed_publish_with_elapsed_deadline_records_an_ordinary_enqueue() {
+    let (broker, _dir) = open_test_broker().await;
+    let publisher = broker.get_publisher("elapsed", Partition::new(0), &None).await.unwrap();
+    publisher.publish_delayed(
+        b"ready".to_vec(), 0, 0, None, Default::default(), 1,
+    ).await.unwrap().await.unwrap().unwrap();
+    let OwnerReplicationRead::Batch(events) = broker.engine()
+        .read_owner_event_records("elapsed", 0, None, 0, 100).await.unwrap() else { panic!("event batch") };
+    assert!(events.records.iter().any(|(_, event)| matches!(event, stroma_core::StromaEvent::EnqueueMany { .. })));
+    assert!(!events.records.iter().any(|(_, event)| matches!(event,
+        stroma_core::StromaEvent::EnqueueDelayed { .. }
+        | stroma_core::StromaEvent::EnqueueDelayedMany { .. }
+        | stroma_core::StromaEvent::ActivateDelayed { .. }
+    )));
+    broker.shutdown().await;
+}
+
+#[tokio::test]
 async fn delayed_publish_waits_until_deadline() {
     let (broker, _dir) = open_test_broker().await;
 

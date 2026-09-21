@@ -2460,6 +2460,7 @@ impl<
                 let batch_commit = Arc::new(OnceLock::new());
                 let mut items = Vec::with_capacity(batch.len());
                 let mut confirmations = Vec::with_capacity(batch.len());
+                let batch_now = unix_millis();
                 for PublishRequest {
                     payload,
                     reply,
@@ -2484,7 +2485,9 @@ impl<
                     items.push(stroma_core::PublishItem {
                         headers,
                         payload,
-                        not_before,
+                        // Resolve once on the owner and persist the resulting
+                        // ordinary enqueue; replicas never consult their clock.
+                        not_before: not_before.filter(|deadline| *deadline > batch_now),
                         expire_at,
                         completion,
                     });

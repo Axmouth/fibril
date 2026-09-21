@@ -1078,7 +1078,8 @@ fn stroma_event_available_for_replicated_messages(
         // annihilation directive: it must not be frontier-gated (its offset may
         // never become durable) and is a harmless no-op on a follower that never
         // received the enqueue it cancels.
-        StromaEvent::Declare(_)
+        StromaEvent::ActivateDelayed { .. }
+        | StromaEvent::Declare(_)
         | StromaEvent::ResetQueue { .. }
         | StromaEvent::CursorCommit { .. }
         | StromaEvent::CursorCommitBatch { .. }

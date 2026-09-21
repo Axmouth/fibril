@@ -105,7 +105,7 @@ Conditions and limits:
 - Explicit sealed inspection can replay each queue from its own exact checkpoint
   to a common target, compare canonical state and live payload identities, and
   separately normalize owner-local leases. Retry, delay, TTL and DLQ state remain
-  significant. Checkpoint authority, resource lineage, complete timer/stream
+  significant. Checkpoint authority, resource lineage, legacy timer/stream
   interpretation and automatic source selection remain pending; see
   [recovery sealing](/reliability/recovery-sealing/).
 
@@ -131,6 +131,8 @@ Conditions and limits:
 - Confirmed publish returns the broker-assigned offset.
 - Unconfirmed client calls only wait for the local client engine or command path, not for a broker-assigned offset.
 - Delayed publish uses a distinct delayed-publish frame and a `not_before` deadline.
+  Already-due publishes persist an ordinary enqueue. Due timers activate through
+  bounded ordered events, preserving retry/deadline state during replay.
 - Content type is stored outside the user header map for common cases.
 - Manual `content-type` headers are interpreted as content type metadata by clients.
 - Broker-side validation rejects reserved system header prefixes on normal and delayed publish.
@@ -683,7 +685,7 @@ See also: [clustering](/concepts/clustering/) and
 | Initial history preparation | Partial | Explicit consensus decisions require creation-time enrollment and bind assignment and owner instance to fixed history/session IDs. Replica preparation leaves storage non-writable; exact prepared-quorum receipts persist through consensus, require the owner and write threshold, and survive restart. Node-authenticated remote preparation checks fresh consensus and exact replica identity with bounded work/deadlines. Automatic enrollment remains pending |
 | Initial activation and replication identity | Partial | Explicit consensus activation binds the exact prepared quorum; local admission requires the original process/storage instances. Live replication carries the accepted identity, rejects legacy bypass and stale peers, and retains the full confirmation threshold. Automatic startup and recovery readmission remain pending |
 | Local storage history binding | Partial | Explicit initialization binds pristine storage to incarnation/history/writer-session IDs; restart blocks ordinary admission while retaining recovery sealing. Cancellation, corruption, checkpoint replacement and Linux SIGKILL tests pass. Exact prepared-instance admission preserves later writes on retry; bound reopen refuses destructive local tail repair. Automatic enrollment and recovery readmission remain pending |
-| Retained-history inspection | Partial | Explicit comparison verifies sealed snapshots and logs, replays exact queue checkpoints to a common target and hashes live payloads. Page/record/byte/operation/deadline limits apply; common origin, checkpoint authority, timer/stream interpretation and automatic activation remain pending |
+| Retained-history inspection | Partial | Explicit comparison verifies sealed snapshots and logs, replays exact queue checkpoints to a common target and hashes live payloads. Page/record/byte/operation/deadline limits apply; common origin, checkpoint authority, legacy timer/stream interpretation and automatic activation remain pending |
 | Checkpoint recovery | Partial | Unix installation journals resume interrupted replacement of both logs and queue state before ordinary replay; completion receipts preserve later backfill on retry. Payload dependencies gate promotion across restart. Linux fault/SIGKILL tests pass; non-Unix installation is unsupported pending durable metadata support |
 | Conflict diagnostics | Implemented | Bounded, payload-free control history, offsets and effective record identities accompany overlap reports; checkpoint logs show source epochs and continuation offsets |
 | Replica-durable confirms | Partial | Queues require the same follower to cover the payload batch and exact enqueue frontier; epoch/session-fenced progress feeds confirmation and delivery visibility, with timeout and ISR floor |

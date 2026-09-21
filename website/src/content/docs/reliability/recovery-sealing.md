@@ -298,6 +298,19 @@ work. Source reads still rescan retained data per page.
 
 ## Queue state at an exact boundary
 
+Delayed publishes and retries now become ready through a durable
+`ActivateDelayed` event (storage event tag 5). Its explicit clock boundary and
+maximum of 4096 consumed timer entries apply identically on the owner, followers
+and offline replay. Entries are removed from their delayed heaps during ordered
+application, after persistence; idle checks append nothing. Retry deadlines
+remain independent of the replay machine's clock. Already-due deadlines at broker
+publish admission produce an ordinary enqueue instead.
+
+This adds one event append per due batch using the configured event-log durability.
+It requires matching storage readers; older binaries cannot decode the new event.
+Existing logs remain readable, but histories missing past timer transitions can
+still need a verified baseline before automatic recovery selection.
+
 `inspect_recovery_pair_with_queue_replay` optionally reconstructs both queues at
 one common, exclusive `event_next` boundary, including the empty boundary zero.
 It applies sealed events in log order to isolated state and verifies both complete
