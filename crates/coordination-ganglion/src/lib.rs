@@ -25,6 +25,7 @@ use ganglion_openraft::{
 };
 use tokio::sync::watch;
 
+pub mod history_identity;
 pub mod promotion;
 pub mod recovery_witnesses;
 
@@ -1059,10 +1060,8 @@ impl GanglionCoordination {
 
     /// Add a queue to the cluster catalogue (forwarded merge; idempotent).
     pub async fn register_queue(&self, queue: &QueueIdentity) -> Result<(), OpenraftAdapterError> {
-        self.forward_merge(MetadataRaftCommand::RegisterResource {
-            resource: to_ganglion_resource(queue),
-        })
-        .await
+        self.forward_merge(history_identity::registration(to_ganglion_resource(queue))?)
+            .await
     }
 
     /// Remove a queue from the cluster catalogue (forwarded merge).
@@ -1070,10 +1069,22 @@ impl GanglionCoordination {
         &self,
         queue: &QueueIdentity,
     ) -> Result<(), OpenraftAdapterError> {
-        self.forward_merge(MetadataRaftCommand::DeregisterResource {
-            resource: to_ganglion_resource(queue),
-        })
-        .await
+        self.deregister_resource_incarnation(to_ganglion_resource(queue))
+            .await
+    }
+
+    async fn deregister_resource_incarnation(
+        &self,
+        resource: ganglion_core::ResourceIdentity,
+    ) -> Result<(), OpenraftAdapterError> {
+        let key = history_identity::key(&resource);
+        let expected = self.node
+            .read_committed(|snapshot| snapshot.attributes.get(&key).cloned());
+        // Keep this observation fixed through forwarding/retry. Retrying a
+        // rejected delete with a replacement's identity could erase new work.
+        self.forward_merge(MetadataRaftCommand::DeregisterResourceWithAttribute {
+            resource, key, expected,
+        }).await
     }
 
     /// The committed cluster queue catalogue (fibril-representable entries).
@@ -1092,10 +1103,8 @@ impl GanglionCoordination {
         &self,
         stream: &StreamIdentity,
     ) -> Result<(), OpenraftAdapterError> {
-        self.forward_merge(MetadataRaftCommand::RegisterResource {
-            resource: to_ganglion_stream_resource(stream),
-        })
-        .await
+        self.forward_merge(history_identity::registration(to_ganglion_stream_resource(stream))?)
+            .await
     }
 
     /// Remove a stream partition from the cluster catalogue (forwarded merge).
@@ -1103,10 +1112,8 @@ impl GanglionCoordination {
         &self,
         stream: &StreamIdentity,
     ) -> Result<(), OpenraftAdapterError> {
-        self.forward_merge(MetadataRaftCommand::DeregisterResource {
-            resource: to_ganglion_stream_resource(stream),
-        })
-        .await
+        self.deregister_resource_incarnation(to_ganglion_stream_resource(stream))
+            .await
     }
 
     /// The committed cluster stream catalogue (fibril-representable entries).
@@ -3984,7 +3991,14 @@ mod tests {
             .register_queue(&queue)
             .await
             .expect("register queue");
-        provider.register_queue(&queue).await.expect("idempotent");
+        let resource = to_ganglion_resource(&queue);
+        let incarnation = provider.node.read_committed(|snapshot|
+            history_identity::resource_incarnation(snapshot, &resource).unwrap().unwrap());
+        let (left, right) = tokio::join!(provider.register_queue(&queue), provider.register_queue(&queue));
+        left.expect("concurrent registration");
+        right.expect("concurrent registration");
+        assert_eq!(provider.node.read_committed(|snapshot|
+            history_identity::resource_incarnation(snapshot, &resource).unwrap().unwrap()), incarnation);
         assert_eq!(provider.registered_queues(), vec![queue.clone()]);
 
         provider
@@ -4032,6 +4046,8 @@ mod tests {
             Some("{\"v\":1}"),
             "attributes must survive controller writes"
         );
+        assert_eq!(provider.node.read_committed(|snapshot|
+            history_identity::resource_incarnation(snapshot, &resource).unwrap().unwrap()), incarnation);
         // The trait snapshot()/watch() view updates through the spawned watch
         // forwarder, so it lags the committed controller write by a task hop.
         // Wait bounded for the assignment to propagate instead of reading

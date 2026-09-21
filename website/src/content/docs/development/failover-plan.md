@@ -64,8 +64,11 @@ other platforms need durable metadata support before these operations are enable
 
 Exact queue checkpoint capture and bounded comparison from different checkpoint
 starts are implemented in [recovery sealing](/reliability/recovery-sealing/#queue-state-at-an-exact-boundary).
-Remaining proof must bind the snapshots to a durable resource incarnation and
-accepted recovery history, including owner restart within an unchanged assignment.
+New resource declarations now have a consensus incarnation ID bound into pending
+recovery transitions. Remaining proof must bind storage and snapshots to that
+incarnation and an accepted recovery history, including owner restart within an
+unchanged assignment. Existing resources still need a verified baseline; the
+catalogue ID alone supplies no history authority.
 A trusted, quorum-installed checkpoint can replace older history; indefinite
 retention of settled payloads is not required.
 

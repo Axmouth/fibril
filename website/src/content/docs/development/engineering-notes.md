@@ -10,6 +10,10 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Resource recreation and recovery identity
+
+New queue and stream declarations now register their incarnation ID atomically, so concurrent declarations retain one identity and recreation after retirement receives a new one. Conditional deletion protects identified replacements from a delayed old delete, and recovery seal authorization rejects changed or missing incarnation metadata. Consensus snapshot restart and transition tests cover these cases; storage lineage and writer admission remain in the [failover plan](/development/failover-plan/).
+
 ### Ordered application and exact checkpoints
 
 Queue events now finish actor application in log order, allowing snapshots to capture state with its actual exclusive event boundary. Interrupted application cannot be cleared by changing roles, and verified repeated follower batches skip already-applied events so NACK retries do not increment twice. Tests cover event zero, partial batches, cancelled captures, failed writes and restart; [checkpoint internals](/development/recovery-internals/) describes the boundary.

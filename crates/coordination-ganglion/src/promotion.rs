@@ -15,6 +15,10 @@ pub const PENDING_RECOVERY_PREFIX: &str = "fibril/pending-recovery/";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingRecovery {
     pub version: u32,
+    /// Declaration lifetime, when recorded at creation. Absence preserves legacy
+    /// transition serialization and remains an unresolved origin requirement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_incarnation: Option<crate::history_identity::ResourceIncarnation>,
     pub requested_generation: u64,
     pub previous: PartitionAssignment,
     pub proposed: PartitionAssignment,
@@ -91,6 +95,8 @@ pub(crate) fn retain_unproven_assignments(
             if pending.version != 1
                 || pending.previous != *previous
                 || pending.proposed.resource != *resource
+                || pending.resource_incarnation
+                    != crate::history_identity::resource_incarnation(committed, resource)?
             {
                 return Err("pending recovery does not match the active assignment".into());
             }
@@ -110,6 +116,9 @@ pub(crate) fn retain_unproven_assignments(
             .ok_or("assignment epoch exhausted")?;
         let pending = PendingRecovery {
             version: 1,
+            resource_incarnation: crate::history_identity::resource_incarnation(
+                committed, resource,
+            )?,
             requested_generation: desired.generation,
             previous: previous.clone(),
             proposed: replacement,
@@ -297,6 +306,8 @@ pub(crate) fn validate_seal_command(
         || pending.requested_generation > snapshot.generation
         || pending.previous.resource != resource
         || pending.proposed.resource != resource
+        || pending.resource_incarnation
+            != crate::history_identity::resource_incarnation(snapshot, &resource)?
         || snapshot.assignments.get(&resource) != Some(&pending.previous)
         || pending.previous.epoch.checked_add(1) != Some(pending.proposed.epoch)
         || pending.previous_write_nodes != write_requirement(&pending.previous)?
@@ -360,6 +371,57 @@ mod seal_tests {
             .assignments
             .insert(pending.previous.resource.clone(), pending.proposed.clone());
         assert!(validate_seal_command(&newer, "b", &command).is_err());
+    }
+
+    #[test]
+    fn seal_binds_incarnation_and_preserves_legacy_transition_encoding() {
+        let (mut snapshot, mut pending) = pending();
+        let legacy = serde_json::to_string(&pending).unwrap();
+        assert!(!legacy.contains("resource_incarnation"));
+        let decoded: PendingRecovery = serde_json::from_str(&legacy).unwrap();
+        assert_eq!(serde_json::to_string(&decoded).unwrap(), legacy);
+        let legacy_command = decoded.seal_command().unwrap();
+        let resource = pending.previous.resource.clone();
+        let identity = crate::history_identity::ResourceIncarnation {
+            version: 1,
+            resource: resource.clone(),
+            id: [1; 16],
+        };
+        pending.resource_incarnation = Some(identity.clone());
+        snapshot.attributes.insert(
+            crate::history_identity::key(&resource),
+            serde_json::to_string(&identity).unwrap(),
+        );
+        snapshot.attributes.insert(
+            pending_recovery_key(&resource),
+            serde_json::to_string(&pending).unwrap(),
+        );
+        let command = pending.seal_command().unwrap();
+        assert_ne!(command.transition, legacy_command.transition);
+        validate_seal_command(&snapshot, "b", &command).unwrap();
+        assert!(validate_seal_command(&snapshot, "b", &legacy_command).is_err());
+        for value in [
+            None,
+            Some("{torn".to_string()),
+            Some(
+                serde_json::to_string(&crate::history_identity::ResourceIncarnation {
+                    id: [2; 16],
+                    ..identity.clone()
+                })
+                .unwrap(),
+            ),
+        ] {
+            let mut stale = snapshot.clone();
+            let key = crate::history_identity::key(&resource);
+            if let Some(value) = value {
+                stale.attributes.insert(key, value);
+            } else {
+                stale.attributes.remove(&key);
+            }
+            assert!(validate_seal_command(&stale, "b", &command).is_err());
+            let mut desired = stale.clone();
+            assert!(retain_unproven_assignments(&stale, &mut desired).is_err());
+        }
     }
 
     #[test]

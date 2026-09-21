@@ -36,6 +36,26 @@ The codecs use `RSL1` and `RSO1` version markers and reject trailing or truncate
 data. These internal messages are experimental and require matching broker
 revisions. Ordinary client frames are unchanged.
 
+## Resource incarnation
+
+New catalogue declarations receive a versioned incarnation ID in the same
+consensus command that registers the queue or stream. Concurrent declarations
+retain the first ID. Deletion removes the ID with the catalogue entry and checks
+the observed value, so a delayed deletion cannot remove an identified replacement.
+Recreation after the old assignment is retired receives a new ID.
+
+Existing catalogue entries and resources with retiring assignments receive no
+new ID. Their origin remains unverified. Pending recovery transitions include an
+available incarnation ID in their digest; a changed, missing or malformed ID
+invalidates seal authorization. Legacy transitions without an ID retain their
+previous encoding.
+
+This ID identifies a catalogue lifetime. Binding it to storage, accepted history,
+writer sessions and an authoritative checkpoint is still required before it can
+support source selection. Same-epoch owner restart admission and legacy baseline
+establishment remain pending. The new consensus commands require matching
+metadata-node binaries; mixed-version rollout is not supported for this change.
+
 ## Explicit witness collection
 
 The explicit transport opens a fresh authenticated connection to the selected
