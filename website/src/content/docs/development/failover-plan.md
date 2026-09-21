@@ -70,10 +70,12 @@ history and writer-session IDs for pristine storage, and blocks ordinary access
 after restart while retaining recovery sealing. It is not enabled by ordinary
 broker creation. Explicit consensus preparation now fixes history/session IDs to
 an owner instance and assignment, and local preparation leaves admission closed.
-The receipt collector requires the owner and the fixed write threshold. Remaining
-work must establish fresh-resource enrollment eligibility, authenticate remote
-preparation, persist installed quorum evidence, bind snapshots and recovery
-installation to that authority, and readmit writers after recovery. Existing resources still need a verified baseline; the
+Explicit creation-time enrollment now withholds ordinary serving while preserving
+placement. Prepared quorum receipts persist under the immutable decision and
+require the owner and fixed write threshold. Remaining work must authenticate
+remote preparation, authorize activation against current storage/process
+instances, bind snapshots and recovery installation to that authority, and
+readmit writers after recovery. Existing resources still need a verified baseline; the
 catalogue ID alone supplies no history authority.
 A trusted, quorum-installed checkpoint can replace older history; indefinite
 retention of settled payloads is not required.

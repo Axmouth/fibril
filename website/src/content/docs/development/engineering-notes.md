@@ -10,9 +10,13 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Creation-time enrollment and durable preparation evidence
+
+Explicit enrollment now blocks ordinary serving from catalogue creation while preserving replica placement, and preparation requires that enrollment before it can certify an empty origin. Deletion retains a retired marker so the remaining assignment cannot accidentally regain legacy serving; exact quorum receipts persist across metadata restart without activating writers. Regressions cover placement stability, retirement/recreation, conflicting receipts and owner replacement ([initial preparation](/reliability/recovery-sealing/#initial-history-preparation)).
+
 ### Consensus preparation without writer admission
 
-Initial-history decisions now persist fixed history/session IDs bound to the owner instance and exact assignment. Replica preparation leaves storage non-writable; receipt collection deduplicates replies, requires the owner and blocks contradictory replica identities. A durable metadata restart regression covers rejection of the old owner grant, while quorum installation and activation remain pending ([initial preparation](/reliability/recovery-sealing/#initial-history-preparation)).
+Initial-history decisions persist fixed history/session IDs bound to the owner instance and exact assignment. Replica preparation leaves storage non-writable; receipt collection deduplicates replies, requires the owner and blocks contradictory replica identities. A durable metadata restart regression covers rejection of the old owner grant; writer activation and recovery readmission remain pending ([initial preparation](/reliability/recovery-sealing/#initial-history-preparation)).
 
 ### Storage history and writer restart
 

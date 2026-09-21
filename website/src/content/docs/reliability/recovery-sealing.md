@@ -88,8 +88,20 @@ binaries do not enforce this receipt, so bound stores require compatible binarie
 
 ## Initial history preparation
 
-Explicit coordination APIs now persist an immutable `Preparing` decision for a
-catalogued incarnation and its current assignment. The decision fixes the owner
+`register_initial_history_resource` explicitly enrolls a new queue or stream
+partition at catalogue creation. Its version-two incarnation is recorded in the
+same consensus operation. Ordinary owner, follower and client-topology projections
+withhold enrolled assignments; the placement controller retains them for replica
+preparation. Existing or retiring resources cannot acquire a fresh origin from
+empty local directories. Ordinary declarations retain their existing behavior.
+
+Enrolled deletion atomically retains a retired incarnation marker, keeping the
+assignment out of serving until placement removes it. Recreation after retirement
+gets a new ID, and a stale conditional deletion cannot erase the replacement.
+Malformed incarnation metadata also withholds the affected serving route.
+
+Explicit coordination APIs persist an immutable `Preparing` decision for an
+enrolled incarnation and its current assignment. The decision fixes the owner
 instance, history ID, writer-session ID and required write count. Repeated calls
 from that owner instance retain the committed IDs. A replacement provider using
 the same node name and assignment epoch must enter recovery readmission.
@@ -104,16 +116,20 @@ as empty preparations.
 
 The explicit receipt collector admits reports from the contacted replica, counts
 identical retries once, requires the owner alongside the write-count threshold,
-and blocks on contradictory process or storage-instance reports. A prepared
-quorum supplies no activation operation. Reports currently live in memory;
-persisted installation receipts, authenticated remote preparation, fresh
-activation and recovery readmission remain pending.
+and blocks on contradictory process or storage-instance reports. The original
+owner can persist the exact prepared quorum through a generation-and-attribute
+guarded consensus update. Identical retries preserve the record; conflicting
+receipts cannot overwrite it. The record survives metadata restart and remains
+historical evidence: activation still needs fresh authority for the recorded
+processes and storage instances. Prepared quorum evidence leaves serving and
+storage admission closed.
 
-These operations are not used by ordinary broker startup. Initial activation
-also needs proof that the resource was enrolled before legacy writes could occur;
-a catalogue incarnation and empty local directories cannot establish that after
-data loss. Existing resources require a verified baseline. Matching metadata
-binaries are required for the new guarded merge command.
+These operations are not used by ordinary broker startup. Authenticated remote
+preparation, writer activation, identity on live replication, recovery installation
+and readmission remain pending. Existing resources require a verified baseline.
+Matching broker and metadata binaries are required; older brokers do not enforce
+the enrollment projection and the retirement command requires updated metadata
+nodes. Mixed-version enrollment and downgrade are unsupported.
 
 ## Explicit witness collection
 

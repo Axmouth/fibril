@@ -15,6 +15,7 @@ use crate::{
 };
 
 const PREFIX: &str = "fibril/initial-history/";
+const QUORUM_PREFIX: &str = "fibril/initial-history-prepared-quorum/";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InitialHistoryPhase {
@@ -60,6 +61,35 @@ pub enum InitialHistoryProgress {
         received: usize,
         required: usize,
     },
+}
+
+/// Durable evidence of an exact preparation round. These are historical
+/// receipts, not proof that their processes still exist or permission to write.
+/// Activation must freshly authorize the same local storage/process instances.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InitialHistoryPreparedQuorum {
+    pub version: u32,
+    pub decision: [u8; 32],
+    pub reports: std::collections::BTreeMap<String, InitialHistoryLocalReceipt>,
+}
+
+impl InitialHistoryPreparedQuorum {
+    pub fn validate(
+        &self,
+        snapshot: &CoordinationSnapshot,
+        decision: &InitialHistoryDecision,
+    ) -> Result<(), String> {
+        if self.version != 1 || self.decision != decision.digest()? {
+            return Err("prepared quorum does not identify the initial decision".into());
+        }
+        let mut receipts = InitialHistoryReceiptSet::new(snapshot, decision.clone())?;
+        for (node, receipt) in &self.reports {
+            receipts.record(snapshot, node, receipt.clone())?;
+        }
+        receipts.prepared_quorum(snapshot)?;
+        Ok(())
+    }
 }
 
 /// Explicit, bounded-by-membership collection. Callers must obtain reports from
@@ -162,6 +192,23 @@ impl InitialHistoryReceiptSet {
             })
         }
     }
+
+    fn prepared_quorum(
+        &self,
+        snapshot: &CoordinationSnapshot,
+    ) -> Result<InitialHistoryPreparedQuorum, String> {
+        if !matches!(
+            self.progress(snapshot)?,
+            InitialHistoryProgress::PreparedQuorum { .. }
+        ) {
+            return Err("initial history requires the owner and a prepared write quorum".into());
+        }
+        Ok(InitialHistoryPreparedQuorum {
+            version: 1,
+            decision: self.decision.digest()?,
+            reports: self.reports.clone(),
+        })
+    }
 }
 
 fn validate_committed(
@@ -184,6 +231,13 @@ fn key(incarnation: &ResourceIncarnation) -> String {
     // Recreated resources have a different key; an old decision remains evidence.
     format!(
         "{PREFIX}{}",
+        serde_json::to_string(incarnation).expect("incarnation serializes")
+    )
+}
+
+fn quorum_key(incarnation: &ResourceIncarnation) -> String {
+    format!(
+        "{QUORUM_PREFIX}{}",
         serde_json::to_string(incarnation).expect("incarnation serializes")
     )
 }
@@ -223,6 +277,8 @@ impl InitialHistoryDecision {
         let resource = &self.incarnation.resource;
         validate_resource(resource)?;
         if self.version != 1
+            || self.incarnation.version != 2
+            || self.incarnation.retired
             || self.owner_process == [0; 16]
             || self.binding.accepted_history == [0; 16]
             || self.binding.writer_session == [0; 16]
@@ -296,6 +352,126 @@ fn proposed_decision(
 }
 
 impl GanglionCoordination {
+    /// Read persisted preparation evidence. Validation against the local snapshot
+    /// establishes identity consistency only; this is not a fresh admission check.
+    pub fn prepared_initial_history_quorum(
+        &self,
+        decision: &InitialHistoryDecision,
+    ) -> Result<Option<InitialHistoryPreparedQuorum>, OpenraftAdapterError> {
+        let snapshot = self.node.committed_snapshot();
+        validate_committed(&snapshot, decision).map_err(error)?;
+        let Some(raw) = snapshot.attributes.get(&quorum_key(&decision.incarnation)) else {
+            return Ok(None);
+        };
+        let quorum: InitialHistoryPreparedQuorum = serde_json::from_str(raw).map_err(error)?;
+        quorum.validate(&snapshot, decision).map_err(error)?;
+        Ok(Some(quorum))
+    }
+
+    /// Commit exactly the authenticated receipts collected for this owner round.
+    /// Retrying a lost reply keeps the first record; a different receipt set
+    /// cannot replace it. No storage admission or serving route is published.
+    pub async fn persist_initial_history_quorum(
+        &self,
+        receipts: &InitialHistoryReceiptSet,
+    ) -> Result<InitialHistoryPreparedQuorum, OpenraftAdapterError> {
+        let decision = &receipts.decision;
+        if decision.assignment.owner != self.node_id
+            || decision.owner_process != self.history_process
+        {
+            return Err(error(
+                "only the original owner process may persist its prepared quorum",
+            ));
+        }
+        for _ in 0..8 {
+            let snapshot = self.node.committed_snapshot();
+            let quorum = receipts.prepared_quorum(&snapshot).map_err(error)?;
+            let key = quorum_key(&decision.incarnation);
+            let expected = snapshot.attributes.get(&key).cloned();
+            if let Some(raw) = &expected {
+                let existing: InitialHistoryPreparedQuorum =
+                    serde_json::from_str(raw).map_err(error)?;
+                existing.validate(&snapshot, decision).map_err(error)?;
+                if existing != quorum {
+                    tracing::warn!(node_id = self.node_id, topic = decision.incarnation.resource.name,
+                        partition = decision.incarnation.resource.partition,
+                        "initial history receipt set conflicts with persisted quorum; recovery required");
+                    return Err(error(
+                        "prepared quorum differs from the persisted receipts; recovery required",
+                    ));
+                }
+            }
+            let value = serde_json::to_string(&quorum).map_err(error)?;
+            match self
+                .forward_command(MetadataRaftCommand::CompareAndSetAttributeGuarded {
+                    expected_generation: snapshot.generation,
+                    key: key.clone(),
+                    expected,
+                    value,
+                })
+                .await
+            {
+                Ok(response) => {
+                    quorum
+                        .validate(&response.snapshot, decision)
+                        .map_err(error)?;
+                    let stored: InitialHistoryPreparedQuorum =
+                        serde_json::from_str(response.snapshot.attributes.get(&key).ok_or_else(
+                            || error("prepared quorum missing from consensus response"),
+                        )?)
+                        .map_err(error)?;
+                    if stored != quorum {
+                        return Err(error("consensus response has different prepared receipts"));
+                    }
+                    return Ok(quorum);
+                }
+                Err(
+                    OpenraftAdapterError::GenerationMismatch { .. }
+                    | OpenraftAdapterError::AttributeMismatch { .. },
+                ) => {
+                    tokio::task::yield_now().await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(error(
+            "prepared quorum raced metadata changes; retry with backoff",
+        ))
+    }
+
+    /// Explicit opt-in for a new resource. Enrollment and incarnation are one
+    /// atomic creation attribute; an existing declaration or retiring assignment
+    /// can never be upgraded into an empty origin. Enrolled resources remain
+    /// absent from ordinary broker/replication/topology serving projections.
+    pub async fn register_initial_history_resource(
+        &self,
+        resource: &ResourceIdentity,
+    ) -> Result<ResourceIncarnation, OpenraftAdapterError> {
+        validate_resource(resource).map_err(error)?;
+        // Avoid reviving a known retired catalogue entry on an invalid retry.
+        // The atomic registration still decides origin eligibility if this
+        // local view races another writer; its returned identity is rechecked.
+        let snapshot = self.node.committed_snapshot();
+        let observed = resource_incarnation(&snapshot, resource).map_err(error)?;
+        if (snapshot.resources.contains(resource) || snapshot.assignments.contains_key(resource))
+            && !observed
+                .as_ref()
+                .is_some_and(|identity| identity.version == 2 && !identity.retired)
+        {
+            return Err(error("existing or retiring resource requires a verified recovery baseline; fresh enrollment refused"));
+        }
+        let response = self
+            .forward_command(crate::history_identity::enrolled_registration(
+                resource.clone(),
+            )?)
+            .await?;
+        let incarnation = resource_incarnation(&response.snapshot, resource)
+            .map_err(error)?
+            .filter(|identity| identity.version == 2 && !identity.retired)
+            .ok_or_else(|| error("existing or retiring resource requires a verified recovery baseline; fresh enrollment refused"))?;
+        Ok(incarnation)
+    }
+
     /// Persist one initial-history preparation decision, or resume this provider's
     /// exact decision. A replacement provider cannot reuse an old owner grant.
     pub async fn prepare_initial_history(
@@ -419,9 +595,10 @@ mod tests {
         snapshot.resources.insert(resource.clone());
         snapshot.assignments.insert(resource.clone(), assignment);
         let identity = ResourceIncarnation {
-            version: 1,
+            version: 2,
             resource: resource.clone(),
             id: [1; 16],
+            retired: false,
         };
         snapshot.attributes.insert(
             crate::history_identity::key(&resource),
@@ -552,6 +729,27 @@ mod tests {
                 required: 2
             }
         ));
+        let quorum = set.prepared_quorum(&snapshot).unwrap();
+        quorum.validate(&snapshot, &decision).unwrap();
+        for mutation in 0..5 {
+            let mut invalid = quorum.clone();
+            match mutation {
+                0 => {
+                    invalid.reports.remove("a");
+                }
+                1 => {
+                    invalid.reports.remove("b");
+                    invalid.reports.remove("c");
+                }
+                2 => invalid.decision = [9; 32],
+                3 => invalid.version = 2,
+                _ => invalid.reports.get_mut("b").unwrap().node_id = "a".into(),
+            }
+            assert!(
+                invalid.validate(&snapshot, &decision).is_err(),
+                "quorum mutation {mutation}"
+            );
+        }
         let mut owner_set = InitialHistoryReceiptSet::new(&snapshot, decision.clone()).unwrap();
         owner_set.record(&snapshot, "a", receipt("a")).unwrap();
         owner_set.record(&snapshot, "b", receipt("b")).unwrap();
@@ -578,9 +776,10 @@ mod tests {
         let decision = proposed_decision(&snapshot, &resource, "a", [2; 16]).unwrap();
         let other = ResourceIdentity::new(crate::QUEUE_NAMESPACE, "other", 0, None::<String>);
         let incarnation = ResourceIncarnation {
-            version: 1,
+            version: 2,
             resource: other.clone(),
             id: [8; 16],
+            retired: false,
         };
         snapshot.resources.insert(other.clone());
         snapshot.assignments.insert(
@@ -600,6 +799,17 @@ mod tests {
     #[test]
     fn preparation_rejects_legacy_malformed_and_noncanonical_resources() {
         let (mut snapshot, resource) = fixture(false);
+        let mut legacy = snapshot.clone();
+        let mut incarnation = resource_incarnation(&legacy, &resource).unwrap().unwrap();
+        incarnation.version = 1;
+        legacy.attributes.insert(
+            crate::history_identity::key(&resource),
+            serde_json::to_string(&incarnation).unwrap(),
+        );
+        assert!(
+            proposed_decision(&legacy, &resource, "a", [2; 16]).is_err(),
+            "a catalogue ID does not prove creation-time enrollment"
+        );
         let decision = proposed_decision(&snapshot, &resource, "a", [2; 16]).unwrap();
         snapshot
             .attributes
@@ -620,6 +830,35 @@ mod tests {
             ResourceIdentity::new(crate::STREAM_NAMESPACE, "q", 0, Some("g".into())),
         ] {
             assert!(validate_resource(&bad).is_err());
+        }
+    }
+
+    #[test]
+    fn serving_projection_withholds_enrolled_and_corrupt_queue_and_stream_assignments() {
+        for stream in [false, true] {
+            let (mut snapshot, resource) = fixture(stream);
+            let hidden = crate::to_fibril_snapshot(&snapshot);
+            assert!(hidden.assignments.is_empty());
+            assert!(hidden.stream_assignments.is_empty());
+            let placement = crate::project_snapshot(&snapshot, false);
+            assert_eq!(
+                placement.assignments.len() + placement.stream_assignments.len(),
+                1
+            );
+            snapshot
+                .attributes
+                .insert(crate::history_identity::key(&resource), "{torn".into());
+            let hidden = crate::to_fibril_snapshot(&snapshot);
+            assert!(hidden.assignments.is_empty());
+            assert!(hidden.stream_assignments.is_empty());
+            snapshot
+                .attributes
+                .remove(&crate::history_identity::key(&resource));
+            let legacy = crate::to_fibril_snapshot(&snapshot);
+            assert_eq!(
+                legacy.assignments.len() + legacy.stream_assignments.len(),
+                1
+            );
         }
     }
 
@@ -657,20 +896,125 @@ mod tests {
             .unwrap();
         let provider = GanglionCoordination::new("a", node);
         let queue = QueueIdentity::new("q", Partition::new(0), None);
-        provider.register_queue(&queue).await.unwrap();
         let resource = crate::to_ganglion_resource(&queue);
+        let (left, right) = tokio::join!(
+            provider.register_initial_history_resource(&resource),
+            provider.register_initial_history_resource(&resource),
+        );
+        let enrolled = left.unwrap();
+        assert_eq!(enrolled, right.unwrap());
+        assert_eq!(enrolled.version, 2);
+        // An ordinary registration retry cannot downgrade enrollment.
+        provider.register_queue(&queue).await.unwrap();
+        assert_eq!(
+            provider
+                .register_initial_history_resource(&resource)
+                .await
+                .unwrap(),
+            enrolled
+        );
+        let legacy_queue = QueueIdentity::new("legacy", Partition::new(0), None);
+        provider.register_queue(&legacy_queue).await.unwrap();
+        let legacy_resource = crate::to_ganglion_resource(&legacy_queue);
+        assert!(provider
+            .register_initial_history_resource(&legacy_resource)
+            .await
+            .is_err());
+        let stream = ResourceIdentity::new(crate::STREAM_NAMESPACE, "events", 0, None::<String>);
+        provider
+            .register_initial_history_resource(&stream)
+            .await
+            .unwrap();
+        provider
+            .register_self(&crate::NodeInfo {
+                node_id: "a".into(),
+                broker_addr: "127.0.0.1:9000".into(),
+                admin_addr: None,
+            })
+            .await
+            .unwrap();
+        let live = provider.live_nodes(Duration::from_secs(30));
+        for _ in 0..2 {
+            let serving = provider
+                .control_iteration(
+                    &fibril_broker::coordination::DeterministicPartitionPlacement,
+                    &provider.registered_queues(),
+                    &crate::DeterministicStreamPlacement,
+                    &provider.registered_streams(),
+                    0,
+                    0,
+                    crate::ReplicationDurabilityPolicy::LocalDurable,
+                    &live,
+                    8,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!serving.assignments.contains_key(&queue));
+            assert!(serving.assignments.contains_key(&legacy_queue));
+            assert!(serving.stream_assignments.is_empty());
+        }
+        let placed = provider.node.committed_snapshot();
+        assert_eq!(placed.assignments.len(), 3);
+        assert!(
+            provider.pending_recoveries().unwrap().is_empty(),
+            "serving quarantine must not make placement rediscover or reassign a resource"
+        );
+        let mut watch = crate::Coordination::watch(&provider);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while watch.borrow_and_update().generation < placed.generation {
+                watch.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!crate::Coordination::owns_queue(
+            &provider,
+            "q",
+            Partition::new(0),
+            None
+        ));
+        assert!(crate::Coordination::owns_queue(
+            &provider,
+            "legacy",
+            Partition::new(0),
+            None
+        ));
+        assert!(!fibril_broker::broker::StreamOwnership::owns_stream(
+            &provider,
+            "events",
+            Partition::new(0)
+        ));
         let mut snapshot = provider.node.committed_snapshot();
         let generation = snapshot.generation;
         let mut assignment =
             PartitionAssignment::new(resource.clone(), "a", vec!["b".into(), "c".into()], 7);
         assignment.durability = ReplicationDurabilityPolicy::MajorityDurable;
         snapshot.assignments.insert(resource.clone(), assignment);
+        let retiring = ResourceIdentity::new(crate::QUEUE_NAMESPACE, "retiring", 0, None::<String>);
+        snapshot.assignments.insert(
+            retiring.clone(),
+            PartitionAssignment::new(retiring.clone(), "a", vec![], 1),
+        );
         snapshot.generation += 1;
         provider
             .node
             .write_snapshot_guarded(generation, snapshot)
             .await
             .unwrap();
+        assert!(provider
+            .register_initial_history_resource(&retiring)
+            .await
+            .is_err());
+        assert!(
+            resource_incarnation(&provider.node.committed_snapshot(), &retiring)
+                .unwrap()
+                .is_none()
+        );
+        assert!(provider
+            .prepare_initial_history(&legacy_resource)
+            .await
+            .is_err());
 
         let (left, right) = tokio::join!(
             provider.prepare_initial_history(&resource),
@@ -703,6 +1047,93 @@ mod tests {
         );
         assert_eq!(receipt.storage.binding, decision.binding);
         assert_eq!(receipt.decision, decision.digest().unwrap());
+        let mut partial =
+            InitialHistoryReceiptSet::new(&provider.node.committed_snapshot(), decision.clone())
+                .unwrap();
+        partial
+            .record(&provider.node.committed_snapshot(), "a", receipt)
+            .unwrap();
+        assert!(provider
+            .persist_initial_history_quorum(&partial)
+            .await
+            .is_err());
+        assert!(provider
+            .prepared_initial_history_quorum(&decision)
+            .unwrap()
+            .is_none());
+
+        // A real local preparation suffices for this owner-only stream. Queue
+        // majority/owner requirements are checked above and in the collector test.
+        let stream_decision = provider.prepare_initial_history(&stream).await.unwrap();
+        assert_eq!(stream_decision.required_write_nodes, 1);
+        let stream_receipt = provider
+            .prepare_local_initial_history(&stream_decision, &engine)
+            .await
+            .unwrap();
+        let mut complete = InitialHistoryReceiptSet::new(
+            &provider.node.committed_snapshot(),
+            stream_decision.clone(),
+        )
+        .unwrap();
+        complete
+            .record(
+                &provider.node.committed_snapshot(),
+                "a",
+                stream_receipt.clone(),
+            )
+            .unwrap();
+        let persisted = provider
+            .persist_initial_history_quorum(&complete)
+            .await
+            .unwrap();
+        assert_eq!(
+            provider
+                .persist_initial_history_quorum(&complete)
+                .await
+                .unwrap(),
+            persisted
+        );
+        assert_eq!(
+            provider
+                .prepared_initial_history_quorum(&stream_decision)
+                .unwrap(),
+            Some(persisted.clone())
+        );
+        let mut changed = InitialHistoryReceiptSet::new(
+            &provider.node.committed_snapshot(),
+            stream_decision.clone(),
+        )
+        .unwrap();
+        let mut changed_receipt = stream_receipt;
+        changed_receipt.storage.storage_instance = [9; 16];
+        changed
+            .record(&provider.node.committed_snapshot(), "a", changed_receipt)
+            .unwrap();
+        assert!(
+            provider
+                .persist_initial_history_quorum(&changed)
+                .await
+                .is_err(),
+            "a replacement receipt cannot overwrite the original quorum"
+        );
+        assert_eq!(
+            provider
+                .prepared_initial_history_quorum(&stream_decision)
+                .unwrap(),
+            Some(persisted.clone())
+        );
+        assert!(
+            crate::to_fibril_snapshot(&provider.node.committed_snapshot())
+                .stream_assignments
+                .is_empty(),
+            "persisted preparation evidence cannot expose serving routes"
+        );
+        assert!(matches!(
+            engine
+                .ensure_queue_owner_epoch("events", 0, None, Some(stream_decision.assignment.epoch))
+                .await,
+            Err(StromaError::HistoryAdmissionRequired { .. })
+        ));
         assert!(matches!(
             engine.ensure_queue_owner_epoch("q", 0, None, Some(7)).await,
             Err(StromaError::HistoryAdmissionRequired { .. })
@@ -734,6 +1165,22 @@ mod tests {
         let reopened = GanglionCoordination::new("a", node);
         let snapshot = reopened.node.committed_snapshot();
         assert_eq!(
+            reopened
+                .prepared_initial_history_quorum(&stream_decision)
+                .unwrap(),
+            Some(persisted)
+        );
+        assert!(
+            reopened
+                .persist_initial_history_quorum(&complete)
+                .await
+                .is_err(),
+            "persisted receipts do not authorize a replacement owner instance"
+        );
+        assert!(crate::to_fibril_snapshot(&snapshot)
+            .stream_assignments
+            .is_empty());
+        assert_eq!(
             serde_json::from_str::<InitialHistoryDecision>(
                 &snapshot.attributes[&key(&decision.incarnation)]
             )
@@ -760,6 +1207,62 @@ mod tests {
             Some(decision.binding)
         );
         engine.shutdown().await.unwrap();
+        let stream_identity = crate::StreamIdentity::new("events", Partition::new(0));
+        reopened.deregister_stream(&stream_identity).await.unwrap();
+        let retired_snapshot = reopened.node.committed_snapshot();
+        let retired_identity = resource_incarnation(&retired_snapshot, &stream)
+            .unwrap()
+            .unwrap();
+        assert!(retired_identity.retired);
+        assert!(!retired_snapshot.resources.contains(&stream));
+        assert!(retired_snapshot.assignments.contains_key(&stream));
+        assert!(crate::to_fibril_snapshot(&retired_snapshot)
+            .stream_assignments
+            .is_empty());
+        assert!(reopened
+            .register_initial_history_resource(&stream)
+            .await
+            .is_err());
+        assert!(!reopened
+            .node
+            .committed_snapshot()
+            .resources
+            .contains(&stream));
+        assert!(reopened
+            .prepared_initial_history_quorum(&stream_decision)
+            .is_err());
+        // Once placement has removed the old assignment, recreation receives a
+        // different origin. The old conditional delete cannot erase that origin.
+        let mut removed = retired_snapshot.clone();
+        removed.assignments.remove(&stream);
+        removed.generation += 1;
+        reopened
+            .node
+            .write_snapshot_guarded(retired_snapshot.generation, removed)
+            .await
+            .unwrap();
+        let replacement = reopened
+            .register_initial_history_resource(&stream)
+            .await
+            .unwrap();
+        assert_ne!(replacement.id, retired_identity.id);
+        assert!(!replacement.retired);
+        let stale_delete = reopened
+            .forward_command(MetadataRaftCommand::DeregisterResourceReplacingAttribute {
+                resource: stream.clone(),
+                key: crate::history_identity::key(&stream),
+                expected: Some(serde_json::to_string(&retired_identity).unwrap()),
+                value: serde_json::to_string(&retired_identity).unwrap(),
+            })
+            .await;
+        assert!(matches!(
+            stale_delete,
+            Err(OpenraftAdapterError::AttributeMismatch { .. })
+        ));
+        assert_eq!(
+            resource_incarnation(&reopened.node.committed_snapshot(), &stream).unwrap(),
+            Some(replacement)
+        );
         reopened.node.shutdown().await.unwrap();
         reopened.forwarder.abort();
         drop(reopened);

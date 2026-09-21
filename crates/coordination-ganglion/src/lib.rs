@@ -749,6 +749,15 @@ pub fn to_ganglion_snapshot(
 /// skipped rather than failing the whole snapshot: a coordination consumer
 /// must keep operating on the entries it understands.
 pub fn to_fibril_snapshot(snapshot: &ganglion_core::CoordinationSnapshot) -> CoordinationSnapshot {
+    project_snapshot(snapshot, true)
+}
+
+/// Placement must retain enrolled resources while serving keeps them fenced.
+/// This projection is private so brokers cannot accidentally use it for admission.
+fn project_snapshot(
+    snapshot: &ganglion_core::CoordinationSnapshot,
+    serving: bool,
+) -> CoordinationSnapshot {
     let nodes: HashMap<String, NodeInfo> = snapshot
         .nodes
         .iter()
@@ -776,6 +785,9 @@ pub fn to_fibril_snapshot(snapshot: &ganglion_core::CoordinationSnapshot) -> Coo
         .iter()
         .filter_map(|(resource, assignment)| {
             let queue = to_fibril_queue(resource)?;
+            if serving && !history_identity::permits_legacy_serving(snapshot, resource) {
+                return None;
+            }
             let mut mapped = PartitionAssignment::new(
                 queue.clone(),
                 assignment.owner.clone(),
@@ -794,6 +806,9 @@ pub fn to_fibril_snapshot(snapshot: &ganglion_core::CoordinationSnapshot) -> Coo
         .iter()
         .filter_map(|(resource, assignment)| {
             let stream = to_fibril_stream(resource)?;
+            if serving && !history_identity::permits_legacy_serving(snapshot, resource) {
+                return None;
+            }
             Some((
                 stream.clone(),
                 StreamAssignment::new(
@@ -1082,13 +1097,22 @@ impl GanglionCoordination {
         resource: ganglion_core::ResourceIdentity,
     ) -> Result<(), OpenraftAdapterError> {
         let key = history_identity::key(&resource);
-        let expected = self.node
-            .read_committed(|snapshot| snapshot.attributes.get(&key).cloned());
+        let (expected, incarnation) = self.node.read_committed(|snapshot| {
+            (snapshot.attributes.get(&key).cloned(), history_identity::resource_incarnation(snapshot, &resource))
+        });
+        let incarnation = incarnation.map_err(OpenraftAdapterError::Storage)?;
         // Keep this observation fixed through forwarding/retry. Retrying a
         // rejected delete with a replacement's identity could erase new work.
-        self.forward_merge(MetadataRaftCommand::DeregisterResourceWithAttribute {
-            resource, key, expected,
-        }).await
+        let command = if let Some(mut identity) = incarnation.filter(|identity| identity.version == 2) {
+            identity.retired = true;
+            MetadataRaftCommand::DeregisterResourceReplacingAttribute {
+                resource, key, expected,
+                value: serde_json::to_string(&identity).map_err(|e| OpenraftAdapterError::Storage(e.to_string()))?,
+            }
+        } else {
+            MetadataRaftCommand::DeregisterResourceWithAttribute { resource, key, expected }
+        };
+        self.forward_merge(command).await
     }
 
     /// The committed cluster queue catalogue (fibril-representable entries).
@@ -2704,7 +2728,7 @@ impl GanglionCoordination {
         let mut attempts = 0;
         loop {
             let committed = self.node.committed_snapshot();
-            let fibril_committed = to_fibril_snapshot(&committed);
+            let fibril_committed = project_snapshot(&committed, false);
 
             // Draining nodes leave the placement inputs entirely: nothing new
             // lands on them (which also keeps a concurrent repartition from
@@ -2729,7 +2753,7 @@ impl GanglionCoordination {
             // plan; assignments stay put until a node finishes draining or a
             // non-draining node appears.
             if placement_nodes.is_empty() {
-                return Ok(Some(fibril_committed));
+                return Ok(Some(to_fibril_snapshot(&committed)));
             }
 
             let mut plan = planner

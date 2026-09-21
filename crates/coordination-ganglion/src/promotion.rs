@@ -386,6 +386,7 @@ mod seal_tests {
             version: 1,
             resource: resource.clone(),
             id: [1; 16],
+            retired: false,
         };
         pending.resource_incarnation = Some(identity.clone());
         snapshot.attributes.insert(
