@@ -3662,3 +3662,35 @@ mod bound_seal_tests {
         assert!(encode_recovery_seal_ok(1,&reply).is_err());
     }
 }
+
+pub fn encode_recovery_transfer(id:u64, req:&crate::RecoveryTransfer, reply:bool) -> WireResult<Frame> {
+    if req.body.len()+8 > crate::MAX_RECOVERY_TRANSFER_FRAME_BYTES {return Err(WireError::InvalidRecordSequence("recovery transfer exceeds size limit"));}
+    let mut out=payload_builder(b"RXT1"); put_bytes(&mut out,&req.body)?;
+    Ok(frame(if reply {Op::RecoveryTransferOk} else {Op::RecoveryTransfer},id,out.freeze()))
+}
+pub fn decode_recovery_transfer(f:&Frame,reply:bool) -> WireResult<crate::RecoveryTransfer> {
+    expect_op(f,if reply {Op::RecoveryTransferOk} else {Op::RecoveryTransfer})?;
+    if f.payload.len()>crate::MAX_RECOVERY_TRANSFER_FRAME_BYTES {return Err(WireError::InvalidRecordSequence("recovery transfer exceeds size limit"));}
+    let mut r=Reader::new(&f.payload); r.expect_magic(b"RXT1","recovery transfer")?;
+    let body=r.bytes()?.to_vec();r.finish()?;Ok(crate::RecoveryTransfer {body})
+}
+
+#[cfg(test)]
+mod recovery_transfer_tests {
+    use super::*;
+    #[test]
+    fn recovery_transfer_codec_rejects_truncation_wrong_op_and_trailing_bytes() {
+        let payload=crate::RecoveryTransfer {body:vec![0,1,255,42]};
+        for reply in [false,true] {
+            let encoded=encode_recovery_transfer(9,&payload,reply).unwrap();
+            assert_eq!(decode_recovery_transfer(&encoded,reply).unwrap(),payload);
+            assert!(decode_recovery_transfer(&encoded,!reply).is_err());
+            for len in 0..encoded.payload.len() {
+                let mut short=encoded.clone(); short.payload=short.payload.slice(..len);
+                assert!(decode_recovery_transfer(&short,reply).is_err());
+            }
+            let mut trailing=encoded.clone();let mut body=encoded.payload.to_vec();body.push(0);trailing.payload=body.into();
+            assert!(decode_recovery_transfer(&trailing,reply).is_err());
+        }
+    }
+}

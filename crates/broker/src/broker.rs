@@ -493,6 +493,16 @@ pub trait QueueOwnership: std::fmt::Debug + Send + Sync {
         Box::pin(async { Err("coordinated initial history preparation is unavailable".into()) })
     }
 
+    fn authorize_recovery_transfer<'a>(&'a self, _command: &'a crate::recovery_transfer::QueueRecoveryCommand) -> futures::future::BoxFuture<'a, Result<crate::recovery_transfer::QueueRecoveryAuthorization, String>> {
+        Box::pin(async { Err("coordinated recovery transfer is unavailable".into()) })
+    }
+    fn record_recovery_installation<'a>(&'a self, _command: &'a crate::recovery_transfer::QueueRecoveryCommand, _receipt: &'a crate::recovery_transfer::QueueRecoveryLocalReceipt) -> futures::future::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async { Err("coordinated recovery installation is unavailable".into()) })
+    }
+    fn authorize_recovery_admission<'a>(&'a self, _command: &'a crate::recovery_transfer::QueueRecoveryCommand) -> futures::future::BoxFuture<'a, Result<crate::queue_engine::PreparedQueueRecovery, String>> {
+        Box::pin(async { Err("coordinated recovery admission is unavailable".into()) })
+    }
+
     /// Return this replica's node identity after consensus-backed authorization.
     /// Standalone and providers without a recovery protocol must refuse it.
     fn authorize_recovery_seal<'a>(
@@ -1538,6 +1548,7 @@ pub struct Broker<
     pub(crate) task_group: Arc<TaskGroup>,
 
     metrics: Option<Arc<BrokerStats>>,
+    pub(crate) recovery_transfer_stage: Arc<tokio::sync::Mutex<Option<crate::recovery_transfer::RecoveryTransferStage>>>,
     pub(crate) initial_history_flight:
         Arc<std::sync::Mutex<Option<crate::initial_history::InitialHistoryFlight>>>,
     pub(crate) recovery_seal_flight:
@@ -1778,6 +1789,7 @@ impl<
             settings_epoch: AtomicU64::new(1),
             task_group: Arc::new(TaskGroup::new()),
             metrics,
+            recovery_transfer_stage: Arc::new(tokio::sync::Mutex::new(None)),
             initial_history_flight: Arc::new(std::sync::Mutex::new(None)),
             recovery_seal_flight: Arc::new(std::sync::Mutex::new(None)),
             ownership,
@@ -2265,6 +2277,8 @@ impl<
         Ok(())
     }
 
+    pub fn is_shutting_down(&self) -> bool { self.shutdown_publishers.is_cancelled() }
+
     pub async fn shutdown(&self) {
         self.shutdown_publishers.cancel();
         self.shutdown_consumers.cancel();
@@ -2273,6 +2287,7 @@ impl<
         self.shutdown_queue_eviction.cancel();
         self.stop_all_follower_replication_workers().await;
         self.task_group.shutdown().await;
+        self.recovery_transfer_stage.lock().await.take();
         self.engine
             .shutdown()
             .await
@@ -2328,6 +2343,7 @@ impl<
         self.task_group.shutdown().await;
 
         // Shutdown engine
+        self.recovery_transfer_stage.lock().await.take();
         if let Err(e) = self.engine.shutdown().await {
             tracing::error!("engine shutdown error: {:?}", e);
         }

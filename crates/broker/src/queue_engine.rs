@@ -19,7 +19,7 @@ pub use stroma_core::{
     QueuePromotionOutcome, RecoveryMismatchPolicy, ReplicatedAppendOutcome, ReplicatedEventBatch,
     ReplicatedMessageBatch, ReplicatedQueueApplyOutcome, RetentionConfig, SnapshotConfig, Stroma,
     StromaError, StromaEvent, StromaKeratinConfig, StorageHistoryBinding, PreparedStorageHistory,
-    QueueRecoveryStage, QueueRecoveryStageSpec, QueueRecoveryStageReceipt, RecoveryStageLimits,
+    PreparedQueueRecovery, QueueRecoveryStage, QueueRecoveryStageSpec, QueueRecoveryStageReceipt, RecoveryStageLimits,
 };
 use tokio::sync::Notify;
 
@@ -606,6 +606,16 @@ impl StromaEngine {
         &self, spec: QueueRecoveryStageSpec, limits: RecoveryStageLimits,
     ) -> Result<QueueRecoveryStage, StromaError> {
         self.inner.resume_queue_recovery_stage(spec, limits).await
+    }
+
+    pub async fn install_queue_recovery_stage(&self, spec: QueueRecoveryStageSpec, seal: crate::recovery::RecoverySealRequest, stage: &QueueRecoveryStage) -> Result<PreparedQueueRecovery, StromaError> {
+        self.inner.install_queue_recovery_stage(spec, seal, stage).await
+    }
+    pub fn verify_prepared_queue_recovery(&self, prepared: &PreparedQueueRecovery) -> Result<(), StromaError> {
+        self.inner.verify_prepared_queue_recovery(prepared)
+    }
+    pub async fn admit_prepared_queue_recovery(&self, prepared: PreparedQueueRecovery) -> Result<(), StromaError> {
+        self.inner.admit_prepared_queue_recovery(prepared).await
     }
 
     /// Inspect local identity without granting access or opening either log.

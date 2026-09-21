@@ -3,6 +3,8 @@
 //! (protocol<->coordination adapter bridges, config->settings mapping); the
 //! reusable coordination primitives live in ganglion.
 
+pub mod recovery_driver;
+
 use std::collections::BTreeMap;
 use std::num::ParseIntError;
 use std::sync::{Arc, RwLock};
@@ -151,6 +153,7 @@ pub struct TcpGanglionParts {
 /// The binary currently lets these tasks run until process shutdown. Tests can
 /// keep the handles and abort them explicitly.
 pub struct GanglionBrokerTaskHandles {
+    pub recovery: tokio::task::JoinHandle<()>,
     pub heartbeat: tokio::task::JoinHandle<()>,
     pub cohort_controller: tokio::task::JoinHandle<()>,
     pub cohort_owner_watcher: tokio::task::JoinHandle<()>,
@@ -1103,6 +1106,7 @@ pub fn spawn_ganglion_broker_tasks(
     if let Some(connector) = peer_tls {
         resolver_cfg = resolver_cfg.with_tls(connector);
     }
+    let recovery = recovery_driver::spawn(parts.coordination.clone(),broker.clone(),resolver_cfg.clone());
     let resolver = Arc::new(
         fibril_protocol::v1::replication::CoordinationProtocolOwnerPeerResolver::with_config(
             parts.coordination.clone(),
@@ -1359,6 +1363,7 @@ pub fn spawn_ganglion_broker_tasks(
     });
 
     GanglionBrokerTaskHandles {
+        recovery,
         heartbeat,
         cohort_controller,
         cohort_owner_watcher,

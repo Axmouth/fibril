@@ -10,6 +10,14 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Recovery installation and quorum activation
+
+Recovery builds a verified storage generation and atomically publishes its route while retaining the old sealed source. Exact process/storage receipts gate new-quorum activation and local admission; bounded authenticated transfer can continue from a completed stage after source loss. Linux crash tests, resumed majority confirmations and consecutive recoveries cover the installed path; ordinary enrollment remains a rollout gate.
+
+### Installed snapshot materialization
+
+The first in-process installation attempt registered the replacement as a new queue, so the actor skipped its saved snapshot despite retaining the payload log. Installation now publishes an existing-storage registry entry under lifecycle serialization. An end-to-end regression performs two recoveries, resumes publishing and verifies delivery of every confirmed message.
+
 ### Resumable recovery staging
 
 Selected queue state and payloads can now be staged in a separate native log while the old sealed source stays readable. Exact page retries, immutable metadata and sequential disk verification preserve the selected baseline through restart; four SIGKILL boundaries and authenticated transfer are covered. A fresh consensus plan check authorizes staging, with replacement and writer admission remaining separate gates.

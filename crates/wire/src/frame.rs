@@ -30,6 +30,7 @@ impl Decoder for ProtoCodec {
         let _version = peek.get_u16();
         let opcode = peek.get_u16();
         let recovery_limit = match opcode {
+            x if x == crate::Op::RecoveryTransfer as u16 || x == crate::Op::RecoveryTransferOk as u16 => Some(crate::MAX_RECOVERY_TRANSFER_FRAME_BYTES),
             x if x == crate::Op::HistoryReplication as u16 => Some(crate::MAX_HISTORY_REPLICATION_FRAME_BYTES),
             x if x == crate::Op::InitialHistoryPrepare as u16 || x == crate::Op::InitialHistoryPrepareOk as u16 => Some(crate::MAX_INITIAL_HISTORY_FRAME_BYTES),
             x if x == crate::Op::RecoveryRead as u16 => Some(crate::MAX_RECOVERY_READ_REQUEST_BYTES),
@@ -131,6 +132,8 @@ mod recovery_frame_tests {
     #[test]
     fn oversized_recovery_frame_is_refused_before_body_arrives() {
         for (op, limit) in [
+            (crate::Op::RecoveryTransfer, crate::MAX_RECOVERY_TRANSFER_FRAME_BYTES),
+            (crate::Op::RecoveryTransferOk, crate::MAX_RECOVERY_TRANSFER_FRAME_BYTES),
             (crate::Op::HistoryReplication, crate::MAX_HISTORY_REPLICATION_FRAME_BYTES),
             (crate::Op::InitialHistoryPrepare, crate::MAX_INITIAL_HISTORY_FRAME_BYTES),
             (crate::Op::InitialHistoryPrepareOk, crate::MAX_INITIAL_HISTORY_FRAME_BYTES),

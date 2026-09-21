@@ -25,9 +25,11 @@ partition has one **owner** and one or more **followers**:
   installs an owner checkpoint and resumes from there.
 - **Replicated failover waits for recovery proof.** The controller records a
   proposed replacement and retains the previous assignment and replication
-  source. Automatic sealing, history transfer and activation are still pending, so
-  automatic replicated failover currently stops at this barrier. Heartbeat tails
-  can suggest a candidate but cannot authorize it to serve.
+  source. Explicitly enrolled queue histories have an automatic worker that seals
+  replicas, verifies a source, installs the recovered state and activates a new
+  quorum. Ordinary declarations and legacy histories still stop at this barrier
+  pending enrollment and migration support. Heartbeat tails can suggest a
+  candidate but cannot authorize it to serve.
 - **Replica-durable publishes wait for replicas.** When the assignment's
   durability policy requires more than the owner, a confirmed publish does not
   return until enough followers have reported the required progress, subject to a
@@ -96,21 +98,24 @@ latency. See the [configuration](/configuration/) replication settings.
 
 - Replica-durable confirms add latency: a publish waits for follower progress,
   bounded by the follower poll interval and the confirm timeout.
-- This surface is experimental. A follower can pass local promotion checks while
-  missing a batch confirmed by the old owner and another follower. Preserving
-  the cluster's confirmed history during promotion requires additional replica
-  evidence and fencing; heartbeat candidate selection alone is insufficient.
+- This surface is experimental. A follower's local tails can omit a batch
+  confirmed by the old owner and another follower. Recovery therefore requires
+  accepted-history witnesses and fencing before selecting and installing a
+  source. Enrolled queues retain their configured confirmation threshold after
+  recovery; unsupported or insufficient evidence leaves the partition fenced.
   Checkpoint backfill is checked before promotion and after restart. Unix
   checkpoint installation uses a durable journal to resume interrupted log/state
   replacement before ordinary replay; completed retries preserve later backfill.
   Linux fault and process-kill tests cover this local path. Non-Unix checkpoint
   installation is unsupported pending durable metadata support.
-- The controller now prevents that automatic reassignment by persisting pending
-  recovery metadata. It also holds follower-set and durability-policy changes
-  involving replicated confirmation. Existing healthy owners retain their active
-  configuration; an unavailable owner leaves the partition unavailable. Pending
-  requests appear in the admin topology's controller status. Do not discard a
-  surviving replica or clear a request to bypass this recovery requirement.
+- The controller persists pending recovery metadata for owner replacement and
+  follower-set or durability-policy changes involving replicated confirmation.
+  Existing healthy owners retain their active configuration until recovery can
+  safely activate the proposed assignment. Recovery of enrolled queues requires
+  a complete source and an available proposed owner; replacing an unavailable
+  proposed owner and reconstructing crossed histories remain rollout gates.
+  Pending requests appear in the admin topology's controller status. Do not
+  discard a surviving replica or clear a request to bypass recovery proof.
 - Cross-broker replication-lag aggregation into a single cluster view is still
   pending. A broker's own follower workers and their progress are visible on the
   [admin queues page](/admin-dashboard/).

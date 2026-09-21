@@ -7322,6 +7322,7 @@ async fn assert_replication_controls_forbidden(conn: &mut Conn) {
         Op::RecoverySeal,
         Op::RecoveryRead,
         Op::InitialHistoryPrepare,
+        Op::RecoveryTransfer,
         Op::HistoryReplication,
     ] {
         conn.send(Frame {
@@ -8000,6 +8001,12 @@ async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_conse
         let reply = request_preparation(&config, command, Duration::from_secs(10)).await;
         task.await.unwrap().unwrap();
         (reply, dir)
+    }
+    async fn transfer(broker: Arc<Broker<StromaEngine>>,dir: TempDir,request: &fibril_broker::recovery_transfer::QueueRecoveryRequest) -> (Result<fibril_broker::recovery_transfer::QueueRecoveryReply,fibril_broker::broker::BrokerError>,TempDir) {
+        let (addr,task,dir,_) = start_protocol_listener_for_broker(ConnectionSettings::new(Some(60)),broker,dir,Some(node_auth())).await;
+        let config=ProtocolOwnerPeerResolverConfig::new(HashMap::from([(request.command.replica_id.clone(),addr.to_string())])).with_auth("@node","secret");
+        let result=fibril_protocol::v1::recovery_transfer::request_transfer(&config,request,Duration::from_secs(10)).await;
+        task.await.unwrap().unwrap(); (result,dir)
     }
     async fn synced(providers: &[Arc<GanglionCoordination>], generation: u64) {
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -8718,6 +8725,102 @@ async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_conse
         &plan, &engines[2], Default::default())).await;
     assert_eq!(resumed.finish().await.unwrap(), staged);
     drop(resumed);
+    use fibril_broker::recovery_transfer::{QueueRecoveryRequest,QueueRecoveryCommand,QueueRecoveryOperation as RecoveryOp,QueueRecoveryReply as RecoveryReply};
+    let transfer_command=|id:&str|QueueRecoveryCommand {replica_id:id.into(),topic:"initial-wire".into(),partition:0,group:None,plan:plan.digest().unwrap()};
+    let request=|id:&str,operation|QueueRecoveryRequest {command:transfer_command(id),operation};
+    let (result,dir)=transfer(brokers[2].clone(),dirs[2].take().unwrap(),&request("c",RecoveryOp::Install)).await;
+    dirs[2]=Some(dir);
+    let RecoveryReply::Installed(installed_c)=result.unwrap() else {panic!("expected installed receipt")};
+    assert!(engines[2].ensure_queue_owner_epoch("initial-wire",0,None,Some(2)).await.is_err());
+    assert!(providers[1].activate_queue_recovery(&plan,&engines[1]).await.is_err());
+    let (result,dir)=transfer(brokers[2].clone(),dirs[2].take().unwrap(),&request("c",RecoveryOp::Snapshot)).await;
+    dirs[2]=Some(dir);
+    let RecoveryReply::Snapshot(source_snapshot)=result.unwrap() else {panic!("expected completed snapshot")};
+    let (result,dir)=transfer(brokers[1].clone(),dirs[1].take().unwrap(),&request("b",RecoveryOp::Begin {snapshot:source_snapshot})).await;
+    dirs[1]=Some(dir); result.unwrap();
+    for from in 0..2 {
+        let (result,dir)=transfer(brokers[2].clone(),dirs[2].take().unwrap(),&request("c",RecoveryOp::Read {from,max_records:1,max_bytes:65536})).await;
+        dirs[2]=Some(dir);
+        let RecoveryReply::Page(page)=result.unwrap() else {panic!("expected completed page")};
+        if from==0 {
+            let mut invalid=page.clone(); invalid.records[0].offset+=1;
+            let (result,dir)=transfer(brokers[1].clone(),dirs[1].take().unwrap(),&request("b",RecoveryOp::Append {page:invalid})).await;
+            dirs[1]=Some(dir); assert!(result.is_err());
+        }
+        let (result,dir)=transfer(brokers[1].clone(),dirs[1].take().unwrap(),&request("b",RecoveryOp::Append {page})).await;
+        dirs[1]=Some(dir); result.unwrap();
+    }
+    let (result,dir)=transfer(brokers[1].clone(),dirs[1].take().unwrap(),&request("b",RecoveryOp::Finish)).await;
+    dirs[1]=Some(dir); result.unwrap();
+    let (result,dir)=transfer(brokers[1].clone(),dirs[1].take().unwrap(),&request("b",RecoveryOp::Install)).await;
+    dirs[1]=Some(dir);
+    let RecoveryReply::Installed(installed_b)=result.unwrap() else {panic!("expected installed receipt")};
+    tokio::time::timeout(Duration::from_secs(10),async {
+        let expected = [serde_json::to_string(&installed_b).unwrap(),serde_json::to_string(&installed_c).unwrap()];
+        while providers.iter().any(|p| expected.iter().any(|r| !p.consensus_node().committed_snapshot().attributes.values().any(|v|v==r))) {tokio::time::sleep(Duration::from_millis(5)).await;}
+    }).await.unwrap();
+    let recovered = retry_metadata(|| providers[1].activate_queue_recovery(&plan,&engines[1])).await;
+    tokio::time::timeout(Duration::from_secs(10),async {
+        while providers.iter().any(|p|p.queue_recovery_activation(&plan).unwrap()!=Some(recovered.clone())) {tokio::time::sleep(Duration::from_millis(5)).await;}
+    }).await.unwrap();
+    // A lost activation reply is resolved by the exact certificate, with no
+    // reinstall or reset. Ordinary roles remain closed until local admission.
+    assert_eq!(retry_metadata(||providers[1].activate_queue_recovery(&plan,&engines[1])).await,recovered);
+    for index in [1,2] {
+        let id=if index==1 {"b"} else {"c"};
+        let (result,dir)=transfer(brokers[index].clone(),dirs[index].take().unwrap(),&request(id,RecoveryOp::Admit)).await;
+        dirs[index]=Some(dir); assert!(matches!(result.unwrap(),RecoveryReply::Admitted(_)));
+    }
+    assert!(providers[0].admit_local_queue_recovery(&recovered,&engines[0]).await.is_err());
+    let (result,dir)=transfer(brokers[2].clone(),dirs[2].take().unwrap(),&request("c",RecoveryOp::Install)).await;
+    dirs[2]=Some(dir); assert!(result.is_err());
+    for index in [1,2] {
+        let id = if index==1 {"b"} else {"c"};
+        for result in brokers[index].apply_assignment_snapshot_transitions(id,&CoordinationSnapshot::default(),&providers[index].snapshot()).await {result.unwrap();}
+    }
+    let recovered_assignment = providers[1].snapshot().assignment_for("initial-wire",Partition::new(0),None).unwrap().clone();
+    let recovered_history = recovered_assignment.history.as_ref().unwrap();
+    assert_eq!(recovered_history.activation,recovered.digest().unwrap());
+    assert_eq!(recovered_assignment.owner,"b");
+    assert!(recovered_assignment.is_followed_by("c"));
+    assert!(!recovered_assignment.is_followed_by("a"));
+    let recovered_session = recovered_history.session("initial-wire",Partition::new(0),None,false,"c","b").unwrap();
+    brokers[1].authorize_history_replication(&recovered_session,true).unwrap();
+    assert!(brokers[1].authorize_history_replication(&session,true).is_err());
+    // A new majority confirmation must use the recovered process/storage
+    // identities and retain the selected offset continuation.
+    let (mut recovered_connection,recovered_task,dir,_) = open_node_connection_for_broker(ConnectionSettings::new(Some(60)),brokers[1].clone(),dirs[1].take().unwrap()).await;
+    dirs[1]=Some(dir);node_handshake(&mut recovered_connection).await;
+    let recovered_peer=ProtocolOwnerReplicationPeer::new(recovered_connection).with_reporter("c").with_history_session(recovered_session.clone());
+    let publisher_b=brokers[1].get_publisher("initial-wire",Partition::new(0),&None).await.unwrap();
+    let mut new_confirm=publisher_b.publish(b"after recovered activation".to_vec(),unix_millis(),unix_millis(),None,Default::default(),None).await.unwrap();
+    let records=tokio::time::timeout(Duration::from_secs(10),async {
+        loop {
+            let records=recovered_peer.read_owner_replication_records_fenced("initial-wire",Partition::new(0),None,plan.message_next(),plan.event_next(),8,8,65536,20,Some(2)).await.unwrap();
+            if matches!(&records.messages,OwnerReplicationRead::Batch(batch) if !batch.records.is_empty()) && matches!(&records.events,OwnerReplicationRead::Batch(batch) if !batch.records.is_empty()) {break records}
+        }
+    }).await.unwrap();
+    assert!(matches!(new_confirm.try_recv(),Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
+    let message_next=match &records.messages {OwnerReplicationRead::Batch(batch)=>batch.records.last().unwrap().0+1,_=>unreachable!()};
+    let event_next=match &records.events {OwnerReplicationRead::Batch(batch)=>batch.records.last().unwrap().0+1,_=>unreachable!()};
+    brokers[2].apply_follower_replication_records("initial-wire",Partition::new(0),None,ReplicationResourceKind::Queue,records).await.unwrap();
+    recovered_peer.read_owner_replication_records_fenced("initial-wire",Partition::new(0),None,message_next,event_next,8,8,65536,0,Some(2)).await.unwrap();
+    assert_eq!(tokio::time::timeout(Duration::from_secs(10),new_confirm).await.unwrap().unwrap().unwrap(),2);
+    drop(recovered_peer);recovered_task.await.unwrap().unwrap();
+    assert_eq!(retry_metadata(||providers[1].activate_queue_recovery(&plan,&engines[1])).await,recovered);
+    retry_metadata(||providers[1].admit_local_queue_recovery(&recovered,&engines[1])).await;
+    assert_eq!(engines[1].queue_durable_frontiers("initial-wire",0,None).await.unwrap().message_next,3);
+    // Seal the recovered generation under a second transition. Its authority
+    // comes from the recovered quorum, rather than the old initial assignment.
+    let again = persist_pending(&providers,&resource,recovered.digest().unwrap()).await;
+    synced(&providers,again.requested_generation).await;
+    let again_sealed = brokers[1].seal_replica_for_recovery(again.seal_command().unwrap()).await.unwrap();
+    assert_eq!(again_sealed.seal.history.storage_history.as_ref().unwrap().binding,*plan.binding());
+    let mut again_witnesses = fibril_coordination_ganglion::recovery_witnesses::RecoveryWitnessSet::new(&providers[1].consensus_node().committed_snapshot(),&again).unwrap();
+    again_witnesses.record(&providers[1].consensus_node().committed_snapshot(),"b",again_sealed).unwrap();
+    assert_eq!(again_witnesses.accepted_history(&providers[1].consensus_node().committed_snapshot()).unwrap().unwrap().activation,recovered.digest().unwrap());
+    assert!(providers[1].admit_local_queue_recovery(&recovered,&engines[1]).await.is_err());
+
     // Replacing storage under the same metadata/provider instance cannot reuse
     // the durable preparation receipt as permission for a fresh storage process.
     let follower_root = dirs[1].as_ref().unwrap().root.clone();
@@ -8792,12 +8895,7 @@ async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_conse
     .await;
     dirs[2] = Some(dir);
     assert!(stale.is_err());
-    assert!(
-        engines[2]
-            .storage_history_binding("initial-wire", 0, None)
-            .unwrap()
-            .is_none()
-    );
+    assert_eq!(engines[2].storage_history_binding("initial-wire",0,None).unwrap().as_ref(),Some(plan.binding()));
     for broker in &brokers {
         broker.shutdown().await;
     }

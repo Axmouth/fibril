@@ -32,6 +32,7 @@ pub mod promotion;
 pub mod recovery_witnesses;
 pub mod recovery_selection;
 pub mod recovery_plan;
+pub mod recovery_activation;
 
 /// Namespace tag used for fibril queues inside ganglion resource identities.
 const QUEUE_NAMESPACE: &str = "fibril/queue";
@@ -3014,6 +3015,16 @@ impl fibril_broker::broker::QueueOwnership for GanglionCoordination {
         command: &'a fibril_broker::initial_history::InitialHistoryPrepareCommand,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<fibril_broker::initial_history::InitialHistoryAuthorization, String>> + Send + 'a>> {
         Box::pin(self.authorize_initial_history_command(command))
+    }
+
+    fn authorize_recovery_transfer<'a>(&'a self, command: &'a fibril_broker::recovery_transfer::QueueRecoveryCommand) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<fibril_broker::recovery_transfer::QueueRecoveryAuthorization, String>> + Send + 'a>> {
+        Box::pin(self.authorize_transfer_command(command))
+    }
+    fn record_recovery_installation<'a>(&'a self, command: &'a fibril_broker::recovery_transfer::QueueRecoveryCommand, receipt: &'a fibril_broker::recovery_transfer::QueueRecoveryLocalReceipt) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(self.record_transfer_receipt(command,receipt))
+    }
+    fn authorize_recovery_admission<'a>(&'a self, command: &'a fibril_broker::recovery_transfer::QueueRecoveryCommand) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<fibril_broker::queue_engine::PreparedQueueRecovery, String>> + Send + 'a>> {
+        Box::pin(self.authorize_recovery_admission_command(command))
     }
 
     fn authorize_recovery_seal<'a>(

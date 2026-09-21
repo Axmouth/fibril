@@ -210,6 +210,9 @@ pub(crate) fn accepted_history(
     snapshot: &CoordinationSnapshot,
     resource: &ganglion_core::ResourceIdentity,
 ) -> Result<fibril_broker::history_replication::AcceptedHistory, String> {
+    if let Some(history) = crate::recovery_activation::accepted(snapshot, resource)? {
+        return Ok(history);
+    }
     let incarnation = crate::history_identity::resource_incarnation(snapshot, resource)?
         .ok_or("resource has no enrolled history")?;
     let raw = snapshot
@@ -307,6 +310,13 @@ pub(crate) fn replaced_initial_processes(
     snapshot: &CoordinationSnapshot,
     resource: &ganglion_core::ResourceIdentity,
 ) -> Result<Vec<String>, String> {
+    if let Some(history) = crate::recovery_activation::accepted(snapshot, resource)? {
+        return Ok(history.replicas.into_iter().filter_map(|(id, previous)| {
+            let current = snapshot.nodes.get(&id)?.labels.get(crate::HISTORY_PROCESS_LABEL)?;
+            let current = uuid::Uuid::parse_str(current).ok()?;
+            (!current.is_nil() && current.as_bytes() != &previous.process).then_some(id)
+        }).collect());
+    }
     let Some(incarnation) = crate::history_identity::resource_incarnation(snapshot, resource)?
     else {
         return Ok(Vec::new());

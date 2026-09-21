@@ -3,6 +3,7 @@ pub mod broker;
 pub mod coordination;
 pub mod queue_engine;
 pub mod recovery;
+pub mod recovery_transfer;
 pub mod initial_history;
 pub mod history_replication;
 pub mod replication;

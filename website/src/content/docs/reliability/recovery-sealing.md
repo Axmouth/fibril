@@ -1,14 +1,14 @@
 ---
 title: Recovery sealing
-description: Explicit recovery authorization, durable local evidence and remaining activation gates.
+description: Recovery authorization, verified staging, durable installation and exact quorum activation.
 ---
 
-Recovery sealing freezes a replica's retained records for inspection. The broker
-has an explicit internal receiver; the placement controller does not dispatch
-seals automatically. Replicated reassignment remains paused at the pending
-recovery barrier until selected history is durably installed and freshly activated.
-Explicit source selection currently covers accepted initial queue histories;
-automatic orchestration and recovered-history readmission remain pending.
+Recovery sealing freezes a replica's retained records for inspection. For explicitly
+enrolled queue histories, a bounded worker collects witnesses, verifies a source,
+installs a new durable quorum and activates its exact process/storage instances.
+The previous assignment stays fenced until activation commits. Ordinary declarations
+still use their existing path; legacy baseline migration, initial enrollment rollout
+and stream-state recovery remain separate gates.
 
 ## Request authority
 
@@ -53,8 +53,8 @@ previous encoding.
 
 This ID identifies a catalogue lifetime. Source selection also requires accepted
 history, writer-session authority and an authoritative checkpoint. The local
-storage primitive below supplies an explicit binding; automatic enrollment,
-recovery readmission and legacy baseline establishment remain pending. The new consensus commands require matching
+storage primitive below supplies an explicit binding. Automatic initial enrollment
+and legacy baseline establishment remain pending. The new consensus commands require matching
 metadata-node binaries; mixed-version rollout is not supported for this change.
 
 ## Local storage history binding
@@ -75,14 +75,14 @@ A private storage-instance token prevents a reopened store from inheriting write
 permission. Ordinary access fails with `HistoryAdmissionRequired` before log
 opening or checkpoint recovery, including at the same assignment epoch. Explicit
 recovery sealing can still read and fence the retained logs. Ordinary checkpoint
-replacement of bound storage is blocked pending an installation protocol that
-carries the selected history and its authority.
+replacement of bound storage is blocked. Bound recovery uses the selected-plan
+installation and activation protocol described below.
 
 This primitive covers local binding and restart admission. The initial preparation
-protocol below allocates history/session IDs through consensus. Persisted quorum
-installation, activation, legacy baseline validation and recovery readmission
-remain pending. Loss of the entire binding
-and log directory must be handled by that consensus protocol; local file absence
+protocol below allocates history/session IDs through consensus. Recovery installation
+and readmission bind an exact verified baseline to a new quorum. Legacy baseline
+validation remains pending. Loss of the entire binding and log directory requires
+that consensus protocol; local file absence
 cannot prove a new resource. Unbound resources retain their existing behavior.
 Linux tests include a SIGKILL restart; they do not simulate power loss. Older
 binaries do not enforce this receipt, so bound stores require compatible binaries.
@@ -143,8 +143,9 @@ can leave admitted preparation running, so retries use the same decision. The
 transport deadline covers setup and the response, and replies must match the target,
 resource, decision and storage binding with nonzero process/storage instances.
 
-These operations are not used by ordinary broker startup. Recovery installation
-and readmission remain pending. Existing resources require a verified baseline.
+Ordinary broker declarations do not enroll resources automatically. Explicitly
+enrolled queues support recovery installation and readmission. Existing resources
+require a verified baseline.
 Matching broker and metadata binaries are required; older brokers do not enforce
 the enrollment projection and the retirement command requires updated metadata
 nodes. Mixed-version enrollment and downgrade are unsupported.
@@ -161,7 +162,8 @@ Activated assignments carry the history binding and exact replica instances.
 The full configured replica count still determines confirmation requirements;
 unprepared members cannot serve or report progress. Enrolled resources also
 require recovery when an owner-only assignment changes. Ordinary declaration
-continues to use the existing path until automatic recovery can complete.
+continues to use the existing path while initial enrollment and interrupted initial
+preparation remain rollout gates.
 
 The internal `HistoryReplication` envelope (opcode 109) binds live replication to
 resource incarnation, accepted history, writer session, activation and both peer
@@ -175,8 +177,8 @@ A real three-node TCP regression activates a prepared majority, writes and copie
 a record, and releases its confirmation only after durable follower progress.
 It also rejects stale identities, changed assignments and reopened storage.
 Transport rejection terminates follower streams; cancelling their parent releases
-both transport tasks and the connection. This explicit initial-activation path
-does not yet supply recovered-history installation or automatic failover.
+both transport tasks and the connection. Recovered activation reuses these exact
+identity checks for its newly installed quorum.
 
 ## Explicit witness collection
 
@@ -220,8 +222,8 @@ replacement or removal of that transition invalidates the collection when checke
 against the updated snapshot. An in-memory snapshot check alone supplies no fresh
 consensus authority for activation.
 
-These are explicit library operations. Automatic fan-out, retry scheduling,
-automatic source selection and selected-history installation are not enabled.
+These library operations also support the bounded recovery worker for accepted
+queue histories. Unsupported origins remain fenced with a diagnostic.
 
 ## Retained content identity
 
@@ -299,8 +301,9 @@ Callers supply a whole-operation deadline. Budget exhaustion, malformed pages,
 transferred-digest mismatch, timeout and source loss return an error without a
 partial success report. Dependency decoding accepts at most 65,536 entries in an
 event batch; larger or unfamiliar encodings leave an explicit semantic gap.
-These limits bound one inspection, while aggregate scheduling remains future
-work. Source reads still rescan retained data per page.
+The automatic worker admits one recovery at a time per node, with at most 16
+replicas and a two-minute attempt budget. Source reads still rescan retained data
+per page.
 
 ## Queue state at an exact boundary
 
@@ -339,7 +342,8 @@ semantics, unknown encoding, offset overflow and exhausted budgets fail the
 replay. The default semantic-operation budget is one million per replica,
 counting every batch entry. Hashing/replay runs on blocking workers with two
 process-wide CPU slots held through caller cancellation; ordinary publishing and
-actor scheduling are unchanged. Automatic source selection remains pending.
+actor scheduling are unchanged. The recovery worker uses these artifacts during
+source selection.
 
 `inspect_recovery_pair_with_checkpoints` also accepts independently captured
 version-two queue snapshots. It downloads and verifies each raw envelope against
@@ -400,7 +404,8 @@ projected state. Ordinary snapshot encoding retains its existing linear work.
 The explicit transport helper uses the same authenticated reads, deadlines and
 CPU admission as pair inspection; inspecting one source counts as one witness.
 
-`select_queue_source` requires an accepted version-two initial history and the
+`select_queue_source` requires accepted lineage from a version-two initial origin,
+including subsequent recovered activations, and the
 fixed old witness threshold. The selected artifact must cover its source's complete
 event tail and both maximum observed tails. Every other collected witness needs
 an exact sealed-content comparison with that source. Divergent overlapping records
@@ -410,8 +415,8 @@ The accepted single-writer origin supplies ancestry for compacted prefixes.
 The result is an immutable proposal tied to the pending transition, previous
 activation, exact source, snapshot/state/live-payload digests and sealed witnesses.
 It grants no writer permission. Crossed incomplete tails require reconstruction;
-legacy origins, streams, recovered lineage, new-quorum installation and automatic
-activation still need further implementation. A larger heartbeat tail is never
+legacy origins and stream state require additional proofs. Installation and
+activation consume the persisted proposal through the protocol below. A larger heartbeat tail is never
 sufficient to authorize this proposal.
 
 ## Persisted queue recovery intent
@@ -426,9 +431,9 @@ barrier remain in place.
 
 A restarted coordinator can read the saved plan and verify that a reconstructed
 artifact matches its exact source and state. Reading or deserializing a plan
-supplies no fresh installation or serving permission. Durable new-quorum receipts,
-replacement storage admission and activation remain pending; ordinary declarations
-still do not enable this lifecycle automatically.
+supplies no fresh installation or serving permission. Each target checks the plan
+through consensus before staging or installation. Ordinary declarations still do
+not enroll into this lifecycle automatically.
 
 ## Non-serving recovery staging
 
@@ -450,5 +455,59 @@ subset from disk before synchronizing a receipt. Sequential scans bound record
 allocation and bypass the tail cache. Staging resumes from its saved snapshot without requiring the original source
 to return. Completed staging uses preserving reopen and refuses silent repair of lost data.
 Linux tests cover four SIGKILL boundaries and authenticated transfer to a proposed
-replica. Completion certifies staged data only. New-quorum persistence, atomic
-replacement, repeated-history admission and automatic activation remain pending.
+replica. Completion certifies staged data; installation and activation require the
+additional checks below.
+
+
+## Installation and recovered activation
+
+Installation builds a complete replacement generation in a separate directory.
+It copies the verified message log, creates an event baseline at the exact exclusive
+continuation, writes a version-two queue checkpoint and persists a new storage
+receipt. The installer reopens and verifies the baseline before publishing one
+checksummed, directory-synced route pointer. An external installation anchor prevents
+an interrupted switch from reopening missing directories as a legacy empty queue.
+
+The partition lifecycle lock drains old operations, permanently fences old handles
+and retires pending snapshot work. The new registry entry records an existing
+on-disk queue, ensuring actor materialization loads the installed snapshot. Old
+sealed generations retain their original identity and remain readable under the
+pending transition. Linux SIGKILL tests cover handle retirement, message copying,
+completed generation persistence and route publication.
+
+Each proposed target records its exact plan, coordinator process and storage
+instance through consensus. The proposed owner requires its own live receipt and
+the configured new write quorum. One guarded metadata operation publishes the new
+assignment and immutable activation certificate while clearing the matching pending
+fence; advisory heartbeat updates are preserved. Every activated target performs a
+fresh consensus check before admitting its recorded process/storage instance.
+Repeated activation and admission preserve subsequent writes. A replacement process
+must recover through a new transition.
+
+Internal `RecoveryTransfer`/`RecoveryTransferOk` frames (110/111) carry versioned,
+bounded control operations for staging, completed-stage reads, installation and
+admission. Authentication occurs before decoding the operation. Completed stages
+can supply another target after the original sealed source disappears. Matching
+broker and metadata revisions are required.
+
+## Automatic recovery bounds and rollout gates
+
+The proposed owner's worker processes accepted queue histories sequentially. It
+retains an immutable plan across retries, resumes staged offsets and prefers a
+completed transferred source. Attempts have a two-minute deadline and exponential
+backoff capped at 30 seconds; admitted storage work survives caller cancellation.
+Every node independently retries exact-process admission after activation, covering
+a lost activation response or an owner disappearing before all admission replies.
+
+Current automatic limits are 16 replicas, a 16 MiB page/snapshot, one million
+records and 1 GiB of logical staged payloads. Oversized records, incompatible
+histories, crossed tails without a complete source, unsupported legacy origins and
+stream state remain fenced. Recovering a fixed pending transition also requires
+its proposed owner to return; safely replacing that candidate is a further gate.
+
+Ordinary creation-time enrollment remains disabled. Initial preparation interrupted
+by owner-process replacement, migration of existing queues and wider membership/
+isolation testing require completion before general rollout. Retained generations
+and stages currently require additional disk and have no automatic reclamation.
+Per-queue disk estimates describe active logs; retained recovery data needs separate
+accounting. Process-crash tests do not establish hardware power-loss behavior.

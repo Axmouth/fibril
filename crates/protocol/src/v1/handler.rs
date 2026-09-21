@@ -3056,6 +3056,7 @@ where
             || x == Op::ReplicationStreamStop as u16
             || x == Op::RecoverySeal as u16
             || x == Op::RecoveryRead as u16
+            || x == Op::RecoveryTransfer as u16
             || x == Op::InitialHistoryPrepare as u16
             || x == Op::HistoryReplication as u16
         );
@@ -3552,6 +3553,24 @@ where
 
             // Recovery always requires an authenticated cluster principal,
             // including when ordinary client authentication is disabled.
+            x if x == Op::RecoveryTransfer as u16 => {
+                let envelope: RecoveryTransfer = decode_or_400!(frame, frame_tx_high_prio, metrics, RecoveryTransfer);
+                let result = match crate::v1::recovery_transfer::decode_body::<fibril_broker::recovery_transfer::QueueRecoveryRequest>(&envelope.body) {
+                    Ok(request) => broker.recovery_transfer(request).await,
+                    Err(error) => Err(fibril_broker::broker::BrokerError::InvalidArgument(format!("invalid recovery operation: {error}"))),
+                };
+                match result {
+                    Ok(reply) => {
+                        let body = rmp_serde::to_vec_named(&reply).map_err(std::io::Error::other)?;
+                        frame_tx_high_prio.send(try_encode(Op::RecoveryTransferOk,frame.request_id,&RecoveryTransfer {body})?).await?;
+                    }
+                    Err(err) => {
+                        let (code,message) = broker_error_response(&err);
+                        send_error_response_and_count(&frame_tx_high_prio,&metrics,frame.request_id,code,message).await;
+                    }
+                }
+            }
+
             x if x == Op::InitialHistoryPrepare as u16 => {
                 let request: InitialHistoryPrepare = decode_or_400!(frame, frame_tx_high_prio, metrics, InitialHistoryPrepare);
                 let command = crate::v1::initial_history::broker_command(request);

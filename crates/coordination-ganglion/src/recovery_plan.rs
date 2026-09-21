@@ -46,6 +46,56 @@ pub(crate) fn key(pending: &PendingRecovery) -> Result<String, String> {
 }
 
 impl QueueRecoveryPlan {
+    pub(crate) fn stage_spec(
+        &self,
+    ) -> Result<fibril_broker::queue_engine::QueueRecoveryStageSpec, String> {
+        let assignment = &self.pending.proposed;
+        let s = &self.selected;
+        let source = self.source_history().ok_or("recovery source is missing")?;
+        let spec = fibril_broker::queue_engine::QueueRecoveryStageSpec {
+            plan: self.digest()?,
+            topic: assignment.resource.name.clone(),
+            partition: u32::try_from(assignment.resource.partition).map_err(|e| e.to_string())?,
+            group: assignment.resource.group.clone(),
+            binding: self.binding.clone(),
+            fence_epoch: assignment.epoch,
+            source_history: s.source_history,
+            message_head: s.message_head,
+            message_next: s.message_next,
+            event_next: s.event_next,
+            message_digest: source.message_digest,
+            snapshot_digest: s.snapshot_digest,
+            state_digest: s.state_digest,
+            live_payload_digest: s.live_payload_digest,
+        };
+        Ok(spec)
+    }
+    pub(crate) fn validate_activated(&self, snapshot: &CoordinationSnapshot) -> Result<(), String> {
+        let resource = &self.pending.proposed.resource;
+        if self.version != 1
+            || resource.namespace != crate::QUEUE_NAMESPACE
+            || !snapshot.resources.contains(resource)
+            || self.pending.resource_incarnation
+                != crate::history_identity::resource_incarnation(snapshot, resource)?
+            || snapshot.assignments.get(resource) != Some(&self.pending.proposed)
+            || snapshot
+                .attributes
+                .contains_key(&crate::promotion::pending_recovery_key(resource))
+            || crate::promotion::write_requirement(&self.pending.proposed)?
+                != self.pending.proposed_write_nodes
+            || self.pending.previous_activation.is_none()
+            || snapshot
+                .attributes
+                .get(&key(&self.pending)?)
+                .map(|raw| serde_json::from_str::<Self>(raw).map_err(|e| e.to_string()))
+                .transpose()?
+                .as_ref()
+                != Some(self)
+        {
+            return Err("activated recovery plan differs from current resource authority".into());
+        }
+        Ok(())
+    }
     pub fn pending(&self) -> &PendingRecovery {
         &self.pending
     }
@@ -237,6 +287,22 @@ impl GanglionCoordination {
             .map_err(error)
     }
 
+    /// Receive the exact snapshot from another completed stage after the old
+    /// source disappears. Storage verifies the plan's state and payload digests.
+    pub async fn open_local_queue_recovery_stage_from_snapshot(
+        &self,
+        plan: &QueueRecoveryPlan,
+        engine: &fibril_broker::queue_engine::StromaEngine,
+        snapshot: Vec<u8>,
+        limits: fibril_broker::queue_engine::RecoveryStageLimits,
+    ) -> Result<fibril_broker::queue_engine::QueueRecoveryStage, OpenraftAdapterError> {
+        let spec = self.authorize_local_queue_recovery_stage(plan).await?;
+        engine
+            .open_queue_recovery_stage(spec, snapshot, limits)
+            .await
+            .map_err(error)
+    }
+
     /// Resume an existing stage from its durable snapshot without contacting
     /// the old source. Fresh consensus still gates the exact pending plan.
     pub async fn resume_local_queue_recovery_stage(
@@ -252,7 +318,7 @@ impl GanglionCoordination {
             .map_err(error)
     }
 
-    async fn authorize_local_queue_recovery_stage(
+    pub(crate) async fn authorize_local_queue_recovery_stage(
         &self,
         plan: &QueueRecoveryPlan,
     ) -> Result<fibril_broker::queue_engine::QueueRecoveryStageSpec, OpenraftAdapterError> {
@@ -260,40 +326,34 @@ impl GanglionCoordination {
         if assignment.owner != self.node_id && !assignment.followers.contains(&self.node_id) {
             return Err(error("recovery staging requires a proposed replica"));
         }
-        let snapshot = self.node.committed_snapshot();
-        plan.validate_committed(&snapshot).map_err(error)?;
-        let key = key(&plan.pending).map_err(error)?;
-        let raw = snapshot.attributes[&key].clone();
-        let response = self
-            .forward_command(MetadataRaftCommand::CompareAndSetAttributeGuarded {
-                expected_generation: snapshot.generation,
-                key,
-                expected: Some(raw.clone()),
-                value: raw,
-            })
-            .await?;
-        plan.validate_committed(&response.snapshot).map_err(error)?;
-        let s = &plan.selected;
-        let source = plan
-            .source_history()
-            .ok_or_else(|| error("recovery source is missing"))?;
-        let spec = fibril_broker::queue_engine::QueueRecoveryStageSpec {
-            plan: plan.digest().map_err(error)?,
-            topic: assignment.resource.name.clone(),
-            partition: u32::try_from(assignment.resource.partition).map_err(error)?,
-            group: assignment.resource.group.clone(),
-            binding: plan.binding.clone(),
-            fence_epoch: assignment.epoch,
-            source_history: s.source_history,
-            message_head: s.message_head,
-            message_next: s.message_next,
-            event_next: s.event_next,
-            message_digest: source.message_digest,
-            snapshot_digest: s.snapshot_digest,
-            state_digest: s.state_digest,
-            live_payload_digest: s.live_payload_digest,
-        };
-        Ok(spec)
+        for _ in 0..8 {
+            let snapshot = self.node.committed_snapshot();
+            plan.validate_committed(&snapshot).map_err(error)?;
+            let key = key(&plan.pending).map_err(error)?;
+            let raw = snapshot.attributes[&key].clone();
+            match self
+                .forward_command(MetadataRaftCommand::CompareAndSetAttributeGuarded {
+                    expected_generation: snapshot.generation,
+                    key,
+                    expected: Some(raw.clone()),
+                    value: raw,
+                })
+                .await
+            {
+                Ok(response) => {
+                    plan.validate_committed(&response.snapshot).map_err(error)?;
+                    return plan.stage_spec().map_err(error);
+                }
+                Err(
+                    OpenraftAdapterError::GenerationMismatch { .. }
+                    | OpenraftAdapterError::AttributeMismatch { .. },
+                ) => tokio::time::sleep(std::time::Duration::from_millis(5)).await,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(error(
+            "recovery authorization raced metadata changes; retry with backoff",
+        ))
     }
 
     /// Read an existing intent after restart. This is a historical read, not
