@@ -458,15 +458,20 @@ async fn automatic_recovery_repeats_and_preserves_confirmed_messages() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn automatic_three_node_enrollment_admits_followers_after_owner_stops() {
-    three_node_owner_loss(false).await;
+    three_node_owner_loss(false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn automatic_recovery_replaces_stopped_candidate_without_weakening_quorum() {
-    three_node_owner_loss(true).await;
+    three_node_owner_loss(true, false).await;
 }
 
-async fn three_node_owner_loss(recover: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn automatic_background_learner_joins_while_owner_keeps_confirming() {
+    three_node_owner_loss(false, true).await;
+}
+
+async fn three_node_owner_loss(recover: bool, learner: bool) {
     use fibril_broker::coordination::{NodeInfo, QueueIdentity};
     let root = std::env::temp_dir().join(format!(
         "fibril-three-node-enrollment-{}",
@@ -580,12 +585,16 @@ async fn three_node_owner_loss(recover: bool) {
     })
     .await
     .unwrap();
-    let config = ProtocolOwnerPeerResolverConfig::new(addresses).with_auth("@node", "secret");
+    if learner {
+        listeners[2].abort();
+        let _ = (&mut listeners[2]).await;
+    }
+    let mut config = ProtocolOwnerPeerResolverConfig::new(addresses).with_auth("@node", "secret");
     let owner_worker =
         fibril::recovery_driver::spawn(providers[0].clone(), brokers[0].clone(), config.clone());
     tokio::time::timeout(Duration::from_secs(40), async {
         loop {
-            if providers.iter().all(|p| {
+            if providers.iter().take(if learner { 2 } else { 3 }).all(|p| {
                 p.local_initial_history_admissions()
                     .is_ok_and(|a| a.len() == 1)
             }) && providers[0]
@@ -606,6 +615,209 @@ async fn three_node_owner_loss(recover: bool) {
     })
     .await
     .unwrap();
+    if learner {
+        use fibril_broker::broker::{
+            BrokerOwnerReplicationPeer, BrokerReplicationCatchUpOptions, ReplicationResourceKind,
+        };
+        use fibril_broker::coordination::CoordinationSnapshot;
+        use fibril_protocol::v1::replication::connect_protocol_owner_peer;
+        let before = providers[0].snapshot();
+        let assignment = before
+            .assignment_for("q", Partition::new(0), None)
+            .unwrap()
+            .clone();
+        assert_eq!(assignment.history.as_ref().unwrap().replicas.len(), 2);
+        assert!(!assignment.is_followed_by("c"));
+        let decision = providers[1].local_initial_history_admissions().unwrap()[0]
+            .0
+            .clone();
+        providers[1]
+            .admit_local_initial_history(&decision, &brokers[1].engine())
+            .await
+            .unwrap();
+        for i in 0..2 {
+            for result in brokers[i]
+                .apply_assignment_snapshot_transitions(
+                    ["a", "b"][i],
+                    &CoordinationSnapshot::default(),
+                    &providers[i].snapshot(),
+                )
+                .await
+            {
+                result.unwrap();
+            }
+        }
+        let peer = connect_protocol_owner_peer(
+            config.nodes["a"].clone(),
+            config.auth.as_ref(),
+            None,
+            "test",
+            "1",
+        )
+        .await
+        .unwrap()
+        .with_reporter("b")
+        .with_history_session(
+            assignment
+                .history
+                .as_ref()
+                .unwrap()
+                .session("q", Partition::new(0), None, false, "b", "a")
+                .unwrap(),
+        );
+        let publisher = brokers[0]
+            .get_publisher("q", Partition::new(0), &None)
+            .await
+            .unwrap();
+        let mut learner_worker = None;
+        let mut frontiers = (0, 0);
+        for n in 0..40u64 {
+            if n == 4 {
+                let (address, listener) = serve_test_broker(brokers[2].clone()).await;
+                config.nodes.insert("c".into(), address.clone());
+                listeners[2] = listener;
+                providers[2]
+                    .register_self(&NodeInfo {
+                        node_id: "c".into(),
+                        broker_addr: address,
+                        admin_addr: None,
+                    })
+                    .await
+                    .unwrap();
+                // Resume from an installed checkpoint whose live payloads
+                // have not arrived yet. The worker must backfill before voting.
+                let intent = providers[2].begin_queue_learner(&resource).await.unwrap();
+                let receipt = providers[2]
+                    .prepare_queue_learner(&intent, &brokers[2].engine())
+                    .await
+                    .unwrap();
+                let cut = peer
+                    .export_owner_state_checkpoint("q", Partition::new(0), None)
+                    .await
+                    .unwrap();
+                brokers[2]
+                    .engine()
+                    .become_queue_follower_with_epoch("q", 0, None, 1)
+                    .await
+                    .unwrap();
+                brokers[2]
+                    .engine()
+                    .install_queue_learner_checkpoint(
+                        receipt,
+                        fibril_broker::queue_engine::FollowerStateCheckpointInstall {
+                            message_epoch: cut.message_epoch,
+                            event_epoch: cut.event_epoch,
+                            message_next_offset: cut.message_checkpoint_offset,
+                            event_next_offset: cut.event_next_offset,
+                            applied_event_offset: cut.applied_event_offset,
+                            state_snapshot: cut.state_snapshot,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    brokers[2]
+                        .engine()
+                        .verify_queue_learner_caught_up("q", 0, None, 1, 0, 4)
+                        .await
+                        .is_err()
+                );
+                learner_worker = Some(fibril::recovery_driver::spawn(
+                    providers[2].clone(),
+                    brokers[2].clone(),
+                    config.clone(),
+                ));
+            }
+            let confirmation = publisher
+                .publish(
+                    n.to_le_bytes().to_vec(),
+                    unix_millis(),
+                    unix_millis(),
+                    None,
+                    Default::default(),
+                    None,
+                )
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while frontiers.0 <= n || frontiers.1 <= n {
+                    brokers[1]
+                        .catch_up_replication_follower_from_owner_with_checkpoint(
+                            &peer,
+                            "q",
+                            Partition::new(0),
+                            None,
+                            ReplicationResourceKind::Queue,
+                            BrokerReplicationCatchUpOptions {
+                                message_from: frontiers.0,
+                                event_from: frontiers.1,
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    frontiers = brokers[1]
+                        .engine()
+                        .queue_replication_next_offsets("q", 0, None)
+                        .await
+                        .unwrap();
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), confirmation)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap(),
+                n
+            );
+            assert!(providers[0].pending_recoveries().unwrap().is_empty());
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while providers.iter().any(|p| {
+                !p.snapshot()
+                    .assignment_for("q", Partition::new(0), None)
+                    .is_some_and(|a| a.is_followed_by("c"))
+            }) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let current = providers[0].snapshot();
+        let joined = current
+            .assignment_for("q", Partition::new(0), None)
+            .unwrap();
+        assert!(joined.preserves_replication_contract(&assignment));
+        assert_eq!(joined.history.as_ref().unwrap().replicas.len(), 3);
+        brokers[2]
+            .engine()
+            .verify_queue_learner_caught_up("q", 0, None, 1, 4, 4)
+            .await
+            .unwrap();
+        learner_worker.unwrap().abort();
+        owner_worker.abort();
+        drop(peer);
+        drop(publisher);
+        for listener in listeners {
+            listener.abort();
+        }
+        for broker in &brokers {
+            broker.shutdown().await;
+        }
+        for provider in &providers {
+            provider.consensus_node().shutdown().await.unwrap();
+        }
+        for server in servers {
+            server.shutdown();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+        return;
+    }
     for i in 1..3 {
         let admissions = providers[i].local_initial_history_admissions().unwrap();
         assert_eq!(admissions[0].0.required_write_nodes, 2);

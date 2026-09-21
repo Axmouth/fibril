@@ -71,6 +71,30 @@ impl PartitionAssignment {
         self.owner == node_id && self.history.as_ref().is_none_or(|h| h.permits_role(node_id))
     }
 
+    /// A verified same-history admission adds eligible instances without
+    /// invalidating proof already supplied by unchanged replicas.
+    pub fn preserves_replication_contract(&self, previous: &Self) -> bool {
+        if self == previous {
+            return true;
+        }
+        let (Some(now), Some(old)) = (&self.history, &previous.history) else {
+            return false;
+        };
+        self.queue == previous.queue
+            && self.owner == previous.owner
+            && self.followers == previous.followers
+            && self.epoch == previous.epoch
+            && self.durability == previous.durability
+            && now.activation == old.activation
+            && now.binding == old.binding
+            && now.owner == old.owner
+            && now.blocked_local_replica == old.blocked_local_replica
+            && old
+                .replicas
+                .iter()
+                .all(|(id, instance)| now.replicas.get(id) == Some(instance))
+    }
+
     pub fn is_followed_by(&self, node_id: &str) -> bool {
         self.followers.iter().any(|follower| follower == node_id)
             && self.history.as_ref().is_none_or(|history| history.permits_role(node_id))

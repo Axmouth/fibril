@@ -364,6 +364,7 @@ pub fn spawn(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut initial_failures: HashMap<ganglion_core::ResourceIdentity, (tokio::time::Instant, u64, String)> = HashMap::new();
+        let _learners = crate::queue_learner_driver::spawn(provider.clone(), broker.clone(), config.clone());
         let mut failures: HashMap<[u8; 32], (tokio::time::Instant, u64, String)> = HashMap::new();
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;

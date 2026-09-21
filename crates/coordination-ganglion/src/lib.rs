@@ -34,6 +34,7 @@ pub mod recovery_selection;
 pub mod recovery_plan;
 pub mod recovery_activation;
 mod recovery_candidate;
+pub mod queue_learner;
 
 /// Namespace tag used for fibril queues inside ganglion resource identities.
 const QUEUE_NAMESPACE: &str = "fibril/queue";
@@ -3025,6 +3026,7 @@ impl fibril_broker::broker::QueueOwnership for GanglionCoordination {
     fn authorize_history_replication(&self, session: &fibril_broker::history_replication::HistoryReplicationSession,
         owner_is_receiver: bool) -> Result<(), String> {
         self.validate_history_replication(session, owner_is_receiver)
+            .or_else(|_| self.validate_learner_read(session, owner_is_receiver))
     }
 
     fn authorize_initial_history<'a>(

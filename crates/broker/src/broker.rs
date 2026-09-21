@@ -2049,13 +2049,19 @@ impl<
                 Entry::Occupied(e) => e.get() != assignment,
                 Entry::Vacant(_) => true,
             };
+            let preserves = match &entry {
+                Entry::Occupied(e) => assignment.preserves_replication_contract(e.get()),
+                Entry::Vacant(_) => false,
+            };
             if changed {
-                if let Some((_, old)) = self.replication_progress.remove(&key) {
-                    old.changed.notify_waiters();
-                }
-                if let Some(qs) = &qs {
-                    qs.committed_message_offset.store(0, Ordering::Release);
-                    qs.wake();
+                if !preserves {
+                    if let Some((_, old)) = self.replication_progress.remove(&key) {
+                        old.changed.notify_waiters();
+                    }
+                    if let Some(qs) = &qs {
+                        qs.committed_message_offset.store(0, Ordering::Release);
+                        qs.wake();
+                    }
                 }
                 match entry {
                     Entry::Occupied(mut e) => {

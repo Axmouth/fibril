@@ -75,7 +75,8 @@ A private storage-instance token prevents a reopened store from inheriting write
 permission. Ordinary access fails with `HistoryAdmissionRequired` before log
 opening or checkpoint recovery, including at the same assignment epoch. Explicit
 recovery sealing can still read and fence the retained logs. Ordinary checkpoint
-replacement of bound storage is blocked. Bound recovery uses the selected-plan
+replacement of bound storage is blocked; a non-voting learner has a separate
+authorized checkpoint path. Bound recovery uses the selected-plan
 installation and activation protocol described below.
 
 This primitive covers local binding and restart admission. The initial preparation
@@ -162,6 +163,46 @@ Standalone queues and stream declarations retain their existing paths.
 Matching broker and metadata binaries are required; older brokers do not enforce
 the enrollment projection and the retirement command requires updated metadata
 nodes. Mixed-version enrollment and downgrade are unsupported.
+
+## Background admission of excluded replicas
+
+An assigned follower outside the activated write set joins as a non-voting
+learner. Fresh consensus fixes its intent, history binding and exact process;
+local preparation records its storage instance. Authenticated reads use a distinct
+learner session that permits reading the current owner and cannot report progress
+for publisher confirmations. Admission expires that read session.
+
+The learner captures an exact owner checkpoint boundary and catches up toward
+that fixed cut while later publications continue. Before admission, both local
+logs must cover the cut, fsync must finish, every retained event must be applied in
+order, and the actor's live-payload dependencies must be present. An overtaken
+read cursor can install a newer owner checkpoint under fresh learner authority.
+The checkpoint journal binds the storage history and resumes interrupted resets;
+ordinary bound-replica checkpoint replacement remains blocked.
+
+Admission adds the exact process/storage instance through guarded consensus.
+The owner, assignment epoch, history identity and configured write requirement
+stay unchanged. Existing replication sessions and confirmation waits preserve
+progress from unchanged replicas. The next recovery uses the enlarged eligible
+set and its corresponding intersection threshold; a pending recovery blocks
+learner admission.
+
+Partial catch-up resumes after learner restart. A persistent learner marker makes
+materialization start as a follower, including after eviction, so timer maintenance
+cannot briefly acquire a local owner role. When a returning replica holds an
+older history, storage seals and retains that generation before publishing a
+separate learner route. Old records remain readable for recovery inspection.
+The background worker has bounded attempts and backoff, runs independently of
+recovery work, and stops with its parent worker. Checkpoint capture still briefly
+serializes owner operations, and copying consumes storage and network capacity;
+there is no queue-wide recovery fence throughout the transfer.
+
+Coverage includes continued majority confirmations during automatic checkpoint
+backfill, forged learner-progress rejection, an existing confirmation completed
+after admission, increased recovery witness requirements, native checkpoint
+interruption/restart, and process kills at learner route-publication boundaries.
+These checks do not establish power-loss behavior or eliminate the need for
+broader isolation and admission-race testing.
 
 ## Initial activation and live replication
 

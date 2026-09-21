@@ -590,6 +590,55 @@ impl StromaEngine {
         self.inner.resume_empty_storage_history(tp, part, group, kind, binding).await
     }
 
+    /// Requires fresh authority excluding this replica from the accepted write set.
+    pub async fn install_queue_learner_checkpoint(
+        &self,
+        receipt: PreparedStorageHistory,
+        install: FollowerStateCheckpointInstall,
+    ) -> Result<FollowerStateCheckpointInstallOutcome, StromaError> {
+        self.inner
+            .install_queue_learner_checkpoint(receipt, install)
+            .await
+    }
+
+    pub async fn prepare_queue_learner_storage(
+        &self,
+        topic: &str,
+        part: u32,
+        group: Option<&str>,
+        binding: StorageHistoryBinding,
+        intent: [u8; 32],
+    ) -> Result<PreparedStorageHistory, StromaError> {
+        self.inner
+            .prepare_queue_learner_storage(topic, part, group, binding, intent)
+            .await
+    }
+
+    pub async fn queue_replication_next_offsets(
+        &self,
+        topic: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<(Offset, Offset), StromaError> {
+        self.inner
+            .queue_replication_next_offsets(topic, part, group)
+            .await
+    }
+
+    pub async fn verify_queue_learner_caught_up(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        epoch: u64,
+        message_target: u64,
+        event_target: u64,
+    ) -> Result<stroma_core::QueuePublishCommit, StromaError> {
+        self.inner
+            .verify_queue_learner_caught_up(tp, part, group, epoch, message_target, event_target)
+            .await
+    }
+
     pub fn verify_admitted_storage_history(&self, prepared: &PreparedStorageHistory) -> Result<(), StromaError> {
         self.inner.verify_admitted_storage_history(prepared)
     }

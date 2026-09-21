@@ -10,6 +10,14 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Background learner catch-up
+
+Assigned replicas excluded from an activated quorum can now copy and backfill the current history while the owner continues confirming writes. A durable, fully applied cut and complete payload dependencies gate exact-instance admission; unchanged sessions keep their progress and the next recovery uses the enlarged witness set. Restart and process-kill tests cover checkpoint backfill and publication of a new local generation with old evidence retained.
+
+### Learner materialization role
+
+Storage normally materialized a queue with an owner role before coordination adjusted it. Learner generations now retain a follower marker across eviction and restart, preventing background timer maintenance from treating a returning copy as an owner during catch-up. Explicit promotion remains a separate operation.
+
 ### Recovery candidate handoff
 
 A persisted recovery could stall indefinitely after its proposed owner disappeared, even with sufficient surviving evidence and completed transfers. The controller now selects another available member of the fixed replica set without changing seals, staged data or quorum requirements; activation binds the selected owner through fresh consensus. Three-node tests cover a stopped candidate, preserved staged data, stale-candidate rejection and resumed replicated confirms.

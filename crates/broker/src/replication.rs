@@ -1454,7 +1454,14 @@ impl ReplicationConfirmGate {
         dependency: Option<stroma_core::QueuePublishCommit>,
         expected_assignment: Option<PartitionAssignment>,
     ) -> Result<(), BrokerError> {
-        if self.assignments.get(key).as_deref() != expected_assignment.as_ref() {
+        let current = self.assignments.get(key);
+        let preserves = match (current.as_deref(), expected_assignment.as_ref()) {
+            (Some(now), Some(old)) => now.preserves_replication_contract(old),
+            (None, None) => true,
+            _ => false,
+        };
+        drop(current);
+        if !preserves {
             return Err(BrokerError::Unknown(
                 "assignment changed after publication admission".into(),
             ));
@@ -1554,7 +1561,7 @@ impl ReplicationConfirmGate {
         if self
             .assignments
             .get(key)
-            .is_none_or(|current| *current != assignment)
+            .is_none_or(|current| !current.preserves_replication_contract(&assignment))
         {
             return Err(BrokerError::Unknown(
                 "assignment changed while awaiting replication".into(),
@@ -3109,7 +3116,7 @@ impl<
         let Some(assignment_guard) = self.assignment_cache.get(&session.key) else {
             return;
         };
-        if *assignment_guard != session.assignment
+        if !assignment_guard.preserves_replication_contract(&session.assignment)
             || self
                 .replication_progress
                 .get(&session.key)
@@ -3415,6 +3422,102 @@ mod queue_dependency_tests {
         assert_eq!(deps.covered_next(&progress(100_000, 1)), 0);
         assert_eq!(deps.covered_next(&progress(100_000, 200_000)), 100_000);
     }
+    #[tokio::test]
+    async fn additive_admission_preserves_waiting_confirmation_and_original_progress_session() {
+        use crate::history_replication::{AcceptedHistory, ReplicaHistoryInstance};
+        let dir = stroma_core::test_dir!("additive_confirmation");
+        let engine = StromaEngine::open(
+            &dir.root,
+            stroma_core::StromaKeratinConfig::from_message_log(
+                stroma_core::KeratinConfig::test_default(),
+            ),
+            stroma_core::SnapshotConfig::default(),
+        )
+        .await
+        .unwrap();
+        let broker = Broker::new(engine, BrokerConfig::default(), None);
+        let key = QueueKey {
+            tp: "q".into(),
+            part: Partition::new(0),
+            group: None,
+        };
+        let mut before = PartitionAssignment::new(
+            crate::coordination::QueueIdentity::new("q", key.part, None),
+            "a",
+            vec!["b".into(), "c".into()],
+            1,
+        );
+        before.durability = crate::coordination::ReplicationDurabilityPolicy::MajorityDurable;
+        let instance = ReplicaHistoryInstance {
+            process: [1; 16],
+            storage: [2; 16],
+        };
+        before.history = Some(Arc::new(AcceptedHistory {
+            activation: [1; 32],
+            binding: stroma_core::StorageHistoryBinding {
+                resource_incarnation: [1; 16],
+                accepted_history: [2; 16],
+                writer_session: [3; 16],
+            },
+            owner: "a".into(),
+            replicas: std::collections::BTreeMap::from([
+                ("a".into(), instance.clone()),
+                ("b".into(), instance.clone()),
+            ]),
+            blocked_local_replica: None,
+        }));
+        broker.cache_queue_assignment(&before);
+        assert!(
+            broker
+                .begin_replication_progress_session("q", key.part, None, "c", 1)
+                .is_none()
+        );
+        let original = broker
+            .begin_replication_progress_session("q", key.part, None, "b", 1)
+            .unwrap();
+        let gate = broker.replication_confirm_gate();
+        let wait = gate.await_dependency(&key, 0, Some(commit(1, 1)), Some(before.clone()));
+        tokio::pin!(wait);
+        assert!(futures::poll!(&mut wait).is_pending());
+        let mut after = before.clone();
+        Arc::make_mut(after.history.as_mut().unwrap())
+            .replicas
+            .insert("c".into(), instance);
+        assert!(after.preserves_replication_contract(&before));
+        assert!(!before.preserves_replication_contract(&after));
+        broker.cache_queue_assignment(&after);
+        broker.record_replication_session_progress(&original, 1, 1);
+        tokio::time::timeout(Duration::from_secs(1), wait)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            broker
+                .begin_replication_progress_session("q", key.part, None, "c", 1)
+                .is_some()
+        );
+        for mutation in 0..5 {
+            let mut bad = after.clone();
+            match mutation {
+                0 => bad.epoch += 1,
+                1 => bad.owner = "c".into(),
+                2 => {
+                    bad.durability = crate::coordination::ReplicationDurabilityPolicy::LocalDurable
+                }
+                3 => {
+                    Arc::make_mut(bad.history.as_mut().unwrap())
+                        .replicas
+                        .get_mut("b")
+                        .unwrap()
+                        .storage = [9; 16]
+                }
+                _ => Arc::make_mut(bad.history.as_mut().unwrap()).activation = [9; 32],
+            }
+            assert!(!bad.preserves_replication_contract(&before));
+        }
+        broker.shutdown().await;
+    }
+
     #[tokio::test]
     async fn removed_assignment_cannot_become_a_local_confirmation() {
         let assignments = Arc::new(DashMap::new());

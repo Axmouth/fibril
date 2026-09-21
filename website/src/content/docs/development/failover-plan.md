@@ -11,9 +11,9 @@ installation, exact quorum activation and bounded recovery are documented in
 ## Remaining recovery work
 
 1. Extend process-isolation and membership-change tests through candidate
-   handoff, including replacement outside the fixed proposed replica set. Add
-   admission and catch-up for returning assigned replicas excluded from the
-   initial activated quorum.
+   handoff, including replacement outside the fixed proposed replica set. Extend
+   background learner coverage to owner isolation, concurrent recovery/admission
+   and repeated broker loss during checkpoint backfill.
 2. Add composite reconstruction for crossed payload/event tails and authoritative
    stream-state recovery. Keep unsupported or contradictory histories fenced.
 3. Extend transfer support beyond the current 16 MiB record/page and snapshot

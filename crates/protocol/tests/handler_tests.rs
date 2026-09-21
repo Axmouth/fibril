@@ -7935,15 +7935,20 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_consensus() {
-    authenticated_recovery_scenario(false).await;
+    authenticated_recovery_scenario(false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn recovery_candidate_handoff_preserves_completed_stage_and_fences_old_candidate() {
-    authenticated_recovery_scenario(true).await;
+    authenticated_recovery_scenario(true, false).await;
 }
 
-async fn authenticated_recovery_scenario(handoff: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn excluded_learner_catches_up_without_interrupting_the_serving_quorum() {
+    authenticated_recovery_scenario(false, true).await;
+}
+
+async fn authenticated_recovery_scenario(handoff: bool, learner: bool) {
     use fibril_broker::initial_history::{
         InitialHistoryLocalReceipt, InitialHistoryPrepareCommand,
     };
@@ -8097,7 +8102,21 @@ async fn authenticated_recovery_scenario(handoff: bool) {
                         proposed,
                         previous_write_nodes: 2,
                         proposed_write_nodes: 2,
-                        required_old_witnesses: 1,
+                        required_old_witnesses: provider
+                            .snapshot()
+                            .assignment_for(
+                                &resource.name,
+                                Partition::new(resource.partition as u32),
+                                resource.group.as_deref(),
+                            )
+                            .unwrap()
+                            .history
+                            .as_ref()
+                            .unwrap()
+                            .replicas
+                            .len()
+                            - 2
+                            + 1,
                     };
                     snapshot.attributes.insert(
                         fibril_coordination_ganglion::promotion::pending_recovery_key(resource),
@@ -8591,6 +8610,318 @@ async fn authenticated_recovery_scenario(handoff: bool) {
         .unwrap()
         .unwrap();
     stream_task.await.unwrap().unwrap();
+    if learner {
+        use fibril_broker::broker::{BrokerReplicationCatchUp, BrokerReplicationCatchUpOptions};
+        use fibril_protocol::v1::replication::connect_protocol_owner_peer;
+        for (provider, id) in providers.iter().zip(["a", "b", "c"]) {
+            let node = NodeInfo {
+                node_id: id.into(),
+                broker_addr: "127.0.0.1:1".into(),
+                admin_addr: None,
+            };
+            retry_metadata(|| provider.register_self(&node)).await;
+        }
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while providers
+                .iter()
+                .any(|p| p.consensus_node().committed_snapshot().nodes.len() != 3)
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let before = providers[0].snapshot();
+        let old_assignment = before
+            .assignment_for("initial-wire", Partition::new(0), None)
+            .unwrap()
+            .clone();
+        let intent = retry_metadata(|| providers[2].begin_queue_learner(&resource)).await;
+        let prepared =
+            retry_metadata(|| providers[2].prepare_queue_learner(&intent, &engines[2])).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while providers.iter().any(|p| {
+                intent
+                    .session(&p.consensus_node().committed_snapshot())
+                    .is_err()
+            }) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(providers[0].begin_queue_learner(&resource).await.is_err());
+        assert!(
+            providers[0]
+                .prepare_queue_learner(&intent, &engines[0])
+                .await
+                .is_err()
+        );
+        assert!(
+            !providers[2]
+                .snapshot()
+                .assignment_for("initial-wire", Partition::new(0), None)
+                .unwrap()
+                .is_followed_by("c")
+        );
+        assert!(
+            brokers[0]
+                .begin_replication_progress_session("initial-wire", Partition::new(0), None, "c", 1)
+                .is_none()
+        );
+        engines[2]
+            .become_queue_follower_with_epoch("initial-wire", 0, None, 1)
+            .await
+            .unwrap();
+        assert!(
+            providers[2]
+                .admit_queue_learner(&intent, &engines[2], 2, 2)
+                .await
+                .is_err()
+        );
+        let (addr, learner_task, dir, _) = start_protocol_listener_for_broker(
+            ConnectionSettings::new(Some(60)),
+            brokers[0].clone(),
+            dirs[0].take().unwrap(),
+            Some(node_auth()),
+        )
+        .await;
+        dirs[0] = Some(dir);
+        let auth =
+            ProtocolOwnerPeerResolverConfig::new(HashMap::new()).with_auth("@node", "secret");
+        let learner_peer = connect_protocol_owner_peer(
+            addr.to_string(),
+            auth.auth.as_ref(),
+            None,
+            "learner-test",
+            "1",
+        )
+        .await
+        .unwrap()
+        .with_reporter("c")
+        .with_history_session(
+            intent
+                .session(&providers[2].consensus_node().committed_snapshot())
+                .unwrap(),
+        );
+        let cut = learner_peer
+            .export_owner_state_checkpoint("initial-wire", Partition::new(0), None)
+            .await
+            .unwrap();
+        let caught = brokers[2]
+            .catch_up_replication_follower_from_owner_with_checkpoint(
+                &learner_peer,
+                "initial-wire",
+                Partition::new(0),
+                None,
+                ReplicationResourceKind::Queue,
+                BrokerReplicationCatchUpOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(caught, BrokerReplicationCatchUp::CaughtUp(_)));
+        let mut waiting = publisher
+            .publish(
+                b"during-learner-admission".to_vec(),
+                unix_millis(),
+                unix_millis(),
+                None,
+                Default::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        // Even forged optimistic learner progress must never satisfy a confirm.
+        let _ = learner_peer
+            .read_owner_replication_records_fenced(
+                "initial-wire",
+                Partition::new(0),
+                None,
+                3,
+                3,
+                8,
+                8,
+                65536,
+                0,
+                Some(1),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            waiting.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            providers[0]
+                .snapshot()
+                .assignment_for("initial-wire", Partition::new(0), None)
+                .unwrap(),
+            &old_assignment
+        );
+        assert!(providers[0].pending_recoveries().unwrap().is_empty());
+        retry_metadata(|| {
+            providers[2].admit_queue_learner(
+                &intent,
+                &engines[2],
+                cut.message_next_offset,
+                cut.event_next_offset,
+            )
+        })
+        .await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while providers.iter().any(|p| {
+                !p.snapshot()
+                    .assignment_for("initial-wire", Partition::new(0), None)
+                    .unwrap()
+                    .is_followed_by("c")
+            }) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let after = providers[0].snapshot();
+        let joined = after
+            .assignment_for("initial-wire", Partition::new(0), None)
+            .unwrap();
+        assert!(joined.preserves_replication_contract(&old_assignment));
+        assert_eq!(joined.epoch, 1);
+        assert_eq!(joined.owner, "a");
+        assert_eq!(
+            joined.history.as_ref().unwrap().activation,
+            history.activation
+        );
+        assert_eq!(
+            joined.history.as_ref().unwrap().replicas["c"].storage,
+            prepared.storage_instance
+        );
+        for i in 0..3 {
+            for result in brokers[i]
+                .apply_assignment_snapshot_transitions(
+                    ["a", "b", "c"][i],
+                    &before,
+                    &providers[i].snapshot(),
+                )
+                .await
+            {
+                result.unwrap();
+            }
+        }
+        assert!(
+            learner_peer
+                .read_owner_replication_records_fenced(
+                    "initial-wire",
+                    Partition::new(0),
+                    None,
+                    3,
+                    3,
+                    8,
+                    8,
+                    65536,
+                    0,
+                    Some(1)
+                )
+                .await
+                .is_err()
+        );
+        drop(learner_peer);
+        learner_task.await.unwrap().unwrap();
+        let (addr, new_task, dir, _) = start_protocol_listener_for_broker(
+            ConnectionSettings::new(Some(60)),
+            brokers[0].clone(),
+            dirs[0].take().unwrap(),
+            Some(node_auth()),
+        )
+        .await;
+        dirs[0] = Some(dir);
+        let new_peer = connect_protocol_owner_peer(
+            addr.to_string(),
+            auth.auth.as_ref(),
+            None,
+            "joined-test",
+            "1",
+        )
+        .await
+        .unwrap()
+        .with_reporter("c")
+        .with_history_session(
+            joined
+                .history
+                .as_ref()
+                .unwrap()
+                .session("initial-wire", Partition::new(0), None, false, "c", "a")
+                .unwrap(),
+        );
+        let from = engines[2]
+            .verify_queue_learner_caught_up("initial-wire", 0, None, 1, 0, 0)
+            .await
+            .unwrap();
+        let caught = brokers[2]
+            .catch_up_replication_follower_from_owner_with_checkpoint(
+                &new_peer,
+                "initial-wire",
+                Partition::new(0),
+                None,
+                ReplicationResourceKind::Queue,
+                BrokerReplicationCatchUpOptions {
+                    message_from: from.message_next,
+                    event_from: from.event_next,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(caught, BrokerReplicationCatchUp::CaughtUp(_)));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), waiting)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            2
+        );
+        drop(new_peer);
+        new_task.await.unwrap().unwrap();
+        // Joined membership participates in the next recovery intersection proof.
+        let pending = persist_pending(&providers, &resource, history.activation, "b").await;
+        synced(&providers, pending.requested_generation).await;
+        assert_eq!(pending.required_old_witnesses, 2);
+        let seal = brokers[2]
+            .seal_replica_for_recovery(pending.seal_command().unwrap())
+            .await
+            .unwrap();
+        let mut witnesses =
+            fibril_coordination_ganglion::recovery_witnesses::RecoveryWitnessSet::new(
+                &providers[0].consensus_node().committed_snapshot(),
+                &pending,
+            )
+            .unwrap();
+        witnesses
+            .record(
+                &providers[0].consensus_node().committed_snapshot(),
+                "c",
+                seal,
+            )
+            .unwrap();
+        assert!(
+            providers[2]
+                .admit_queue_learner(&intent, &engines[2], 0, 0)
+                .await
+                .is_err()
+        );
+        drop(peer);
+        owner_task.await.unwrap().unwrap();
+        for broker in &brokers {
+            broker.shutdown().await;
+        }
+        for provider in &providers {
+            provider.consensus_node().shutdown().await.unwrap();
+        }
+        for server in servers {
+            server.shutdown();
+        }
+        return;
+    }
     // Fencing closes the live session but retains the accepted certificate.
     // The one surviving prepared follower is enough: every previous majority
     // confirm needed both prepared replicas, and c was never eligible to vote.

@@ -209,6 +209,13 @@ pub(crate) fn accepted_history(
     snapshot: &CoordinationSnapshot,
     resource: &ganglion_core::ResourceIdentity,
 ) -> Result<fibril_broker::history_replication::AcceptedHistory, String> {
+    crate::queue_learner::extend(snapshot, resource, base_history(snapshot, resource)?)
+}
+
+pub(crate) fn base_history(
+    snapshot: &CoordinationSnapshot,
+    resource: &ganglion_core::ResourceIdentity,
+) -> Result<fibril_broker::history_replication::AcceptedHistory, String> {
     if let Some(history) = crate::recovery_activation::accepted(snapshot, resource)? {
         return Ok(history);
     }
@@ -309,52 +316,11 @@ pub(crate) fn replaced_initial_processes(
     snapshot: &CoordinationSnapshot,
     resource: &ganglion_core::ResourceIdentity,
 ) -> Result<Vec<String>, String> {
-    if let Some(history) = crate::recovery_activation::accepted(snapshot, resource)? {
-        return Ok(history.replicas.into_iter().filter_map(|(id, previous)| {
-            let current = snapshot.nodes.get(&id)?.labels.get(crate::HISTORY_PROCESS_LABEL)?;
-            let current = uuid::Uuid::parse_str(current).ok()?;
-            (!current.is_nil() && current.as_bytes() != &previous.process).then_some(id)
-        }).collect());
-    }
-    let Some(incarnation) = crate::history_identity::resource_incarnation(snapshot, resource)?
-    else {
+    let Some(history) = previous_initial_history(snapshot, resource)? else {
         return Ok(Vec::new());
     };
-    if incarnation.version != 2 || incarnation.retired {
-        return Ok(Vec::new());
-    }
-    let Some(raw) = snapshot.attributes.get(&initial_history::key(&incarnation)) else {
-        return Ok(Vec::new());
-    };
-    let decision: InitialHistoryDecision = serde_json::from_str(raw).map_err(|e| e.to_string())?;
-    if decision.incarnation != incarnation {
-        return Err("initial decision has wrong incarnation".into());
-    }
-    initial_history::validate_committed(snapshot, &decision)?;
-    // Before activation no writer exists. Renew the initial preparation instead
-    // of creating a recovery fence with no accepted history to recover from.
-    if !snapshot.attributes.contains_key(&key(&decision)) {
-        return Ok(Vec::new());
-    }
-    let mut expected = std::collections::BTreeMap::from([(
-        decision.assignment.owner.clone(),
-        decision.owner_process,
-    )]);
-    if let Some(raw) = snapshot
-        .attributes
-        .get(&initial_history::quorum_key(&incarnation))
-    {
-        let quorum: InitialHistoryPreparedQuorum =
-            serde_json::from_str(raw).map_err(|e| e.to_string())?;
-        quorum.validate(snapshot, &decision)?;
-        expected.extend(
-            quorum
-                .reports
-                .into_iter()
-                .map(|(id, report)| (id, report.replica_process)),
-        );
-    }
-    Ok(expected
+    Ok(history
+        .replicas
         .into_iter()
         .filter_map(|(id, previous)| {
             let current = snapshot
@@ -363,7 +329,7 @@ pub(crate) fn replaced_initial_processes(
                 .labels
                 .get(crate::HISTORY_PROCESS_LABEL)?;
             let current = uuid::Uuid::parse_str(current).ok()?;
-            (!current.is_nil() && current.as_bytes() != &previous).then_some(id)
+            (!current.is_nil() && current.as_bytes() != &previous.process).then_some(id)
         })
         .collect())
 }

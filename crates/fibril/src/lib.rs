@@ -5,6 +5,7 @@
 
 pub mod recovery_driver;
 pub mod initial_history_driver;
+pub mod queue_learner_driver;
 
 use std::collections::BTreeMap;
 use std::num::ParseIntError;

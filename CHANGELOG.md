@@ -29,6 +29,13 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- Background catch-up and additive admission for assigned replicas excluded from
+  an activated queue quorum. Learners cannot vote or serve; complete durable and
+  applied history gates exact-instance admission while the existing owner and
+  confirmation waits continue. Interrupted checkpoint backfill and older local
+  generations resume safely, retaining sealed evidence. Matching broker revisions
+  are required for the learner metadata and admission rules.
+
 - Automatic handoff of unfinished queue recovery to another available member of
   the fixed proposed replica set. Existing witness evidence, plans and completed
   stages are retained; stale candidates cannot activate and confirmation
