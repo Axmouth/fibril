@@ -458,20 +458,32 @@ async fn automatic_recovery_repeats_and_preserves_confirmed_messages() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn automatic_three_node_enrollment_admits_followers_after_owner_stops() {
-    three_node_owner_loss(false, false).await;
+    three_node_owner_loss(false, LearnerCase::None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn automatic_recovery_replaces_stopped_candidate_without_weakening_quorum() {
-    three_node_owner_loss(true, false).await;
+    three_node_owner_loss(true, LearnerCase::None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn automatic_background_learner_joins_while_owner_keeps_confirming() {
-    three_node_owner_loss(false, true).await;
+    three_node_owner_loss(false, LearnerCase::Join).await;
 }
 
-async fn three_node_owner_loss(recover: bool, learner: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn background_learner_resumes_incomplete_checkpoint_after_repeated_broker_restarts() {
+    three_node_owner_loss(false, LearnerCase::Restart).await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LearnerCase {
+    None,
+    Join,
+    Restart,
+}
+
+async fn three_node_owner_loss(recover: bool, learner: LearnerCase) {
     use fibril_broker::coordination::{NodeInfo, QueueIdentity};
     let root = std::env::temp_dir().join(format!(
         "fibril-three-node-enrollment-{}",
@@ -510,7 +522,7 @@ async fn three_node_owner_loss(recover: bool, learner: bool) {
         .wait_for_any_leader(Duration::from_secs(10))
         .await
         .unwrap();
-    let providers: Vec<_> = nodes
+    let mut providers: Vec<_> = nodes
         .into_iter()
         .zip(["a", "b", "c"])
         .map(|(node, id)| Arc::new(GanglionCoordination::new(id, node)))
@@ -585,7 +597,7 @@ async fn three_node_owner_loss(recover: bool, learner: bool) {
     })
     .await
     .unwrap();
-    if learner {
+    if learner != LearnerCase::None {
         listeners[2].abort();
         let _ = (&mut listeners[2]).await;
     }
@@ -594,7 +606,7 @@ async fn three_node_owner_loss(recover: bool, learner: bool) {
         fibril::recovery_driver::spawn(providers[0].clone(), brokers[0].clone(), config.clone());
     tokio::time::timeout(Duration::from_secs(40), async {
         loop {
-            if providers.iter().take(if learner { 2 } else { 3 }).all(|p| {
+            if providers.iter().take(if learner != LearnerCase::None { 2 } else { 3 }).all(|p| {
                 p.local_initial_history_admissions()
                     .is_ok_and(|a| a.len() == 1)
             }) && providers[0]
@@ -615,7 +627,7 @@ async fn three_node_owner_loss(recover: bool, learner: bool) {
     })
     .await
     .unwrap();
-    if learner {
+    if learner != LearnerCase::None {
         use fibril_broker::broker::{
             BrokerOwnerReplicationPeer, BrokerReplicationCatchUpOptions, ReplicationResourceKind,
         };
@@ -703,7 +715,7 @@ async fn three_node_owner_loss(recover: bool, learner: bool) {
                 brokers[2]
                     .engine()
                     .install_queue_learner_checkpoint(
-                        receipt,
+                        receipt.clone(),
                         fibril_broker::queue_engine::FollowerStateCheckpointInstall {
                             message_epoch: cut.message_epoch,
                             event_epoch: cut.event_epoch,
@@ -722,6 +734,102 @@ async fn three_node_owner_loss(recover: bool, learner: bool) {
                         .await
                         .is_err()
                 );
+                if learner == LearnerCase::Restart {
+                    // Recreate the whole broker and its process identity twice,
+                    // retaining only durable data. Restart its metadata node
+                    // on the same address so the remaining quorum can reconnect.
+                    // Native SIGKILL tests cover torn storage publication; this
+                    // exercises broker-level reopening and stale authority.
+                    let mut old_intent = intent;
+                    let mut old_receipt = receipt.clone();
+                    for _ in 0..2 {
+                        listeners[2].abort();
+                        let _ = (&mut listeners[2]).await;
+                        let stopped = brokers.pop().unwrap();
+                        stopped.shutdown().await;
+                        drop(stopped);
+                        providers[2].consensus_node().shutdown().await.unwrap();
+                        let address = servers[2].local_addr();
+                        servers.pop().unwrap().shutdown();
+                        let (node, server) = tokio::time::timeout(Duration::from_secs(10), async {
+                            loop {
+                                match ganglion::RaftMetadataNode::start_durable_tcp(
+                                    3,
+                                    ganglion::default_raft_config().unwrap(),
+                                    address,
+                                    root.join("metadata-3"),
+                                )
+                                .await
+                                {
+                                    Ok(started) => break started,
+                                    Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+                                }
+                            }
+                        })
+                        .await
+                        .unwrap();
+                        servers.push(server);
+                        node.wait_for_any_leader(Duration::from_secs(10))
+                            .await
+                            .unwrap();
+                        providers[2] = Arc::new(GanglionCoordination::new("c", node));
+                        let engine = StromaEngine::open(
+                            root.join("data-c"),
+                            StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+                            SnapshotConfig::default(),
+                        )
+                        .await
+                        .unwrap();
+                        let broker = Broker::new_with_ownership(
+                            engine,
+                            BrokerConfig::default(),
+                            None,
+                            providers[2].clone(),
+                        );
+                        let (address, listener) = serve_test_broker(broker.clone()).await;
+                        brokers.push(broker);
+                        listeners[2] = listener;
+                        config.nodes.insert("c".into(), address.clone());
+                        providers[2]
+                            .register_self(&NodeInfo {
+                                node_id: "c".into(),
+                                broker_addr: address,
+                                admin_addr: None,
+                            })
+                            .await
+                            .unwrap();
+                        assert!(
+                            providers[2]
+                                .authorize_queue_learner(&old_intent)
+                                .await
+                                .is_err()
+                        );
+                        let renewed = providers[2].begin_queue_learner(&resource).await.unwrap();
+                        let prepared = providers[2]
+                            .prepare_queue_learner(&renewed, &brokers[2].engine())
+                            .await
+                            .unwrap();
+                        assert_ne!(renewed.process, old_intent.process);
+                        assert_ne!(prepared.storage_instance, old_receipt.storage_instance);
+                        assert_eq!(prepared.binding, old_receipt.binding);
+                        assert!(
+                            !providers[2]
+                                .snapshot()
+                                .assignment_for("q", Partition::new(0), None)
+                                .unwrap()
+                                .is_followed_by("c")
+                        );
+                        assert!(
+                            providers[2]
+                                .admit_queue_learner(&renewed, &brokers[2].engine(), 4, 4)
+                                .await
+                                .is_err()
+                        );
+                        assert!(providers[0].pending_recoveries().unwrap().is_empty());
+                        old_intent = renewed;
+                        old_receipt = prepared;
+                    }
+                }
                 learner_worker = Some(fibril::recovery_driver::spawn(
                     providers[2].clone(),
                     brokers[2].clone(),

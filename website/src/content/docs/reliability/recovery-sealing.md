@@ -201,8 +201,13 @@ Coverage includes continued majority confirmations during automatic checkpoint
 backfill, forged learner-progress rejection, an existing confirmation completed
 after admission, increased recovery witness requirements, native checkpoint
 interruption/restart, and process kills at learner route-publication boundaries.
-These checks do not establish power-loss behavior or eliminate the need for
-broader isolation and admission-race testing.
+Authenticated tests also cover admission competing with recovery, rejection of
+late learner admission, and an old owner retaining stale metadata after its
+coordination runtime stops. Sealing its eligible follower prevents further
+confirmations. Broker and metadata reopening twice during incomplete backfill
+rejects old receipts and resumes through the automatic worker. These checks do
+not establish power-loss behavior; packet-level asymmetric partitions and
+whole-process interruption during transfer remain separate acceptance work.
 
 ## Initial activation and live replication
 

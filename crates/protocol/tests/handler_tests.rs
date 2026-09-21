@@ -7935,20 +7935,44 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_consensus() {
-    authenticated_recovery_scenario(false, false).await;
+    authenticated_recovery_scenario(false, LearnerCase::None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn recovery_candidate_handoff_preserves_completed_stage_and_fences_old_candidate() {
-    authenticated_recovery_scenario(true, false).await;
+    authenticated_recovery_scenario(true, LearnerCase::None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn excluded_learner_catches_up_without_interrupting_the_serving_quorum() {
-    authenticated_recovery_scenario(false, true).await;
+    authenticated_recovery_scenario(false, LearnerCase::Join).await;
 }
 
-async fn authenticated_recovery_scenario(handoff: bool, learner: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pending_recovery_rejects_ready_learner_and_old_owner_reads() {
+    authenticated_recovery_scenario(false, LearnerCase::RecoveryFirst).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn learner_admission_racing_recovery_preserves_quorum_intersection() {
+    authenticated_recovery_scenario(false, LearnerCase::Race).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stale_owner_without_metadata_updates_cannot_confirm_after_follower_fence() {
+    authenticated_recovery_scenario(false, LearnerCase::StaleOwner).await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LearnerCase {
+    None,
+    Join,
+    RecoveryFirst,
+    Race,
+    StaleOwner,
+}
+
+async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
     use fibril_broker::initial_history::{
         InitialHistoryLocalReceipt, InitialHistoryPrepareCommand,
     };
@@ -8610,7 +8634,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: bool) {
         .unwrap()
         .unwrap();
     stream_task.await.unwrap().unwrap();
-    if learner {
+    if learner != LearnerCase::None {
         use fibril_broker::broker::{BrokerReplicationCatchUp, BrokerReplicationCatchUpOptions};
         use fibril_protocol::v1::replication::connect_protocol_owner_peer;
         for (provider, id) in providers.iter().zip(["a", "b", "c"]) {
@@ -8720,6 +8744,182 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: bool) {
             .await
             .unwrap();
         assert!(matches!(caught, BrokerReplicationCatchUp::CaughtUp(_)));
+        if matches!(
+            learner,
+            LearnerCase::RecoveryFirst | LearnerCase::Race | LearnerCase::StaleOwner
+        ) {
+            use fibril_broker::coordination::{
+                DeterministicPartitionPlacement, DeterministicStreamPlacement,
+            };
+            // Keep the old owner process and TCP session alive. Excluding it from
+            // placement models a failure report, rather than graceful shutdown.
+            let live = providers[0]
+                .live_nodes(Duration::from_secs(300))
+                .into_iter()
+                .filter(|(id, _)| id != "a")
+                .collect::<HashMap<_, _>>();
+            assert_eq!(live.len(), 2);
+            let isolated = learner == LearnerCase::StaleOwner;
+            if isolated {
+                // Stop only the owner's metadata transport/runtime. Its broker,
+                // publisher and replication sockets remain live with old authority.
+                providers[0].consensus_node().shutdown().await.unwrap();
+                servers[0].shutdown();
+            }
+            let survivors = if isolated {
+                &providers[1..]
+            } else {
+                &providers[..]
+            };
+            let recover = async {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        for provider in survivors {
+                            provider
+                                .control_iteration(
+                                    &DeterministicPartitionPlacement,
+                                    &[QueueIdentity::new("initial-wire", Partition::new(0), None)],
+                                    &DeterministicStreamPlacement,
+                                    &[],
+                                    2,
+                                    2,
+                                    ReplicationDurabilityPolicy::MajorityDurable,
+                                    &live,
+                                    8,
+                                )
+                                .await
+                                .unwrap();
+                            if let Some(pending) = provider.pending_recoveries().unwrap().first() {
+                                return pending.clone();
+                            }
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap()
+            };
+            let admit = || {
+                providers[2].admit_queue_learner(
+                    &intent,
+                    &engines[2],
+                    cut.message_next_offset,
+                    cut.event_next_offset,
+                )
+            };
+            let (pending, admission) = if learner == LearnerCase::RecoveryFirst || isolated {
+                let pending = recover.await;
+                synced(survivors, pending.requested_generation).await;
+                (pending, admit().await)
+            } else {
+                tokio::join!(recover, admit())
+            };
+            synced(survivors, pending.requested_generation).await;
+            let joined = pending.required_old_witnesses == 2;
+            assert!(matches!(pending.required_old_witnesses, 1 | 2));
+            if learner == LearnerCase::RecoveryFirst {
+                assert!(!joined);
+            }
+            if admission.is_ok() {
+                assert!(joined);
+            }
+            assert_eq!(pending.previous_write_nodes, 2);
+            assert_eq!(pending.proposed_write_nodes, 2);
+            assert!(providers[2].authorize_queue_learner(&intent).await.is_err());
+            assert!(admit().await.is_err());
+            if !isolated {
+                assert!(
+                    learner_peer
+                        .export_owner_state_checkpoint("initial-wire", Partition::new(0), None)
+                        .await
+                        .is_err()
+                );
+                assert!(
+                    peer.export_owner_state_checkpoint("initial-wire", Partition::new(0), None)
+                        .await
+                        .is_err()
+                );
+            } else {
+                assert!(providers[0].pending_recoveries().unwrap().is_empty());
+                assert_eq!(
+                    providers[0]
+                        .snapshot()
+                        .assignment_for("initial-wire", Partition::new(0), None)
+                        .unwrap(),
+                    &old_assignment
+                );
+            }
+            let snapshot = providers[1].consensus_node().committed_snapshot();
+            let mut witnesses =
+                fibril_coordination_ganglion::recovery_witnesses::RecoveryWitnessSet::new(
+                    &snapshot, &pending,
+                )
+                .unwrap();
+            let sealed = brokers[2]
+                .seal_replica_for_recovery(pending.seal_command().unwrap())
+                .await
+                .unwrap();
+            assert_eq!(witnesses.record(&snapshot, "c", sealed).is_ok(), joined);
+            let sealed = brokers[1]
+                .seal_replica_for_recovery(pending.seal_command().unwrap())
+                .await
+                .unwrap();
+            witnesses.record(&snapshot, "b", sealed).unwrap();
+            assert!(matches!(witnesses.progress(&snapshot).unwrap(),
+                fibril_coordination_ganglion::recovery_witnesses::SealCollectionProgress::AwaitingHistoryValidation { .. }));
+            if isolated {
+                let mut waiting = publisher
+                    .publish(
+                        b"isolated-owner-unconfirmed".to_vec(),
+                        unix_millis(),
+                        unix_millis(),
+                        None,
+                        Default::default(),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                // The owner can durably append under stale metadata, but its
+                // old eligible follower is now sealed and rejects further apply.
+                assert!(
+                    brokers[1]
+                        .catch_up_replication_follower_from_owner_with_checkpoint(
+                            &peer,
+                            "initial-wire",
+                            Partition::new(0),
+                            None,
+                            ReplicationResourceKind::Queue,
+                            BrokerReplicationCatchUpOptions {
+                                message_from: 2,
+                                event_from: 2,
+                                ..Default::default()
+                            }
+                        )
+                        .await
+                        .is_err()
+                );
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(250), &mut waiting)
+                        .await
+                        .is_err()
+                );
+            }
+            drop(learner_peer);
+            learner_task.await.unwrap().unwrap();
+            drop(peer);
+            owner_task.await.unwrap().unwrap();
+            drop(publisher);
+            for broker in &brokers {
+                broker.shutdown().await;
+            }
+            for provider in &providers {
+                provider.consensus_node().shutdown().await.unwrap();
+            }
+            for server in servers {
+                server.shutdown();
+            }
+            return;
+        }
         let mut waiting = publisher
             .publish(
                 b"during-learner-admission".to_vec(),

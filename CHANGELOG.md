@@ -29,6 +29,9 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- Recovery regressions for concurrent learner admission, stale-owner confirmation
+  fencing, and repeated broker/metadata reopening during checkpoint backfill.
+
 - Background catch-up and additive admission for assigned replicas excluded from
   an activated queue quorum. Learners cannot vote or serve; complete durable and
   applied history gates exact-instance admission while the existing owner and

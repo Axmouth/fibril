@@ -10,6 +10,14 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Recovery admission races and stale owners
+
+Authenticated tests now race learner admission against recovery and verify the resulting witness requirement at the unchanged write threshold. An owner whose metadata runtime has stopped cannot confirm further writes after its eligible follower is sealed; repeated learner broker/metadata restarts also preserve incomplete checkpoint backfill and reject stale receipts. These tests complement native process-kill coverage and leave packet-level partitions and whole-process interruption during transfer as separate acceptance work.
+
+### OpenRaft empty-read panic
+
+An empty replication read panicked an OpenRaft 0.9.24 background task, sometimes while the surrounding test still passed. The 0.9.25 heartbeat fallback also fails at index zero; Ganglion carries a narrow retry patch that reports no progress for unread data and retires old streams on step-down, with subprocess checks for panics, eventual replication and cancellation. Dependency provenance and removal conditions are recorded in Ganglion's `vendor/openraft/PATCHES.md`; the scheduling cause of the original intermittent empty read remains unconfirmed.
+
 ### Background learner catch-up
 
 Assigned replicas excluded from an activated quorum can now copy and backfill the current history while the owner continues confirming writes. A durable, fully applied cut and complete payload dependencies gate exact-instance admission; unchanged sessions keep their progress and the next recovery uses the enlarged witness set. Restart and process-kill tests cover checkpoint backfill and publication of a new local generation with old evidence retained.
