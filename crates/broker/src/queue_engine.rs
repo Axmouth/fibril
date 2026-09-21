@@ -18,7 +18,7 @@ pub use stroma_core::{
     OwnerStateCheckpoint, PartitionKind, PutOutcome, QuarantineInfo, QueueInspectionState,
     QueuePromotionOutcome, RecoveryMismatchPolicy, ReplicatedAppendOutcome, ReplicatedEventBatch,
     ReplicatedMessageBatch, ReplicatedQueueApplyOutcome, RetentionConfig, SnapshotConfig, Stroma,
-    StromaError, StromaEvent, StromaKeratinConfig, StorageHistoryBinding,
+    StromaError, StromaEvent, StromaKeratinConfig, StorageHistoryBinding, PreparedStorageHistory,
 };
 use tokio::sync::Notify;
 
@@ -564,6 +564,20 @@ impl StromaEngine {
     ) -> Result<(), StromaError> {
         self.inner
             .initialize_empty_storage_history(tp, part, group, kind, binding)
+            .await
+    }
+
+    /// Persist an empty baseline while ordinary admission remains closed.
+    pub async fn prepare_empty_storage_history(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        kind: PartitionKind,
+        binding: StorageHistoryBinding,
+    ) -> Result<PreparedStorageHistory, StromaError> {
+        self.inner
+            .prepare_empty_storage_history(tp, part, group, kind, binding)
             .await
     }
 

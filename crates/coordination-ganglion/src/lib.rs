@@ -26,6 +26,7 @@ use ganglion_openraft::{
 use tokio::sync::watch;
 
 pub mod history_identity;
+pub mod initial_history;
 pub mod promotion;
 pub mod recovery_witnesses;
 
@@ -943,6 +944,8 @@ impl std::error::Error for ControlError {}
 /// through [`GanglionCoordination::propose`], which is leader-only.
 pub struct GanglionCoordination {
     node_id: String,
+    // Private instance identity: a replacement provider cannot inherit an old writer grant.
+    history_process: [u8; 16],
     node: RaftMetadataNode,
     tx: watch::Sender<CoordinationSnapshot>,
     forwarder: tokio::task::JoinHandle<()>,
@@ -1005,6 +1008,7 @@ impl GanglionCoordination {
 
         Self {
             node_id: node_id.into(),
+            history_process: *uuid::Uuid::now_v7().as_bytes(),
             node,
             tx,
             forwarder,

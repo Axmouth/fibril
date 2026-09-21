@@ -39,7 +39,7 @@ pub fn pending_recovery_key(resource: &ResourceIdentity) -> String {
     )
 }
 
-fn write_requirement(assignment: &PartitionAssignment) -> Result<usize, String> {
+pub(crate) fn write_requirement(assignment: &PartitionAssignment) -> Result<usize, String> {
     let mut nodes = BTreeSet::from([assignment.owner.as_str()]);
     if assignment.followers.iter().any(|id| !nodes.insert(id)) {
         return Err("replica configuration contains duplicate identities".into());

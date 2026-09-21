@@ -10,6 +10,10 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Consensus preparation without writer admission
+
+Initial-history decisions now persist fixed history/session IDs bound to the owner instance and exact assignment. Replica preparation leaves storage non-writable; receipt collection deduplicates replies, requires the owner and blocks contradictory replica identities. A durable metadata restart regression covers rejection of the old owner grant, while quorum installation and activation remain pending ([initial preparation](/reliability/recovery-sealing/#initial-history-preparation)).
+
 ### Storage history and writer restart
 
 An explicit initialization primitive now persists incarnation, history and writer-session IDs before admitting pristine storage. Reopening that store blocks ordinary access even at the same assignment epoch, while recovery sealing remains available; conflicting IDs and ordinary checkpoint replacement cannot relabel it. Cancellation, corruption and Linux SIGKILL regressions cover the boundary, with automatic enrollment and recovery readmission still pending ([storage binding](/reliability/recovery-sealing/#local-storage-history-binding)).

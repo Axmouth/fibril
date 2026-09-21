@@ -77,13 +77,43 @@ recovery sealing can still read and fence the retained logs. Ordinary checkpoint
 replacement of bound storage is blocked pending an installation protocol that
 carries the selected history and its authority.
 
-This primitive covers local binding and restart admission. Consensus allocation
-of accepted history and writer sessions, quorum initialization, legacy baseline
-validation and recovery readmission remain pending. Loss of the entire binding
+This primitive covers local binding and restart admission. The initial preparation
+protocol below allocates history/session IDs through consensus. Persisted quorum
+installation, activation, legacy baseline validation and recovery readmission
+remain pending. Loss of the entire binding
 and log directory must be handled by that consensus protocol; local file absence
 cannot prove a new resource. Unbound resources retain their existing behavior.
 Linux tests include a SIGKILL restart; they do not simulate power loss. Older
 binaries do not enforce this receipt, so bound stores require compatible binaries.
+
+## Initial history preparation
+
+Explicit coordination APIs now persist an immutable `Preparing` decision for a
+catalogued incarnation and its current assignment. The decision fixes the owner
+instance, history ID, writer-session ID and required write count. Repeated calls
+from that owner instance retain the committed IDs. A replacement provider using
+the same node name and assignment epoch must enter recovery readmission.
+
+Before preparing local storage, a generation-and-attribute guarded consensus
+update rechecks the decision. This merges one attribute and preserves advisory
+heartbeat updates. Assigned replicas can then persist an empty local baseline
+without opening ordinary writer admission. Preparation receipts identify the
+exact decision, reporting node, provider instance and storage instance. Existing
+state, snapshots, admitted histories and sealed replicas cannot be recertified
+as empty preparations.
+
+The explicit receipt collector admits reports from the contacted replica, counts
+identical retries once, requires the owner alongside the write-count threshold,
+and blocks on contradictory process or storage-instance reports. A prepared
+quorum supplies no activation operation. Reports currently live in memory;
+persisted installation receipts, authenticated remote preparation, fresh
+activation and recovery readmission remain pending.
+
+These operations are not used by ordinary broker startup. Initial activation
+also needs proof that the resource was enrolled before legacy writes could occur;
+a catalogue incarnation and empty local directories cannot establish that after
+data loss. Existing resources require a verified baseline. Matching metadata
+binaries are required for the new guarded merge command.
 
 ## Explicit witness collection
 
