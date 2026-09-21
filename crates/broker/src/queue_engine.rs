@@ -555,6 +555,13 @@ impl StromaEngine {
         self.inner.set_recovery_mismatch_policy(policy);
     }
 
+    /// Persist a queue checkpoint without triggering log compaction.
+    pub async fn snapshot_partition(
+        &self, tp: &str, part: u32, group: Option<&str>,
+    ) -> Result<(), StromaError> {
+        self.inner.snapshot_partition(tp, part, group).await
+    }
+
     /// Truncate the message log so offsets below `before` are no longer retained,
     /// advancing the log head. An operational primitive (retention/cleanup); a
     /// follower that requests an offset below the new head must install a

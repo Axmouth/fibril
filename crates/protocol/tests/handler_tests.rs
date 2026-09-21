@@ -7576,6 +7576,15 @@ async fn owner_peer_reauthenticates_after_transport_loss() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sealed_pair_inspection_compares_real_peers_and_discards_incomplete_reads() {
+    sealed_pair_inspection_scenario(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sealed_pair_checkpoint_replay_compares_different_boundaries_over_tcp() {
+    sealed_pair_inspection_scenario(true).await;
+}
+
+async fn sealed_pair_inspection_scenario(checkpoints: bool) {
     use fibril_broker::coordination::{
         DeterministicPartitionPlacement, DeterministicStreamPlacement,
     };
@@ -7726,11 +7735,21 @@ async fn sealed_pair_inspection_compares_real_peers_and_discards_incomplete_read
                         ] },
                         stroma_core::StromaEvent::MarkInflight { off: 0, deadline: 300 },
                         stroma_core::StromaEvent::Ack { off: 0 },
-                    ],
+                    ].into_iter().take(if checkpoints { index + 2 } else { 3 }).collect(),
                 }),
             )
             .await
             .unwrap();
+        if checkpoints {
+            engine.snapshot_partition(&command.topic, 0, None).await.unwrap();
+            if index == 0 {
+                engine.apply_replicated_queue_batch(&command.topic, 0, None, None,
+                    Some(stroma_core::ReplicatedEventBatch {
+                        epoch: pending.previous.epoch, first_offset: 2, durability: None,
+                        events: vec![stroma_core::StromaEvent::Ack { off: 0 }],
+                    })).await.unwrap();
+            }
+        }
         seals.push(
             broker
                 .seal_replica_for_recovery(command.clone())
@@ -7809,6 +7828,19 @@ async fn sealed_pair_inspection_compares_real_peers_and_discards_incomplete_read
         assert_eq!(left.required_message_next, if target == 0 { 0 } else { 2 });
         assert_ne!(left.message_digest, right.message_digest);
         assert_ne!(left.history_id, right.history_id);
+    }
+    if checkpoints {
+        let result = fibril_protocol::v1::recovery_inspection::inspect_recovery_pair_with_checkpoints(
+            &config, &command, &seals[0], &seals[1], limits, 3, Default::default(), 1024 * 1024,
+            Duration::from_secs(10),
+        ).await.unwrap();
+        let [left, right] = result.evidence.queue_replay.unwrap();
+        assert_eq!(left.checkpoint_event_next, Some(2));
+        assert_eq!(right.checkpoint_event_next, Some(3));
+        assert_eq!(left.lease_normalized_state_digest, right.lease_normalized_state_digest);
+        assert_eq!(left.live_payload_digest, right.live_payload_digest);
+        assert!(left.live_payload_digest.is_some());
+        assert_ne!(left.message_digest, right.message_digest);
     }
     let error = inspect_recovery_pair(
         &config,

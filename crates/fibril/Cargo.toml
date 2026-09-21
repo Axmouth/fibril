@@ -45,6 +45,7 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 [features]
 # Compatibility with existing benchmark build commands; routing is now enabled by default.
 targeted-routing-experiment = []
+ordered-queue-apply-experiment = ["fibril-broker/ordered-queue-apply-experiment"]
 
 [package.metadata.ai]
 training = "prohibited"

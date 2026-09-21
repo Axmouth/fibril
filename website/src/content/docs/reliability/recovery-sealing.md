@@ -128,8 +128,8 @@ establish corruption or authorize deleting an event suffix.
 
 Every result lists remaining common-origin/installed-lineage and state/dependency
 proofs. Nonzero retained heads and snapshot receipts add explicit compaction and
-checkpoint requirements. Snapshot digests are reported without interpreting the
-snapshot state. The inspector never combines independent maximum log tails,
+checkpoint requirements. The basic inspection reports snapshot digests; the checkpoint replay variant
+also interprets exact snapshot state. The inspector never combines independent maximum log tails,
 chooses a source, installs state or activates an owner.
 
 Default inspection limits are 256 records and 1 MiB per page, 1,024 pages,
@@ -166,6 +166,26 @@ replay. The default semantic-operation budget is one million per replica,
 counting every batch entry. Hashing/replay runs on blocking workers with two
 process-wide CPU slots held through caller cancellation; ordinary publishing and
 actor scheduling are unchanged. Automatic source selection remains pending.
+
+`inspect_recovery_pair_with_checkpoints` also accepts independently captured
+version-two queue snapshots. It downloads and verifies each raw envelope against
+its resource-bound seal, checks its exclusive boundary and state metadata, then
+replays the retained suffix to a common target. Legacy inclusive checkpoints are
+not accepted as exact replay evidence. The configured snapshot cap is at most
+16 MiB per replica, and decoded blob bytes count against the replay work budget.
+
+After reconstruction it streams the retained message records and hashes the
+exact offsets, headers and bodies of live messages. Missing live payloads fail
+inspection. Different retention of settled payloads can therefore produce equal
+live-payload evidence despite different complete-log digests. Snapshot bytes and
+input suffix identities remain in the report.
+
+The report includes both the complete state digest and a projection that releases
+owner-local leases to ready state. Retry counts, delays, TTL and pending DLQ state
+remain significant. Timer-driven transitions can still cause legitimate state
+differences and need further interpretation. Snapshot equality and live-payload
+equality supply comparison evidence; resource incarnation, accepted recovery
+history and quorum installation remain prerequisites for automatic activation.
 
 ## Cost and limits
 

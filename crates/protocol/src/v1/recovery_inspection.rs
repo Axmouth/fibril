@@ -54,10 +54,28 @@ pub async fn inspect_recovery_pair_with_queue_replay(
         left,
         right,
         limits,
-        Some((event_next, replay_limits)),
+        Some((event_next, replay_limits, None)),
         deadline,
     )
     .await
+}
+
+/// Compare queues replayed from each sealed replica's exact checkpoint. Raw
+/// snapshots, event suffixes and live payloads share the inspection budgets and
+/// deadline. Matching evidence still does not authorize source activation.
+pub async fn inspect_recovery_pair_with_checkpoints(
+    config: &ProtocolOwnerPeerResolverConfig,
+    command: &RecoverySealCommand,
+    left: &BrokerSealedReplica,
+    right: &BrokerSealedReplica,
+    limits: RecoveryInspectionLimits,
+    event_next: u64,
+    replay_limits: RecoveryReplayLimits,
+    max_checkpoint_bytes: u32,
+    deadline: std::time::Duration,
+) -> Result<ProtocolRecoveryPairInspection, BrokerError> {
+    inspect_pair(config, command, left, right, limits,
+        Some((event_next, replay_limits, Some(max_checkpoint_bytes))), deadline).await
 }
 
 // Admission remains held by owned CPU work if its caller times out. This bounds
@@ -70,7 +88,7 @@ async fn inspect_pair(
     left: &BrokerSealedReplica,
     right: &BrokerSealedReplica,
     limits: RecoveryInspectionLimits,
-    replay: Option<(u64, RecoveryReplayLimits)>,
+    replay: Option<(u64, RecoveryReplayLimits, Option<u32>)>,
     deadline: std::time::Duration,
 ) -> Result<ProtocolRecoveryPairInspection, BrokerError> {
     if left.node_id.is_empty() || right.node_id.is_empty() || left.node_id == right.node_id {
@@ -97,10 +115,11 @@ async fn inspect_pair(
         limits,
     )
     .map_err(BrokerError::InvalidArgument)?;
-    if let Some((target, replay_limits)) = replay {
-        inspector = inspector
-            .with_queue_replay(target, replay_limits)
-            .map_err(BrokerError::InvalidArgument)?;
+    if let Some((target, replay_limits, checkpoint_bytes)) = replay {
+        inspector = match checkpoint_bytes {
+            Some(max_bytes) => inspector.with_queue_checkpoint_replay(target, replay_limits, max_bytes),
+            None => inspector.with_queue_replay(target, replay_limits),
+        }.map_err(BrokerError::InvalidArgument)?;
     }
     let inspect = async {
         while let Some((side, request)) = inspector

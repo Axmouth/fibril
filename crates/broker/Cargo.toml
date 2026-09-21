@@ -41,6 +41,7 @@ name = "stream_filter"
 harness = false
 
 [features]
+ordered-queue-apply-experiment = ["stroma-core/ordered-queue-apply-experiment"]
 # Exposes coordination::contract_tests so other crates can run the shared
 # provider contract suite against their Coordination implementations.
 provider-contract-tests = []

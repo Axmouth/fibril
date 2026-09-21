@@ -95,13 +95,19 @@ Conditions and limits:
 - `refuse` is lazy today (a mismatch is caught when the partition is first used);
   an eager whole-disk variant at boot is a tracked follow-up.
 
-- Queue checkpoint decoding rejects malformed fields before replacing actor state.
-  Cancelling a checkpoint capture releases its owner pause, and capture serializes
-  with role changes and recovery seals.
-- Explicit sealed inspection can reconstruct fully retained queue state at a
-  common exclusive event boundary, with canonical state and separate input-history
-  digests. Compacted checkpoint authority, resource lineage and automatic source
-  selection remain pending; see [recovery sealing](/reliability/recovery-sealing/).
+- Queue event applications complete in log order by default. A checkpoint captures
+  actor state with its actual exclusive event boundary; zero means no events are
+  included. Interrupted application blocks capture and promotion until recovery or
+  checkpoint installation. Verified repeated follower events are not applied twice.
+- Snapshot version two records the exclusive boundary. Legacy snapshots remain
+  readable; older binaries cannot read version-two files. On Unix, snapshot file
+  and directory persistence precede periodic prefix compaction.
+- Explicit sealed inspection can replay each queue from its own exact checkpoint
+  to a common target, compare canonical state and live payload identities, and
+  separately normalize owner-local leases. Retry, delay, TTL and DLQ state remain
+  significant. Checkpoint authority, resource lineage, complete timer/stream
+  interpretation and automatic source selection remain pending; see
+  [recovery sealing](/reliability/recovery-sealing/).
 
 ## Publish
 
@@ -673,7 +679,7 @@ See also: [clustering](/concepts/clustering/) and
 | Recovery seal receiver and retained identity | Partial | Node-authenticated requests are checked against the exact committed transition; local seals and checksummed content fingerprints survive restart and support identical-request retry. Linux validated; non-Unix sealing is unsupported. Automatic dispatch, compatible-history proof and activation remain pending; see [recovery sealing](/reliability/recovery-sealing/) |
 | Recovery witness admission | Partial | Explicit calls use fresh authenticated connections and bounded deadlines; collection binds replies to distinct old replicas and the exact transition, preserves the old threshold and rejects contradictions. Count completion awaits history validation. Automatic collection, transfer and activation remain pending |
 | Sealed-source reads | Partial | Explicit node-authenticated pages recheck the committed transition and exact durable receipt, verify retained contents from disk, and preserve seals across live/cold reads and cancellation. Page/record limits and single-read admission bound storage work in flight; every page currently rescans retained data. Compatible-history proof, selected transfer and activation remain pending |
-| Retained-history inspection | Partial | Explicit two-witness comparison verifies transferred log digests, compares shared offsets and reports whole-event payload references with page/record/byte/deadline limits. Empty overlaps, compaction and state/checkpoint gaps remain explicit; common-origin proof, source selection and activation are pending |
+| Retained-history inspection | Partial | Explicit comparison verifies sealed snapshots and logs, replays exact queue checkpoints to a common target and hashes live payloads. Page/record/byte/operation/deadline limits apply; common origin, checkpoint authority, timer/stream interpretation and automatic activation remain pending |
 | Checkpoint recovery | Partial | Unix installation journals resume interrupted replacement of both logs and queue state before ordinary replay; completion receipts preserve later backfill on retry. Payload dependencies gate promotion across restart. Linux fault/SIGKILL tests pass; non-Unix installation is unsupported pending durable metadata support |
 | Conflict diagnostics | Implemented | Bounded, payload-free control history, offsets and effective record identities accompany overlap reports; checkpoint logs show source epochs and continuation offsets |
 | Replica-durable confirms | Partial | Queues require the same follower to cover the payload batch and exact enqueue frontier; epoch/session-fenced progress feeds confirmation and delivery visibility, with timeout and ISR floor |

@@ -10,6 +10,14 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Ordered application and exact checkpoints
+
+Queue events now finish actor application in log order, allowing snapshots to capture state with its actual exclusive event boundary. Interrupted application cannot be cleared by changing roles, and verified repeated follower batches skip already-applied events so NACK retries do not increment twice. Tests cover event zero, partial batches, cancelled captures, failed writes and restart; [checkpoint internals](/development/recovery-internals/) describes the boundary.
+
+### Comparing different checkpoint starts
+
+Explicit sealed inspection now verifies each snapshot and replays its event suffix to a common target, then compares live payload identities separately from state. Owner-local leases have a separate normalized digest; retry counts, delays, TTL and DLQ state retain their meaning. Authenticated TCP tests cover unequal checkpoint starts, while source authority and automatic activation remain tracked in the [failover plan](/development/failover-plan/).
+
 ### Checkpoint rejection and cancelled captures
 
 Malformed queue checkpoints could panic on invalid ranges or a truncated custom-DLQ group, and a rejected load could partially replace existing actor state. Decoding now validates into isolated state before replacement, and a pause acquired for checkpoint export is released even when its caller is cancelled while draining active work. Owner capture also serializes with role changes and recovery sealing; malformed-field, cancellation and real broker checkpoint tests cover these paths.

@@ -1,74 +1,65 @@
 ---
-title: Recovery quarantine internals
-description: Development notes on why a damaged queue log is repaired by truncate-to-valid, and where the consistency check belongs.
+title: Queue recovery and checkpoint internals
+description: Event-prefix checkpoints, replay boundaries and recoverable suffix repair.
 ---
 
-This is a development note. User-facing behavior lives in
-[recovery quarantine](/reliability/recovery-quarantine/). This page
-records the reasoning behind the design.
+Queue recovery loads a checkpoint and replays its event suffix on first use.
+The operator-facing corruption policy is described in
+[recovery quarantine](/reliability/recovery-quarantine/).
 
-The planning requirement was explicit: on recovery, verify that event references
-resolve, fail loud, and do not silently self-heal.
+## Exact application boundary
 
-## Detection
+Durable queue events complete actor application in log order. Disk appends remain
+concurrent. The application gate advances an exclusive `event_next` only after
+all actor commands for that event batch have completed; zero represents an empty
+applied prefix.
 
-Recovery replays the event log lazily, per partition, on first use. During the
-scan each event's highest referenced message offset is compared to the message
-log's durable tail (`next_offset`). The first event whose reference is at or past
-the tail is the truncation point: the scan stops there and returns the valid
-prefix plus the mismatch (event-log offset and dangling message offset). Every
-record must also decode, including its CRC.
+Checkpoint capture acquires this gate, passes its permit to the actor command and
+clones state with the actual boundary. A cancelled receiver cannot release the
+permit while its command remains queued. Encoding and file I/O run after the
+actor releases the application gate. Delivery leases and local timer state are
+also present in a live capture, which matters when comparing it with event-only
+replay.
 
-## Why truncate-to-valid is the only shape
+Partial application invalidates the sequence and blocks later owner application,
+checkpoint capture and promotion. Role changes preserve that failure. Completed
+recovery or a validated checkpoint installation establishes the next boundary;
+replaying verified follower overlap skips already-applied events. Reapplying a
+NACK can increment retries again, so replay starts at the exclusive checkpoint
+boundary.
 
-A mid-log dangling reference is impossible by construction. An `Enqueue{off}`
-event is written only after its message is durable (message fsync, then event),
-so the event log can reference a missing message only if it got ahead and a crash
-lost the message tail. That always leaves a contiguous suffix of dangling events,
-never a hole in the middle.
+## Persistence and compatibility
 
-So truncating back to the last valid record drops exactly the unbacked suffix. An
-earlier "surgically drop scattered dangling events" idea was discarded because
-there is nothing scattered to drop. This is also the precise prerequisite for
-parallel-fsync, where that suffix gap first becomes possible.
+Version-two snapshot envelopes store an exclusive event boundary. Legacy
+version-one envelopes store an inclusive value and remain readable, including the
+existing ambiguous-zero recovery handling. Older binaries cannot read version-two
+snapshots; preserve a compatible data copy when testing an older revision.
 
-A corrupt record (CRC or decode failure) is the genuinely mid-log failure rather
-than a lost tail, but the safe repair is the same: truncate at the bad record.
-Skipping it and continuing the scan would silently drop a state transition and
-leave inconsistent state, so recovery stops there too. Both kinds share one
-human-readable reason on the quarantine record.
+On Unix, the file and directory entries are synchronized before periodic prefix
+compaction. A failed write leaves the queue dirty for retry. Snapshot capture,
+persistence and compaction serialize with follower application and recovery
+installation; later owner applications can proceed after capture and mark the
+queue dirty again. Directory durability and crash acceptance on other platforms
+remain separate validation work.
 
-## Repair and re-replication
+## Parallel append recovery
 
-Truncate-to-valid drops the event-log suffix from the first bad record
-(destructive reset to a checkpoint, briefly assuming the follower role).
+Message and enqueue-event durability can overlap. Recovery folds enqueue and
+cancel events against the durable message tail to identify an unconfirmed suffix
+whose payloads were lost. Ordinary confirmation requires both durable logs, so
+this suffix can be removed without dropping a confirmed publication.
 
-On a follower this is not data loss: dropping the suffix lowers the local
-`next_offset`, and the existing follower replication worker re-fetches exactly
-that dropped suffix from the owner on its next catch-up tick. The worker retries
-through the quarantine, so once an operator clears it the partition catches up on
-its own, with no new code. An owner or single node has no peer to re-fetch from,
-so the suffix is genuinely lost there, and the admin banner says so.
+Corrupt records and unexplained missing non-enqueue dependencies use the configured
+corruption policy. A preceding dangling enqueue does not conceal later corruption.
+The suffix-repair journal preserves the valid prefix and resumes an interrupted
+cut before ordinary log opening. Checkpoint installation has a separate journal
+covering replacement of both logs and actor state.
 
-## Where the invariant belongs
+## Recovery comparison
 
-The steady-state follower invariant "events never reference unreceived messages"
-is enforced at recovery (the persisted-log scan) and at promotion (refuse a
-partial replica), but not on the live apply path. Catch-up legitimately runs with
-events transiently ahead of their messages, so a live hard-fail is wrong: it
-broke a promotion test that intentionally exercises partial replication.
-Fail-fast belongs only where consistency is actually required.
-
-## Policy and blast radius
-
-The default `quarantine` policy parks only the affected partition, so the blast
-radius is one queue while the broker keeps serving everything else. `refuse`
-escalates to readiness so a strict deployment cannot miss it, and `ignore`
-auto-applies the truncate with a loud warning for operators who accept the
-possible loss. An eager opt-in whole-disk recovery at boot (a tracked follow-up)
-would make `refuse` a literal refuse-to-start.
-
-## See also
-
-- [Recovery quarantine](/reliability/recovery-quarantine/) for the operator view.
-- [Replication design](/development/replication-design/) for the ordering invariants this builds on.
+Sealed inspection can replay different exact checkpoints to a common boundary and
+compare state and live payload identities. A separate lease projection accounts
+for ordinary owner delivery, which does not append a lease event. Timer state,
+resource incarnation and checkpoint authority still require explicit proof before
+source selection; see [recovery sealing](/reliability/recovery-sealing/) and the
+[failover plan](/development/failover-plan/).

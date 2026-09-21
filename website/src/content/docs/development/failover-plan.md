@@ -62,20 +62,23 @@ other platforms need durable metadata support before these operations are enable
 
 ## State digests at a recovery boundary
 
-Isolated queue replay and canonical digests for fully retained histories are
-implemented in [recovery sealing](/reliability/recovery-sealing/#queue-state-at-an-exact-boundary).
-Further work must bind this evidence to resource incarnation and installed
-lineage, support proven compacted checkpoints, and define complete stream state.
-Equal state can arise from different payload histories; preserve content identity
-and ancestry checks alongside the state digest.
+Exact queue checkpoint capture and bounded comparison from different checkpoint
+starts are implemented in [recovery sealing](/reliability/recovery-sealing/#queue-state-at-an-exact-boundary).
+Remaining proof must bind the snapshots to a durable resource incarnation and
+accepted recovery history, including owner restart within an unchanged assignment.
+A trusted, quorum-installed checkpoint can replace older history; indefinite
+retention of settled payloads is not required.
 
-Measure replay time, hashing/sorting CPU, peak memory and recovery delay before
-adding periodic live-owner captures. A live capture must return state and the
-actual durable applied frontier under an explicit application fence across actor
-priority lanes. Hash an immutable capture outside the actor; avoid adding a hash
-wait to every publish/confirmation batch. Requests for an already-passed boundary
-require a retained capture or replay, and a hash cannot retroactively establish
-that an arbitrary live state represented the requested offset.
+Owner-local leases have a separate comparison projection. Delayed work can move
+to ready state under a local clock without a log event, so a full timer-state
+comparison still needs a defined common-time projection or equivalent replay
+semantics. Preserve retry, TTL and DLQ decisions when defining that projection.
+Complete stream-state proof is also pending.
+
+Measure checkpoint replay/hash CPU, peak memory and recovery delay before adding
+periodic state hashes or larger recovery fan-out. The ordered-application benchmark
+showed competitive throughput and higher memory use at saturation; allocation
+retention and pending-task memory require separate investigation.
 
 ## Eager failure detection
 
