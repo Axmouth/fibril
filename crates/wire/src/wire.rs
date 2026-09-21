@@ -3112,3 +3112,199 @@ pub fn decode_recovery_seal_ok(frame: &Frame) -> WireResult<crate::RecoverySealO
     r.finish()?;
     Ok(reply)
 }
+
+fn recovery_source(source: u8) -> WireResult<u8> {
+    if source > 2 {
+        return Err(WireError::UnknownTag {
+            context: "recovery source",
+            value: source,
+        });
+    }
+    Ok(source)
+}
+
+pub fn encode_recovery_read(id: u64, req: &crate::RecoveryRead) -> WireResult<Frame> {
+    let mut out = payload_builder(b"RRD1");
+    let seal = encode_recovery_seal(id, &req.seal)?;
+    put_bytes(&mut out, &seal.payload)?;
+    out.extend_from_slice(&req.history_id);
+    out.put_u8(recovery_source(req.source)?);
+    out.put_u64(req.from);
+    out.put_u32(req.max_records);
+    out.put_u32(req.max_bytes);
+    if out.len() > crate::MAX_RECOVERY_READ_REQUEST_BYTES {
+        return Err(WireError::FieldTooLarge("recovery request"));
+    }
+    Ok(frame(Op::RecoveryRead, id, out.freeze()))
+}
+
+pub fn decode_recovery_read(f: &Frame) -> WireResult<crate::RecoveryRead> {
+    expect_op(f, Op::RecoveryRead)?;
+    if f.payload.len() > crate::MAX_RECOVERY_READ_REQUEST_BYTES {
+        return Err(WireError::FieldTooLarge("recovery request"));
+    }
+    let mut r = Reader::new(&f.payload);
+    r.expect_magic(b"RRD1", "recovery read")?;
+    let seal = decode_recovery_seal(&frame(
+        Op::RecoverySeal,
+        f.request_id,
+        Bytes::copy_from_slice(r.bytes()?),
+    ))?;
+    let req = crate::RecoveryRead {
+        seal,
+        history_id: r.take(32)?.try_into().unwrap(),
+        source: recovery_source(r.u8()?)?,
+        from: r.u64()?,
+        max_records: r.u32()?,
+        max_bytes: r.u32()?,
+    };
+    r.finish()?;
+    Ok(req)
+}
+
+pub fn encode_recovery_read_ok(id: u64, reply: &crate::RecoveryReadOk) -> WireResult<Frame> {
+    let mut out = payload_builder(b"RRO1");
+    put_str(&mut out, &reply.replica_id)?;
+    out.extend_from_slice(&reply.transition);
+    out.put_u64(reply.fence_epoch);
+    out.extend_from_slice(&reply.history_id);
+    out.put_u8(recovery_source(reply.source)?);
+    out.put_u64(reply.from);
+    out.put_u64(reply.next);
+    out.put_u64(reply.end);
+    if reply.records.len() > 4096 {
+        return Err(WireError::FieldTooLarge("recovery records"));
+    }
+    put_replication_message_records(&mut out, &reply.records)?;
+    put_bytes(&mut out, &reply.snapshot_bytes)?;
+    if out.len() > crate::MAX_RECOVERY_READ_REPLY_BYTES {
+        return Err(WireError::FieldTooLarge("recovery page"));
+    }
+    Ok(frame(Op::RecoveryReadOk, id, out.freeze()))
+}
+
+pub fn decode_recovery_read_ok(f: &Frame) -> WireResult<crate::RecoveryReadOk> {
+    expect_op(f, Op::RecoveryReadOk)?;
+    if f.payload.len() > crate::MAX_RECOVERY_READ_REPLY_BYTES {
+        return Err(WireError::FieldTooLarge("recovery page"));
+    }
+    let mut r = Reader::new(&f.payload);
+    r.expect_magic(b"RRO1", "recovery page")?;
+    let replica_id = r.str()?.to_owned();
+    let transition = r.take(32)?.try_into().unwrap();
+    let fence_epoch = r.u64()?;
+    let history_id = r.take(32)?.try_into().unwrap();
+    let source = recovery_source(r.u8()?)?;
+    let from = r.u64()?;
+    let next = r.u64()?;
+    let end = r.u64()?;
+    let count = r.u32()?;
+    if count > 4096 {
+        return Err(WireError::FieldTooLarge("recovery records"));
+    }
+    let mut records = Vec::new();
+    for _ in 0..count {
+        records.push(r.replication_message_record()?);
+    }
+    let snapshot_bytes = r.bytes()?.to_vec();
+    r.finish()?;
+    Ok(crate::RecoveryReadOk {
+        replica_id,
+        transition,
+        fence_epoch,
+        history_id,
+        source,
+        from,
+        next,
+        end,
+        records,
+        snapshot_bytes,
+    })
+}
+
+#[cfg(test)]
+mod recovery_read_wire_tests {
+    use super::*;
+
+    #[test]
+    fn recovery_pages_roundtrip_and_reject_truncation_trailing_data_and_unknown_sources() {
+        let request = crate::RecoveryRead {
+            seal: crate::RecoverySeal {
+                topic: "q".into(),
+                partition: crate::Partition::new(0),
+                group: None,
+                stream: false,
+                transition: [1; 32],
+                fence_epoch: 8,
+            },
+            history_id: [2; 32],
+            source: 0,
+            from: 4,
+            max_records: 2,
+            max_bytes: 1024,
+        };
+        let reply = crate::RecoveryReadOk {
+            replica_id: "b".into(),
+            transition: [1; 32],
+            fence_epoch: 8,
+            history_id: [2; 32],
+            source: 0,
+            from: 4,
+            next: 5,
+            end: 8,
+            records: vec![crate::ReplicationMessageRecord {
+                offset: 4,
+                flags: 3,
+                headers: vec![5],
+                payload: vec![6, 7],
+            }],
+            snapshot_bytes: vec![],
+        };
+        let req = encode_recovery_read(9, &request).unwrap();
+        let res = encode_recovery_read_ok(9, &reply).unwrap();
+        assert_eq!(decode_recovery_read(&req).unwrap(), request);
+        assert_eq!(decode_recovery_read_ok(&res).unwrap(), reply);
+        for original in [&req, &res] {
+            for length in 0..original.payload.len() {
+                let mut broken = original.clone();
+                broken.payload = broken.payload.slice(..length);
+                let rejected = if broken.opcode == Op::RecoveryRead as u16 {
+                    decode_recovery_read(&broken).is_err()
+                } else {
+                    decode_recovery_read_ok(&broken).is_err()
+                };
+                assert!(rejected, "accepted truncated frame at {length}");
+            }
+            let mut broken = original.clone();
+            let mut bytes = original.payload.to_vec();
+            bytes.push(0);
+            broken.payload = bytes.into();
+            assert!(if broken.opcode == Op::RecoveryRead as u16 {
+                decode_recovery_read(&broken).is_err()
+            } else {
+                decode_recovery_read_ok(&broken).is_err()
+            });
+        }
+        let mut bad = req.clone();
+        let mut bytes = bad.payload.to_vec();
+        let source = bytes.len() - 17;
+        bytes[source] = 3;
+        bad.payload = bytes.into();
+        assert!(decode_recovery_read(&bad).is_err());
+        let mut bad = res.clone();
+        let mut bytes = bad.payload.to_vec();
+        let count = 4 + 4 + 1 + 32 + 8 + 32 + 1 + 24;
+        bytes[count..count + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+        bad.payload = bytes.into();
+        assert!(decode_recovery_read_ok(&bad).is_err());
+        let mut snapshot = reply;
+        snapshot.source = 2;
+        snapshot.records.clear();
+        snapshot.snapshot_bytes = vec![8, 9];
+        snapshot.next = 6;
+        assert_eq!(
+            decode_recovery_read_ok(&encode_recovery_read_ok(9, &snapshot).unwrap()).unwrap(),
+            snapshot
+        );
+    }
+}

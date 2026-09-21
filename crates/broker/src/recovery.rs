@@ -6,7 +6,10 @@ use crate::{
     queue_engine::StromaEngine,
 };
 use std::sync::{Arc, Mutex};
-pub use stroma_core::{RecoverySealRequest, RetainedHistoryIdentity, SealedReplicaFrontiers};
+pub use stroma_core::{
+    RecoveryReadPage, RecoveryReadRequest, RecoveryReadSource, RecoveryRecord, RecoverySealRequest,
+    RetainedHistoryIdentity, SealedReplicaFrontiers,
+};
 use tokio::sync::watch;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +42,35 @@ impl Drop for FlightGuard {
 }
 
 impl Broker<StromaEngine> {
+    /// Reading does not initiate or finish a seal. Require its exact persisted
+    /// transition through consensus before entering storage's bounded read slot.
+    pub async fn read_sealed_replica(
+        &self,
+        command: RecoverySealCommand,
+        request: RecoveryReadRequest,
+    ) -> Result<(String, RecoveryReadPage), BrokerError> {
+        if request.seal.transition != command.transition
+            || request.seal.fence_epoch != command.fence_epoch
+        {
+            return Err(BrokerError::InvalidArgument(
+                "recovery read transition mismatch".into(),
+            ));
+        }
+        let node_id = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.ownership.authorize_recovery_seal(&command),
+        )
+        .await
+        .map_err(|_| BrokerError::Unknown("recovery authorization timed out".into()))?
+        .map_err(BrokerError::InvalidArgument)?;
+        let page = self
+            .engine
+            .read_sealed_replica(&command, request)
+            .await
+            .map_err(|err| BrokerError::InvalidArgument(err.to_string()))?;
+        Ok((node_id, page))
+    }
+
     /// The protocol authenticates the peer first. Only one recovery seal runs
     /// per broker; identical concurrent requests share it, conflicting requests
     /// get a busy error. Caller cancellation cannot cancel admitted work.

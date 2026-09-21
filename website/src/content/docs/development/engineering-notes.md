@@ -10,6 +10,10 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Read-only access to sealed evidence
+
+Recovery can now read bounded pages from live or restarted sealed replicas without opening queue actors, repairing files or lifting the seal. Every page verifies the complete retained logs and snapshot, while authentication, transition checks and cancellation-safe locks preserve the recovery boundary. Full rescans are deliberately confined to explicit recovery calls; compatible-history proof and efficient bulk installation remain pending ([recovery sealing](/reliability/recovery-sealing/)).
+
 ### Transition-bound recovery witnesses
 
 Explicit seal calls now use fresh authenticated connections with whole-call deadlines, and witness admission binds each reply to the contacted old replica and exact pending transition. Duplicate retries count once, a smaller proposed configuration cannot lower the old threshold, and contradictory evidence from one sealed replica blocks the collection. Threshold completion remains `AwaitingHistoryValidation`; automatic dispatch, compatible-history proof and activation are still pending.

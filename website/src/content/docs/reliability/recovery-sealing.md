@@ -60,7 +60,7 @@ against the updated snapshot. An in-memory snapshot check alone supplies no fres
 consensus authority for activation.
 
 These are explicit library operations. Automatic fan-out, retry scheduling,
-source comparison and recovery transfer are not enabled.
+source comparison and selected-history installation are not enabled.
 
 ## Retained content identity
 
@@ -82,11 +82,49 @@ or authority to promote. Replicas can have different fingerprints while sharing
 a valid history, for example when their retained ranges or snapshots differ.
 Future witness selection must prove those relationships separately.
 
+## Explicit sealed-source reads
+
+`RecoveryRead` (105) and `RecoveryReadOk` (106) expose message records, event
+records and raw snapshot-envelope bytes from an already completed seal. The
+`RRD1` and `RRO1` codecs bind pages to the exact transition, fence and retained
+history ID. The receiver requires node authentication and fresh consensus
+authorization of the pending transition; the requester checks replica identity,
+contiguous offsets, retained bounds, progress and page budgets under a whole-call
+deadline. Ordinary clients cannot access these controls.
+
+Storage reads the files directly without opening ordinary queue actors or writer
+threads. Cold reads acquire both existing log locks; live reads retain the frozen
+log owners. Lifecycle, snapshot and admission guards remain held until disk work
+finishes, including after caller cancellation. Missing receipts, stale requests,
+pending checkpoint installation, corruption and changed content withhold the page
+and leave the source sealed. Reads do not create receipts, repair files or unseal
+replicas.
+
+Every page verifies both complete retained logs and the complete snapshot against
+the receipt, capturing its returned bytes during that scan. CRCs and contiguous
+record offsets are checked without cache fallback or record resynchronization.
+Queue, stream, empty-range, nonzero-head, cold-restart, cancellation and real TCP
+authorization tests cover this path. The data is available for subsequent history
+comparison; reads do not establish ancestry, dependency completeness or promotion
+authority.
+
 ## Cost and limits
 
 Hashing scans all retained records on each explicit seal or completed retry in
-chunks of 64 records. There is no per-message hashing or normal-traffic metadata
-round introduced by this path. Recovery I/O and latency are not benchmarked.
+chunks of 64 records. Each sealed-read page also scans all retained data, so
+transferring many pages currently repeats that I/O. Returned pages are capped at
+16 MiB and 4,096 records; log budgets include 18 bytes of wire metadata per record.
+The strict disk reader caps a single record allocation at 64 MiB, snapshot reads
+use 64 KiB chunks, and recovery metadata is capped at 64 KiB. Segment enumeration
+uses memory proportional to segment count. One sealed-read operation per storage
+instance is admitted at a time; concurrent calls receive a retryable busy error.
+A record that cannot fit the requested page is refused rather than split.
+
+There is no per-message hashing or normal-traffic metadata round introduced by
+this path. Recovery I/O and latency are not benchmarked. The page limits govern
+this recovery API's output and disk-read allocations. The shared frame decoder
+rejects oversized recovery-read requests and replies from their frame headers,
+before accumulating their bodies.
 
 Linux storage, fault, cancellation and real TCP authorization tests cover this
 increment. Non-Unix sealing rejects before mutation pending durable metadata

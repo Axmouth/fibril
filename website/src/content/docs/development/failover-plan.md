@@ -37,7 +37,8 @@ across different retained ranges and checkpoint boundaries.
 
 The implemented [recovery seal receiver](/reliability/recovery-sealing/) binds
 explicit requests to committed transitions and persists exact retained-content
-identity. Recoverable local checkpoint installation is also available. Automatic
+identity. Read-only sealed-source pages and recoverable local checkpoint installation
+are also available. Automatic
 recovery requires the following pieces:
 
 1. Build automatic dispatch with bounded backoff and restartable, coalesced
@@ -46,9 +47,14 @@ recovery requires the following pieces:
 2. Establish compatible history from the collected reports, including compacted
    prefixes and payload/event/checkpoint dependencies. Exact content fingerprints
    and the completed seal count alone cannot establish ancestry or authority.
+   Define installed/activated lineage, checkpoint relationships and a trusted
+   baseline for existing resource incarnations; a newly advanced fence cannot
+   establish that baseline.
 3. Transfer the selected history and durably install it on the new write quorum,
    including the candidate, before committing activation. Resume interrupted
-   phases and isolate the old owner through repeated failovers.
+   phases and isolate the old owner through repeated failovers. Bound aggregate
+   transfer buffering and total verification work, and support records larger than the
+   current page limit before enabling automatic bulk transfer.
 
 Automatic dispatch remains disabled until installation and activation can finish
 safely. Linux tests cover local seals and interrupted checkpoint replacement;

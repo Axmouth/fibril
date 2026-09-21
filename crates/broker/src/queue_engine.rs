@@ -624,6 +624,26 @@ impl StromaEngine {
             .await
     }
 
+    pub async fn read_sealed_replica(
+        &self,
+        command: &crate::recovery::RecoverySealCommand,
+        request: stroma_core::RecoveryReadRequest,
+    ) -> Result<stroma_core::RecoveryReadPage, StromaError> {
+        self.inner
+            .read_sealed_replica(
+                &command.topic,
+                command.partition.id(),
+                command.group.as_deref(),
+                if command.stream {
+                    PartitionKind::Stream
+                } else {
+                    PartitionKind::Queue
+                },
+                request,
+            )
+            .await
+    }
+
     pub async fn seal_replica_for_recovery(
         &self,
         topic: &str,

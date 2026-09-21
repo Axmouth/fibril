@@ -3048,6 +3048,7 @@ where
             || x == Op::ReplicationStreamReset as u16
             || x == Op::ReplicationStreamStop as u16
             || x == Op::RecoverySeal as u16
+            || x == Op::RecoveryRead as u16
         );
         if node_control
             && authenticated_principal.as_deref()
@@ -3472,6 +3473,77 @@ where
                     }
                     Err(err) => {
                         tracing::warn!(error = %err, "recovery seal request refused or incomplete");
+                        let (code, message) = broker_error_response(&err);
+                        send_error_response_and_count(
+                            &frame_tx_high_prio,
+                            &metrics,
+                            frame.request_id,
+                            code,
+                            message,
+                        )
+                        .await;
+                    }
+                }
+            }
+
+            x if x == Op::RecoveryRead as u16 => {
+                use fibril_broker::recovery::{
+                    RecoveryReadRequest, RecoveryReadSource, RecoverySealCommand, RecoverySealRequest,
+                };
+                let read: RecoveryRead =
+                    decode_or_400!(frame, frame_tx_high_prio, metrics, RecoveryRead);
+                let command = RecoverySealCommand {
+                    topic: read.seal.topic,
+                    partition: read.seal.partition,
+                    group: read.seal.group,
+                    stream: read.seal.stream,
+                    transition: read.seal.transition,
+                    fence_epoch: read.seal.fence_epoch,
+                };
+                let request = RecoveryReadRequest {
+                    seal: RecoverySealRequest {
+                        transition: command.transition,
+                        fence_epoch: command.fence_epoch,
+                    },
+                    history_id: read.history_id,
+                    source: match read.source {
+                        0 => RecoveryReadSource::Messages,
+                        1 => RecoveryReadSource::Events,
+                        _ => RecoveryReadSource::Snapshot,
+                    },
+                    from: read.from,
+                    max_records: read.max_records,
+                    max_bytes: read.max_bytes,
+                };
+                match broker.read_sealed_replica(command, request).await {
+                    Ok((replica_id, page)) => {
+                        let reply = RecoveryReadOk {
+                            replica_id,
+                            transition: read.seal.transition,
+                            fence_epoch: read.seal.fence_epoch,
+                            history_id: page.history_id,
+                            source: read.source,
+                            from: page.from,
+                            next: page.next,
+                            end: page.end,
+                            records: page
+                                .records
+                                .into_iter()
+                                .map(|record| ReplicationMessageRecord {
+                                    offset: record.offset,
+                                    flags: record.flags,
+                                    headers: record.headers,
+                                    payload: record.payload,
+                                })
+                                .collect(),
+                            snapshot_bytes: page.snapshot_bytes,
+                        };
+                        frame_tx_high_prio
+                            .send(try_encode(Op::RecoveryReadOk, frame.request_id, &reply)?)
+                            .await?;
+                    }
+                    Err(err) => {
+                        tracing::warn!(error=%err,"sealed recovery read refused; source remains sealed");
                         let (code, message) = broker_error_response(&err);
                         send_error_response_and_count(
                             &frame_tx_high_prio,

@@ -27,6 +27,19 @@ impl Decoder for ProtoCodec {
         // Peek length (payload only)
         let mut peek = &src[..];
         let payload_len = peek.get_u32() as usize;
+        let _version = peek.get_u16();
+        let opcode = peek.get_u16();
+        let recovery_limit = match opcode {
+            x if x == crate::Op::RecoveryRead as u16 => Some(crate::MAX_RECOVERY_READ_REQUEST_BYTES),
+            x if x == crate::Op::RecoveryReadOk as u16 => Some(crate::MAX_RECOVERY_READ_REPLY_BYTES),
+            _ => None,
+        };
+        if recovery_limit.is_some_and(|limit| payload_len > limit) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "recovery frame exceeds size limit",
+            ));
+        }
 
         if src.len() < HEADER + payload_len {
             return Ok(None);
@@ -107,4 +120,37 @@ fn protocol_frame_timing_enabled() -> bool {
             Ok("1") | Ok("true") | Ok("yes") | Ok("on")
         )
     })
+}
+
+#[cfg(test)]
+mod recovery_frame_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_recovery_frame_is_refused_before_body_arrives() {
+        for (op, limit) in [
+            (
+                crate::Op::RecoveryRead,
+                crate::MAX_RECOVERY_READ_REQUEST_BYTES,
+            ),
+            (
+                crate::Op::RecoveryReadOk,
+                crate::MAX_RECOVERY_READ_REPLY_BYTES,
+            ),
+        ] {
+            let mut header = BytesMut::new();
+            header.put_u32((limit + 1) as u32);
+            header.put_u16(1);
+            header.put_u16(op as u16);
+            header.put_u32(0);
+            header.put_u64(3);
+            assert_eq!(header.len(), 20);
+            assert_eq!(
+                ProtoCodec.decode(&mut header).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+            header[..4].copy_from_slice(&(limit as u32).to_be_bytes());
+            assert!(ProtoCodec.decode(&mut header).unwrap().is_none());
+        }
+    }
 }

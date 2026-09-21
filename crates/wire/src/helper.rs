@@ -210,6 +210,12 @@ pub fn try_encode<T: Serialize + Any>(op: Op, req_id: u64, msg: &T) -> ProtocolR
         Op::RecoverySealOk => encode_typed(msg, "RecoverySealOk", |msg| {
             wire::encode_recovery_seal_ok(req_id, msg)
         }),
+        Op::RecoveryRead => encode_typed(msg, "RecoveryRead", |msg| {
+            wire::encode_recovery_read(req_id, msg)
+        }),
+        Op::RecoveryReadOk => encode_typed(msg, "RecoveryReadOk", |msg| {
+            wire::encode_recovery_read_ok(req_id, msg)
+        }),
         Op::Error => encode_error_like(op, req_id, msg),
     }
 }
@@ -355,6 +361,12 @@ pub fn try_decode<T: for<'de> Deserialize<'de> + Any>(frame: &Frame) -> Protocol
             .map_err(wire_decode_error)
             .and_then(cast_decoded),
         x if x == Op::RecoverySealOk as u16 => wire::decode_recovery_seal_ok(frame)
+            .map_err(wire_decode_error)
+            .and_then(cast_decoded),
+        x if x == Op::RecoveryRead as u16 => wire::decode_recovery_read(frame)
+            .map_err(wire_decode_error)
+            .and_then(cast_decoded),
+        x if x == Op::RecoveryReadOk as u16 => wire::decode_recovery_read_ok(frame)
             .map_err(wire_decode_error)
             .and_then(cast_decoded),
         x if x == Op::Error as u16 => decode_error_like(frame),

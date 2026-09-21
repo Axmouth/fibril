@@ -6975,14 +6975,37 @@ async fn recovery_seal_requires_node_auth_and_exact_committed_authority_over_tcp
         fence_epoch: command.fence_epoch,
     };
     let (engine, mut dir) = open_test_engine().await;
-    let broker =
-        Broker::new_with_ownership(engine, BrokerConfig::default(), None, provider.clone());
+    let broker = Broker::new_with_ownership(
+        engine.clone(),
+        BrokerConfig::default(),
+        None,
+        provider.clone(),
+    );
     broker
         .become_replication_follower_with_epoch(
             &request.topic,
             request.partition,
             None,
             pending.previous.epoch,
+        )
+        .await
+        .unwrap();
+    engine
+        .apply_replicated_queue_batch(
+            &request.topic,
+            0,
+            None,
+            Some(stroma_core::ReplicatedMessageBatch {
+                epoch: pending.previous.epoch,
+                first_offset: 0,
+                records: vec![stroma_core::Message {
+                    flags: 0,
+                    headers: vec![],
+                    payload: b"sealed-wire-body".to_vec(),
+                }],
+                durability: None,
+            }),
+            None,
         )
         .await
         .unwrap();
@@ -7013,6 +7036,21 @@ async fn recovery_seal_requires_node_auth_and_exact_committed_authority_over_tcp
             .await
             .unwrap();
             assert_eq!(recv_frame(&mut conn).await.opcode, Op::AuthOk as u16);
+        }
+        if identity != Some("@node") {
+            let read = fibril_protocol::v1::RecoveryRead {
+                seal: request.clone(),
+                history_id: [0; 32],
+                source: 0,
+                from: 0,
+                max_records: 1,
+                max_bytes: 1024,
+            };
+            conn.send(try_encode(Op::RecoveryRead, 30, &read).unwrap())
+                .await
+                .unwrap();
+            let error: ErrorMsg = try_decode(&recv_frame(&mut conn).await).unwrap();
+            assert_eq!(error.code, 403);
         }
         if identity == Some("@node") {
             let mut stale = request.clone();
@@ -7053,6 +7091,33 @@ async fn recovery_seal_requires_node_auth_and_exact_committed_authority_over_tcp
             assert_eq!(sealed.transition, request.transition);
             assert_eq!(sealed.fence_epoch, request.fence_epoch);
             assert_eq!(sealed.history_version, 1);
+            let valid = fibril_protocol::v1::RecoveryRead {
+                seal: request.clone(),
+                history_id: sealed.history_id,
+                source: 0,
+                from: 0,
+                max_records: 1,
+                max_bytes: 1024,
+            };
+            for mutation in 0..4 {
+                let mut bad = valid.clone();
+                match mutation {
+                    0 => bad.seal.transition[0] ^= 1,
+                    1 => bad.history_id[0] ^= 1,
+                    2 => bad.from = 2,
+                    _ => bad.max_bytes = 0,
+                }
+                conn.send(try_encode(Op::RecoveryRead, 31, &bad).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(recv_frame(&mut conn).await.opcode, Op::Error as u16);
+            }
+            conn.send(try_encode(Op::RecoveryRead, 32, &valid).unwrap())
+                .await
+                .unwrap();
+            let page: fibril_protocol::v1::RecoveryReadOk =
+                try_decode(&recv_frame(&mut conn).await).unwrap();
+            assert_eq!(page.records[0].payload, b"sealed-wire-body");
             conn.send(try_encode(Op::RecoverySeal, 5, &request).unwrap())
                 .await
                 .unwrap();
@@ -7102,6 +7167,7 @@ async fn recovery_seal_requires_node_auth_and_exact_committed_authority_over_tcp
         )
         .await
         .unwrap();
+        let retained = evidence.clone();
         witnesses
             .record(
                 &provider.consensus_node().committed_snapshot(),
@@ -7110,6 +7176,49 @@ async fn recovery_seal_requires_node_auth_and_exact_committed_authority_over_tcp
             )
             .unwrap();
         task.await.unwrap().unwrap();
+        for source in [
+            fibril_broker::recovery::RecoveryReadSource::Messages,
+            fibril_broker::recovery::RecoveryReadSource::Events,
+            fibril_broker::recovery::RecoveryReadSource::Snapshot,
+        ] {
+            let (addr, task, returned, _) = start_protocol_listener_for_broker(
+                ConnectionSettings::new(Some(60)),
+                broker.clone(),
+                dir,
+                Some(node_auth()),
+            )
+            .await;
+            dir = returned;
+            let cfg = ProtocolOwnerPeerResolverConfig::new(HashMap::from([(
+                "b".into(),
+                addr.to_string(),
+            )]))
+            .with_auth("@node", "secret");
+            let read = fibril_broker::recovery::RecoveryReadRequest {
+                seal: retained.seal.request.clone(),
+                history_id: retained.seal.history.id,
+                source,
+                from: 0,
+                max_records: 10,
+                max_bytes: 1024,
+            };
+            let page = fibril_protocol::v1::replication::request_recovery_read(
+                &cfg,
+                witnesses.command(),
+                &retained,
+                &read,
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+            if source == fibril_broker::recovery::RecoveryReadSource::Messages {
+                assert_eq!(page.records[0].payload, b"sealed-wire-body");
+                assert_eq!(page.next, 1);
+            } else {
+                assert!(page.records.is_empty());
+            }
+            task.await.unwrap().unwrap();
+        }
     }
     assert_eq!(
         witnesses
@@ -7211,6 +7320,7 @@ async fn assert_replication_controls_forbidden(conn: &mut Conn) {
         Op::ReplicationStreamReset,
         Op::ReplicationStreamStop,
         Op::RecoverySeal,
+        Op::RecoveryRead,
     ] {
         conn.send(Frame {
             version: PROTOCOL_V1,

@@ -140,6 +140,9 @@ pub enum Op {
     /// Fire-and-forget: no ack, the subscription is already gone.
     SubscriptionClosed = 104,
 
+    RecoveryRead = 105,
+    RecoveryReadOk = 106,
+
     Error = 255,
 }
 
@@ -1162,4 +1165,33 @@ pub struct RecoverySealOk {
     pub message_next: u64,
     pub event_head: u64,
     pub event_next: u64,
+}
+
+/// Wire payload caps checked from frame headers before buffering recovery bodies.
+pub const MAX_RECOVERY_READ_REQUEST_BYTES: usize = 64 * 1024;
+pub const MAX_RECOVERY_READ_REPLY_BYTES: usize = 16 * 1024 * 1024 + 64 * 1024;
+
+/// Bounded read of a completed seal. Source: 0 messages, 1 events, 2 snapshot bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryRead {
+    pub seal: RecoverySeal,
+    pub history_id: [u8; 32],
+    pub source: u8,
+    pub from: u64,
+    pub max_records: u32,
+    pub max_bytes: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryReadOk {
+    pub replica_id: String,
+    pub transition: [u8; 32],
+    pub fence_epoch: u64,
+    pub history_id: [u8; 32],
+    pub source: u8,
+    pub from: u64,
+    pub next: u64,
+    pub end: u64,
+    pub records: Vec<ReplicationMessageRecord>,
+    pub snapshot_bytes: Vec<u8>,
 }

@@ -1996,3 +1996,251 @@ mod recovery_tests {
         server.await.unwrap();
     }
 }
+
+/// Read a bounded page from the exact seal already collected from this replica.
+/// Remote work retains its read slot until disk verification finishes, even if
+/// this call times out. No automatic recovery dispatcher is enabled.
+pub async fn request_recovery_read(
+    config: &ProtocolOwnerPeerResolverConfig,
+    command: &fibril_broker::recovery::RecoverySealCommand,
+    sealed: &fibril_broker::recovery::BrokerSealedReplica,
+    request: &fibril_broker::recovery::RecoveryReadRequest,
+    deadline: std::time::Duration,
+) -> Result<crate::v1::RecoveryReadOk, BrokerError> {
+    use fibril_broker::recovery::RecoveryReadSource;
+    if request.seal != sealed.seal.request
+        || request.history_id != sealed.seal.history.id
+        || command.transition != request.seal.transition
+        || command.fence_epoch != request.seal.fence_epoch
+        || request.max_bytes == 0
+        || request.max_bytes > 16 * 1024 * 1024
+        || request.max_records == 0
+        || request.max_records > 4096
+    {
+        return Err(BrokerError::InvalidArgument(
+            "recovery read does not match collected seal or budget".into(),
+        ));
+    }
+    let addr = config.nodes.get(&sealed.node_id).ok_or_else(|| {
+        BrokerError::InvalidArgument("recovery source has no configured address".into())
+    })?;
+    let wire_request = crate::v1::RecoveryRead {
+        seal: crate::v1::RecoverySeal {
+            topic: command.topic.clone(),
+            partition: command.partition,
+            group: command.group.clone(),
+            stream: command.stream,
+            transition: command.transition,
+            fence_epoch: command.fence_epoch,
+        },
+        history_id: request.history_id,
+        source: match request.source {
+            RecoveryReadSource::Messages => 0,
+            RecoveryReadSource::Events => 1,
+            RecoveryReadSource::Snapshot => 2,
+        },
+        from: request.from,
+        max_records: request.max_records,
+        max_bytes: request.max_bytes,
+    };
+    let operation = async {
+        let mut conn = open_protocol_owner_conn(
+            addr.clone(),
+            config.auth.as_ref(),
+            config.tls.as_ref(),
+            &config.client_name,
+            &config.client_version,
+            config.owner_connect_timeout_ms,
+        )
+        .await?;
+        conn.send(try_encode(Op::RecoveryRead, 3, &wire_request).map_err(protocol_error)?)
+            .await
+            .map_err(|err| BrokerError::Unknown(format!("recovery read send failed: {err}")))?;
+        let reply: crate::v1::RecoveryReadOk = recv_response(&mut conn, 3, Op::RecoveryReadOk)
+            .await
+            .map_err(|err| BrokerError::Unknown(format!("recovery read failed: {err}")))?;
+        validate_recovery_read_reply(&sealed.node_id, &wire_request, &sealed.seal.history, &reply)?;
+        Ok(reply)
+    };
+    tokio::time::timeout(deadline, operation)
+        .await
+        .map_err(|_| BrokerError::Unknown("recovery read deadline elapsed".into()))?
+}
+
+fn validate_recovery_read_reply(
+    node: &str,
+    request: &crate::v1::RecoveryRead,
+    history: &fibril_broker::recovery::RetainedHistoryIdentity,
+    reply: &crate::v1::RecoveryReadOk,
+) -> Result<(), BrokerError> {
+    let invalid =
+        || BrokerError::InvalidArgument("recovery page identity, range or budget mismatch".into());
+    if reply.replica_id != node
+        || reply.transition != request.seal.transition
+        || reply.fence_epoch != request.seal.fence_epoch
+        || reply.history_id != history.id
+        || reply.history_id != request.history_id
+        || reply.source != request.source
+        || reply.from != request.from
+        || reply.next < reply.from
+        || reply.next > reply.end
+        || reply.next == reply.from && reply.next != reply.end
+    {
+        return Err(invalid());
+    }
+    if reply.source == 2 {
+        if !reply.records.is_empty()
+            || reply.snapshot_bytes.len() > request.max_bytes as usize
+            || reply.next - reply.from != reply.snapshot_bytes.len() as u64
+        {
+            return Err(invalid());
+        }
+    } else {
+        let (head, end) = if reply.source == 0 {
+            (history.message_head, history.message_next)
+        } else {
+            (history.event_head, history.event_next)
+        };
+        if reply.source > 1
+            || reply.from < head
+            || reply.end != end
+            || !reply.snapshot_bytes.is_empty()
+            || reply.records.len() > request.max_records as usize
+            || reply.next - reply.from != reply.records.len() as u64
+        {
+            return Err(invalid());
+        }
+        let mut bytes = 0usize;
+        for (i, record) in reply.records.iter().enumerate() {
+            if record.offset != reply.from + i as u64 {
+                return Err(invalid());
+            }
+            bytes = bytes
+                .checked_add(18)
+                .and_then(|n| n.checked_add(record.headers.len()))
+                .and_then(|n| n.checked_add(record.payload.len()))
+                .ok_or_else(invalid)?;
+        }
+        if bytes > request.max_bytes as usize {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod recovery_read_tests {
+    use super::*;
+    use crate::v1::{RecoveryRead, RecoveryReadOk, RecoverySeal, ReplicationMessageRecord};
+    use fibril_broker::recovery::RetainedHistoryIdentity;
+
+    #[test]
+    fn read_reply_rejects_wrong_identity_holes_bounds_and_budget_violations() {
+        let history = RetainedHistoryIdentity {
+            version: 1,
+            id: [2; 32],
+            message_digest: [3; 32],
+            event_digest: [4; 32],
+            snapshot_digest: Some([5; 32]),
+            message_head: 4,
+            message_next: 8,
+            event_head: 1,
+            event_next: 9,
+        };
+        let request = RecoveryRead {
+            seal: RecoverySeal {
+                topic: "q".into(),
+                partition: Partition::new(0),
+                group: None,
+                stream: false,
+                transition: [1; 32],
+                fence_epoch: 8,
+            },
+            history_id: history.id,
+            source: 0,
+            from: 4,
+            max_records: 1,
+            max_bytes: 20,
+        };
+        let reply = RecoveryReadOk {
+            replica_id: "b".into(),
+            transition: [1; 32],
+            fence_epoch: 8,
+            history_id: history.id,
+            source: 0,
+            from: 4,
+            next: 5,
+            end: 8,
+            records: vec![ReplicationMessageRecord {
+                offset: 4,
+                flags: 0,
+                headers: vec![],
+                payload: vec![6, 7],
+            }],
+            snapshot_bytes: vec![],
+        };
+        assert!(validate_recovery_read_reply("b", &request, &history, &reply).is_ok());
+        for case in 0..13 {
+            let mut bad = reply.clone();
+            match case {
+                0 => bad.replica_id = "c".into(),
+                1 => bad.transition[0] ^= 1,
+                2 => bad.fence_epoch += 1,
+                3 => bad.history_id[0] ^= 1,
+                4 => bad.source = 1,
+                5 => bad.from = 3,
+                6 => bad.next = 9,
+                7 => bad.end = 7,
+                8 => bad.records[0].offset = 5,
+                9 => bad.records[0].payload.push(8),
+                10 => bad.snapshot_bytes.push(1),
+                11 => {
+                    bad.records.clear();
+                    bad.next = 4;
+                }
+                _ => {
+                    bad.records.push(bad.records[0].clone());
+                    bad.next = 6;
+                }
+            }
+            assert!(
+                validate_recovery_read_reply("b", &request, &history, &bad).is_err(),
+                "case {case}"
+            );
+        }
+        let mut eof_req = request.clone();
+        eof_req.from = 8;
+        let mut eof = reply.clone();
+        eof.from = 8;
+        eof.next = 8;
+        eof.records.clear();
+        assert!(validate_recovery_read_reply("b", &eof_req, &history, &eof).is_ok());
+        let mut events_req = request.clone();
+        events_req.source = 1;
+        events_req.from = 1;
+        let mut events = reply.clone();
+        events.source = 1;
+        events.from = 1;
+        events.next = 2;
+        events.end = 9;
+        events.records[0].offset = 1;
+        assert!(validate_recovery_read_reply("b", &events_req, &history, &events).is_ok());
+        events.from = 0;
+        events_req.from = 0;
+        events.next = 1;
+        events.records[0].offset = 0;
+        assert!(validate_recovery_read_reply("b", &events_req, &history, &events).is_err());
+        let mut snapshot_req = request.clone();
+        snapshot_req.source = 2;
+        let mut snapshot = reply;
+        snapshot.source = 2;
+        snapshot.records.clear();
+        snapshot.snapshot_bytes = vec![8];
+        assert!(validate_recovery_read_reply("b", &snapshot_req, &history, &snapshot).is_ok());
+        snapshot.snapshot_bytes.push(9);
+        assert!(validate_recovery_read_reply("b", &snapshot_req, &history, &snapshot).is_err());
+        snapshot.next = 6;
+        snapshot_req.max_bytes = 1;
+        assert!(validate_recovery_read_reply("b", &snapshot_req, &history, &snapshot).is_err());
+    }
+}
