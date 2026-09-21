@@ -216,6 +216,12 @@ pub fn try_encode<T: Serialize + Any>(op: Op, req_id: u64, msg: &T) -> ProtocolR
         Op::RecoveryReadOk => encode_typed(msg, "RecoveryReadOk", |msg| {
             wire::encode_recovery_read_ok(req_id, msg)
         }),
+        Op::InitialHistoryPrepare => encode_typed(msg, "InitialHistoryPrepare", |msg| {
+            wire::encode_initial_history_prepare(req_id, msg)
+        }),
+        Op::InitialHistoryPrepareOk => encode_typed(msg, "InitialHistoryPrepareOk", |msg| {
+            wire::encode_initial_history_prepare_ok(req_id, msg)
+        }),
         Op::Error => encode_error_like(op, req_id, msg),
     }
 }
@@ -369,6 +375,10 @@ pub fn try_decode<T: for<'de> Deserialize<'de> + Any>(frame: &Frame) -> Protocol
         x if x == Op::RecoveryReadOk as u16 => wire::decode_recovery_read_ok(frame)
             .map_err(wire_decode_error)
             .and_then(cast_decoded),
+        x if x == Op::InitialHistoryPrepare as u16 => wire::decode_initial_history_prepare(frame)
+            .map_err(wire_decode_error).and_then(cast_decoded),
+        x if x == Op::InitialHistoryPrepareOk as u16 => wire::decode_initial_history_prepare_ok(frame)
+            .map_err(wire_decode_error).and_then(cast_decoded),
         x if x == Op::Error as u16 => decode_error_like(frame),
         opcode => Err(ProtocolError::Decode(format!("unknown opcode {opcode}"))),
     }

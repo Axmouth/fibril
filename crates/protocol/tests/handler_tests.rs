@@ -7321,6 +7321,7 @@ async fn assert_replication_controls_forbidden(conn: &mut Conn) {
         Op::ReplicationStreamStop,
         Op::RecoverySeal,
         Op::RecoveryRead,
+        Op::InitialHistoryPrepare,
     ] {
         conn.send(Frame {
             version: PROTOCOL_V1,
@@ -7929,4 +7930,305 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
         provider.consensus_node().shutdown().await.unwrap();
     }
     drop(dirs);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn initial_history_preparation_uses_authenticated_replicas_and_fresh_consensus() {
+    use fibril_broker::initial_history::{
+        InitialHistoryLocalReceipt, InitialHistoryPrepareCommand,
+    };
+    use fibril_coordination_ganglion::{
+        initial_history::InitialHistoryReceiptSet, GanglionCoordination,
+    };
+    use fibril_protocol::v1::initial_history::request_preparation;
+    use ganglion_openraft::{default_raft_config, RaftMetadataNode};
+    use std::collections::BTreeMap;
+
+    async fn call(
+        broker: Arc<Broker<StromaEngine>>,
+        dir: TempDir,
+        command: &InitialHistoryPrepareCommand,
+    ) -> (
+        Result<InitialHistoryLocalReceipt, fibril_broker::broker::BrokerError>,
+        TempDir,
+    ) {
+        let (addr, task, dir, _) = start_protocol_listener_for_broker(
+            ConnectionSettings::new(Some(60)),
+            broker,
+            dir,
+            Some(node_auth()),
+        )
+        .await;
+        let config = ProtocolOwnerPeerResolverConfig::new(HashMap::from([(
+            command.replica_id.clone(),
+            addr.to_string(),
+        )]))
+        .with_auth("@node", "secret");
+        let reply = request_preparation(&config, command, Duration::from_secs(10)).await;
+        task.await.unwrap().unwrap();
+        (reply, dir)
+    }
+    async fn synced(providers: &[Arc<GanglionCoordination>], generation: u64) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while providers
+                .iter()
+                .any(|p| p.consensus_node().committed_snapshot().generation < generation)
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    async fn set_assignment(
+        providers: &[Arc<GanglionCoordination>],
+        resource: &ganglion_core::ResourceIdentity,
+        epoch: u64,
+    ) -> u64 {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                for provider in providers {
+                    if !provider.consensus_node().is_leader().await {
+                        continue;
+                    }
+                    let mut snapshot = provider.consensus_node().committed_snapshot();
+                    if !snapshot.resources.contains(resource) {
+                        continue;
+                    }
+                    let generation = snapshot.generation;
+                    let mut assignment = ganglion_core::PartitionAssignment::new(
+                        resource.clone(),
+                        "a",
+                        vec!["b".into(), "c".into()],
+                        epoch,
+                    );
+                    assignment.durability =
+                        ganglion_core::ReplicationDurabilityPolicy::MajorityDurable;
+                    snapshot.assignments.insert(resource.clone(), assignment);
+                    snapshot.generation += 1;
+                    match provider
+                        .consensus_node()
+                        .write_snapshot_guarded(generation, snapshot)
+                        .await
+                    {
+                        Ok(_) => return generation + 1,
+                        Err(
+                            ganglion_openraft::OpenraftAdapterError::NotLeader
+                            | ganglion_openraft::OpenraftAdapterError::GenerationMismatch { .. },
+                        ) => {}
+                        Err(error) => panic!("assignment write failed: {error}"),
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+    let metadata_dir = TempDir {
+        root: std::env::current_dir()
+            .unwrap()
+            .join("test_data")
+            .join(format!("initial-history-metadata-{}", Uuid::now_v7())),
+    };
+    let mut nodes = vec![];
+    let mut servers = vec![];
+    for id in 1..=3 {
+        let (node, server) = RaftMetadataNode::start_durable_tcp(
+            id,
+            default_raft_config().unwrap(),
+            "127.0.0.1:0",
+            metadata_dir.root.join(id.to_string()),
+        )
+        .await
+        .unwrap();
+        nodes.push(node);
+        servers.push(server);
+    }
+    nodes[0]
+        .initialize(
+            servers
+                .iter()
+                .enumerate()
+                .map(|(i, s)| {
+                    (
+                        i as u64 + 1,
+                        ganglion_openraft::openraft::BasicNode::new(s.local_addr().to_string()),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>(),
+        )
+        .await
+        .unwrap();
+    let leader = nodes[0]
+        .wait_for_any_leader(Duration::from_secs(10))
+        .await
+        .unwrap();
+    let providers: Vec<_> = nodes
+        .into_iter()
+        .zip(["a", "b", "c"])
+        .map(|(node, id)| Arc::new(GanglionCoordination::new(id, node)))
+        .collect();
+    let coordinator = &providers[leader as usize - 1];
+    let resource =
+        ganglion_core::ResourceIdentity::new("fibril/queue", "initial-wire", 0, None::<String>);
+    coordinator
+        .register_initial_history_resource(&resource)
+        .await
+        .unwrap();
+    let generation = set_assignment(&providers, &resource, 1).await;
+    synced(&providers, generation).await;
+    let decision = providers[0]
+        .prepare_initial_history(&resource)
+        .await
+        .unwrap();
+    // A forwarded response can precede the caller's local watch update.
+    let decision_key_seen = || {
+        providers.iter().all(|p| {
+            InitialHistoryReceiptSet::new(
+                &p.consensus_node().committed_snapshot(),
+                decision.clone(),
+            )
+            .is_ok()
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !decision_key_seen() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut receipts = InitialHistoryReceiptSet::new(
+        &providers[0].consensus_node().committed_snapshot(),
+        decision.clone(),
+    )
+    .unwrap();
+    let mut engines = vec![];
+    let mut brokers = vec![];
+    let mut dirs = vec![];
+    for provider in &providers {
+        let (engine, dir) = open_test_engine().await;
+        brokers.push(Broker::new_with_ownership(
+            engine.clone(),
+            BrokerConfig::default(),
+            None,
+            provider.clone(),
+        ));
+        engines.push(engine);
+        dirs.push(Some(dir));
+    }
+    for (index, id) in ["a", "b"].into_iter().enumerate() {
+        let command = decision.prepare_command(id).unwrap();
+        let mut stale = command.clone();
+        stale.decision[0] ^= 1;
+        let (failed, dir) = call(brokers[index].clone(), dirs[index].take().unwrap(), &stale).await;
+        dirs[index] = Some(dir);
+        assert!(failed.is_err());
+        assert!(
+            engines[index]
+                .storage_history_binding("initial-wire", 0, None)
+                .unwrap()
+                .is_none(),
+            "stale authorization must fail before storage is prepared"
+        );
+        let mut first = None;
+        for _ in 0..2 {
+            let (reply, dir) = call(
+                brokers[index].clone(),
+                dirs[index].take().unwrap(),
+                &command,
+            )
+            .await;
+            dirs[index] = Some(dir);
+            let receipt = reply.unwrap();
+            if let Some(previous) = &first {
+                assert_eq!(previous, &receipt);
+            }
+            first = Some(receipt.clone());
+            receipts
+                .record(
+                    &providers[0].consensus_node().committed_snapshot(),
+                    id,
+                    receipt,
+                )
+                .unwrap();
+        }
+        assert!(matches!(
+            engines[index]
+                .ensure_queue_owner_epoch("initial-wire", 0, None, Some(1))
+                .await,
+            Err(stroma_core::StromaError::HistoryAdmissionRequired { .. })
+        ));
+    }
+    let quorum = providers[0]
+        .persist_initial_history_quorum(&receipts)
+        .await
+        .unwrap();
+    assert_eq!(quorum.reports.len(), 2);
+    assert!(quorum.reports.contains_key("a") && quorum.reports.contains_key("b"));
+    // Misrouting to another member must reject even with correct node credentials.
+    let (wrong, dir) = call(
+        brokers[2].clone(),
+        dirs[2].take().unwrap(),
+        &decision.prepare_command("b").unwrap(),
+    )
+    .await;
+    dirs[2] = Some(dir);
+    assert!(wrong.is_err());
+    assert!(engines[2]
+        .storage_history_binding("initial-wire", 0, None)
+        .unwrap()
+        .is_none());
+    // Replacing storage under the same metadata/provider instance cannot reuse
+    // the durable preparation receipt as permission for a fresh storage process.
+    let follower_root = dirs[1].as_ref().unwrap().root.clone();
+    brokers[1].shutdown().await;
+    let reopened = StromaEngine::open(
+        &follower_root,
+        StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+        SnapshotConfig::default(),
+    )
+    .await
+    .unwrap();
+    let replacement = Broker::new_with_ownership(
+        reopened.clone(),
+        BrokerConfig::default(),
+        None,
+        providers[1].clone(),
+    );
+    let (failed, dir) = call(
+        replacement.clone(),
+        dirs[1].take().unwrap(),
+        &decision.prepare_command("b").unwrap(),
+    )
+    .await;
+    dirs[1] = Some(dir);
+    assert!(failed.is_err());
+    replacement.shutdown().await;
+    // Assignment changes invalidate the old command through a fresh consensus
+    // check, including on a replica that had not prepared any storage yet.
+    let generation = set_assignment(&providers, &resource, 2).await;
+    synced(&providers, generation).await;
+    let (stale, dir) = call(
+        brokers[2].clone(),
+        dirs[2].take().unwrap(),
+        &decision.prepare_command("c").unwrap(),
+    )
+    .await;
+    dirs[2] = Some(dir);
+    assert!(stale.is_err());
+    assert!(engines[2]
+        .storage_history_binding("initial-wire", 0, None)
+        .unwrap()
+        .is_none());
+    for broker in &brokers {
+        broker.shutdown().await;
+    }
+    for provider in &providers {
+        provider.consensus_node().shutdown().await.unwrap();
+    }
+    for server in servers {
+        server.shutdown();
+    }
 }

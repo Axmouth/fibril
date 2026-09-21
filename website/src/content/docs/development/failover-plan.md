@@ -72,8 +72,8 @@ broker creation. Explicit consensus preparation now fixes history/session IDs to
 an owner instance and assignment, and local preparation leaves admission closed.
 Explicit creation-time enrollment now withholds ordinary serving while preserving
 placement. Prepared quorum receipts persist under the immutable decision and
-require the owner and fixed write threshold. Remaining work must authenticate
-remote preparation, authorize activation against current storage/process
+require the owner and fixed write threshold. Authenticated remote preparation rechecks the exact decision through consensus.
+Remaining work must authorize activation against current storage/process
 instances, bind snapshots and recovery installation to that authority, and
 readmit writers after recovery. Existing resources still need a verified baseline; the
 catalogue ID alone supplies no history authority.

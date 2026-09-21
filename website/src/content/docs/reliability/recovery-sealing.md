@@ -124,9 +124,21 @@ historical evidence: activation still needs fresh authority for the recorded
 processes and storage instances. Prepared quorum evidence leaves serving and
 storage admission closed.
 
-These operations are not used by ordinary broker startup. Authenticated remote
-preparation, writer activation, identity on live replication, recovery installation
-and readmission remain pending. Existing resources require a verified baseline.
+Remote preparation uses the internal `InitialHistoryPrepare`/`InitialHistoryPrepareOk`
+operations (107/108). A fresh authenticated cluster-peer connection names the exact
+target replica and decision; the receiver resolves authority from its committed
+metadata and rechecks it through consensus before storage work. Anonymous, ordinary
+user and resumed logical-session privileges cannot authorize this operation.
+
+Requests and replies have a 64 KiB limit enforced from the frame header. One
+preparation can run per broker; identical concurrent requests share work and
+conflicting requests receive a retryable refusal. Disconnect or caller cancellation
+can leave admitted preparation running, so retries use the same decision. The
+transport deadline covers setup and the response, and replies must match the target,
+resource, decision and storage binding with nonzero process/storage instances.
+
+These operations are not used by ordinary broker startup. Writer activation,
+identity on live replication, recovery installation and readmission remain pending. Existing resources require a verified baseline.
 Matching broker and metadata binaries are required; older brokers do not enforce
 the enrollment projection and the retirement command requires updated metadata
 nodes. Mixed-version enrollment and downgrade are unsupported.

@@ -10,6 +10,10 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Authenticated initial preparation
+
+Remote preparation now verifies the exact target and committed decision through consensus before creating a non-writable storage baseline. Requests use fresh node authentication, bounded frames and deadlines; identical calls share one broker operation that survives caller cancellation. Real three-node TCP tests cover majority receipt collection, retries, stale decisions, wrong targets and reopened storage ([initial preparation](/reliability/recovery-sealing/#initial-history-preparation)).
+
 ### Creation-time enrollment and durable preparation evidence
 
 Explicit enrollment now blocks ordinary serving from catalogue creation while preserving replica placement, and preparation requires that enrollment before it can certify an empty origin. Deletion retains a retired marker so the remaining assignment cannot accidentally regain legacy serving; exact quorum receipts persist across metadata restart without activating writers. Regressions cover placement stability, retirement/recreation, conflicting receipts and owner replacement ([initial preparation](/reliability/recovery-sealing/#initial-history-preparation)).

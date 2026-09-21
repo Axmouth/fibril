@@ -3049,6 +3049,7 @@ where
             || x == Op::ReplicationStreamStop as u16
             || x == Op::RecoverySeal as u16
             || x == Op::RecoveryRead as u16
+            || x == Op::InitialHistoryPrepare as u16
         );
         if node_control
             && authenticated_principal.as_deref()
@@ -3437,6 +3438,22 @@ where
 
             // Recovery always requires an authenticated cluster principal,
             // including when ordinary client authentication is disabled.
+            x if x == Op::InitialHistoryPrepare as u16 => {
+                let request: InitialHistoryPrepare = decode_or_400!(frame, frame_tx_high_prio, metrics, InitialHistoryPrepare);
+                let command = crate::v1::initial_history::broker_command(request);
+                match broker.prepare_initial_history_replica(command).await {
+                    Ok(receipt) => {
+                        let reply = crate::v1::initial_history::wire_receipt(receipt);
+                        frame_tx_high_prio.send(try_encode(Op::InitialHistoryPrepareOk, frame.request_id, &reply)?).await?;
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "initial history preparation refused or incomplete");
+                        let (code, message) = broker_error_response(&err);
+                        send_error_response_and_count(&frame_tx_high_prio, &metrics, frame.request_id, code, message).await;
+                    }
+                }
+            }
+
             x if x == Op::RecoverySeal as u16 => {
                 let request: RecoverySeal =
                     decode_or_400!(frame, frame_tx_high_prio, metrics, RecoverySeal);

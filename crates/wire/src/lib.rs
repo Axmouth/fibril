@@ -143,6 +143,9 @@ pub enum Op {
     RecoveryRead = 105,
     RecoveryReadOk = 106,
 
+    InitialHistoryPrepare = 107,
+    InitialHistoryPrepareOk = 108,
+
     Error = 255,
 }
 
@@ -1195,3 +1198,27 @@ pub struct RecoveryReadOk {
     pub records: Vec<ReplicationMessageRecord>,
     pub snapshot_bytes: Vec<u8>,
 }
+
+/// Internal cluster preparation request. The receiver resolves authority from
+/// committed metadata; none of these fields can grant writer admission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InitialHistoryPrepare {
+    pub replica_id: String,
+    pub topic: String,
+    pub partition: Partition,
+    pub group: Option<String>,
+    pub stream: bool,
+    pub decision: [u8; 32],
+    pub resource_incarnation: [u8; 16],
+    pub accepted_history: [u8; 16],
+    pub writer_session: [u8; 16],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InitialHistoryPrepareOk {
+    pub prepared: InitialHistoryPrepare,
+    pub replica_process: [u8; 16],
+    pub storage_instance: [u8; 16],
+}
+
+pub const MAX_INITIAL_HISTORY_FRAME_BYTES: usize = 64 * 1024;

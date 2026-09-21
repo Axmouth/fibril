@@ -407,7 +407,7 @@ impl BrokerOwnerReplicationPeerResolver for CoordinationProtocolOwnerPeerResolve
     }
 }
 
-async fn open_protocol_owner_conn(
+pub(super) async fn open_protocol_owner_conn(
     addr: String,
     auth: Option<&ProtocolOwnerPeerAuth>,
     tls: Option<&PeerTlsConnector>,
@@ -1158,7 +1158,7 @@ pub async fn catch_up_replication_over_protocol(
     Ok(ProtocolReplicationCatchUp::IterationLimit { progress })
 }
 
-async fn recv_response<T>(
+pub(super) async fn recv_response<T>(
     conn: &mut Conn,
     request_id: u64,
     expected: Op,
@@ -1349,7 +1349,7 @@ fn event_apply_batch(
     }
 }
 
-fn protocol_error(err: impl std::fmt::Display) -> BrokerError {
+pub(super) fn protocol_error(err: impl std::fmt::Display) -> BrokerError {
     BrokerError::Unknown(format!("protocol replication error: {err}"))
 }
 

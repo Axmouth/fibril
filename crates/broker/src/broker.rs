@@ -476,6 +476,14 @@ impl Default for BrokerConfig {
 }
 
 pub trait QueueOwnership: std::fmt::Debug + Send + Sync {
+    /// Fresh consensus authority for non-writable initial preparation.
+    fn authorize_initial_history<'a>(
+        &'a self,
+        _command: &'a crate::initial_history::InitialHistoryPrepareCommand,
+    ) -> futures::future::BoxFuture<'a, Result<crate::initial_history::InitialHistoryAuthorization, String>> {
+        Box::pin(async { Err("coordinated initial history preparation is unavailable".into()) })
+    }
+
     /// Return this replica's node identity after consensus-backed authorization.
     /// Standalone and providers without a recovery protocol must refuse it.
     fn authorize_recovery_seal<'a>(
@@ -1521,6 +1529,8 @@ pub struct Broker<
     pub(crate) task_group: Arc<TaskGroup>,
 
     metrics: Option<Arc<BrokerStats>>,
+    pub(crate) initial_history_flight:
+        Arc<std::sync::Mutex<Option<crate::initial_history::InitialHistoryFlight>>>,
     pub(crate) recovery_seal_flight:
         Arc<std::sync::Mutex<Option<crate::recovery::RecoverySealFlight>>>,
     pub(crate) ownership: Arc<dyn QueueOwnership>,
@@ -1759,6 +1769,7 @@ impl<
             settings_epoch: AtomicU64::new(1),
             task_group: Arc::new(TaskGroup::new()),
             metrics,
+            initial_history_flight: Arc::new(std::sync::Mutex::new(None)),
             recovery_seal_flight: Arc::new(std::sync::Mutex::new(None)),
             ownership,
             stream_ownership,

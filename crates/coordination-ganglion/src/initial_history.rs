@@ -2,9 +2,7 @@
 //! not activate a writer or establish an installed quorum. Ordinary startup does
 //! not invoke these APIs while recovery readmission remains incomplete.
 
-use fibril_broker::queue_engine::{
-    PartitionKind, PreparedStorageHistory, StorageHistoryBinding, StromaEngine,
-};
+use fibril_broker::queue_engine::{PartitionKind, StorageHistoryBinding, StromaEngine};
 use ganglion_core::{CoordinationSnapshot, PartitionAssignment, ResourceIdentity};
 use ganglion_openraft::{MetadataRaftCommand, OpenraftAdapterError};
 use serde::{Deserialize, Serialize};
@@ -36,17 +34,8 @@ pub struct InitialHistoryDecision {
     pub required_write_nodes: usize,
 }
 
-/// Produced after fresh consensus authorization and durable local preparation.
-/// Remote transport must authenticate the reporting node before admitting this
-/// evidence to a future quorum-installation record.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct InitialHistoryLocalReceipt {
-    pub decision: [u8; 32],
-    pub node_id: String,
-    pub replica_process: [u8; 16],
-    pub storage: PreparedStorageHistory,
-}
+pub use fibril_broker::initial_history::InitialHistoryLocalReceipt;
+use fibril_broker::initial_history::{InitialHistoryAuthorization, InitialHistoryPrepareCommand};
 
 /// Receipt counts describe prepared storage only. Activation requires a fresh
 /// persisted quorum decision and the remaining writer-admission protocol.
@@ -264,6 +253,28 @@ fn validate_resource(resource: &ResourceIdentity) -> Result<(), String> {
 }
 
 impl InitialHistoryDecision {
+    pub fn prepare_command(
+        &self,
+        replica_id: &str,
+    ) -> Result<InitialHistoryPrepareCommand, String> {
+        if replica_id != self.assignment.owner
+            && !self.assignment.followers.iter().any(|id| id == replica_id)
+        {
+            return Err("initial preparation target is not an assigned replica".into());
+        }
+        let resource = &self.incarnation.resource;
+        validate_resource(resource)?;
+        Ok(InitialHistoryPrepareCommand {
+            replica_id: replica_id.into(),
+            topic: resource.name.clone(),
+            partition: fibril_broker::Partition::new(resource.partition as u32),
+            group: resource.group.clone(),
+            stream: resource.namespace == crate::STREAM_NAMESPACE,
+            decision: self.digest()?,
+            binding: self.binding.clone(),
+        })
+    }
+
     pub fn digest(&self) -> Result<[u8; 32], String> {
         let mut hash = blake3::Hasher::new();
         hash.update(b"fibril-initial-history-v1\0");
@@ -352,6 +363,59 @@ fn proposed_decision(
 }
 
 impl GanglionCoordination {
+    pub(crate) async fn authorize_initial_history_command(
+        &self,
+        command: &InitialHistoryPrepareCommand,
+    ) -> Result<InitialHistoryAuthorization, String> {
+        if command.replica_id != self.node_id {
+            return Err("initial preparation was addressed to another replica".into());
+        }
+        let resource = ResourceIdentity::new(
+            if command.stream {
+                crate::STREAM_NAMESPACE
+            } else {
+                crate::QUEUE_NAMESPACE
+            },
+            command.topic.clone(),
+            u64::from(command.partition.id()),
+            command.group.clone(),
+        );
+        validate_resource(&resource)?;
+        let snapshot = self.node.committed_snapshot();
+        let incarnation = resource_incarnation(&snapshot, &resource)?
+            .ok_or("initial preparation requires enrolled metadata")?;
+        let key = key(&incarnation);
+        let raw = snapshot
+            .attributes
+            .get(&key)
+            .ok_or("initial history decision is not committed")?;
+        let decision: InitialHistoryDecision =
+            serde_json::from_str(raw).map_err(|e| e.to_string())?;
+        validate_committed(&snapshot, &decision)?;
+        if decision.prepare_command(&self.node_id)? != *command {
+            return Err("initial preparation does not match the exact committed decision".into());
+        }
+        if decision.assignment.owner == self.node_id
+            && decision.owner_process != self.history_process
+        {
+            return Err("restarted owner requires recovery readmission".into());
+        }
+        let response = self
+            .forward_command(MetadataRaftCommand::CompareAndSetAttributeGuarded {
+                expected_generation: snapshot.generation,
+                key,
+                expected: Some(raw.clone()),
+                value: raw.clone(),
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+        validate_committed(&response.snapshot, &decision)?;
+        Ok(InitialHistoryAuthorization {
+            node_id: self.node_id.clone(),
+            replica_process: self.history_process,
+        })
+    }
+
     /// Read persisted preparation evidence. Validation against the local snapshot
     /// establishes identity consistency only; this is not a fresh admission check.
     pub fn prepared_initial_history_quorum(
@@ -518,34 +582,10 @@ impl GanglionCoordination {
         decision: &InitialHistoryDecision,
         engine: &StromaEngine,
     ) -> Result<InitialHistoryLocalReceipt, OpenraftAdapterError> {
-        let snapshot = self.node.committed_snapshot();
-        decision.validate(&snapshot).map_err(error)?;
-        let owner = decision.assignment.owner == self.node_id;
-        if !owner && !decision.assignment.followers.contains(&self.node_id) {
-            return Err(error(
-                "initial history preparation requires assigned replica membership",
-            ));
-        }
-        if owner && decision.owner_process != self.history_process {
-            return Err(error("restarted owner requires recovery readmission"));
-        }
-        let key = key(&decision.incarnation);
-        let raw = snapshot
-            .attributes
-            .get(&key)
-            .ok_or_else(|| error("initial history decision is not committed"))?;
-        if serde_json::from_str::<InitialHistoryDecision>(raw).map_err(error)? != *decision {
-            return Err(error("initial history differs from the committed decision"));
-        }
-        let response = self
-            .forward_command(MetadataRaftCommand::CompareAndSetAttributeGuarded {
-                expected_generation: snapshot.generation,
-                key,
-                expected: Some(raw.clone()),
-                value: raw.clone(),
-            })
-            .await?;
-        decision.validate(&response.snapshot).map_err(error)?;
+        let command = decision.prepare_command(&self.node_id).map_err(error)?;
+        self.authorize_initial_history_command(&command)
+            .await
+            .map_err(error)?;
         let resource = &decision.incarnation.resource;
         let kind = if resource.namespace == crate::STREAM_NAMESPACE {
             PartitionKind::Stream
@@ -574,6 +614,7 @@ impl GanglionCoordination {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fibril_broker::queue_engine::PreparedStorageHistory;
     use ganglion_core::ReplicationDurabilityPolicy;
     use std::collections::BTreeMap;
 

@@ -1479,6 +1479,7 @@ dependencies = [
  "fibril-wire",
  "futures",
  "ganglion",
+ "ganglion-core",
  "ganglion-openraft",
  "rmp-serde",
  "serde",

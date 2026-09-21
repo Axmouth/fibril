@@ -3308,3 +3308,140 @@ mod recovery_read_wire_tests {
         );
     }
 }
+
+fn put_initial_history(out: &mut BytesMut, req: &crate::InitialHistoryPrepare) -> WireResult<()> {
+    put_str(out, &req.replica_id)?;
+    put_queue_key(out, &req.topic, req.partition, req.group.as_deref())?;
+    put_bool(out, req.stream);
+    out.extend_from_slice(&req.decision);
+    out.extend_from_slice(&req.resource_incarnation);
+    out.extend_from_slice(&req.accepted_history);
+    out.extend_from_slice(&req.writer_session);
+    Ok(())
+}
+
+fn read_initial_history(r: &mut Reader<'_>) -> WireResult<crate::InitialHistoryPrepare> {
+    let replica_id = r.str()?.to_owned();
+    let (topic, partition, group) = r.queue_key()?;
+    Ok(crate::InitialHistoryPrepare {
+        replica_id,
+        topic,
+        partition,
+        group,
+        stream: r.bool()?,
+        decision: r.take(32)?.try_into().unwrap(),
+        resource_incarnation: r.take(16)?.try_into().unwrap(),
+        accepted_history: r.take(16)?.try_into().unwrap(),
+        writer_session: r.take(16)?.try_into().unwrap(),
+    })
+}
+
+fn initial_history_size(size: usize) -> WireResult<()> {
+    if size > crate::MAX_INITIAL_HISTORY_FRAME_BYTES {
+        return Err(WireError::InvalidRecordSequence(
+            "initial history frame exceeds size limit",
+        ));
+    }
+    Ok(())
+}
+
+pub fn encode_initial_history_prepare(
+    id: u64,
+    req: &crate::InitialHistoryPrepare,
+) -> WireResult<Frame> {
+    let mut out = payload_builder(b"IHP1");
+    put_initial_history(&mut out, req)?;
+    initial_history_size(out.len())?;
+    Ok(frame(Op::InitialHistoryPrepare, id, out.freeze()))
+}
+
+pub fn decode_initial_history_prepare(f: &Frame) -> WireResult<crate::InitialHistoryPrepare> {
+    expect_op(f, Op::InitialHistoryPrepare)?;
+    initial_history_size(f.payload.len())?;
+    let mut r = Reader::new(&f.payload);
+    r.expect_magic(b"IHP1", "initial history preparation")?;
+    let request = read_initial_history(&mut r)?;
+    r.finish()?;
+    Ok(request)
+}
+
+pub fn encode_initial_history_prepare_ok(
+    id: u64,
+    reply: &crate::InitialHistoryPrepareOk,
+) -> WireResult<Frame> {
+    let mut out = payload_builder(b"IHO1");
+    put_initial_history(&mut out, &reply.prepared)?;
+    out.extend_from_slice(&reply.replica_process);
+    out.extend_from_slice(&reply.storage_instance);
+    initial_history_size(out.len())?;
+    Ok(frame(Op::InitialHistoryPrepareOk, id, out.freeze()))
+}
+
+pub fn decode_initial_history_prepare_ok(f: &Frame) -> WireResult<crate::InitialHistoryPrepareOk> {
+    expect_op(f, Op::InitialHistoryPrepareOk)?;
+    initial_history_size(f.payload.len())?;
+    let mut r = Reader::new(&f.payload);
+    r.expect_magic(b"IHO1", "initial history preparation response")?;
+    let reply = crate::InitialHistoryPrepareOk {
+        prepared: read_initial_history(&mut r)?,
+        replica_process: r.take(16)?.try_into().unwrap(),
+        storage_instance: r.take(16)?.try_into().unwrap(),
+    };
+    r.finish()?;
+    Ok(reply)
+}
+
+#[cfg(test)]
+mod initial_history_tests {
+    use super::*;
+    #[test]
+    fn initial_preparation_codecs_reject_truncation_trailing_data_and_oversize() {
+        let request = crate::InitialHistoryPrepare {
+            replica_id: "a".into(),
+            topic: "q".into(),
+            partition: Partition::new(0),
+            group: Some("workers".into()),
+            stream: false,
+            decision: [1; 32],
+            resource_incarnation: [2; 16],
+            accepted_history: [3; 16],
+            writer_session: [4; 16],
+        };
+        let reply = crate::InitialHistoryPrepareOk {
+            prepared: request.clone(),
+            replica_process: [5; 16],
+            storage_instance: [6; 16],
+        };
+        let req = crate::helper::try_encode(Op::InitialHistoryPrepare, 7, &request).unwrap();
+        let rep = crate::helper::try_encode(Op::InitialHistoryPrepareOk, 7, &reply).unwrap();
+        assert_eq!(
+            crate::helper::try_decode::<crate::InitialHistoryPrepare>(&req).unwrap(),
+            request
+        );
+        assert_eq!(
+            crate::helper::try_decode::<crate::InitialHistoryPrepareOk>(&rep).unwrap(),
+            reply
+        );
+        for frame in [req, rep] {
+            let rejects = |f: &Frame| {
+                if f.opcode == Op::InitialHistoryPrepare as u16 {
+                    decode_initial_history_prepare(f).is_err()
+                } else {
+                    decode_initial_history_prepare_ok(f).is_err()
+                }
+            };
+            for length in 0..frame.payload.len() {
+                let mut short = frame.clone();
+                short.payload = short.payload.slice(..length);
+                assert!(rejects(&short));
+            }
+            let mut extra = frame.clone();
+            let mut bytes = extra.payload.to_vec();
+            bytes.push(0);
+            extra.payload = bytes.into();
+            assert!(rejects(&extra));
+            extra.payload = vec![0; crate::MAX_INITIAL_HISTORY_FRAME_BYTES + 1].into();
+            assert!(rejects(&extra));
+        }
+    }
+}

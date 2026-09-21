@@ -2948,6 +2948,13 @@ impl Drop for GanglionCoordination {
 /// Queue-ownership gate view: in cluster mode brokers serve only queues the
 /// committed snapshot assigns to them.
 impl fibril_broker::broker::QueueOwnership for GanglionCoordination {
+    fn authorize_initial_history<'a>(
+        &'a self,
+        command: &'a fibril_broker::initial_history::InitialHistoryPrepareCommand,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<fibril_broker::initial_history::InitialHistoryAuthorization, String>> + Send + 'a>> {
+        Box::pin(self.authorize_initial_history_command(command))
+    }
+
     fn authorize_recovery_seal<'a>(
         &'a self,
         command: &'a fibril_broker::recovery::RecoverySealCommand,
