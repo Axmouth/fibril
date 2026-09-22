@@ -140,6 +140,8 @@ The compatibility work follows this order:
 - Add a node-local dashboard settings section with explicitly targeted updates,
   durable local overrides and defined precedence over startup configuration.
   Introduce validated Keratin configuration updates for existing and future logs.
+  Publish coherent configuration snapshots and adopt them at operation boundaries,
+  keeping configuration synchronization out of per-record hot loops.
   Start with preallocation applied at the next segment creation; classify fsync,
   batching and adaptive-buffer controls by their safe application boundary.
   Show requested and effective values, pending application and failures. Preserve
