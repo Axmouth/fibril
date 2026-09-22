@@ -144,6 +144,18 @@ pub(crate) fn retain_unproven_assignments(
             // the new owner renews preparation while retaining the origin IDs.
             continue;
         }
+        // Liveness can temporarily expose only one survivor during a Raft
+        // election. Recomputing a majority over that smaller placement must not
+        // silently lower the active queue's confirmation requirement. Leave the
+        // request uncommitted so the next controller pass can use returning nodes.
+        if resource.namespace == crate::QUEUE_NAMESPACE
+            && previous.durability == proposed.durability
+            && new_writes < old_writes
+        {
+            *proposed = previous.clone();
+            held += 1;
+            continue;
+        }
         let replaced = if enrolled {
             crate::history_activation::replaced_initial_processes(committed, resource)?
         } else {
@@ -245,6 +257,26 @@ mod tests {
             retain_unproven_assignments(&old, &mut reordered).unwrap(),
             0
         );
+    }
+    #[test]
+    fn transient_liveness_loss_cannot_reduce_queue_confirmation_requirement() {
+        let old = snapshot(assignment("a", &["b", "c"]));
+        let resource = old.assignments.keys().next().unwrap();
+        let mut single_survivor = snapshot(assignment("b", &[]));
+        assert_eq!(retain_unproven_assignments(&old, &mut single_survivor).unwrap(), 1);
+        assert_eq!(single_survivor.assignments, old.assignments);
+        assert!(!single_survivor.attributes.contains_key(&pending_recovery_key(resource)));
+
+        // Once a second survivor registers, recovery can choose the two-node
+        // configuration without being stuck with an earlier one-node proposal.
+        let mut two_survivors = snapshot(assignment("b", &["c"]));
+        retain_unproven_assignments(&single_survivor, &mut two_survivors).unwrap();
+        let pending: PendingRecovery = serde_json::from_str(
+            &two_survivors.attributes[&pending_recovery_key(resource)],
+        ).unwrap();
+        assert_eq!(pending.previous_write_nodes, 2);
+        assert_eq!(pending.proposed_write_nodes, 2);
+        assert_eq!(pending.proposed.followers, vec!["c"]);
     }
     #[test]
     fn unactivated_enrollment_allows_placement_changes_without_recovery() {

@@ -2562,6 +2562,7 @@ impl Broker<StromaEngine> {
         shutdown: CancellationToken,
     ) -> Result<FollowerReplicationWorkerLoopExit, BrokerError> {
         let mut ticks = 0;
+        let mut initialized_history_offsets = false;
         loop {
             let cfg = if cfg.follow_runtime_settings {
                 let snap = self.config_snapshot();
@@ -2634,6 +2635,25 @@ impl Broker<StromaEngine> {
                     return Ok(FollowerReplicationWorkerLoopExit::WorkerStopped { ticks });
                 }
                 outcome = async {
+                    if !initialized_history_offsets && scoped_owner.history.is_some()
+                        && kind == ReplicationResourceKind::Queue
+                    {
+                        // Recovery may install a compacted baseline. Only exact
+                        // admitted history permits trusting local cursors; legacy
+                        // workers must still reconcile their suffix from zero.
+                        scoped_owner.check_history()?;
+                        let (message_next, event_next) = self.engine
+                            .queue_replication_next_offsets(
+                                &assignment.queue.topic,
+                                assignment.queue.partition.id(),
+                                assignment.queue.group.as_deref(),
+                            ).await?;
+                        scoped_owner.check_history()?;
+                        let mut state = runtime.state.lock().await;
+                        state.message_next_offset = message_next;
+                        state.event_next_offset = event_next;
+                        initialized_history_offsets = true;
+                    }
                     // The credit-based streaming transport has no stream-mode op
                     // (only the StreamReplicationRead pull op is stream-aware), so
                     // a Plexus stream always catches up via the pull path.

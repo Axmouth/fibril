@@ -933,6 +933,39 @@ async fn three_node_owner_loss(recover: bool, learner: LearnerCase) {
             .await
             .unwrap();
         learner_worker.unwrap().abort();
+        // Handoff from checkpoint-backed learner to ordinary replication must
+        // resume its admitted cursors. Starting from zero requests a second
+        // checkpoint, which accepted-history storage correctly refuses.
+        for result in brokers[0]
+            .apply_assignment_snapshot_transitions("a", &before, &providers[0].snapshot())
+            .await
+        {
+            result.unwrap();
+        }
+        let resolver = Arc::new(
+            fibril_protocol::v1::replication::CoordinationProtocolOwnerPeerResolver::with_config(
+                providers[2].clone(),
+                config.clone().with_reporter("c"),
+            ),
+        );
+        brokers[2].spawn_assignment_watcher_with_follower_replication(
+            providers[2].clone(),
+            resolver,
+            fibril_broker::broker::FollowerReplicationWorkerConfig {
+                allow_checkpoint_install: true,
+                ..Default::default()
+            },
+        );
+        let confirmation = publisher.publish(
+            40u64.to_le_bytes().to_vec(), unix_millis(), unix_millis(),
+            None, Default::default(), None,
+        ).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), confirmation)
+                .await.expect("ordinary follower must continue from the installed checkpoint")
+                .unwrap().unwrap(),
+            40,
+        );
         owner_worker.abort();
         drop(peer);
         drop(publisher);

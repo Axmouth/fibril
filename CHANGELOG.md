@@ -542,6 +542,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- Automatic queue recovery retains the existing confirmation count when transient
+  liveness loss would shrink a majority to one node. Admitted followers resume
+  from their verified local offsets after snapshot recovery or learner handoff,
+  avoiding a repeated checkpoint-installation failure from offset zero.
+
 - Checkpoint installation preserves source message/event epochs through both
   replication paths and rejects mismatches before reset, with a second check in
   each storage writer. This prevents stale checkpoints replacing fenced history;
