@@ -1,0 +1,16 @@
+await foreach (var msg in sub.Deliveries())
+{
+    try
+    {
+        await SendEmailAsync(msg.Text());
+    }
+    catch (EmailException error)
+    {
+        if (error.IsTemporary)
+            msg.RetryAfter(TimeSpan.FromSeconds(30));
+        else
+            msg.Fail();
+        continue;
+    }
+    msg.Complete();
+}

@@ -1,12 +1,70 @@
-<div class="console">
-  <div class="console-head"><span>worker.rs</span><span>explicit lifecycle</span></div>
-  <pre><code><span class="code-keyword">while let</span> Some(msg) = sub.<span class="code-function">recv</span>().await? &#123;
-    <span class="code-keyword">match</span> send_email(msg.<span class="code-function">content</span>()?).await &#123;
-        Ok(_) =&gt; msg.<span class="code-function">complete</span>().await?,
-        Err(err) <span class="code-keyword">if</span> err.<span class="code-function">is_temporary</span>() =&gt; msg.<span class="code-function">retry_after</span>(30).await?,
-        Err(_) =&gt; msg.<span class="code-function">fail</span>().await?,
-    &#125;;
-&#125;
+---
+import { Code } from "astro:components";
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import rust from "../examples/workers/worker.rs.txt?raw";
+import csharp from "../examples/workers/worker.cs.txt?raw";
+import go from "../examples/workers/worker.go.txt?raw";
+import typescript from "../examples/workers/worker.ts.txt?raw";
+import python from "../examples/workers/worker.py.txt?raw";
 
-<span class="code-comment">// settlement says what should happen next</span></code></pre>
-</div>
+const examples = [
+  { label: "worker.rs (Rust)", lang: "rust", code: rust },
+  { label: "worker.cs (C#)", lang: "csharp", code: csharp },
+  { label: "worker.go (Go)", lang: "go", code: go },
+  { label: "worker.ts (TypeScript)", lang: "typescript", code: typescript },
+  { label: "worker.py (Python)", lang: "python", code: python },
+] as const;
+---
+
+<section class="console worker-examples" aria-label="Worker examples by client language">
+  <div class="console-head">
+    <span>complete · retry · fail</span>
+    <a href="/clients/#manual-acknowledgements">Client setup and usage →</a>
+  </div>
+  <Tabs syncKey="worker-example">
+    {examples.map(({ label, lang, code }) => (
+      <TabItem label={label}>
+        <Code code={code.trimEnd()} lang={lang}
+          themes={{ dark: "github-dark", light: "github-light" }} defaultColor={false} />
+      </TabItem>
+    ))}
+  </Tabs>
+  <p class="worker-context">
+    Inside a worker with a manual-ack subscription. Email sending and error classification
+    are application code; settlement errors propagate to the caller.
+  </p>
+</section>
+
+<style>
+  .worker-examples {
+    --sl-color-gray-5: var(--line);
+    --sl-color-gray-3: var(--muted);
+    --sl-color-text-accent: var(--accent);
+    --sl-color-white: var(--text);
+    --sl-line-height-headings: 1.5;
+    --sl-outline-offset-inside: -3px;
+    min-width: 0;
+  }
+  .console-head { height: auto; min-height: 40px; gap: 12px; flex-wrap: wrap; padding-block: 8px; }
+  .console-head a { color: var(--accent); }
+  .worker-examples :global([role="tablist"]) { margin: 0; }
+  .worker-examples :global(.tab > [role="tab"]) {
+    padding: 12px 16px;
+    white-space: nowrap;
+    font: 12px/1.5 var(--mono);
+  }
+  .worker-examples :global([role="tab"]:focus-visible) {
+    outline: 2px solid var(--accent);
+  }
+  .worker-examples :global(.tablist-wrapper ~ [role="tabpanel"]) { margin-top: 0; }
+  .worker-examples :global(pre) { min-height: 25rem; background: transparent !important; }
+  .worker-examples :global(.astro-code),
+  .worker-examples :global(.astro-code span) { color: var(--shiki-dark); }
+  :global(html[data-theme="light"]) .worker-examples :global(.astro-code),
+  :global(html[data-theme="light"]) .worker-examples :global(.astro-code span) { color: var(--shiki-light); }
+  .worker-context { margin: 0; padding: 12px 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+  @media (max-width: 600px) {
+    .worker-examples :global(.tab > [role="tab"]) { padding: 10px 12px; }
+    .worker-examples :global(pre) { font-size: 12px; padding: 14px; }
+  }
+</style>

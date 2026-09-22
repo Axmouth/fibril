@@ -1,0 +1,9 @@
+async for msg in sub:
+    try:
+        await send_email(msg.text())
+    except TemporaryEmailError:
+        await msg.retry_after(30)  # seconds
+    except EmailError:
+        await msg.fail()
+    else:
+        await msg.complete()

@@ -1,0 +1,15 @@
+for msg := range sub.Deliveries {
+    sendErr := sendEmail(msg.Text())
+    var settleErr error
+    switch {
+    case sendErr == nil:
+        settleErr = msg.Complete()
+    case isTemporary(sendErr):
+        settleErr = msg.RetryAfter(30 * time.Second)
+    default:
+        settleErr = msg.Fail()
+    }
+    if settleErr != nil {
+        return settleErr
+    }
+}
