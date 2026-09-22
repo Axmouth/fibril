@@ -8,6 +8,78 @@ and cluster operations. This page tracks remaining work. Current capabilities
 and their limits are documented in [implemented surface](/implemented-surface/);
 [project status](/status/) summarizes their maturity.
 
+## Immediate rounds
+
+The next rounds prioritize bounded operational work, recovery latency and adoption
+of the retained delivery experiment. Client and stream work can proceed as
+separate rounds when their dependencies permit.
+
+1. **Admin settings and recovery visibility.** Complete the effective-settings
+   audit, including defaults, validation, node/cluster scope and live versus
+   restart-only changes. Show recovery stages and account for retained generations
+   and staging data before adding automatic reclamation.
+2. **Recovery overhead.** Establish matched release-build timelines and remove
+   avoidable polling, repeated connections and activation retries. Measure first
+   delivery and new durable confirmation, separating owner loss from metadata-
+   leader loss. Start with steps 1–2 of the
+   [fast-recovery plan](/development/failover-plan/#fast-recovery); promotion in
+   place and agreed checkpoints follow their own proof and measurement gates.
+3. **Speculative delivery adoption.** Reconcile the retained local-queue prototype
+   with current recovery and ordered application. Close ACK-before-durability,
+   crash/error, slow-consumer, memory-budget and expiry/fallback gaps, then repeat
+   representative physical-storage measurements. Production configuration and
+   confirmation/identity contracts are required before adoption. Replicated
+   speculation and replication before owner fsync remain separate increments.
+4. **Python and TypeScript performance.** Profile scheduling, decoding, delivery
+   and flushing against shared broker workloads. Apply useful transport changes
+   across SDKs where the same mechanism applies, retaining consistent semantics.
+5. **Streams completeness.** Resolve fail/retry and reconnect-ACK behavior across
+   clients, then add stream and consumer fan-out workloads to the shared harness.
+6. **Many-queue resource use.** Measure adaptive staging with idle, intermittently
+   active and busy queues under realistic memory pressure. Track retained recovery
+   disk separately from active logs and assess reclamation only after visibility.
+
+A smaller optional round can add a coherent moving dashboard scenario: backlog
+builds, consumers catch up and a node recovers. Reuse production views and clearly
+label the simulated state. Allocator/THP repeats remain evidence-driven follow-ups.
+
+## Medium-term directions
+
+These four directions follow the immediate rounds. They are exploration and
+product targets, with implementation scope and acceptance refined individually.
+
+### Ordering across partitioned queues
+
+Explore useful per-key ordering while distributing customers or jobs across
+partitions. Specify delivery versus processing order, retries, consumer ownership
+and repartitioning. Evaluate queue-wide ordering separately, including its
+sequencing and throughput costs.
+
+### Scaling across partitions, nodes and drives
+
+Map aggregate and per-partition capacity with replica count as an independent
+axis. Spread owners and storage across nodes and physical drives, verify client
+headroom, and measure latency, CPU, memory and durable behavior at offered rates
+and saturation. Explore a million messages per second as a measurement target;
+report sustainable operating points and exact hardware/configuration conditions.
+
+### Low-latency service routing
+
+Build a representative request → worker → response example with correlation,
+deadlines, retries and idempotency. Define worker completion, response durability
+and request acknowledgment ordering, including duplicate responses after failure.
+Measure both queue legs and full round-trip latency. Integrate speculative
+delivery only under its validated contract; pre-staging delivery and write
+avoidance remain a further design requiring explicit ordering and crash semantics.
+
+### Public/private endpoints and routing fallback
+
+Design public entry brokers that can forward to owners on private endpoints,
+while retaining direct owner routing where reachable. Define advertisement scope,
+authentication, failure/retry outcomes, loop prevention and bounded forwarding.
+Overlapping topology groups and arbitrary multi-hop routing remain later options
+that require a concrete deployment use case.
+
 ## Path to 1.0
 
 The 1.0 acceptance criteria cover four areas:
@@ -27,14 +99,15 @@ The remaining work is grouped below by dependency and operational impact.
 
 - Implement and validate Windows durable metadata replacement before enabling
   checkpoint installation and recovery seals on that platform.
-- Require promotion to preserve the previously confirmed history, using current
-  replica evidence and assignment fencing. Cover stale heartbeat tails and a
-  lagging, internally consistent candidate that lacks a confirmed batch. See the
-  [failover plan](/development/failover-plan/).
-- Exercise failover during checkpoint catch-up through real brokers, and extend
-  local error/cancellation/process-kill coverage to power-loss persistence tests.
-- Define source authority, acknowledged-history preservation, bounded retries
-  and operator alerts before enabling automatic repair of divergent replicas.
+- Extend accepted-history recovery coverage to packet-level asymmetric partitions,
+  whole-process interruption during learner transfer and candidate replacement
+  outside the fixed proposed replica set. Preserve confirmed history and fencing
+  through every transition; see the [failover plan](/development/failover-plan/).
+- Extend local error/cancellation/process-kill coverage to power-loss persistence
+  tests, larger records/snapshots and authoritative stream-state recovery.
+- Design composite reconstruction for crossed payload/event histories and safe
+  reclamation of retained recovery data. Keep unresolved authoritative divergence
+  fenced and visible to operators.
 
 ## Client lifecycle and compatibility
 
@@ -112,9 +185,6 @@ These require a concrete use case or further design:
 - Reclaim inflight ownership across broker restart and transfer sessions across
   nodes, with a defined startup grace window and redelivery policy.
 - Per-topic authorization and tenancy controls.
-- Ordering guarantees across a partitioned queue: compare per-key and queue-wide
-  ordering, delivery versus processing order, retries and repartitioning, and the
-  cost of sequencing or merging across partitions.
 - Additional clients, such as Java.
 - Richer bounded stream filters and client-side wildcard publishing.
 - Queue expiration based on coordinated inactivity.
