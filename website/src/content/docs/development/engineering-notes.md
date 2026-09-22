@@ -12,7 +12,7 @@ remaining work is in the [roadmap](/roadmap/).
 
 ### Adaptive storage staging
 
-Message and event log staging can now grow on demand, shed empty capacity and release idle allocations through the existing writer loop. Broker measurements found comparable latency and lower memory in several steady-load cases, with extra CPU in a replicated run and higher RSS in a large-payload burst case; the policy remains opt-in while live capacity and allocator retention are investigated. Configuration and retention details are in [configuration](/configuration/) and Keratin's `experiments/ADAPTIVE_STAGING.md`.
+Message and event log staging can now grow on demand, shed empty capacity and release idle allocations through the existing writer loop. Broker measurements found comparable latency and workload-dependent CPU/RSS effects; capacity tracing and forced collection on storage writer threads linked much of the idle RSS excess after bursts to allocator retention after staging capacity was released. The policy remains opt-in; configuration and retention details are in [configuration](/configuration/) and Keratin's `experiments/ADAPTIVE_STAGING.md`.
 
 ### Follower transition before storage admission
 
@@ -210,15 +210,14 @@ The [shared Rust harness](https://github.com/Axmouth/fibril/tree/main/benchmarks
 
 ### Transparent huge pages — deployment option
 
-Allocation tracing found that each materialized queue reserves two 16 MiB write
-buffers and two 256 KiB index buffers, whose resident cost can grow substantially
-under THP even when lightly used. Disabling THP only for the diagnostic broker
-reduced RSS, while separate publish/delivery comparisons found mixed latency
-effects at paced and saturated rates. The existing
-[allocator startup option](/configuration/#linux-memory-policy) is a candidate
-for memory-constrained deployments, especially lightly used materialized logs;
-latency-sensitive deployments require workload-specific validation, and
-production defaults are unchanged.
+Allocation tracing found that retained log staging reserves two 16 MiB write
+buffers and two 256 KiB index buffers per materialized queue; their resident cost
+can grow substantially under THP even when lightly used. Mirrored local tests of
+the [allocator startup option](/configuration/#linux-memory-policy) found lower
+RSS with THP disabled across paced, saturated and three-node request/reply
+workloads, with workload-dependent CPU and latency costs. The option remains a
+candidate for memory-sensitive deployments; production defaults are unchanged,
+and memory pressure and large active working sets require further validation.
 
 ### Storage writer channel sizing — configurable, defaults unchanged
 

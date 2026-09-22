@@ -371,13 +371,14 @@ The tradeoff depends on workload: huge pages can improve address-translation
 efficiency for large active working sets, while allocating and clearing larger
 pages can add latency and consume extra memory.
 
-:::caution[Latency-sensitive deployments]
-Keep the existing THP policy unless workload-specific testing establishes
-acceptable tail latency. Disabling THP can increase confirmation or delivery
-latency even when throughput stays similar; local paced and saturated tests
-showed mixed results. Compare resident memory and both latency measures at
-representative payload sizes, normal rates and bursts before adopting the
-setting. Behavior under memory pressure and replication remains unmeasured.
+:::caution[Validate latency and CPU]
+Compare resident memory, CPU, confirmation latency and delivery latency for the
+intended workload before changing the policy. Mirrored local tests found lower
+RSS at paced and saturated rates, including three-node request/reply; retained
+buffer throughput was similar, while adaptive-buffer saturation and light-load
+CPU showed potential costs. Tail-latency effects varied between runs. Behavior
+under memory pressure, across hosts and with large active working sets remains
+unmeasured, and the production default is unchanged.
 :::
 
 After restart, `/proc/<broker-pid>/status` should report `THP_enabled: 0`, and
