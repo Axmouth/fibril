@@ -44,6 +44,8 @@ rustls-pemfile = "2"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 
 [features]
+system-allocator-experiment = []
+mimalloc-collection-experiment = ["fibril-broker/mimalloc-collection-experiment"]
 staging-buffer-experiment = ["fibril-broker/staging-buffer-experiment"]
 # Compatibility with existing benchmark build commands; routing is now enabled by default.
 targeted-routing-experiment = []

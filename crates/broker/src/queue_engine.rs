@@ -1,3 +1,5 @@
+#[cfg(feature = "mimalloc-collection-experiment")]
+pub use stroma_core::allocator_probe;
 use std::{collections::HashMap, path::Path, sync::Arc};
 
 use crate::storage::Offset;

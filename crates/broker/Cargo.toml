@@ -42,6 +42,7 @@ name = "stream_filter"
 harness = false
 
 [features]
+mimalloc-collection-experiment = ["stroma-core/mimalloc-collection-experiment"]
 staging-buffer-experiment = ["stroma-core/staging-buffer-experiment"]
 ordered-queue-apply-experiment = ["stroma-core/ordered-queue-apply-experiment"]
 # Exposes coordination::contract_tests so other crates can run the shared
