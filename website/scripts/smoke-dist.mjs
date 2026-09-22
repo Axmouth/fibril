@@ -9,12 +9,14 @@ const checks = [
   { path: "deployment/monitoring/index.html", includes: ["/dashboard-demo/?embed=1", "Broker health and recent activity"] },
   { path: "dashboard-demo/index.html", includes: ["Read-only demo", "fixtures.js", "chart-throughput"] },
   { path: "dashboard-demo/admin/queue/index.html", includes: ["q-partitions", "transport.js"] },
-  { path: "admin-dashboard/index.html", includes: ["/dashboard-demo/", "loading=\"lazy\"", 'Broker overview', 'embed=1', 'height="860"', 'style="height:860px"', 'sandbox="allow-scripts allow-same-origin"'] },
+  { path: "admin-dashboard/index.html", includes: ["/dashboard-demo/", "loading=\"lazy\"", 'Broker overview', 'brand-mascot', '/brand/face-32.png', 'embed=1', 'height="860"', 'style="height:860px"', 'sandbox="allow-scripts allow-same-origin"'] },
   {
     path: "index.html",
     includes: [
       "<title>Fibril | Durable messaging without broker ceremony</title>",
       "Useful messaging without broker ceremony.",
+      "brand-mascot",
+      "/brand/face-32.png",
       "queue lifecycle",
       // The release badge renders a real version from the workspace manifest,
       // never the 0.x fallback.
@@ -85,6 +87,18 @@ for (const check of checks) {
       console.error(`missing expected content in ${check.path}: ${expected}`);
       failures += 1;
     }
+  }
+}
+
+
+// Generated favicon copies must match the dashboard's canonical artwork.
+for (const size of [16, 32, 48]) {
+  const name = `face-${size}.png`;
+  const output = join(root, 'brand', name);
+  const source = new URL(`../../crates/admin/admin-ui/img/${name}`, import.meta.url);
+  if (!existsSync(output) || !readFileSync(output).equals(readFileSync(source))) {
+    console.error(`missing or stale shared favicon: ${name}`);
+    failures += 1;
   }
 }
 

@@ -29,6 +29,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- Shared mascot branding for the website and documentation: a softly shaded,
+  centered ring icon with reduced-motion-aware blinking, plus face favicons
+  generated from the dashboard artwork. Website container builds include the
+  shared dashboard template and asset sources.
+
 - Read-only dashboard demo built from the production templates and assets, with
   thirteen views, deterministic sample data, and inline dashboard documentation
   examples. Larger embedded views keep navigation within the documented page,

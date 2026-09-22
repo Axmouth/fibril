@@ -5,3 +5,7 @@ bench_data
 server_data
 website/node_modules
 website/dist
+
+website/.astro
+website/public/dashboard-demo
+website/public/brand

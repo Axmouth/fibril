@@ -17,11 +17,13 @@ export default defineConfig({
     starlight({
       title: "Fibril",
       description: "A lightweight message broker with durable queues and explicit delivery semantics.",
-      logo: {
-        src: "./src/assets/fibril-mark.svg",
-      },
+      components: { SiteTitle: "./src/components/SiteTitle.astro" },
       customCss: ["./src/styles/starlight.css"],
-      favicon: "/favicon.svg",
+      favicon: "/brand/face-48.png",
+      head: [
+        { tag: "link", attrs: { rel: "icon", type: "image/png", sizes: "16x16", href: "/brand/face-16.png" } },
+        { tag: "link", attrs: { rel: "icon", type: "image/png", sizes: "32x32", href: "/brand/face-32.png" } },
+      ],
       social: [
         { icon: "github", label: "GitHub", href: "https://github.com/Axmouth/fibril" },
       ],
