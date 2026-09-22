@@ -33,6 +33,145 @@ confirmation threshold. Owner-only durability still requires its
 surviving storage. Pending plans retry with bounded backoff when reachable evidence
 is insufficient; authoritative divergence requires investigation.
 
+## Fast recovery
+
+### Target and scope
+
+Target **two seconds or less from owner process loss to resumed useful service**
+for an enrolled replicated queue when the metadata leader and a sufficient data
+quorum survive. Measure first valid delivery and first new replica-durable publish
+confirmation independently. A ready flag alone does not meet the target. This is
+an engineering target for the common case, with no current latency guarantee.
+
+Measure simultaneous owner/metadata-leader loss separately, including election
+latency. Silent partitions, quorum loss, missing payloads, damaged storage and
+conflicting histories have separate availability limits. Initial implementation
+and measurement focus on three-replica, majority-durable queues; other supported
+confirmation policies require their own quorum-intersection proof. Stream recovery
+and speculative/early-replication histories remain separate work.
+
+### 1. Establish a comparable baseline
+
+Use the same release binary, storage, configuration, queue contents and client
+reconnect policy for heartbeat and eager runs. Measure both a continuously
+reconnecting client and broker readiness, keeping their times distinct. Separate
+owner-only failure from combined owner/metadata-leader failure. Compare with the
+older first-delivery benchmark only after matching its method and build profile.
+
+Capture monotonic stage timings for failure observation, placement proposal,
+worker dispatch, seal/witness collection, source inspection, plan commit, transfer,
+installation, receipt publication/visibility, activation and local admission.
+Record RPC count, connection/handshake time, metadata waits, fsync time, bytes
+read/copied, retries and polling delay, keyed by resource and recovery transition.
+Keep payloads out of diagnostics and bound retained trace data.
+
+Exit criterion: account for the dominant elapsed time, including why an activation
+attempt can lack quorum receipts after installation calls returned. Distinguish
+replication lag in the local metadata view from missing receipts or failed work.
+The current one-second worker poll, serial RPCs, fresh connections and whole-attempt
+retries are investigation leads; their individual costs are not yet measured.
+
+### 2. Reduce overhead with the existing recovery proof
+
+Evaluate changes individually against that baseline:
+
+- Wake recovery and admission on relevant committed metadata changes, with bounded
+  periodic retry as a fallback. Prevent lost wakeups and tight retry loops.
+- Reuse authenticated peer connections across recovery operations. Reconnect,
+  cancellation, stale replies and per-operation deadlines must preserve identity
+  checks and bounded resource use.
+- Overlap independent witness/inspection and target-installation work with bounded
+  concurrency. Keep dependent mutations ordered and preserve the required witness
+  set; an early reply alone cannot establish that source selection is complete.
+- Wait for the exact required committed receipts when local metadata visibility is
+  behind, avoiding a repeat of successful installation. Preserve deadlines and
+  retry behavior for genuinely missing evidence.
+- Resume completed stages and cache verified evidence within its exact immutable
+  transition where safe, retaining all invalidation checks.
+
+Adopt each change only after correctness checks and matched timing runs. Do not
+shorten safety deadlines or weaken confirmation thresholds to meet the target.
+Reassess the remaining delay before introducing new recovery metadata or formats.
+
+### 3. Prove promotion using existing storage
+
+Design a path that can reuse a compatible replica's current generation without
+copying and reinstalling it. Fresh fencing and intersecting survivor evidence must
+establish that the proposed owner contains the required authoritative history,
+including all confirmed payload/event dependencies and completely applied state.
+Equal offsets, matching current state hashes or an old checkpoint alone cannot
+establish this authority. Replicas may have different valid suffixes; define which
+ones can be reconciled and when reconstruction remains necessary.
+
+Specify the durable transition before implementation: exact incarnation/history,
+configuration, writer and storage identities; new write authority; quorum receipts;
+crash/retry behavior; and how existing seals interact with generation reuse.
+Retaining the same files must not reopen an old writer or invalidate evidence.
+Define safe fallback at every stage, including a crash after local preparation but
+before quorum activation. Reuse must be idempotent and preserve the current
+confirmation threshold; unsupported evidence stays fenced.
+
+Exit criterion: a reviewed state transition and deterministic fault tests prove
+that the common compatible-history case can activate without full generation
+replacement. Retain verified reconstruction for cases that need repair.
+
+### 4. Assess agreed checkpoints and suffix comparison
+
+If history inspection remains significant, establish periodic agreed recovery
+boundaries during healthy operation. An agreed boundary represents a durable,
+fully applied cut under a specific accepted history and replica configuration.
+It must cover queue state, message/event dependencies and live-payload identity,
+with the existing explicit treatment of owner-local leases and delayed activation.
+A shared boundary is additional recovery evidence; it does not change the normal
+publish-confirm contract.
+
+Design and measure the following before choosing a cadence or format:
+
+- Capture an exact cut while later writes continue. Avoid hashing moving actor
+  state against unrelated log positions or stalling the actor for full encoding.
+- Obtain durable receipts from a set sufficient for the configured policy and
+  future recovery intersection, then commit the boundary certificate through
+  coordination. Reject stale configuration, history, storage or writer identities.
+- Retain a usable checkpoint and required suffix records/live payloads until a
+  replacement boundary is safely committed. Define retention across compaction,
+  membership changes, process replacement and interrupted checkpoint publication.
+- During failover, validate surviving evidence against the boundary and compare
+  the subsequent suffix. Preserve messages confirmed after that boundary and
+  resolve unconfirmed suffixes using the same history rules as full recovery.
+- Fall back safely when no compatible boundary or adequate survivor evidence
+  exists. Incomplete, stale or corrupted certificates cannot authorize promotion.
+
+Start with time/byte-triggered, coalesced background work and at most one pending
+boundary per partition. Measure checkpoint/hash CPU, memory, retained disk,
+metadata traffic and publish/delivery latency for idle queues, busy queues and
+many partitions before selecting defaults. Incremental digests require a separate
+proof of what they cover; a compact digest is not a replacement for recoverable
+state or quorum authority.
+
+### Validation and adoption
+
+Start with a small repeated release-build screen, then run at least 30 trials per
+primary failure/configuration case before assessing the two-second target. Report
+median, p95, maximum, failures and false reassignments; the initial performance
+gate is p95 at or below two seconds in the stated common-case workload. Publish
+slow cases rather than excluding them. Include SATA/NVMe, empty and nonempty
+queues, retained backlogs, compacted histories and concurrent traffic. Report
+healthy throughput, tail latency, CPU, memory and retained disk alongside failover.
+
+At each protocol change, cover confirmed data present only on a surviving quorum
+member, offset zero, unequal checkpoints, payload/event tail mismatch, delayed
+activation, acknowledgements, stale owners still reachable by clients, candidate
+loss, lost replies, restart at durable transition boundaries and repeated failover.
+Checkpoint work additionally needs crashes around receipt/certificate publication
+and compaction racing boundary replacement. Tests must reject stale authority and
+verify all confirmed identities survive; legitimate redelivery is recorded
+separately from loss.
+
+Keep adoption incremental: overhead changes first, generation reuse after its
+proof, periodic boundaries only if their measured benefit justifies their steady
+state cost. Use opt-in rollout for new authority/format paths until fault acceptance
+passes. Document any format break explicitly and preserve a safe recovery fallback.
+
 ## Existing experimental queues
 
 Migration of existing queue histories is outside the supported scope. This is a

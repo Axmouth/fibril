@@ -65,6 +65,10 @@ The compatibility work follows this order:
 - Assess live updates for coordination heartbeat interval and liveness TTL,
   with coupled validation, safe adoption across nodes, controller propagation,
   admin visibility and rollback. Keep Raft election timing separate.
+- Target common-case queue recovery within two seconds: measure release-build
+  stage costs, remove avoidable waits, prove promotion using compatible existing
+  storage, then assess agreed checkpoints and suffix-only comparison. See the
+  [staged fast-recovery plan](/development/failover-plan/#fast-recovery).
 - Extend eager failover acceptance to packet-level partitions, CPU/storage stalls,
   planned drains and durable streams. Measure detection, recovery time, false
   reassignments and healthy traffic disruption under the
