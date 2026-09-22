@@ -21,10 +21,10 @@ import blink from "../../../crates/admin/admin-ui/img/sprites/ring-closed-128.pn
     content: "";
     position: absolute;
     pointer-events: none;
-    inset: 2px 0;
+    inset: 0 -3px;
     border-radius: 50%;
     border: 1px solid #b9e7ff99;
-    background: #71c8ff18;
+    background: radial-gradient(ellipse, #a9e3ff55 15%, #76c8ff35 65%, #71c8ff18);
     box-shadow: 0 0 7px #7dcfff80, inset 0 0 9px #9bdcff66;
   }
   .brand-mascot img {
@@ -41,7 +41,7 @@ import blink from "../../../crates/admin/admin-ui/img/sprites/ring-closed-128.pn
   }
   :global([data-theme="light"]) .brand-mascot::before {
     border-color: #65bde477;
-    background: #71c8ff12;
+    background: radial-gradient(ellipse, #89d4ff33 15%, #71c8ff22 65%, #71c8ff12);
     box-shadow: 0 0 7px #7dcfff40, inset 0 0 9px #9bdcff33;
   }
   .blink { opacity: 0; }
