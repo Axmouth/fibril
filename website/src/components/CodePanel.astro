@@ -1,5 +1,6 @@
 ---
 import { Code } from "astro:components";
+import { siteCodeTheme } from "../styles/code-theme";
 import { Tabs, TabItem } from "@astrojs/starlight/components";
 import rust from "../examples/workers/worker.rs.txt?raw";
 import csharp from "../examples/workers/worker.cs.txt?raw";
@@ -17,54 +18,91 @@ const examples = [
 ---
 
 <section class="console worker-examples" aria-label="Worker examples by client language">
-  <div class="console-head">
-    <span>complete · retry · fail</span>
-    <a href="/clients/#manual-acknowledgements">Client setup and usage →</a>
-  </div>
   <Tabs syncKey="worker-example">
     {examples.map(({ label, lang, code }) => (
       <TabItem label={label}>
-        <Code code={code.trimEnd()} lang={lang}
-          themes={{ dark: "github-dark", light: "github-light" }} defaultColor={false} />
+        <Code code={code.trimEnd()} lang={lang} theme={siteCodeTheme} />
       </TabItem>
     ))}
   </Tabs>
+  <div class="worker-footer">
+    <span>complete · retry in 30s · fail</span>
+    <a href="/clients/#manual-acknowledgements">Connection &amp; subscription setup →</a>
+  </div>
   <p class="worker-context">
-    Inside a worker with a manual-ack subscription. Email sending and error classification
-    are application code; settlement errors propagate to the caller.
+    Worker loops with manual acknowledgements. Email sending and error types are application code.
   </p>
 </section>
 
 <style>
   .worker-examples {
-    --sl-color-gray-5: var(--line);
-    --sl-color-gray-3: var(--muted);
-    --sl-color-text-accent: var(--accent);
-    --sl-color-white: var(--text);
-    --sl-line-height-headings: 1.5;
-    --sl-outline-offset-inside: -3px;
+    --sl-outline-offset-inside: -4px;
     min-width: 0;
+    background: var(--panel);
   }
-  .console-head { height: auto; min-height: 40px; gap: 12px; flex-wrap: wrap; padding-block: 8px; }
-  .console-head a { color: var(--accent); }
-  .worker-examples :global([role="tablist"]) { margin: 0; }
+  .worker-examples :global(.tablist-wrapper) {
+    background: var(--bg-soft);
+    scrollbar-width: thin;
+    scrollbar-color: var(--line-2) var(--bg-soft);
+  }
+  .worker-examples :global([role="tablist"]) {
+    margin: 0;
+    border: 0;
+    box-shadow: inset 0 -1px var(--line);
+  }
   .worker-examples :global(.tab > [role="tab"]) {
-    padding: 12px 16px;
+    position: relative;
+    padding: 11px 16px;
+    border-top: 2px solid transparent;
+    border-right: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    box-shadow: none;
+    color: var(--muted);
     white-space: nowrap;
     font: 12px/1.5 var(--mono);
+  }
+  .worker-examples :global(.tab > [role="tab"]:hover) {
+    background: var(--panel-2);
+    color: var(--text);
+  }
+  .worker-examples :global(.tab > [role="tab"][aria-selected="true"]) {
+    border-top-color: var(--accent);
+    border-bottom-color: var(--panel);
+    background: var(--panel);
+    color: var(--text);
   }
   .worker-examples :global([role="tab"]:focus-visible) {
     outline: 2px solid var(--accent);
   }
   .worker-examples :global(.tablist-wrapper ~ [role="tabpanel"]) { margin-top: 0; }
-  .worker-examples :global(pre) { min-height: 25rem; background: transparent !important; }
-  .worker-examples :global(.astro-code),
-  .worker-examples :global(.astro-code span) { color: var(--shiki-dark); }
-  :global(html[data-theme="light"]) .worker-examples :global(.astro-code),
-  :global(html[data-theme="light"]) .worker-examples :global(.astro-code span) { color: var(--shiki-light); }
-  .worker-context { margin: 0; padding: 12px 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+  .worker-examples :global(pre) {
+    padding: 16px 20px;
+    font-size: 12px;
+    line-height: 1.65;
+    tab-size: 4;
+  }
+  .worker-footer {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px 20px;
+    flex-wrap: wrap;
+    padding: 10px 20px;
+    border-top: 1px solid var(--line);
+    color: var(--muted);
+    font: 11px/1.5 var(--mono);
+  }
+  .worker-footer a { color: var(--accent); }
+  .worker-footer a:hover { text-decoration: underline; }
+  .worker-context {
+    margin: 0;
+    padding: 0 20px 12px;
+    color: var(--muted);
+    font-size: 12px;
+  }
   @media (max-width: 600px) {
-    .worker-examples :global(.tab > [role="tab"]) { padding: 10px 12px; }
-    .worker-examples :global(pre) { font-size: 12px; padding: 14px; }
+    .worker-examples :global(.tab > [role="tab"]) { padding: 11px 14px; }
+    .worker-examples :global(pre) { padding: 14px 16px; }
+    .worker-footer { padding-inline: 16px; }
+    .worker-context { padding-inline: 16px; }
   }
 </style>

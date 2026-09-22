@@ -3,10 +3,10 @@ use std::time::Duration;
 
 while let SubEvent::Delivery(msg) = sub.recv().await {
     match send_email(msg.text()?).await {
-        Ok(()) => { msg.complete().await?; }
+        Ok(()) => msg.complete().await?,
         Err(err) if err.is_temporary() => {
-            msg.retry_after(Duration::from_secs(30)).await?;
+            msg.retry_after(Duration::from_secs(30)).await?
         }
-        Err(_) => { msg.fail().await?; }
-    }
+        Err(_) => msg.fail().await?,
+    };
 }
