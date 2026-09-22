@@ -91,6 +91,12 @@ pub struct ConsumerGroupRuntimeSettings {
 
 impl RuntimeSettings {
     pub fn validate(&self) -> Result<(), RuntimeSettingsError> {
+        if !(100..=60_000).contains(&self.replication.eager_failover_grace_ms) {
+            return Err(RuntimeSettingsError::Invalid(
+                "replication.eager_failover_grace_ms must be between 100 and 60000".into(),
+            ));
+        }
+
         if self.delivery.expiry_batch_max == 0 {
             return Err(RuntimeSettingsError::Invalid(
                 "delivery.expiry_batch_max must be at least 1".into(),
@@ -175,6 +181,10 @@ pub struct DeliveryRuntimeSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct ReplicationRuntimeSettings {
+    /// Opt-in controller suspicion from repeated explicit Raft transport errors.
+    pub eager_failover: bool,
+    /// Minimum failed-reconnect grace; heartbeat expiry remains the fallback.
+    pub eager_failover_grace_ms: u64,
     /// How long a publish confirm may wait for the assignment's replication
     /// durability policy (replica acks) before failing with a clear error.
     pub confirm_timeout_ms: u64,
@@ -226,6 +236,8 @@ pub struct ReplicationRuntimeSettings {
 impl Default for ReplicationRuntimeSettings {
     fn default() -> Self {
         Self {
+            eager_failover: false,
+            eager_failover_grace_ms: 1_000,
             confirm_timeout_ms: 5_000,
             caught_up_poll_ms: 1_000,
             retry_poll_ms: 100,
@@ -690,6 +702,21 @@ fn decode_snapshot(value: GlobalValue) -> Result<RuntimeSettingsSnapshot, Runtim
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn eager_failover_defaults_off_and_requires_bounded_grace() {
+        let old: super::ReplicationRuntimeSettings = serde_json::from_str("{}").unwrap();
+        assert!(!old.eager_failover);
+        assert_eq!(old.eager_failover_grace_ms, 1000);
+        let mut settings = super::RuntimeSettings::default();
+        for grace in [0, 99, 60_001, u64::MAX] {
+            settings.replication.eager_failover_grace_ms = grace;
+            assert!(settings.validate().is_err());
+        }
+        for grace in [100, 1000, 60_000] {
+            settings.replication.eager_failover_grace_ms = grace;
+            assert!(settings.validate().is_ok());
+        }
+    }
     use stroma_core::{KeratinConfig, SnapshotConfig, Stroma, StromaKeratinConfig, test_dir};
 
     use super::*;

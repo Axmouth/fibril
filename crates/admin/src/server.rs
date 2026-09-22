@@ -2987,6 +2987,8 @@ mod tests {
         assert_eq!(body["version"], 1);
         assert_eq!(body["settings"]["delivery"]["inflight_ttl_ms"], 30_000);
         assert!(body["settings"]["connection"]["reconnect_grace_ms"].is_null());
+        assert_eq!(body["settings"]["replication"]["eager_failover"], false);
+        assert_eq!(body["settings"]["replication"]["eager_failover_grace_ms"], 1000);
         assert_eq!(body["locks"]["idle_queue_cleanup"], false);
         assert!(body["load_issue"].is_null());
     }
@@ -3953,6 +3955,8 @@ mod tests {
         assert!(body.contains("Target partitions per consumer"));
         assert!(!body.contains("Queue partition"));
         assert!(!body.contains("consumer group"));
+        assert!(body.contains("id=\"replication.eager_failover\""));
+        assert!(body.contains("id=\"replication.eager_failover_grace_ms\""));
         assert!(body.contains("Save runtime settings"));
         assert!(!body.contains("Log out"));
         assert!(!body.contains("href=\"/logout\""));

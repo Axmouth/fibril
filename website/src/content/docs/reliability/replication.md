@@ -53,6 +53,42 @@ is set per cluster through `coordination.ganglion.assignment_durability` (see
 `N` includes the owner, so `replica_durable` with `N = 2` means the owner plus
 one durable follower.
 
+## Eager failover
+
+The default detector uses broker heartbeat expiry. An optional policy lets the
+active metadata controller exclude a peer from placement after repeated explicit
+Raft connection failures, with failed reconnects spanning a configurable grace.
+Enable it in the dashboard's **Settings → Replication** section, or seed a fresh
+cluster with:
+
+```toml
+[runtime_seed.replication]
+eager_failover = true
+eager_failover_grace_ms = 1000
+```
+
+`eager_failover` defaults to `false`; the grace defaults to 1,000 ms and accepts
+100–60,000 ms. The saved cluster runtime-settings document takes precedence over
+startup seeds. Keep seeds consistent across nodes. Runtime policy changes restart
+pending suspicion, and a newly elected controller starts its own grace.
+
+A successful Raft RPC, a fresh broker heartbeat or a changed broker process
+identity resets suspicion. Client disconnects and replication-stream restarts do
+not trigger it. Timeouts and silent packet loss continue to use heartbeat expiry.
+The detector reuses normal Raft reconnect attempts; it does not change Raft
+heartbeat/election timing or broker heartbeat/TTL settings.
+
+Excluding a peer starts the existing placement/recovery process. Verified history,
+fencing and the configured confirmation threshold still gate activation. A crash
+that also removes the metadata leader first needs a Raft election; recovery may
+then dominate the outage. Shorter detection therefore does not promise service
+restoration within the grace interval. Network interruptions can also cause extra
+recovery work, so eager detection remains opt-in and experimental.
+
+The controller logs the peer, error kind, failed attempts and elapsed suspicion
+time without payloads. `/admin/api/topology` exposes current exclusions in
+`consensus.controller.eager_suspects`.
+
 ## In-sync replicas
 
 A follower counts as in sync when it has reported durable progress recently

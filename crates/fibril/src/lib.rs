@@ -97,6 +97,8 @@ pub fn runtime_seed_from_config(config: &ServerConfig) -> RuntimeSettings {
                 .resume_session_restart_ttl_ms,
         },
         replication: ReplicationRuntimeSettings {
+            eager_failover: config.runtime_seed.replication.eager_failover,
+            eager_failover_grace_ms: config.runtime_seed.replication.eager_failover_grace_ms,
             confirm_timeout_ms: config.runtime_seed.replication.confirm_timeout_ms,
             caught_up_poll_ms: config.runtime_seed.replication.caught_up_poll_ms,
             retry_poll_ms: config.runtime_seed.replication.retry_poll_ms,
@@ -736,6 +738,8 @@ pub async fn open_tcp_ganglion_parts(
             let (controller_task, controller_status) = coordination.spawn_controller(
                 Arc::new(DeterministicPartitionPlacement),
                 fibril_coordination_ganglion::ControllerConfig {
+                    eager_failover: config.runtime_seed.replication.eager_failover,
+                    eager_failover_grace_ms: config.runtime_seed.replication.eager_failover_grace_ms,
                     target_followers: section.target_followers,
                     stream_replication_factor: section.stream_replication_factor,
                     default_durability: assignment_durability_from_config(

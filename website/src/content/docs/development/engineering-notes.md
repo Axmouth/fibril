@@ -10,6 +10,18 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Recovery during transient liveness loss
+
+A metadata election could temporarily leave only one broker marked live, causing majority placement to propose a lower confirmation threshold and then a second recovery as heartbeats returned. The controller now holds that proposal until it can preserve the existing write requirement; confirmed process-loss checks exercise recovery onto two survivors. The fix and regression are in [5c6557d](https://github.com/Axmouth/fibril/commit/5c6557d).
+
+### Replication after checkpoint admission
+
+A recovered or newly admitted follower could start its ordinary replication worker at zero despite having installed a checkpoint beyond the retained event head. Accepted-history workers now resume from the admitted storage's complete, idle applied boundary, with current identity rechecked before adoption. A learner regression confirms a new publication using that follower after checkpoint admission; see [5c6557d](https://github.com/Axmouth/fibril/commit/5c6557d).
+
+### Eager peer-failure detection
+
+The active metadata controller can now use repeated explicit Raft transport failures and a reconnect grace to begin recovery before heartbeat expiry. The policy is off by default and runtime configurable; successful contact or a fresh heartbeat resets suspicion, while recovery proof still gates serving. Process-kill, brief-pause and stale-owner fencing checks cover the initial path; packet-level partitions and broader disruption measurements remain in the [failover plan](/development/failover-plan/).
+
 ### Adaptive storage staging
 
 Message and event log staging can now grow on demand, shed empty capacity and release idle allocations through the existing writer loop. Broker measurements found comparable latency and workload-dependent CPU/RSS effects; capacity tracing and forced collection on storage writer threads linked much of the idle RSS excess after bursts to allocator retention after staging capacity was released. Fibril enables the policy by default, with `adaptive_staging = false` as the retained-buffer opt-out; configuration and retention details are in [configuration](/configuration/) and Keratin's `experiments/ADAPTIVE_STAGING.md`.

@@ -202,6 +202,18 @@
           <input id="replication.stream_buffer_batches" type="number" min="1" step="1">
         </label>
       </div>
+      <label class="checkbox-label">
+        <input id="replication.eager_failover" type="checkbox">
+        <span>
+          <span class="settings-label">Eager failover</span>
+          <span class="settings-help">Opt in to faster reassignment after repeated explicit peer connection failures. Safe recovery still runs; heartbeat expiry handles silent failures. Brief network interruptions can cause extra recovery work.</span>
+        </span>
+      </label>
+      <label class="settings-field">
+        <span class="settings-label">Eager failover grace (ms)</span>
+        <span class="settings-help">Require failed reconnects across this interval. Changing the policy restarts pending suspicion. Raft election and heartbeat timers stay unchanged.</span>
+        <input id="replication.eager_failover_grace_ms" type="number" min="100" max="60000" step="100">
+      </label>
     </section>
 
     <section class="settings-section">
@@ -654,6 +666,8 @@ function renderSettings(data) {
   field("replication.stream_apply_max_merge_bytes").value =
     data.settings.replication.stream_apply_max_merge_bytes;
   field("replication.stream_buffer_batches").value = data.settings.replication.stream_buffer_batches;
+  field("replication.eager_failover").checked = data.settings.replication.eager_failover ?? false;
+  field("replication.eager_failover_grace_ms").value = data.settings.replication.eager_failover_grace_ms ?? 1000;
   field("partitioning.default_partition_count").value = data.settings.partitioning.default_partition_count;
   field("consumer_groups.default_target_per_consumer").value =
     data.settings.consumer_groups.default_target_per_consumer ?? "";
@@ -739,6 +753,8 @@ function collectSettings() {
       stream_apply_linger_us: numberValue("replication.stream_apply_linger_us"),
       stream_apply_max_merge_bytes: numberValue("replication.stream_apply_max_merge_bytes"),
       stream_buffer_batches: numberValue("replication.stream_buffer_batches"),
+      eager_failover: field("replication.eager_failover").checked,
+      eager_failover_grace_ms: numberValue("replication.eager_failover_grace_ms"),
     },
     partitioning: {
       default_partition_count: numberValue("partitioning.default_partition_count"),

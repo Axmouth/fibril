@@ -33,6 +33,7 @@ pub mod recovery_witnesses;
 pub mod recovery_selection;
 pub mod recovery_plan;
 pub mod recovery_activation;
+mod eager_failover;
 mod recovery_candidate;
 pub mod queue_learner;
 
@@ -932,6 +933,9 @@ fn to_fibril_durability(
 /// Settings for the embedded controller loop (from server config).
 #[derive(Debug, Clone)]
 pub struct ControllerConfig {
+    /// Boot policy until a cluster runtime-settings document exists.
+    pub eager_failover: bool,
+    pub eager_failover_grace_ms: u64,
     pub target_followers: usize,
     /// Replica followers for a DURABLE stream partition (the durable tier; the
     /// express tiers stay owner-only). Tuned independently of the queue
@@ -949,6 +953,8 @@ pub struct ControllerConfig {
 impl Default for ControllerConfig {
     fn default() -> Self {
         Self {
+            eager_failover: false,
+            eager_failover_grace_ms: 1_000,
             target_followers: 1,
             stream_replication_factor: 1,
             default_durability: ReplicationDurabilityPolicy::LocalDurable,
@@ -968,6 +974,7 @@ pub struct ControllerStatus {
     pub last_error: Option<String>,
     /// Assignment changes held until confirmed-history recovery can complete.
     pub pending_recoveries: Vec<promotion::PendingRecovery>,
+    pub eager_suspects: Vec<eager_failover::EagerSuspect>,
 }
 
 /// Controller-iteration failure surface.
@@ -2404,10 +2411,49 @@ impl GanglionCoordination {
 
         let handle = tokio::spawn(async move {
             let mut watch = provider.watch();
+            let mut transport = provider.node.peer_transport_failures();
+            let mut detector = eager_failover::Detector::default();
+            let mut previous_suspects = std::collections::BTreeSet::new();
             loop {
                 let queues = provider.registered_queues();
                 let streams = provider.registered_streams();
-                let live = provider.live_nodes(config.liveness_ttl);
+                let mut live = provider.live_nodes(config.liveness_ttl);
+                let policy = match provider.runtime_settings_document() {
+                    Ok(Some(document)) if document.settings.validate().is_ok() => {
+                        document.settings.replication
+                    }
+                    Ok(None) => fibril_broker::runtime_settings::ReplicationRuntimeSettings {
+                        eager_failover: config.eager_failover,
+                        eager_failover_grace_ms: config.eager_failover_grace_ms,
+                        ..Default::default()
+                    },
+                    _ => Default::default(),
+                };
+                let active = provider.node.is_leader().await;
+                let suspects = detector.suspects(
+                    active && policy.eager_failover,
+                    policy.eager_failover_grace_ms,
+                    &provider.node.committed_snapshot(),
+                    &transport.borrow_and_update(),
+                    provider.node.node_id(),
+                    std::time::Instant::now(),
+                );
+                let current_suspects: std::collections::BTreeSet<_> =
+                    suspects.iter().map(|s| s.node.clone()).collect();
+                for suspect in &suspects {
+                    live.remove(&suspect.node);
+                    if !previous_suspects.contains(&suspect.node) {
+                        tracing::warn!(
+                            node = suspect.node,
+                            raft_id = suspect.raft_id,
+                            failure = suspect.failure,
+                            elapsed_ms = suspect.elapsed_ms,
+                            reconnect_failures = suspect.reconnect_failures,
+                            "eager failover excludes suspected peer from placement; recovery proof still required"
+                        );
+                    }
+                }
+                previous_suspects = current_suspects;
                 let outcome = if (queues.is_empty() && streams.is_empty()) || live.is_empty() {
                     // Nothing to place (or no live brokers): a normal idle
                     // tick, not an error.
@@ -2429,6 +2475,7 @@ impl GanglionCoordination {
                 };
 
                 if let Ok(mut status) = status.write() {
+                    status.eager_suspects = suspects;
                     match outcome {
                         Ok(Some(snapshot)) => {
                             status.active = true;
@@ -2448,6 +2495,11 @@ impl GanglionCoordination {
                 }
 
                 tokio::select! {
+                    changed = transport.changed(), if active && policy.eager_failover => {
+                        if changed.is_err() {
+                            return;
+                        }
+                    }
                     changed = watch.changed() => {
                         if changed.is_err() {
                             return;
@@ -4399,6 +4451,7 @@ mod tests {
                 // Generous TTL first: both brokers count as live.
                 liveness_ttl: Duration::from_secs(30),
                 max_cas_retries: 8,
+                ..Default::default()
             },
         );
 
@@ -4463,6 +4516,7 @@ mod tests {
                 tick: Duration::from_millis(100),
                 liveness_ttl: Duration::from_millis(900),
                 max_cas_retries: 8,
+                ..Default::default()
             },
         );
 
@@ -4556,6 +4610,8 @@ mod tests {
 
         // Broker A commits through the cluster document first.
         let mut settings = manager_a.current().settings.clone();
+        settings.replication.eager_failover = true;
+        settings.replication.eager_failover_grace_ms = 750;
         settings.delivery.inflight_ttl_ms = settings.delivery.inflight_ttl_ms.saturating_add(7);
         let stored = provider
             .update_runtime_settings(0, &settings)

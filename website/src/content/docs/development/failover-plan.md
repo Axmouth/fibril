@@ -1,10 +1,10 @@
 ---
 title: Failover plan
-description: Planned promotion evidence, eager failure detection and acceptance scenarios.
+description: Remaining recovery proofs and failure-detection acceptance scenarios.
 ---
 
-This plan covers the remaining rollout gates for queue recovery and an optional
-faster failure detector. Implemented sealing, verified transfer, durable generation
+This plan covers the remaining rollout gates for queue recovery and failure
+detection. Implemented sealing, verified transfer, durable generation
 installation, exact quorum activation and bounded recovery are documented in
 [recovery sealing](/reliability/recovery-sealing/).
 
@@ -77,24 +77,19 @@ periodic state hashes or larger recovery fan-out. The ordered-application benchm
 showed competitive throughput and higher memory use at saturation; allocation
 retention and pending-task memory require separate investigation.
 
-## Eager failure detection
+## Failure-detection rollout
 
-After promotion safety is established, add an opt-in cluster runtime policy for
-eager detection. Proposed names are `failover.mode = heartbeat | eager` and a
-bounded probe/grace duration; these are design names, not available settings.
-Keep heartbeat detection as the default and as the fallback for silent failures.
+Opt-in eager detection is implemented through cluster runtime settings; see
+[replication](/reliability/replication/#eager-failover). Repeated explicit Raft
+transport errors and failed reconnects can remove a peer from placement after a
+grace period. Heartbeat expiry remains the default and handles silent failures.
+Recovery proof still gates authority to serve.
 
-Unexpected peer transport failure starts a coordinated probe/reconnect attempt.
-Persistent suspicion can initiate reassignment after the grace period, through
-the same safe promotion handshake. Coalesce signals per node, bound retries and
-distinguish planned drain from unexpected failure. Client disconnects and normal
-replication-stream restarts must not themselves evict a broker.
-
-Runtime revisions must reach the active controller and define how a changed
-grace applies to existing suspicions. Ganglion Raft election timers remain
-separate from this broker-membership policy. Record the signal, probe outcome,
-elapsed detection and recovery time, assignment epoch, promotion refusal and
-owner changes without payloads.
+Remaining work includes packet-level partitions, longer CPU/storage stalls,
+planned drains, repeated membership changes and durable-stream acceptance.
+Measure detection separately from election, recovery activation and restored
+publish/delivery service. Faster suspicion alone does not establish a shorter
+end-to-end outage.
 
 ## Acceptance scenarios
 

@@ -854,6 +854,11 @@ impl ServerConfig {
                 "storage.keratin.writer_buffer_factor must be in 1..=128",
             ));
         }
+        if !(100..=60_000).contains(&self.runtime_seed.replication.eager_failover_grace_ms) {
+            return Err(ConfigError::validation(
+                "runtime_seed.replication.eager_failover_grace_ms must be between 100 and 60000",
+            ));
+        }
         if self.runtime_seed.replication.caught_up_poll_ms == 0
             || self.runtime_seed.replication.retry_poll_ms == 0
             || self.runtime_seed.replication.checkpoint_retry_poll_ms == 0
@@ -1694,6 +1699,8 @@ pub struct ConsumerGroupSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct ReplicationSettings {
+    pub eager_failover: bool,
+    pub eager_failover_grace_ms: u64,
     pub confirm_timeout_ms: u64,
     pub caught_up_poll_ms: u64,
     pub retry_poll_ms: u64,
@@ -1763,6 +1770,8 @@ fn default_stream_buffer_batches() -> usize {
 impl Default for ReplicationSettings {
     fn default() -> Self {
         Self {
+            eager_failover: false,
+            eager_failover_grace_ms: 1_000,
             confirm_timeout_ms: 5_000,
             caught_up_poll_ms: 1_000,
             retry_poll_ms: 100,
@@ -1878,6 +1887,28 @@ pub struct InternalIdleQueueCleanup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn eager_failover_seed_accepts_valid_grace_and_rejects_unbounded_values() {
+        let default = ServerConfig::from_toml_str("").unwrap();
+        assert!(!default.runtime_seed.replication.eager_failover);
+        assert_eq!(default.runtime_seed.replication.eager_failover_grace_ms, 1000);
+        for grace in [100, 1000, 60_000] {
+            let config = ServerConfig::from_toml_str(&format!(
+                "[runtime_seed.replication]\neager_failover = true\neager_failover_grace_ms = {grace}"
+            ))
+            .unwrap();
+            assert!(config.runtime_seed.replication.eager_failover);
+            assert_eq!(config.runtime_seed.replication.eager_failover_grace_ms, grace);
+        }
+        for grace in [0, 99, 60_001] {
+            let error = ServerConfig::from_toml_str(&format!(
+                "[runtime_seed.replication]\neager_failover_grace_ms = {grace}"
+            ))
+            .unwrap_err();
+            assert!(error.to_string().contains("eager_failover_grace_ms"));
+        }
+    }
 
     #[test]
     fn derive_advertise_uses_own_peer_host_with_broker_port() {
