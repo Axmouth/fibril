@@ -30,7 +30,7 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 ### Added
 
 - Shared mascot branding for the website and documentation: a larger standalone
-  ring icon with a muted pixel halo and reduced-motion-aware blinking, plus face favicons
+  ring icon with a pale blue oval glow and reduced-motion-aware blinking, plus face favicons
   generated from the dashboard artwork. Website container builds include the
   shared dashboard template and asset sources.
 

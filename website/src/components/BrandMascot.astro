@@ -17,26 +17,15 @@ import blink from "../../../crates/admin/admin-ui/img/sprites/ring-closed-128.pn
     position: relative;
     isolation: isolate;
   }
-  .brand-mascot::before,
-  .brand-mascot::after {
+  .brand-mascot::before {
     content: "";
     position: absolute;
     pointer-events: none;
-    clip-path: polygon(
-      30% 0, 70% 0, 70% 6%, 82% 6%, 82% 14%, 92% 14%,
-      92% 26%, 100% 26%, 100% 74%, 92% 74%, 92% 86%,
-      82% 86%, 82% 94%, 70% 94%, 70% 100%, 30% 100%,
-      30% 94%, 18% 94%, 18% 86%, 8% 86%, 8% 74%, 0 74%,
-      0 26%, 8% 26%, 8% 14%, 18% 14%, 18% 6%, 30% 6%
-    );
-  }
-  .brand-mascot::before {
-    inset: -2px;
-    background: #85858d26;
-  }
-  .brand-mascot::after {
-    inset: 2px;
-    background: #9a9aa266;
+    inset: 2px 0;
+    border-radius: 50%;
+    border: 1px solid #b9e7ff99;
+    background: #71c8ff18;
+    box-shadow: 0 0 7px #7dcfff80, inset 0 0 9px #9bdcff66;
   }
   .brand-mascot img {
     position: relative;
@@ -50,8 +39,11 @@ import blink from "../../../crates/admin/admin-ui/img/sprites/ring-closed-128.pn
     object-fit: contain;
     image-rendering: pixelated;
   }
-  :global([data-theme="light"]) .brand-mascot::before { background: #85858d12; }
-  :global([data-theme="light"]) .brand-mascot::after { background: #9a9aa226; }
+  :global([data-theme="light"]) .brand-mascot::before {
+    border-color: #65bde477;
+    background: #71c8ff12;
+    box-shadow: 0 0 7px #7dcfff40, inset 0 0 9px #9bdcff33;
+  }
   .blink { opacity: 0; }
   @media (prefers-reduced-motion: no-preference) {
     .awake { animation: mascot-awake 8s step-end infinite; }
