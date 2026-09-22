@@ -16,8 +16,10 @@ separate rounds when their dependencies permit.
 
 1. **Admin settings and recovery visibility.** Complete the effective-settings
    audit, including defaults, validation, node/cluster scope and live versus
-   restart-only changes. Show recovery stages and account for retained generations
-   and staging data before adding automatic reclamation.
+   restart-only changes. Add a node-local settings section and safe live storage
+   tuning through Keratin, starting with segment preallocation. Show recovery
+   stages and account for retained generations and staging data before adding
+   automatic reclamation.
 2. **Recovery overhead.** Establish matched release-build timelines and remove
    avoidable polling, repeated connections and activation retries. Measure first
    delivery and new durable confirmation, separating owner loss from metadata-
@@ -135,6 +137,14 @@ The compatibility work follows this order:
 
 - Complete the admin configuration audit against current server settings,
   including effective values, validation, scope and restart requirements.
+- Add a node-local dashboard settings section with explicitly targeted updates,
+  durable local overrides and defined precedence over startup configuration.
+  Introduce validated Keratin configuration updates for existing and future logs.
+  Start with preallocation applied at the next segment creation; classify fsync,
+  batching and adaptive-buffer controls by their safe application boundary.
+  Show requested and effective values, pending application and failures. Preserve
+  in-flight durability requirements and validate concurrent writes, failed updates,
+  restart persistence and isolation from other nodes.
 - Assess live updates for coordination heartbeat interval and liveness TTL,
   with coupled validation, safe adoption across nodes, controller propagation,
   admin visibility and rollback. Keep Raft election timing separate.
