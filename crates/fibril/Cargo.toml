@@ -26,6 +26,8 @@ async-trait = "0.1"
 fastrand = "2"
 futures = "0.3"
 mimalloc = { version = "0.1" }
+tikv-jemallocator = { version = "0.7", optional = true }
+tikv-jemalloc-ctl = { version = "0.7", optional = true }
 serde_json = "1.0"
 thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
@@ -44,6 +46,7 @@ rustls-pemfile = "2"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 
 [features]
+jemalloc-allocator-experiment = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 system-allocator-experiment = []
 mimalloc-collection-experiment = ["fibril-broker/mimalloc-collection-experiment"]
 staging-buffer-experiment = ["fibril-broker/staging-buffer-experiment"]

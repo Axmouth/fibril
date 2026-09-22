@@ -1,16 +1,28 @@
 use fibril::run_server_from_config;
 use fibril_config::ServerConfig;
 use fibril_util::init_tracing;
-#[cfg(not(feature = "system-allocator-experiment"))]
+#[cfg(not(any(
+    feature = "system-allocator-experiment",
+    feature = "jemalloc-allocator-experiment"
+)))]
 use mimalloc::MiMalloc;
 
-#[cfg(not(feature = "system-allocator-experiment"))]
+#[cfg(not(any(
+    feature = "system-allocator-experiment",
+    feature = "jemalloc-allocator-experiment"
+)))]
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
+
+#[cfg(feature = "jemalloc-allocator-experiment")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
+    #[cfg(feature = "jemalloc-allocator-experiment")]
+    install_jemalloc_probe()?;
     #[cfg(feature = "system-allocator-experiment")]
     tracing::warn!("ALLOCATOR_SYSTEM_CONTROL active");
     #[cfg(all(unix, feature = "mimalloc-collection-experiment"))]
@@ -20,7 +32,10 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(all(
     feature = "mimalloc-collection-experiment",
-    feature = "system-allocator-experiment"
+    any(
+        feature = "system-allocator-experiment",
+        feature = "jemalloc-allocator-experiment"
+    )
 ))]
 compile_error!("mimalloc collection requires the mimalloc global allocator");
 
@@ -45,5 +60,29 @@ fn install_collection_probe() -> std::io::Result<()> {
             allocator_probe::request_writer_collection();
         }
     });
+    Ok(())
+}
+
+#[cfg(all(
+    feature = "system-allocator-experiment",
+    feature = "jemalloc-allocator-experiment"
+))]
+compile_error!("select one diagnostic allocator");
+
+#[cfg(feature = "jemalloc-allocator-experiment")]
+fn install_jemalloc_probe() -> anyhow::Result<()> {
+    use tikv_jemalloc_ctl::{background_thread, opt, version};
+    let background = std::env::var("FIBRIL_JEMALLOC_BACKGROUND").as_deref() == Ok("1");
+    background_thread::write(background)
+        .map_err(|e| anyhow::anyhow!("jemalloc background control: {e}"))?;
+    let actual =
+        background_thread::read().map_err(|e| anyhow::anyhow!("jemalloc background read: {e}"))?;
+    anyhow::ensure!(actual == background, "jemalloc background state mismatch");
+    tracing::warn!(
+        "ALLOCATOR_JEMALLOC_CONTROL active background={} version={:?} narenas={:?}",
+        actual,
+        version::read(),
+        opt::narenas::read()
+    );
     Ok(())
 }
