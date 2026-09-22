@@ -59,7 +59,7 @@ min_fsync_interval_ms = 0
 # Writer and notification channels each have 64 * factor slots per log.
 # 128 preserves the default 8192 slots; smaller values reduce eager allocation.
 writer_buffer_factor = 128
-adaptive_staging = false
+adaptive_staging = true
 staging_decay_secs = 10
 staging_idle_release_secs = 60
 
@@ -172,7 +172,7 @@ These fields are read on process start.
 | `storage.keratin.fsync_interval_ms` | `FIBRIL_KERATIN_FSYNC_INTERVAL_MS` | `--keratin-fsync-interval-ms` | `5` |
 | `storage.keratin.min_fsync_interval_ms` | `FIBRIL_KERATIN_MIN_FSYNC_INTERVAL_MS` | `--keratin-min-fsync-interval-ms` | `0` |
 | `storage.keratin.writer_buffer_factor` | `FIBRIL_KERATIN_WRITER_BUFFER_FACTOR` | none | `128` |
-| `storage.keratin.adaptive_staging` | `FIBRIL_KERATIN_ADAPTIVE_STAGING` | none | `false` |
+| `storage.keratin.adaptive_staging` | `FIBRIL_KERATIN_ADAPTIVE_STAGING` | none | `true` |
 | `storage.keratin.staging_decay_secs` | `FIBRIL_KERATIN_STAGING_DECAY_SECS` | none | `10` |
 | `storage.keratin.staging_idle_release_secs` | `FIBRIL_KERATIN_STAGING_IDLE_RELEASE_SECS` | none | `60` |
 | `storage.keratin.message_log.segment_max_bytes` | `FIBRIL_KERATIN_MESSAGE_LOG_SEGMENT_MAX_BYTES` | `--keratin-message-log-segment-max-bytes` | `268435456` |
@@ -315,7 +315,7 @@ message and event logs. Fsync pipeline depth remains controlled by
 `storage.keratin.max_inflight_fsyncs`; caches, actor mailboxes and client buffers
 have separate limits.
 
-`storage.keratin.adaptive_staging = true` enables lazy staging allocations for
+`storage.keratin.adaptive_staging = true` (the default) enables lazy staging allocations for
 both message and event logs. Write buffers start empty with a 64 KiB reservation
 floor; sparse-index buffers use a 4 KiB floor. They grow to fit batches, may halve
 while empty every `staging_decay_secs` (default 10), and release fully after
@@ -323,13 +323,13 @@ while empty every `staging_decay_secs` (default 10), and release fully after
 for recent batches and never discards staged records. For less frequent bursts,
 longer retention delays reduce repeated allocation work.
 
-The default `false` retains the existing eager 16 MiB write and 256 KiB index
+Set `adaptive_staging = false` to retain eager 16 MiB write and 256 KiB index
 reservations per log. These sizes and adaptive floors are initial reservations,
 not maximum capacities. This startup-only setting changes allocation retention;
 channel sizes, caches and durability policy remain independently configured.
 Released capacity may remain resident in the allocator, so RSS can stay high or
 even increase for some burst patterns. Evaluate memory, CPU and first-message
-latency after idle before enabling it across a deployment.
+latency after idle when choosing retention delays or opting out.
 
 `coordination.ganglion.heartbeat_interval_ms` controls how often a broker
 renews its cluster liveness record. `coordination.ganglion.liveness_ttl_ms`

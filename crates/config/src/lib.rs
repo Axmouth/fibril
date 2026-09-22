@@ -1527,7 +1527,7 @@ impl Default for KeratinStorageSection {
             max_inflight_fsyncs: default_max_inflight_fsyncs(),
             pipeline_commit_records: default_pipeline_commit_records(),
             writer_buffer_factor: default_writer_buffer_factor(),
-            adaptive_staging: false,
+            adaptive_staging: true,
             staging_decay_secs: 10,
             staging_idle_release_secs: 60,
         }
@@ -1994,7 +1994,21 @@ mod tests {
     #[test]
     fn adaptive_staging_file_env_roundtrip_and_validation() {
         let default = ServerConfig::default();
-        assert!(!default.storage.keratin.adaptive_staging);
+        assert!(default.storage.keratin.adaptive_staging);
+        assert!(
+            ServerConfig::from_toml_str("[storage.keratin]\nwriter_buffer_factor = 16\n")
+                .unwrap()
+                .storage
+                .keratin
+                .adaptive_staging
+        );
+        assert!(
+            !ServerConfig::from_toml_str("[storage.keratin]\nadaptive_staging = false\n")
+                .unwrap()
+                .storage
+                .keratin
+                .adaptive_staging
+        );
         assert_eq!(default.storage.keratin.staging_decay_secs, 10);
         assert_eq!(default.storage.keratin.staging_idle_release_secs, 60);
         let mut config = ServerConfig::from_toml_str(

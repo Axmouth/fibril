@@ -60,10 +60,8 @@ The compatibility work follows this order:
 
 ## Cluster operations
 
-- Reconcile admin configuration controls with current server settings, including
-  buffer factors, effective values, validation, scope and restart requirements.
-  Use a low buffer factor in the cluster demo and verify the generated node
-  configurations and representative delivery behavior.
+- Complete the admin configuration audit against current server settings,
+  including effective values, validation, scope and restart requirements.
 - Assess live updates for coordination heartbeat interval and liveness TTL,
   with coupled validation, safe adoption across nodes, controller propagation,
   admin visibility and rollback. Keep Raft election timing separate.
@@ -100,15 +98,9 @@ The compatibility work follows this order:
 
 ## Dashboard demo and interactive documentation
 
-An important follow-up after the early-replication work is a public dashboard
-demo linked from the docs. Reuse the production dashboard pages and components
-with representative demo data so users can explore current behavior.
-
-Embed relevant read-only dashboard views alongside their documentation, sharing
-the same components and demo data adapter. Keep navigation, filtering and other
-useful local interactions where appropriate; use isolated demo data with writes
-disabled. Build and test the demo and inline views with the dashboard so interface
-changes carry through to the documentation and reduce reliance on screenshots.
+Pin matching demo assets when archiving documentation versions. Extend inline
+examples to additional dashboard pages where they clarify operational behavior.
+Assess coherent moving scenarios for backlog growth, slow consumers and recovery.
 
 ## Longer-term options
 

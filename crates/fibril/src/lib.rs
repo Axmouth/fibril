@@ -2073,6 +2073,10 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
             keratin_min_fsync_interval_ms: config.storage.keratin.min_fsync_interval_ms,
             keratin_segment_preallocate_bytes: config.storage.keratin.segment_preallocate_bytes
                 as u64,
+            keratin_writer_buffer_factor: config.storage.keratin.writer_buffer_factor,
+            keratin_adaptive_staging: config.storage.keratin.adaptive_staging,
+            keratin_staging_decay_secs: config.storage.keratin.staging_decay_secs,
+            keratin_staging_idle_release_secs: config.storage.keratin.staging_idle_release_secs,
             keratin_max_inflight_fsyncs: config.storage.keratin.max_inflight_fsyncs as u64,
             keratin_pipeline_commit_records: config.storage.keratin.pipeline_commit_records,
             keratin_message_log_segment_max_bytes: config

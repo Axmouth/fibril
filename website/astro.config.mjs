@@ -66,6 +66,7 @@ export default defineConfig({
             { label: "Deployment", slug: "deployment/source" },
             { label: "Setting up a cluster", slug: "deployment/cluster" },
             { label: "Admin dashboard", slug: "admin-dashboard" },
+            { label: "Dashboard demo", link: "/dashboard-demo/" },
             { label: "Monitoring", slug: "deployment/monitoring" },
             { label: "Failure modes and operations", slug: "reliability/failure-modes" },
             { label: "Recovery quarantine", slug: "reliability/recovery-quarantine" },

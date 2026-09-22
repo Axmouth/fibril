@@ -34,6 +34,8 @@ services:
     environment:
       FIBRIL_BROKER_BIND: 0.0.0.0:9876
       FIBRIL_ADMIN_BIND: 0.0.0.0:8081
+      # Keep the shared-machine demo small: 1,024 slots per writer channel.
+      FIBRIL_KERATIN_WRITER_BUFFER_FACTOR: "16"
       # The host-mapped admin port, so the dashboard's cross-broker links
       # ("open its admin", the broker switcher) work from the browser
       # running the tryout.
@@ -62,6 +64,8 @@ services:
     environment:
       FIBRIL_BROKER_BIND: 0.0.0.0:9876
       FIBRIL_ADMIN_BIND: 0.0.0.0:8081
+      # Keep the shared-machine demo small: 1,024 slots per writer channel.
+      FIBRIL_KERATIN_WRITER_BUFFER_FACTOR: "16"
       FIBRIL_ADMIN_ADVERTISE: 127.0.0.1:8082
       FIBRIL_COORDINATION_MODE: ganglion
       # Demo-only shared secret. Real deployments generate their own with
@@ -86,6 +90,8 @@ services:
     environment:
       FIBRIL_BROKER_BIND: 0.0.0.0:9876
       FIBRIL_ADMIN_BIND: 0.0.0.0:8081
+      # Keep the shared-machine demo small: 1,024 slots per writer channel.
+      FIBRIL_KERATIN_WRITER_BUFFER_FACTOR: "16"
       FIBRIL_ADMIN_ADVERTISE: 127.0.0.1:8083
       FIBRIL_COORDINATION_MODE: ganglion
       # Demo-only shared secret. Real deployments generate their own with

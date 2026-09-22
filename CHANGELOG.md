@@ -29,10 +29,17 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
-- Opt-in `storage.keratin.adaptive_staging`, with startup configuration for
+- Read-only dashboard demo built from the production templates and assets, with
+  thirteen views, deterministic sample data, and inline dashboard documentation
+  examples. Mutations are disabled in the UI and demo transport.
+- Effective writer-buffer and adaptive-staging configuration in the admin startup
+  summary. Runnable cluster examples use writer factor 16 (1,024 slots per channel);
+  the native tryout honors an explicit environment override.
+
+- Adaptive staging enabled by default through `storage.keratin.adaptive_staging`, with startup configuration for
   staging decay and idle release. Both message and event logs allocate staging
-  on demand and reclaim empty buffers; the existing retained policy is the
-  default. Configuration is available through TOML and `FIBRIL_KERATIN_*` variables.
+  on demand and reclaim empty buffers; set it to `false` for the retained policy.
+  Configuration is available through TOML and `FIBRIL_KERATIN_*` variables.
 
 - Recovery regressions for concurrent learner admission, stale-owner confirmation
   fencing, and repeated broker/metadata reopening during checkpoint backfill.

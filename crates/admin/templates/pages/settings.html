@@ -324,7 +324,7 @@
   <section class="settings-section settings-form-secondary" id="startup-config-section" hidden>
     <div class="settings-section-heading">
       <h5>Startup Config</h5>
-      <p>Read-only process settings loaded from defaults, TOML, environment, and CLI before the broker starts.</p>
+      <p>Read-only settings for this node, loaded from defaults, TOML, environment, and CLI. Changes require a broker restart.</p>
     </div>
 
     <dl class="settings-readonly-grid">
@@ -359,6 +359,26 @@
       <div>
         <dt>Segment preallocation</dt>
         <dd id="startup.keratin_segment_preallocate_bytes"></dd>
+      </div>
+      <div>
+        <dt>Writer buffer factor</dt>
+        <dd id="startup.keratin_writer_buffer_factor"></dd>
+        <small>Range 1–128; default 128. Each log has writer and notification channels.</small>
+      </div>
+      <div>
+        <dt>Staging buffers</dt>
+        <dd id="startup.keratin_adaptive_staging"></dd>
+        <small>Default: adaptive. Retained mode keeps the high-water allocation.</small>
+      </div>
+      <div>
+        <dt>Staging decay interval</dt>
+        <dd id="startup.keratin_staging_decay_secs"></dd>
+        <small>Default 10 s; must be positive. Only empty buffers shrink.</small>
+      </div>
+      <div>
+        <dt>Staging idle release</dt>
+        <dd id="startup.keratin_staging_idle_release_secs"></dd>
+        <small>Default 60 s; must be at least the decay interval.</small>
       </div>
       <div>
         <dt>Max in-flight fsyncs</dt>
@@ -663,6 +683,10 @@ function renderStartupConfig(data) {
   field("startup.keratin_min_fsync_interval_ms").textContent = `${data.keratin_min_fsync_interval_ms} ms`;
   field("startup.keratin_segment_preallocate_bytes").textContent =
     data.keratin_segment_preallocate_bytes > 0 ? formatBytes(data.keratin_segment_preallocate_bytes) : "off";
+  field("startup.keratin_writer_buffer_factor").textContent = `${data.keratin_writer_buffer_factor} (${64 * data.keratin_writer_buffer_factor} slots/channel)`;
+  field("startup.keratin_adaptive_staging").textContent = data.keratin_adaptive_staging ? "adaptive" : "retained";
+  field("startup.keratin_staging_decay_secs").textContent = `${data.keratin_staging_decay_secs} s`;
+  field("startup.keratin_staging_idle_release_secs").textContent = `${data.keratin_staging_idle_release_secs} s`;
   field("startup.keratin_max_inflight_fsyncs").textContent = String(data.keratin_max_inflight_fsyncs);
   field("startup.keratin_pipeline_commit_records").textContent =
     `${data.keratin_pipeline_commit_records} records/commit`;

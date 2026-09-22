@@ -12,7 +12,7 @@ remaining work is in the [roadmap](/roadmap/).
 
 ### Adaptive storage staging
 
-Message and event log staging can now grow on demand, shed empty capacity and release idle allocations through the existing writer loop. Broker measurements found comparable latency and workload-dependent CPU/RSS effects; capacity tracing and forced collection on storage writer threads linked much of the idle RSS excess after bursts to allocator retention after staging capacity was released. The policy remains opt-in; configuration and retention details are in [configuration](/configuration/) and Keratin's `experiments/ADAPTIVE_STAGING.md`.
+Message and event log staging can now grow on demand, shed empty capacity and release idle allocations through the existing writer loop. Broker measurements found comparable latency and workload-dependent CPU/RSS effects; capacity tracing and forced collection on storage writer threads linked much of the idle RSS excess after bursts to allocator retention after staging capacity was released. Fibril enables the policy by default, with `adaptive_staging = false` as the retained-buffer opt-out; configuration and retention details are in [configuration](/configuration/) and Keratin's `experiments/ADAPTIVE_STAGING.md`.
 
 ### Follower transition before storage admission
 

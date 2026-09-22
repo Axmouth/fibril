@@ -26,6 +26,8 @@
 #
 # In --ganglion mode the servers share an embedded raft coordinator over real
 # TCP: the script asserts all nodes agree on one leader and voter set.
+# Local nodes default to writer buffer factor 16 (1,024 slots per channel).
+# Override with FIBRIL_KERATIN_WRITER_BUFFER_FACTOR for capacity comparisons.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -504,6 +506,7 @@ start_node() {
     "FIBRIL_DATA_DIR=$node_data"
     "FIBRIL_BROKER_BIND=127.0.0.1:$broker_port"
     "FIBRIL_ADMIN_BIND=127.0.0.1:$admin_port"
+    "FIBRIL_KERATIN_WRITER_BUFFER_FACTOR=${FIBRIL_KERATIN_WRITER_BUFFER_FACTOR:-16}"
   )
   if [[ "$PREALLOC_BYTES" != "0" ]]; then
     env_vars+=("FIBRIL_KERATIN_SEGMENT_PREALLOCATE_BYTES=$PREALLOC_BYTES")

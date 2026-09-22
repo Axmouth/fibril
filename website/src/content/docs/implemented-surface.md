@@ -405,7 +405,7 @@ See also: [configuration](/configuration/),
 | --- | --- | --- |
 | TOML startup config | Implemented | Config crate and server binary |
 | Storage writer buffer factor | Implemented | `storage.keratin.writer_buffer_factor` or `FIBRIL_KERATIN_WRITER_BUFFER_FACTOR`; restart-time capacities for message/event log writer and notification channels, default preserved at 8,192 slots each |
-| Adaptive storage staging | Implemented, opt-in | `storage.keratin.adaptive_staging`; lazy allocation, configurable decay and idle release for message/event log staging; existing retained allocation policy is the default |
+| Adaptive storage staging | Implemented, enabled by default | `storage.keratin.adaptive_staging`; lazy allocation, configurable decay and idle release for message/event log staging; set `adaptive_staging = false` for the retained allocation policy |
 | Env and CLI overrides | Implemented | Config crate and server binary |
 | Admin auth startup config | Implemented | TOML, env, CLI, server wiring |
 | Metrics exposition startup config | Implemented | `admin.metrics_per_channel` via TOML and env |
@@ -431,6 +431,7 @@ See also: [admin dashboard](/admin-dashboard/).
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
+| Read-only dashboard demo | Implemented | Thirteen real dashboard views backed by synthetic fixtures at `/dashboard-demo/`; lazy overview and queue-detail embeds in dashboard docs; built and checked with the website |
 | Overview metrics | Implemented | Dashboard and API |
 | Control-plane activity feed | Implemented | `GET /admin/api/audit` returns a bounded in-memory ring (newest 512 entries, reset on restart) of operator actions, attention transitions, membership changes, and stream lag-recovery events, rendered live on the dashboard's Activity page |
 | Attention feed | Implemented | `GET /admin/api/attention` names conditions needing an operator, most severe first: quarantined partition, expired or expiring certificate, failed settings load, backlog with no consumer, backlog growing despite consumers, low disk on the data directory, stalled replication follower, queue state error, broker left draining. Drives the Overview panel, the sidebar badge, and opt-in desktop notifications |
@@ -444,7 +445,7 @@ See also: [admin dashboard](/admin-dashboard/).
 | Delete queue (single-node) | Implemented | `POST /admin/api/queues/delete` + per-row dashboard button; refuses while messages are inflight (409) and in cluster mode (501) pending coordinated teardown |
 | Streams page | Implemented | Dashboard and API (`GET /admin/api/streams`), per-topic partition rows with head/tail/retained, declared durability and retention, per-partition role and applied offset, a follower-replication view (`GET /admin/api/streams_debug`), an append-rate chip, and a durable-cursor table per stream (cursor name, tail/catching-up, behind, read rate, last advance) |
 | Create stream | Implemented | `POST /admin/api/streams` + dashboard form (partition count, durability tier, optional retention by records/bytes/age); coordinated in cluster mode like queue declares, so multi-partition streams place fully |
-| Settings page | Implemented | Dashboard and API, incl. replication and streaming-replication settings |
+| Settings page | Implemented | Dashboard and API, incl. replication and streaming-replication settings; effective writer factor and adaptive staging policy/timings in the read-only startup summary |
 | Message inspection page | Implemented | Dashboard and API; targets a specific partition (`partition` query param - offsets are per partition) |
 | DLQ replay controls | Implemented | Dashboard and API |
 | Topology page | Implemented | Coordination nodes, per-partition ownership/epochs (queues and streams), consensus block, per-node liveness/raft-id/publish+delivery rates/runtime facts (version, uptime, TLS state, cert expiry) from heartbeat labels; rendered as the living cluster diagram (ring sprites, fiber tendrils, load signals) or a card list with a placement matrix (`?view=list`) |

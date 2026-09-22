@@ -3,8 +3,17 @@ title: Admin Dashboard
 description: Use the Fibril admin UI for operational inspection and runtime settings.
 ---
 
+import DashboardDemo from "../../components/DashboardDemo.astro";
+
 The admin dashboard is for operators. It shows broker state, active connections,
 queues, runtime settings, and message inspection tools.
+
+[Explore the read-only web demo](/dashboard-demo/) without installing a broker.
+It uses the same templates, scripts and styles as the real dashboard, with
+illustrative sample data. Browsing, filtering, charts and themes work; broker
+mutations are disabled. Sample values are examples, not benchmark results.
+
+<DashboardDemo view="overview" title="Broker overview" />
 
 The UI is a sidebar shell with a command palette (Ctrl/Cmd-K jumps to any
 page), dark and light modes, and optional named flavors that re-key the accent
@@ -121,6 +130,9 @@ shows `Auth disabled`. Treat that mode as local-only or otherwise protected by
 network boundaries.
 
 ## Queues
+
+<DashboardDemo view="queue" topic="orders.created" title="Queue detail and consumer coverage" />
+
 
 The queues page lists known queues with ready, inflight, and settled offset
 information. Use **Inspect messages** from a queue row when you want to inspect

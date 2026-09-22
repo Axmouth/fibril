@@ -241,6 +241,10 @@ pub struct StartupConfigSummary {
     pub keratin_fsync_interval_ms: u64,
     pub keratin_min_fsync_interval_ms: u64,
     pub keratin_segment_preallocate_bytes: u64,
+    pub keratin_writer_buffer_factor: usize,
+    pub keratin_adaptive_staging: bool,
+    pub keratin_staging_decay_secs: u64,
+    pub keratin_staging_idle_release_secs: u64,
     pub keratin_max_inflight_fsyncs: u64,
     pub keratin_pipeline_commit_records: u64,
     pub keratin_message_log_segment_max_bytes: u64,
@@ -1280,6 +1284,10 @@ mod tests {
                 keratin_fsync_interval_ms: 5,
                 keratin_min_fsync_interval_ms: 0,
                 keratin_segment_preallocate_bytes: 0,
+                keratin_writer_buffer_factor: 16,
+                keratin_adaptive_staging: true,
+                keratin_staging_decay_secs: 10,
+                keratin_staging_idle_release_secs: 60,
                 keratin_max_inflight_fsyncs: 8,
                 keratin_pipeline_commit_records: 2048,
                 keratin_message_log_segment_max_bytes: 16 * 1024 * 1024,
@@ -3003,6 +3011,10 @@ mod tests {
         assert_eq!(body["broker_bind"], "127.0.0.1:9876");
         assert_eq!(body["admin_auth_enabled"], false);
         assert_eq!(body["keratin_fsync_interval_ms"], 5);
+        assert_eq!(body["keratin_writer_buffer_factor"], 16);
+        assert_eq!(body["keratin_adaptive_staging"], true);
+        assert_eq!(body["keratin_staging_decay_secs"], 10);
+        assert_eq!(body["keratin_staging_idle_release_secs"], 60);
     }
 
     #[tokio::test]

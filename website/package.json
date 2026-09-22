@@ -3,12 +3,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "astro dev",
-    "build": "astro check && astro build",
+    "dev": "npm run demo:build && astro dev",
+    "build": "npm run demo:build && npm run demo:test && astro check && astro build",
     "preview": "astro preview",
     "check": "astro check",
     "smoke:dist": "node scripts/smoke-dist.mjs",
-    "verify": "npm run build && npm run smoke:dist"
+    "verify": "npm run build && npm run smoke:dist",
+    "demo:build": "node demo/build.mjs",
+    "demo:test": "node demo/demo.test.mjs"
   },
   "dependencies": {
     "@astrojs/starlight": "^0.39.3",

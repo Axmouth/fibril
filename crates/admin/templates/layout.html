@@ -72,55 +72,55 @@
       <span class="word">fibril<em>·</em>admin</span>
     </a>
     <nav class="nav-links" aria-label="Admin navigation">
-      <a class="nav-link {% if page == "dashboard" %}active{% endif %}" href="/">
+      <a class="nav-link {% if page == "dashboard" %}active{% endif %}" href="/" aria-label="Overview" title="Overview">
         <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="9" y="1.5" width="5.5" height="5.5" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="1.5" y="9" width="5.5" height="5.5" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="9" y="9" width="5.5" height="5.5" rx="1" stroke="currentColor" stroke-width="1.3"/></svg>
         <span>Overview</span>
         <span class="nav-badge" id="attention-badge" hidden></span>
       </a>
       <div class="nav-section">Messaging</div>
-      <a class="nav-link {% if page == "queues" %}active{% endif %}" href="/admin/queues">
+      <a class="nav-link {% if page == "queues" %}active{% endif %}" href="/admin/queues" aria-label="Queues" title="Queues">
         <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 4.5h12M2 8h12M2 11.5h8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
         <span>Queues</span>
       </a>
-      <a class="nav-link {% if page == "streams" %}active{% endif %}" href="/admin/streams">
+      <a class="nav-link {% if page == "streams" %}active{% endif %}" href="/admin/streams" aria-label="Streams" title="Streams">
         <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 4c2.5 0 2.5 2 5 2s2.5-2 5-2 2 1 2 1M2 8c2.5 0 2.5 2 5 2s2.5-2 5-2 2 1 2 1M2 12c2.5 0 2.5 2 5 2s2.5-2 5-2 2 1 2 1" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
         <span>Streams</span>
       </a>
-      <a class="nav-link {% if page == "messages" %}active{% endif %}" href="/admin/messages">
+      <a class="nav-link {% if page == "messages" %}active{% endif %}" href="/admin/messages" aria-label="Messages" title="Messages">
         <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="1.5" y="3.5" width="13" height="9" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M2.5 5 8 9.2 13.5 5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span>Messages</span>
       </a>
-      <a class="nav-link {% if page == "dlq" %}active{% endif %}" href="/admin/dlq">
+      <a class="nav-link {% if page == "dlq" %}active{% endif %}" href="/admin/dlq" aria-label="Dead letters" title="Dead letters">
         <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="1.5" y="3.5" width="13" height="9" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M2.5 5 8 9.2 13.5 5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" opacity=".55"/><path d="M2 14 14 2.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
         <span>Dead letters</span>
       </a>
       <div class="nav-section">Clients</div>
-      <a class="nav-link {% if page == "connections" %}active{% endif %}" href="/admin/connections">
+      <a class="nav-link {% if page == "connections" %}active{% endif %}" href="/admin/connections" aria-label="Connections" title="Connections">
         <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M5 2v4M11 2v4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M3.5 6h9v2.5a4.5 4.5 0 0 1-9 0V6Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 13v1.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
         <span>Connections</span>
       </a>
-      <a class="nav-link {% if page == "subscriptions" %}active{% endif %}" href="/admin/subscriptions">
+      <a class="nav-link {% if page == "subscriptions" %}active{% endif %}" href="/admin/subscriptions" aria-label="Subscriptions" title="Subscriptions">
         <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 13a10 10 0 0 1 10-10M3 8.5A5.5 5.5 0 0 1 8.5 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="4" cy="12" r="1.4" fill="currentColor"/></svg>
         <span>Subscriptions</span>
       </a>
-      <a class="nav-link {% if page == "activity" %}active{% endif %}" href="/admin/activity">
+      <a class="nav-link {% if page == "activity" %}active{% endif %}" href="/admin/activity" aria-label="Activity" title="Activity">
         <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="6.4" stroke="currentColor" stroke-width="1.3"/><path d="M8 4.5V9M8 11.5v.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
         <span>Activity</span>
       </a>
       <div class="nav-section">Operate</div>
-      <a class="nav-link {% if page == "topology" %}active{% endif %}" href="/admin/topology">
+      <a class="nav-link {% if page == "topology" %}active{% endif %}" href="/admin/topology" aria-label="Cluster" title="Cluster">
         <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="3.4" r="1.9" stroke="currentColor" stroke-width="1.3"/><circle cx="3.4" cy="11.6" r="1.9" stroke="currentColor" stroke-width="1.3"/><circle cx="12.6" cy="11.6" r="1.9" stroke="currentColor" stroke-width="1.3"/><path d="M6.8 4.9 4.3 9.9M9.2 4.9l2.5 5M5.3 11.6h5.4" stroke="currentColor" stroke-width="1.2"/></svg>
         <span>Cluster</span>
       </a>
-      <a class="nav-link {% if page == "diagnostics" %}active{% endif %}" href="/admin/diagnostics">
+      <a class="nav-link {% if page == "diagnostics" %}active{% endif %}" href="/admin/diagnostics" aria-label="Diagnostics" title="Diagnostics">
         <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M1.5 8h3l1.5-4 3 8 1.5-4h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span>Diagnostics</span>
       </a>
-      <a class="nav-link {% if page == "security" %}active{% endif %}" href="/admin/security">
+      <a class="nav-link {% if page == "security" %}active{% endif %}" href="/admin/security" aria-label="Security" title="Security">
         <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 1.8 13 3.6v4c0 3.4-2.2 5.6-5 6.8-2.8-1.2-5-3.4-5-6.8v-4L8 1.8Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
         <span>Security</span>
       </a>
-      <a class="nav-link {% if page == "settings" %}active{% endif %}" href="/admin/settings">
+      <a class="nav-link {% if page == "settings" %}active{% endif %}" href="/admin/settings" aria-label="Settings" title="Settings">
         <svg class="icon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 4.5h8M12.5 4.5H14M2 11.5h3M7.5 11.5H14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="10.7" cy="4.5" r="1.8" stroke="currentColor" stroke-width="1.3"/><circle cx="5.3" cy="11.5" r="1.8" stroke="currentColor" stroke-width="1.3"/></svg>
         <span>Settings</span>
       </a>
