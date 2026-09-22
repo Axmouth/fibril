@@ -37,6 +37,8 @@ The landing page and docs header share that component: a 160ms blink every eight
 seconds, with a still image when reduced motion is preferred. Favicon images use
 the existing 16/32/48px face crops so the mascot stays legible at tab size.
 `npm run assets:build` copies those canonical face files into ignored, generated
-`public/brand/`; both `dev` and `build` run it. Edit artwork in
+`public/brand/` and generates an SVG favicon embedding the 32px face with a thin
+pale-blue vector outline. The PNGs remain browser fallbacks. Both `dev` and
+`build` run it. Edit artwork in
 `crates/admin/admin-ui/img`, not the generated files. A fresh build propagates
 asset changes to the website and demo without maintaining another authored copy.

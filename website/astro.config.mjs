@@ -23,6 +23,7 @@ export default defineConfig({
       head: [
         { tag: "link", attrs: { rel: "icon", type: "image/png", sizes: "16x16", href: "/brand/face-16.png" } },
         { tag: "link", attrs: { rel: "icon", type: "image/png", sizes: "32x32", href: "/brand/face-32.png" } },
+        { tag: "link", attrs: { rel: "icon", type: "image/svg+xml", sizes: "any", href: "/brand/face.svg" } },
       ],
       social: [
         { icon: "github", label: "GitHub", href: "https://github.com/Axmouth/fibril" },

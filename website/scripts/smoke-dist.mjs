@@ -16,7 +16,7 @@ const checks = [
       "<title>Fibril | Durable messaging without broker ceremony</title>",
       "Useful messaging without broker ceremony.",
       "brand-mascot",
-      "/brand/face-32.png",
+      "/brand/face.svg",
       "queue lifecycle",
       // The release badge renders a real version from the workspace manifest,
       // never the 0.x fallback.
@@ -100,6 +100,13 @@ for (const size of [16, 32, 48]) {
     console.error(`missing or stale shared favicon: ${name}`);
     failures += 1;
   }
+}
+
+const faceSvg = join(root, 'brand', 'face.svg');
+const canonicalFace = readFileSync(new URL('../../crates/admin/admin-ui/img/face-32.png', import.meta.url));
+if (!existsSync(faceSvg) || !readFileSync(faceSvg, 'utf8').includes(canonicalFace.toString('base64'))) {
+  console.error('missing or stale outlined favicon');
+  failures += 1;
 }
 
 if (failures > 0) {
