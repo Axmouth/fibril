@@ -13,3 +13,14 @@ button[disabled] { cursor: not-allowed; }
   .site-header .crumb, .admin-auth-pill { display: none; }
   .site-header .nav-actions { gap: 6px; margin-left: auto; }
 }
+
+/* Focused documentation frames retain the real page controls and data views. */
+html[data-demo-embed] body.admin-body { grid-template-columns: minmax(0, 1fr); }
+html[data-demo-embed] .side-nav,
+html[data-demo-embed] .demo-banner,
+html[data-demo-embed] [data-palette-open],
+html[data-demo-embed] #palette-overlay,
+html[data-demo-embed] #broker-switch { display: none !important; }
+html[data-demo-embed] .main-container { min-height: 100vh; }
+html[data-demo-embed] .site-header { top: 0; }
+html[data-demo-embed] a[aria-disabled] { cursor: default; text-decoration: none; }

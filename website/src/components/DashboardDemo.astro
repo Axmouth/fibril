@@ -1,23 +1,28 @@
 ---
 interface Props {
-  view?: 'overview' | 'queues' | 'queue' | 'streams' | 'topology' | 'settings';
+  view?: 'overview' | 'queues' | 'queue' | 'streams' | 'topology' | 'settings' | 'messages' | 'connections' | 'subscriptions' | 'activity' | 'diagnostics' | 'dlq' | 'security';
   topic?: string;
   title: string;
   height?: number;
 }
-const { view = 'overview', topic, title, height = 640 } = Astro.props;
+const { view = 'overview', topic, title, height = 860 } = Astro.props;
 const path = view === 'overview' ? '/dashboard-demo/' : `/dashboard-demo/admin/${view}/`;
-const src = topic ? `${path}?${new URLSearchParams({ topic })}` : path;
+const params = new URLSearchParams(topic ? { topic } : {});
+const fullView = params.size ? `${path}?${params}` : path;
+params.set('embed', '1');
+const src = `${path}?${params}`;
 ---
 <figure class="dashboard-example">
   <figcaption>
-    <span>{title} · read-only sample</span>
-    <a href={src} target="_blank" rel="noopener">Open full dashboard ↗</a>
+    <span>{title} · read-only sample · fixed view</span>
+    <a href={fullView} target="_blank" rel="noopener">Open full dashboard ↗</a>
   </figcaption>
-  <iframe src={src} title={title} loading="lazy" height={height}
-    referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-popups allow-top-navigation-by-user-activation"></iframe>
+  <iframe src={src} title={title} loading="lazy" height={height} style={{ height: `${height}px` }}
+    referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin"></iframe>
 </figure>
 <style>
+  :global(html:has(.dashboard-example)) { --sl-content-width: 60rem; }
+  :global(.sl-markdown-content:has(.dashboard-example) > :not(.dashboard-example)) { max-width: 75ch; }
   .dashboard-example { margin: 1.5rem 0; border: 1px solid var(--sl-color-gray-5); border-radius: 8px; overflow: hidden; }
   figcaption { display: flex; flex-wrap: wrap; gap: .5rem 1rem; padding: .75rem; font-size: .85rem; }
   figcaption a { margin-inline-start: auto; }

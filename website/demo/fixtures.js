@@ -23,7 +23,7 @@
     connections: 6, subscriptions: 3, rss_mb: 112 + i / 10,
     cpu: 8 + 3 * Math.sin(i / 4), disk_used: 96 * 1024 * 1024 + i * 65536,
   }));
-  const assignments = queues.map((q, i) => ({
+  const assignments = queues.map(q => ({
     topic: q.topic, group: q.group, partition: q.partition, owner: 'broker-1',
     followers: ['broker-2', 'broker-3'], epoch: 12,
   }));

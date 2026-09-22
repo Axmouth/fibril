@@ -2,6 +2,8 @@
   'use strict';
   const originalFetch = window.fetch.bind(window);
   const root = '/dashboard-demo/';
+  const embedded = new URL(location.href).searchParams.get('embed') === '1';
+  if (embedded) document.documentElement.dataset.demoEmbed = 'true';
   // Exercising the normal polling path avoids emulating broker SSE state.
   window.EventSource = undefined;
   window.fetch = async (input, init = {}) => {
@@ -25,7 +27,7 @@
     // fallback to a live admin API, including for unknown paths or mutations.
     const page = /^(?:index\.html|admin\/(?:queues|queue|streams|messages|dlq|connections|subscriptions|activity|topology|diagnostics|security|settings)\/?(?:index\.html)?)?$/;
     const resource = url.pathname.slice(root.length);
-    if (url.pathname.startsWith(root) && (page.test(resource) || resource.startsWith('static/'))) return originalFetch(input, init);
+    if (url.pathname.startsWith(root) && ((!embedded && page.test(resource)) || resource.startsWith('static/'))) return originalFetch(input, init);
     return reply({ error: 'Request outside the static demo.' }, 403);
   };
 
@@ -38,6 +40,17 @@
     '#global-dlq-form button[type="submit"]', '#queue-dlq-form button[type="submit"]',
   ].join(',');
   const protect = () => {
+    if (embedded) {
+      // Removing href also closes keyboard/context-menu navigation. Keep the
+      // text so the shared view still explains where the real dashboard links.
+      document.querySelectorAll('a[href]').forEach(el => {
+        el.dataset.demoHref = el.getAttribute('href');
+        el.removeAttribute('href');
+        el.setAttribute('aria-disabled', 'true');
+        el.setAttribute('tabindex', '-1');
+        el.title = 'Open the full dashboard above to browse other views';
+      });
+    }
     document.querySelectorAll(mutationSelector).forEach(el => {
       if (!el.disabled) el.disabled = true;
       if (el.title !== 'Unavailable in the read-only demo') el.title = 'Unavailable in the read-only demo';
@@ -47,14 +60,29 @@
     const pill = document.getElementById('live-pill-text');
     if (pill && pill.textContent !== 'Sample data') pill.textContent = 'Sample data';
   };
-  document.addEventListener('click', event => {
-    if (event.target.closest(mutationSelector)) { event.preventDefault(); event.stopImmediatePropagation(); }
+  for (const type of ['click', 'auxclick']) document.addEventListener(type, event => {
+    if (event.target.closest(mutationSelector) || (embedded && event.target.closest('a'))) {
+      event.preventDefault(); event.stopImmediatePropagation();
+    }
+  }, true);
+  document.addEventListener('keydown', event => {
+    // The production palette has its own document-level keyboard handler.
+    if (embedded && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+      event.preventDefault(); event.stopImmediatePropagation();
+    }
   }, true);
   document.addEventListener('submit', event => {
     if (event.target.id !== 'message-inspection-form') { event.preventDefault(); event.stopImmediatePropagation(); }
   }, true);
   document.addEventListener('DOMContentLoaded', () => {
+    // A lazy frame can be discarded while its loading callbacks are queued.
+    const element = document?.documentElement;
+    if (!element) return;
     protect();
-    new MutationObserver(protect).observe(document, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled'] });
+    const observer = new MutationObserver(protect);
+    const observe = () => observer.observe(element, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled', 'href'] });
+    observe();
+    window.addEventListener('pagehide', () => observer.disconnect());
+    window.addEventListener('pageshow', event => { if (event.persisted) { protect(); observe(); } });
   });
 })();

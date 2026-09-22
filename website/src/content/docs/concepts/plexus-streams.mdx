@@ -3,6 +3,8 @@ title: Plexus streams
 description: Fan-out stream channels where every consumer sees every record.
 ---
 
+import DashboardDemo from "../../../components/DashboardDemo.astro";
+
 A **Plexus stream** is a channel type beside the work queue. Where a queue
 delivers each message once (consumed means gone), a stream delivers **every
 record to every consumer**. Pick the type when you declare the channel:
@@ -10,6 +12,10 @@ record to every consumer**. Pick the type when you declare the channel:
 
 Use a stream for fan-out: event broadcast, change feeds, notifications, an audit
 tail, or anything where many independent readers each need the full sequence.
+
+The dashboard shows retained records and each durable cursor’s distance from the tail. This read-only example has one cursor at the tail and another catching up.
+
+<DashboardDemo view="streams" title="Stream retention and consumer positions" />
 
 ## Cursors: where a consumer reads from
 

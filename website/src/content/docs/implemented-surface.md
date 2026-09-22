@@ -431,7 +431,7 @@ See also: [admin dashboard](/admin-dashboard/).
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
-| Read-only dashboard demo | Implemented | Thirteen real dashboard views backed by synthetic fixtures at `/dashboard-demo/`; lazy overview and queue-detail embeds in dashboard docs; built and checked with the website |
+| Read-only dashboard demo | Implemented | Thirteen real dashboard views backed by synthetic fixtures at `/dashboard-demo/`; larger, fixed-view embeds throughout dashboard, streams, clustering and monitoring docs; built and checked with the website |
 | Overview metrics | Implemented | Dashboard and API |
 | Control-plane activity feed | Implemented | `GET /admin/api/audit` returns a bounded in-memory ring (newest 512 entries, reset on restart) of operator actions, attention transitions, membership changes, and stream lag-recovery events, rendered live on the dashboard's Activity page |
 | Attention feed | Implemented | `GET /admin/api/attention` names conditions needing an operator, most severe first: quarantined partition, expired or expiring certificate, failed settings load, backlog with no consumer, backlog growing despite consumers, low disk on the data directory, stalled replication follower, queue state error, broker left draining. Drives the Overview panel, the sidebar badge, and opt-in desktop notifications |

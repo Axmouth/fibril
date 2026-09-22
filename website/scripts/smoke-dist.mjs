@@ -4,9 +4,12 @@ import { join } from "node:path";
 const root = new URL("../dist/", import.meta.url).pathname;
 
 const checks = [
+  { path: "concepts/plexus-streams/index.html", includes: ["/dashboard-demo/admin/streams/?embed=1", "Stream retention and consumer positions"] },
+  { path: "concepts/clustering/index.html", includes: ["/dashboard-demo/admin/topology/?embed=1", "Owners, followers and cluster membership"] },
+  { path: "deployment/monitoring/index.html", includes: ["/dashboard-demo/?embed=1", "Broker health and recent activity"] },
   { path: "dashboard-demo/index.html", includes: ["Read-only demo", "fixtures.js", "chart-throughput"] },
   { path: "dashboard-demo/admin/queue/index.html", includes: ["q-partitions", "transport.js"] },
-  { path: "admin-dashboard/index.html", includes: ["/dashboard-demo/", "loading=\"lazy\"", "Broker overview"] },
+  { path: "admin-dashboard/index.html", includes: ["/dashboard-demo/", "loading=\"lazy\"", 'Broker overview', 'embed=1', 'height="860"', 'style="height:860px"', 'sandbox="allow-scripts allow-same-origin"'] },
   {
     path: "index.html",
     includes: [

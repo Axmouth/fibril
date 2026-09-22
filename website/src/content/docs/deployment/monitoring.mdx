@@ -3,6 +3,8 @@ title: Monitoring with Prometheus
 description: Scrape broker metrics from the admin listener in Prometheus text exposition format.
 ---
 
+import DashboardDemo from "../../../components/DashboardDemo.astro";
+
 Every broker serves `GET /metrics` on its admin listener in the Prometheus
 text exposition format. The endpoint sits behind the same protections as the
 rest of the admin surface: when admin auth is enabled the scrape needs basic
@@ -12,6 +14,10 @@ is nothing separate to enable.
 A scrape is cheap by design. It reads atomic counters and the same snapshot
 views the dashboard's live stream serializes, never a delivery hot path, so
 scraping every few seconds does not affect broker throughput.
+
+For immediate operational inspection, the dashboard combines throughput, backlog and resource history. This example uses sample data; Prometheus remains the durable monitoring history.
+
+<DashboardDemo view="overview" title="Broker health and recent activity" />
 
 ## Naming and semantics
 

@@ -23,7 +23,7 @@ test('fixture transport rejects writes, unknown APIs and external requests witho
   const context = vm.createContext({ URL, Response, structuredClone, btoa, console,
     location: new URL('http://demo.test/dashboard-demo/'),
     document: { addEventListener() {} },
-    window: { fetch: async (...args) => { requested.push(args); return new Response('static'); } },
+    window: { addEventListener() {}, fetch: async (...args) => { requested.push(args); return new Response('static'); } },
   });
   vm.runInContext(await readFile(new URL('fixtures.js', import.meta.url), 'utf8'), context);
   vm.runInContext(await readFile(new URL('transport.js', import.meta.url), 'utf8'), context);
@@ -89,4 +89,42 @@ test('inspection respects partition, status, pagination and payload selection', 
   assert.equal(preview.items[0].payload_truncated, true);
   assert.equal(atob(preview.items[0].payload_base64).length, 8);
   assert.equal(get('limit=1&include_settled=true').items[0].state.status, 'settled');
+});
+
+test('embedded views disable navigation while keeping data reads and local controls', async () => {
+  const listeners = new Map(), attributes = new Map([['href', '/dashboard-demo/admin/streams/']]);
+  const anchor = { dataset: {}, getAttribute: key => attributes.get(key),
+    removeAttribute: key => attributes.delete(key), setAttribute: (key, value) => attributes.set(key, value) };
+  const document = { documentElement: { dataset: {} },
+    addEventListener: (type, handler) => listeners.set(type, handler),
+    querySelectorAll: selector => selector === 'a[href]' && attributes.has('href') ? [anchor] : [],
+    getElementById: () => null };
+  const requested = [];
+  const context = vm.createContext({ URL, Response, structuredClone, btoa, console, document,
+    location: new URL('http://demo.test/dashboard-demo/admin/queue/?topic=orders.created&embed=1'),
+    MutationObserver: class { observe() {} disconnect() {} },
+    window: { addEventListener() {}, fetch: async (...args) => { requested.push(args); return new Response('static'); } } });
+  vm.runInContext(await readFile(new URL('fixtures.js', import.meta.url), 'utf8'), context);
+  vm.runInContext(await readFile(new URL('transport.js', import.meta.url), 'utf8'), context);
+  listeners.get('DOMContentLoaded')();
+  assert.equal(document.documentElement.dataset.demoEmbed, 'true');
+  assert.equal(attributes.has('href'), false);
+  assert.equal(attributes.get('aria-disabled'), 'true');
+  assert.equal(attributes.get('tabindex'), '-1');
+  for (const type of ['click', 'auxclick', 'keydown']) {
+    let prevented = false, stopped = false;
+    listeners.get(type)({ target: { closest: selector => selector === 'a' ? anchor : null },
+      ctrlKey: true, key: 'k', preventDefault: () => { prevented = true; },
+      stopImmediatePropagation: () => { stopped = true; } });
+    assert(prevented && stopped, type);
+  }
+  let blocked = false;
+  listeners.get('click')({ target: { closest: () => null },
+    preventDefault: () => { blocked = true; }, stopImmediatePropagation() {} });
+  assert.equal(blocked, false, 'ordinary local controls remain interactive');
+  assert.equal((await context.window.fetch('/dashboard-demo/admin/streams/')).status, 403);
+  assert.equal(requested.length, 0);
+  assert.equal((await context.window.fetch('/admin/api/queues_debug')).status, 200);
+  await context.window.fetch('/dashboard-demo/static/js/admin.js');
+  assert.equal(requested.length, 1);
 });

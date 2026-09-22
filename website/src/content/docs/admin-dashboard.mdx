@@ -11,7 +11,9 @@ queues, runtime settings, and message inspection tools.
 [Explore the read-only web demo](/dashboard-demo/) without installing a broker.
 It uses the same templates, scripts and styles as the real dashboard, with
 illustrative sample data. Browsing, filtering, charts and themes work; broker
-mutations are disabled. Sample values are examples, not benchmark results.
+mutations are disabled. Embedded examples stay on their assigned view; use
+**Open full dashboard** above a frame to browse other pages. Sample values are
+examples, not benchmark results.
 
 <DashboardDemo view="overview" title="Broker overview" />
 
@@ -103,6 +105,8 @@ command-lane depths and timings, command-kind counters, append stats, snapshot
 cost, and recovery counters. Use it when the overview suggests pressure and you
 need the next level of detail.
 
+<DashboardDemo view="diagnostics" title="Storage and queue diagnostics" />
+
 ## Security
 
 The security page shows the served certificate (subject, expiry, and the
@@ -192,6 +196,8 @@ durability tier, and optional retention bounds (records, bytes, or age). A topic
 is one channel kind for its lifetime, so declaring a stream over an existing
 queue (or the reverse) is refused.
 
+<DashboardDemo view="streams" title="Stream retention and durable cursors" />
+
 ## Message Inspection
 
 Message inspection reads queue state and persisted message data on demand. Use
@@ -218,6 +224,8 @@ Payload previews are optional. They are base64 over the admin API and shown as a
 short preview in the table. Use the payload modal for a larger preview. Large
 page sizes and large payload previews ask for confirmation because they can read
 a lot of persisted data.
+
+<DashboardDemo view="messages" title="Inspect queue messages" topic="orders.created" />
 
 ## Dead Letters
 
@@ -249,6 +257,8 @@ you loaded the page, the save is rejected and you are asked to reload and resubm
 Global DLQ target changes are persisted in storage-owned state and survive
 restart.
 
+<DashboardDemo view="settings" title="Runtime settings and startup configuration" />
+
 ## Connections
 
 The connections page lists every open client connection with its publish
@@ -261,6 +271,8 @@ and idle connections gather as a dim bundle under the ring. Hovering an
 endpoint spotlights its strand and its table row. In a cluster the smart
 clients follow partition ownership, so a connection appears on the broker
 it actually talks to.
+
+<DashboardDemo view="connections" title="Client connections" />
 
 ## Subscriptions and Cohorts
 
@@ -311,6 +323,8 @@ The page also exposes three operator actions, each with a confirmation:
 
 Use these deliberately. Repartitioning changes placement, and voting-membership
 changes affect quorum and availability.
+
+<DashboardDemo view="topology" title="Cluster topology and partition placement" />
 
 ## Health And Quarantine
 

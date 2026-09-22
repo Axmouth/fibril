@@ -20,7 +20,14 @@ protection disables known mutations, while transport rejection remains the
 backstop. Keep fixture additions in step with API changes; do not capture live
 credentials, user payloads or host details into these public assets.
 
-`DashboardDemo.astro` provides a lazy, titled iframe and a full-view link. Styling
+`DashboardDemo.astro` provides a lazy, titled 860px-tall iframe and a full-view
+link, with a wider documentation layout. Embedded URLs use `embed=1`: navigation
+chrome is hidden, link destinations removed, click/middle-click and palette
+shortcuts blocked, and page-navigation fetches refused. Filters, charts, themes,
+inspection and view toggles stay interactive. The iframe does not allow popups
+or top navigation; the full-view link lives in the parent documentation and opens
+the ordinary navigable demo. This is a focused presentation mode, not a security
+boundary against code running on the same origin. Styling
 and scripts stay isolated from the docs. Current unversioned docs and the demo
 are built together from the same checkout. Existing archived docs do not embed
 the demo. Before archiving a version that does, preserve its matching generated

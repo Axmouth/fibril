@@ -3,6 +3,8 @@ title: Clustering and coordination
 description: How Fibril assigns partition ownership across brokers, fences stale owners, and moves ownership on failure.
 ---
 
+import DashboardDemo from "../../../components/DashboardDemo.astro";
+
 A single broker is simple: it owns every queue and answers every request. To
 spread queues across machines and to survive losing a machine, brokers need to
 agree on who owns what.
@@ -10,6 +12,10 @@ agree on who owns what.
 Fibril's clustering is experimental. It adds a coordination layer that assigns
 each queue partition to a broker, fences stale owners, and reassigns ownership
 when a broker fails.
+
+The dashboard maps partition owners and followers onto registered brokers. Explore this illustrative three-node topology without starting a cluster.
+
+<DashboardDemo view="topology" title="Owners, followers and cluster membership" />
 
 ## Two modes
 
