@@ -11,19 +11,36 @@ import blink from "../../../crates/admin/admin-ui/img/sprites/ring-closed-128.pn
     display: inline-grid;
     grid-template: minmax(0, 1fr) / minmax(0, 1fr);
     flex: 0 0 auto;
-    width: 52px;
-    height: 52px;
-    box-sizing: border-box;
-    padding: 4px;
+    width: 48px;
+    height: 56px;
     place-items: center;
-    border: 1px solid #bfd4de55;
-    border-radius: 13px;
-    background:
-      radial-gradient(ellipse at 20% 0%, #b4ebe24d, transparent 70%),
-      linear-gradient(145deg, #697584, #424e60 55%, #303b4b);
-    box-shadow: inset 0 1px 0 #ffffff30, 0 2px 5px #00000020;
+    position: relative;
+    isolation: isolate;
+  }
+  .brand-mascot::before,
+  .brand-mascot::after {
+    content: "";
+    position: absolute;
+    pointer-events: none;
+    clip-path: polygon(
+      30% 0, 70% 0, 70% 6%, 82% 6%, 82% 14%, 92% 14%,
+      92% 26%, 100% 26%, 100% 74%, 92% 74%, 92% 86%,
+      82% 86%, 82% 94%, 70% 94%, 70% 100%, 30% 100%,
+      30% 94%, 18% 94%, 18% 86%, 8% 86%, 8% 74%, 0 74%,
+      0 26%, 8% 26%, 8% 14%, 18% 14%, 18% 6%, 30% 6%
+    );
+  }
+  .brand-mascot::before {
+    inset: -2px;
+    background: #85858d26;
+  }
+  .brand-mascot::after {
+    inset: 2px;
+    background: #9a9aa266;
   }
   .brand-mascot img {
+    position: relative;
+    z-index: 1;
     grid-area: 1 / 1;
     display: block;
     width: 100%;
@@ -33,6 +50,8 @@ import blink from "../../../crates/admin/admin-ui/img/sprites/ring-closed-128.pn
     object-fit: contain;
     image-rendering: pixelated;
   }
+  :global([data-theme="light"]) .brand-mascot::before { background: #85858d12; }
+  :global([data-theme="light"]) .brand-mascot::after { background: #9a9aa226; }
   .blink { opacity: 0; }
   @media (prefers-reduced-motion: no-preference) {
     .awake { animation: mascot-awake 8s step-end infinite; }
