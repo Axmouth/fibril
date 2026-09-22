@@ -10,6 +10,10 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Adaptive storage staging
+
+Message and event log staging can now grow on demand, shed empty capacity and release idle allocations through the existing writer loop. Broker measurements found comparable latency and lower memory in several steady-load cases, with extra CPU in a replicated run and higher RSS in a large-payload burst case; the policy remains opt-in while live capacity and allocator retention are investigated. Configuration and retention details are in [configuration](/configuration/) and Keratin's `experiments/ADAPTIVE_STAGING.md`.
+
 ### Follower transition before storage admission
 
 Initial follower setup could fail while history admission was pending, while the routing cache made subsequent reconciliation treat the role change as complete. The broker now retains that rejected transition's predecessor and retries against current metadata after local admission; removed assignments cancel the pending work. A regression holds metadata unchanged across admission, and a second checks assignment withdrawal.

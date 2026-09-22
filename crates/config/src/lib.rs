@@ -630,6 +630,18 @@ impl ServerConfig {
             self.storage.keratin.max_inflight_fsyncs =
                 parse_env("FIBRIL_KERATIN_MAX_INFLIGHT_FSYNCS", &value)?;
         }
+        if let Some(value) = env_value(&mut get, "FIBRIL_KERATIN_ADAPTIVE_STAGING")? {
+            self.storage.keratin.adaptive_staging =
+                parse_env("FIBRIL_KERATIN_ADAPTIVE_STAGING", &value)?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_KERATIN_STAGING_DECAY_SECS")? {
+            self.storage.keratin.staging_decay_secs =
+                parse_env("FIBRIL_KERATIN_STAGING_DECAY_SECS", &value)?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_KERATIN_STAGING_IDLE_RELEASE_SECS")? {
+            self.storage.keratin.staging_idle_release_secs =
+                parse_env("FIBRIL_KERATIN_STAGING_IDLE_RELEASE_SECS", &value)?;
+        }
         if let Some(value) = env_value(&mut get, "FIBRIL_KERATIN_WRITER_BUFFER_FACTOR")? {
             self.storage.keratin.writer_buffer_factor =
                 parse_env("FIBRIL_KERATIN_WRITER_BUFFER_FACTOR", &value)?;
@@ -822,6 +834,19 @@ impl ServerConfig {
         if self.runtime_seed.idle_queue_cleanup.sweep_interval_ms == 0 {
             return Err(ConfigError::validation(
                 "runtime_seed.idle_queue_cleanup.sweep_interval_ms must be at least 1",
+            ));
+        }
+        let staging = &self.storage.keratin;
+        if staging.staging_decay_secs == 0
+            || staging.staging_idle_release_secs < staging.staging_decay_secs
+            || std::time::Instant::now()
+                .checked_add(std::time::Duration::from_secs(
+                    staging.staging_idle_release_secs,
+                ))
+                .is_none()
+        {
+            return Err(ConfigError::validation(
+                "storage.keratin staging decay must be positive and idle release must be representable and at least as long as decay",
             ));
         }
         if !(1..=128).contains(&self.storage.keratin.writer_buffer_factor) {
@@ -1451,6 +1476,11 @@ pub struct KeratinStorageSection {
     /// of each message/event log. Each gets 64 * factor slots; range 1..=128.
     #[serde(default = "default_writer_buffer_factor")]
     pub writer_buffer_factor: usize,
+    /// Lazily allocate staging, decay empty buffers and release idle allocations.
+    /// Startup-only; applies to both message and event logs.
+    pub adaptive_staging: bool,
+    pub staging_decay_secs: u64,
+    pub staging_idle_release_secs: u64,
 }
 
 fn default_writer_buffer_factor() -> usize {
@@ -1497,6 +1527,9 @@ impl Default for KeratinStorageSection {
             max_inflight_fsyncs: default_max_inflight_fsyncs(),
             pipeline_commit_records: default_pipeline_commit_records(),
             writer_buffer_factor: default_writer_buffer_factor(),
+            adaptive_staging: false,
+            staging_decay_secs: 10,
+            staging_idle_release_secs: 60,
         }
     }
 }
@@ -1956,6 +1989,51 @@ mod tests {
             vec!["127.0.0.1:8082".to_string()]
         );
         assert_eq!(config.admin_advertise_address(), "127.0.0.1:8082");
+    }
+
+    #[test]
+    fn adaptive_staging_file_env_roundtrip_and_validation() {
+        let default = ServerConfig::default();
+        assert!(!default.storage.keratin.adaptive_staging);
+        assert_eq!(default.storage.keratin.staging_decay_secs, 10);
+        assert_eq!(default.storage.keratin.staging_idle_release_secs, 60);
+        let mut config = ServerConfig::from_toml_str(
+            "[storage.keratin]\nadaptive_staging = true\nstaging_decay_secs = 120\nstaging_idle_release_secs = 1800\n",
+        ).unwrap();
+        assert!(config.storage.keratin.adaptive_staging);
+        assert_eq!(config.storage.keratin.staging_decay_secs, 120);
+        assert_eq!(config.storage.keratin.staging_idle_release_secs, 1800);
+        config
+            .apply_env_from(|name| match name {
+                "FIBRIL_KERATIN_ADAPTIVE_STAGING" => Some(Ok("false".into())),
+                "FIBRIL_KERATIN_STAGING_DECAY_SECS" => Some(Ok("20".into())),
+                "FIBRIL_KERATIN_STAGING_IDLE_RELEASE_SECS" => Some(Ok("40".into())),
+                _ => None,
+            })
+            .unwrap();
+        config.validate().unwrap();
+        assert!(!config.storage.keratin.adaptive_staging);
+        assert_eq!(config.storage.keratin.staging_decay_secs, 20);
+        assert_eq!(config.storage.keratin.staging_idle_release_secs, 40);
+        let serialized = toml::Value::try_from(&config).unwrap();
+        let roundtrip: ServerConfig = serialized.try_into().unwrap();
+        assert_eq!(roundtrip.storage.keratin, config.storage.keratin);
+        for (decay, release) in [(0, 60), (10, 0), (60, 10)] {
+            let input = format!(
+                "[storage.keratin]\nstaging_decay_secs = {decay}\nstaging_idle_release_secs = {release}\n"
+            );
+            assert!(ServerConfig::from_toml_str(&input).is_err());
+        }
+        config.storage.keratin.staging_idle_release_secs = u64::MAX;
+        assert!(config.validate().is_err());
+        assert!(
+            config
+                .apply_env_from(|name| match name {
+                    "FIBRIL_KERATIN_ADAPTIVE_STAGING" => Some(Ok("maybe".into())),
+                    _ => None,
+                })
+                .is_err()
+        );
     }
 
     #[test]

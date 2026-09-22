@@ -29,6 +29,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- Opt-in `storage.keratin.adaptive_staging`, with startup configuration for
+  staging decay and idle release. Both message and event logs allocate staging
+  on demand and reclaim empty buffers; the existing retained policy is the
+  default. Configuration is available through TOML and `FIBRIL_KERATIN_*` variables.
+
 - Recovery regressions for concurrent learner admission, stale-owner confirmation
   fencing, and repeated broker/metadata reopening during checkpoint backfill.
 

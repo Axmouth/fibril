@@ -30,6 +30,7 @@ use fibril_broker::{
         StickyConsumerGroupAssignor, StreamIdentity,
     },
     queue_engine::{
+        AdaptiveStagingConfig, EmptyBufferResize,
         KeratinConfig, MessageContentType, MessageHeaders, QueueEngine as _,
         RecoveryMismatchPolicy, SnapshotConfig, StromaEngine, StromaError, StromaKeratinConfig,
     },
@@ -1670,6 +1671,23 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
 
     let metrics = Metrics::new(3 * 60 * 60);
     let keratin_default = KeratinConfig::default();
+    let adaptive_staging =
+        config
+            .storage
+            .keratin
+            .adaptive_staging
+            .then(|| AdaptiveStagingConfig {
+                decay_interval: std::time::Duration::from_secs(
+                    config.storage.keratin.staging_decay_secs,
+                ),
+                idle_release_after: std::time::Duration::from_secs(
+                    config.storage.keratin.staging_idle_release_secs,
+                ),
+                // Fibril uses mimalloc; replacing empty allocations avoids copying their
+                // unused capacity. Standalone Keratin retains allocator-neutral defaults.
+                empty_resize: EmptyBufferResize::Replace,
+                ..Default::default()
+            });
     let keratin_message_cfg = KeratinConfig {
         fsync_interval_ms: config.storage.keratin.fsync_interval_ms,
         min_fsync_interval_ms: config.storage.keratin.min_fsync_interval_ms,
@@ -1680,6 +1698,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         max_inflight_fsyncs: config.storage.keratin.max_inflight_fsyncs,
         pipeline_commit_records: config.storage.keratin.pipeline_commit_records,
         writer_buffer_factor: config.storage.keratin.writer_buffer_factor,
+        adaptive_staging,
         ..keratin_default
     };
     let keratin_event_cfg = KeratinConfig {
@@ -1696,6 +1715,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         max_inflight_fsyncs: config.storage.keratin.max_inflight_fsyncs,
         pipeline_commit_records: config.storage.keratin.pipeline_commit_records,
         writer_buffer_factor: config.storage.keratin.writer_buffer_factor,
+        adaptive_staging,
         ..keratin_default
     };
     let engine = StromaEngine::open(

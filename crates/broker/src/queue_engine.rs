@@ -9,6 +9,7 @@ use stroma_core::{
     AckEventMeta, CompletionPair, NackEventMeta, PublishItem, StromaDebugSnapshot, StromaMetrics,
 };
 pub use stroma_core::{
+    AdaptiveStagingConfig, EmptyBufferResize,
     AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, DestroyOutcome, DiskUsedBreakdownEntry,
     EnqueuedStreamAppend, EvictOutcome, FollowerStateCheckpointInstall,
     FollowerStateCheckpointInstallOutcome, GlobalDLQ, GlobalDlqSnapshot, GlobalDlqUpdateOutcome,

@@ -405,6 +405,7 @@ See also: [configuration](/configuration/),
 | --- | --- | --- |
 | TOML startup config | Implemented | Config crate and server binary |
 | Storage writer buffer factor | Implemented | `storage.keratin.writer_buffer_factor` or `FIBRIL_KERATIN_WRITER_BUFFER_FACTOR`; restart-time capacities for message/event log writer and notification channels, default preserved at 8,192 slots each |
+| Adaptive storage staging | Implemented, opt-in | `storage.keratin.adaptive_staging`; lazy allocation, configurable decay and idle release for message/event log staging; existing retained allocation policy is the default |
 | Env and CLI overrides | Implemented | Config crate and server binary |
 | Admin auth startup config | Implemented | TOML, env, CLI, server wiring |
 | Metrics exposition startup config | Implemented | `admin.metrics_per_channel` via TOML and env |
