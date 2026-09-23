@@ -8,6 +8,7 @@
     "preview": "astro preview",
     "check": "astro check",
     "smoke:dist": "node scripts/smoke-dist.mjs",
+    "smoke:server": "node scripts/smoke-server.mjs",
     "verify": "npm run build && npm run smoke:dist",
     "demo:build": "node demo/build.mjs",
     "demo:test": "node demo/demo.test.mjs",

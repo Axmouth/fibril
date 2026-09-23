@@ -41,6 +41,10 @@ jobs:
           SITE_IMAGE: ghcr.io/axmouth/fibril/site:test
           SITE_DOMAIN: fibril.sh
 
+      - name: Verify production server navigation behind a TLS proxy
+        run: npm run smoke:server
+        working-directory: website
+
       - name: Check Traefik host rules
         run: |
           config="$(docker compose -f compose.website.deploy.yaml config)"

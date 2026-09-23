@@ -11,6 +11,16 @@ and checks the transport's read-only boundary. Run `npm run verify` for the
 website build and static smoke checks. A source fingerprint is emitted as
 `dashboard-demo/source.json`.
 
+After building, `npm run smoke:server` uses Docker to check the production Nginx
+configuration with an external Host and forwarded HTTPS header. It covers all
+demo pages with slashless, trailing-slash, explicit-index and query/embed URLs,
+static assets, missing routes and relative documentation redirects. CI runs this
+in addition to the build checks. `WEBSITE_SMOKE_IMAGE` can select a locally cached
+compatible Nginx image; the default matches the website Dockerfile's runtime.
+The server resolves demo index files directly because shared broker navigation
+uses slashless paths. Other directory redirects remain relative behind the TLS
+proxy, preserving the public origin and the demo's same-origin CSP.
+
 `fixtures.js` supplies deterministic synthetic relationships and time series;
 timestamps are anchored to page load. Values illustrate the UI, not broker
 performance. `transport.js` installs before the shared scripts, serves only known
