@@ -2075,6 +2075,8 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
             admin_auth_enabled: config.admin.auth.enabled,
             keratin_fsync_interval_ms: config.storage.keratin.fsync_interval_ms,
             keratin_min_fsync_interval_ms: config.storage.keratin.min_fsync_interval_ms,
+            keratin_batch_linger_ms: config.storage.keratin.batch_linger_ms,
+            keratin_tail_cache_bytes: config.storage.keratin.tail_cache_bytes as u64,
             keratin_segment_preallocate_bytes: config.storage.keratin.segment_preallocate_bytes
                 as u64,
             keratin_writer_buffer_factor: config.storage.keratin.writer_buffer_factor,

@@ -9,6 +9,7 @@ on:
       - "website/**"
       - "crates/admin/templates/**"
       - "crates/admin/admin-ui/**"
+      - "crates/admin/tests/**"
 
 permissions:
   contents: read

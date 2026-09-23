@@ -11,7 +11,7 @@
     "smoke:server": "node scripts/smoke-server.mjs",
     "verify": "npm run build && npm run smoke:dist",
     "demo:build": "node demo/build.mjs",
-    "demo:test": "node demo/demo.test.mjs",
+    "demo:test": "node demo/demo.test.mjs && node ../crates/admin/tests/settings-form.test.mjs",
     "assets:build": "node scripts/build-branding.mjs"
   },
   "dependencies": {

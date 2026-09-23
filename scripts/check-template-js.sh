@@ -70,3 +70,5 @@ if (failures > 0) {
   process.exit(1);
 }
 NODE
+
+node "$repo_root/crates/admin/tests/settings-form.test.mjs"

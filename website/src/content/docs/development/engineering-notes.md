@@ -10,6 +10,10 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Dashboard settings preservation
+
+Saving an unrelated runtime setting rebuilt an incomplete document, resetting omitted connection, replication and Plexus stream settings to deserialization defaults. The form now edits a copy of the full loaded document, exposes every current runtime field and retains the version check; regression tests cover preservation, reloads, optional values, locks and duration conversion. A template coverage test compares controls against the serialized Rust settings model so newly added fields cannot silently miss the dashboard.
+
 ### Recovery during transient liveness loss
 
 A metadata election could temporarily leave only one broker marked live, causing majority placement to propose a lower confirmation threshold and then a second recovery as heartbeats returned. The controller now holds that proposal until it can preserve the existing write requirement; confirmed process-loss checks exercise recovery onto two survivors. The fix and regression are in [5c6557d](https://github.com/Axmouth/fibril/commit/5c6557d).

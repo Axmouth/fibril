@@ -14,9 +14,9 @@ The next rounds prioritize bounded operational work, recovery latency and adopti
 of the retained delivery experiment. Client and stream work can proceed as
 separate rounds when their dependencies permit.
 
-1. **Admin settings and recovery visibility.** Complete the effective-settings
-   audit, including defaults, validation, node/cluster scope and live versus
-   restart-only changes. Add a node-local settings section and safe live storage
+1. **Admin settings and recovery visibility.** Complete defaults/validation
+   metadata and requested-versus-applied reporting, including node/cluster scope
+   and live versus restart-only changes. Add a node-local settings section and safe live storage
    tuning through Keratin, starting with segment preallocation. Show recovery
    stages and account for retained generations and staging data before adding
    automatic reclamation.
@@ -135,8 +135,10 @@ The compatibility work follows this order:
 
 ## Cluster operations
 
-- Complete the admin configuration audit against current server settings,
-  including effective values, validation, scope and restart requirements.
+- Unify configuration defaults and validation metadata across startup seeds, the
+  runtime API and the dashboard. Report requested versus locally applied settings,
+  node/cluster scope and application boundaries; complete safe startup visibility
+  for coordination and listener configuration.
 - Add a node-local dashboard settings section with explicitly targeted updates,
   durable local overrides and defined precedence over startup configuration.
   Introduce validated Keratin configuration updates for existing and future logs.

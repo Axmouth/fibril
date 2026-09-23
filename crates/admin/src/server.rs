@@ -240,6 +240,8 @@ pub struct StartupConfigSummary {
     pub admin_auth_enabled: bool,
     pub keratin_fsync_interval_ms: u64,
     pub keratin_min_fsync_interval_ms: u64,
+    pub keratin_batch_linger_ms: u64,
+    pub keratin_tail_cache_bytes: u64,
     pub keratin_segment_preallocate_bytes: u64,
     pub keratin_writer_buffer_factor: usize,
     pub keratin_adaptive_staging: bool,
@@ -1283,6 +1285,8 @@ mod tests {
                 admin_auth_enabled,
                 keratin_fsync_interval_ms: 5,
                 keratin_min_fsync_interval_ms: 0,
+                keratin_batch_linger_ms: 5,
+                keratin_tail_cache_bytes: 64 * 1024 * 1024,
                 keratin_segment_preallocate_bytes: 0,
                 keratin_writer_buffer_factor: 16,
                 keratin_adaptive_staging: true,
@@ -3013,6 +3017,8 @@ mod tests {
         assert_eq!(body["broker_bind"], "127.0.0.1:9876");
         assert_eq!(body["admin_auth_enabled"], false);
         assert_eq!(body["keratin_fsync_interval_ms"], 5);
+        assert_eq!(body["keratin_batch_linger_ms"], 5);
+        assert_eq!(body["keratin_tail_cache_bytes"], 64 * 1024 * 1024);
         assert_eq!(body["keratin_writer_buffer_factor"], 16);
         assert_eq!(body["keratin_adaptive_staging"], true);
         assert_eq!(body["keratin_staging_decay_secs"], 10);
@@ -3957,6 +3963,18 @@ mod tests {
         assert!(!body.contains("consumer group"));
         assert!(body.contains("id=\"replication.eager_failover\""));
         assert!(body.contains("id=\"replication.eager_failover_grace_ms\""));
+        // New runtime fields must be represented by the shared form. Its generic
+        // collector preserves unknown fields too, including newer server fields.
+        let settings = serde_json::to_value(RuntimeSettings::default()).unwrap();
+        for (group, values) in settings.as_object().unwrap() {
+            for key in values.as_object().unwrap().keys() {
+                let control = format!("id=\"{group}.{key}\" data-runtime-setting");
+                assert!(
+                    body.contains(&control),
+                    "missing settings control: {group}.{key}"
+                );
+            }
+        }
         assert!(body.contains("Save runtime settings"));
         assert!(!body.contains("Log out"));
         assert!(!body.contains("href=\"/logout\""));

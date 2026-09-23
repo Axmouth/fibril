@@ -1,7 +1,7 @@
 {% extends "layout.html" %}
 {% block content %}
 <h4 class="metrics-header">Settings</h4>
-<p class="page-desc">Runtime settings apply live and, in a cluster, replicate to every broker - no restarts. Startup-only values live in the configuration file.</p>
+<p class="page-desc">Runtime settings are persisted and, in a cluster, replicated to brokers. Each worker adopts changes at its next supported boundary. Startup-only values require a restart.</p>
 
 <div class="settings-panel">
   <p class="settings-note">
@@ -28,7 +28,7 @@
         <span class="settings-label">Inflight TTL</span>
         <span class="settings-help">How long a delivered message can remain unacknowledged before it becomes eligible again.</span>
         <span class="settings-duration">
-          <input id="delivery.inflight_ttl_ms" type="number" min="0" step="1">
+          <input id="delivery.inflight_ttl_ms" data-runtime-setting type="number" min="0" step="1">
           <select class="duration-unit" id="delivery.inflight_ttl_ms.unit" data-for="delivery.inflight_ttl_ms">
             <option value="s">seconds</option>
             <option value="ms">milliseconds</option>
@@ -39,7 +39,7 @@
         <span class="settings-label">Expiry poll minimum</span>
         <span class="settings-help">Minimum wait between checks for delayed messages becoming ready.</span>
         <span class="settings-duration">
-          <input id="delivery.expiry_poll_min_ms" type="number" min="0" step="1">
+          <input id="delivery.expiry_poll_min_ms" data-runtime-setting type="number" min="0" step="1">
           <select class="duration-unit" id="delivery.expiry_poll_min_ms.unit" data-for="delivery.expiry_poll_min_ms">
             <option value="s">seconds</option>
             <option value="ms">milliseconds</option>
@@ -49,13 +49,13 @@
       <label class="settings-field">
         <span class="settings-label">Expiry batch max</span>
         <span class="settings-help">Maximum delayed or expired offsets processed in one pass.</span>
-        <input id="delivery.expiry_batch_max" type="number" min="1" step="1">
+        <input id="delivery.expiry_batch_max" data-runtime-setting type="number" min="1" step="1">
       </label>
       <label class="settings-field">
         <span class="settings-label">Delivery poll max</span>
         <span class="settings-help">Maximum wait used by broker delivery polling when no message is immediately ready.</span>
         <span class="settings-duration">
-          <input id="delivery.delivery_poll_max_ms" type="number" min="0" step="1">
+          <input id="delivery.delivery_poll_max_ms" data-runtime-setting type="number" min="0" step="1">
           <select class="duration-unit" id="delivery.delivery_poll_max_ms.unit" data-for="delivery.delivery_poll_max_ms">
             <option value="s">seconds</option>
             <option value="ms">milliseconds</option>
@@ -75,8 +75,30 @@
         <span class="settings-label">Reconnect grace</span>
         <span class="settings-help">Blank disables grace. Otherwise, a disconnected client can resume within this window before its subscriptions are cleaned up.</span>
         <span class="settings-duration">
-          <input id="connection.reconnect_grace_ms" type="number" min="0" step="1" placeholder="disabled">
+          <input id="connection.reconnect_grace_ms" data-runtime-setting data-runtime-optional type="number" min="0" step="1" placeholder="disabled">
           <select class="duration-unit" id="connection.reconnect_grace_ms.unit" data-for="connection.reconnect_grace_ms">
+            <option value="s">seconds</option>
+            <option value="ms">milliseconds</option>
+          </select>
+        </span>
+      </label>
+      <label class="settings-field">
+        <span class="settings-label">Drain handoff timeout</span>
+        <span class="settings-help">Maximum wait for partition ownership handoff during a coordinated drain. Blank uses 30 seconds; expiry leaves recovery running.</span>
+        <span class="settings-duration">
+          <input id="connection.drain_handoff_timeout_ms" data-runtime-setting data-runtime-optional type="number" min="0" step="any" placeholder="default">
+          <select class="duration-unit" id="connection.drain_handoff_timeout_ms.unit" data-for="connection.drain_handoff_timeout_ms">
+            <option value="s">seconds</option>
+            <option value="ms">milliseconds</option>
+          </select>
+        </span>
+      </label>
+      <label class="settings-field">
+        <span class="settings-label">Restart session TTL</span>
+        <span class="settings-help">Maximum age of persisted session metadata accepted when a client resumes after broker restart. Blank or zero disables restart resumption; live disconnects use reconnect grace.</span>
+        <span class="settings-duration">
+          <input id="connection.resume_session_restart_ttl_ms" data-runtime-setting data-runtime-optional type="number" min="0" step="any" placeholder="disabled">
+          <select class="duration-unit" id="connection.resume_session_restart_ttl_ms.unit" data-for="connection.resume_session_restart_ttl_ms">
             <option value="s">seconds</option>
             <option value="ms">milliseconds</option>
           </select>
@@ -95,7 +117,7 @@
           <span class="settings-label">Confirm timeout</span>
           <span class="settings-help">How long a replica-durable publish confirm can wait for enough durable follower progress.</span>
           <span class="settings-duration">
-            <input id="replication.confirm_timeout_ms" type="number" min="1" step="1">
+            <input id="replication.confirm_timeout_ms" data-runtime-setting type="number" min="1" step="1">
             <select class="duration-unit" id="replication.confirm_timeout_ms.unit" data-for="replication.confirm_timeout_ms">
               <option value="s">seconds</option>
               <option value="ms">milliseconds</option>
@@ -106,7 +128,7 @@
           <span class="settings-label">Caught-up poll</span>
           <span class="settings-help">Follower pull interval while already caught up with the owner.</span>
           <span class="settings-duration">
-            <input id="replication.caught_up_poll_ms" type="number" min="1" step="1">
+            <input id="replication.caught_up_poll_ms" data-runtime-setting type="number" min="1" step="1">
             <select class="duration-unit" id="replication.caught_up_poll_ms.unit" data-for="replication.caught_up_poll_ms">
               <option value="s">seconds</option>
               <option value="ms">milliseconds</option>
@@ -119,7 +141,7 @@
           <span class="settings-label">Retry poll</span>
           <span class="settings-help">Follower retry interval after a partial pull or transient replication error.</span>
           <span class="settings-duration">
-            <input id="replication.retry_poll_ms" type="number" min="1" step="1">
+            <input id="replication.retry_poll_ms" data-runtime-setting type="number" min="1" step="1">
             <select class="duration-unit" id="replication.retry_poll_ms.unit" data-for="replication.retry_poll_ms">
               <option value="s">seconds</option>
               <option value="ms">milliseconds</option>
@@ -130,7 +152,7 @@
           <span class="settings-label">Checkpoint retry poll</span>
           <span class="settings-help">Follower retry interval while it needs a checkpoint before it can continue.</span>
           <span class="settings-duration">
-            <input id="replication.checkpoint_retry_poll_ms" type="number" min="1" step="1">
+            <input id="replication.checkpoint_retry_poll_ms" data-runtime-setting type="number" min="1" step="1">
             <select class="duration-unit" id="replication.checkpoint_retry_poll_ms.unit" data-for="replication.checkpoint_retry_poll_ms">
               <option value="s">seconds</option>
               <option value="ms">milliseconds</option>
@@ -142,44 +164,68 @@
         <label class="settings-field">
           <span class="settings-label">Messages per read</span>
           <span class="settings-help">Maximum message records a follower asks the owner for in one pull.</span>
-          <input id="replication.max_messages_per_read" type="number" min="1" step="1">
+          <input id="replication.max_messages_per_read" data-runtime-setting type="number" min="1" step="1">
         </label>
         <label class="settings-field">
           <span class="settings-label">Events per read</span>
           <span class="settings-help">Maximum event records a follower asks the owner for in one pull.</span>
-          <input id="replication.max_events_per_read" type="number" min="1" step="1">
+          <input id="replication.max_events_per_read" data-runtime-setting type="number" min="1" step="1">
         </label>
         <label class="settings-field">
           <span class="settings-label">Bytes per read</span>
           <span class="settings-help">Approximate byte budget for one owner replication response.</span>
-          <input id="replication.max_bytes_per_read" type="number" min="1" step="1">
+          <input id="replication.max_bytes_per_read" data-runtime-setting type="number" min="1" step="1">
         </label>
       </div>
       <div class="settings-grid settings-grid-two">
         <label class="settings-field">
           <span class="settings-label">Iterations per tick</span>
           <span class="settings-help">Maximum pull/apply iterations before the follower yields.</span>
-          <input id="replication.max_iterations_per_tick" type="number" min="1" step="1">
+          <input id="replication.max_iterations_per_tick" data-runtime-setting type="number" min="1" step="1">
         </label>
         <label class="settings-field">
           <span class="settings-label">Minimum in-sync replicas</span>
           <span class="settings-help">Fail replica-durable publishes quickly when fewer replicas are recently in sync. Use 1 to disable the floor.</span>
-          <input id="replication.min_in_sync_replicas" type="number" min="1" step="1">
+          <input id="replication.min_in_sync_replicas" data-runtime-setting type="number" min="1" step="1">
         </label>
       </div>
       <label class="settings-field">
         <span class="settings-label">ISR timeout</span>
         <span class="settings-help">How recently a follower must report durable progress to count as in sync.</span>
         <span class="settings-duration">
-          <input id="replication.isr_timeout_ms" type="number" min="1" step="1">
+          <input id="replication.isr_timeout_ms" data-runtime-setting type="number" min="1" step="1">
           <select class="duration-unit" id="replication.isr_timeout_ms.unit" data-for="replication.isr_timeout_ms">
             <option value="s">seconds</option>
             <option value="ms">milliseconds</option>
           </select>
         </span>
       </label>
+      <div class="settings-grid settings-grid-two">
+      <label class="settings-field">
+        <span class="settings-label">Owner read timeout slack</span>
+        <span class="settings-help">Extra time allowed beyond a replication read’s long-poll window before reconnecting.</span>
+        <span class="settings-duration">
+          <input id="replication.read_timeout_slack_ms" data-runtime-setting type="number" min="0" step="any">
+          <select class="duration-unit" id="replication.read_timeout_slack_ms.unit" data-for="replication.read_timeout_slack_ms">
+            <option value="s">seconds</option>
+            <option value="ms">milliseconds</option>
+          </select>
+        </span>
+      </label>
+      <label class="settings-field">
+        <span class="settings-label">Owner connect timeout</span>
+        <span class="settings-help">Time allowed for TCP connection and authentication to the owner before retrying.</span>
+        <span class="settings-duration">
+          <input id="replication.owner_connect_timeout_ms" data-runtime-setting type="number" min="1" step="any">
+          <select class="duration-unit" id="replication.owner_connect_timeout_ms.unit" data-for="replication.owner_connect_timeout_ms">
+            <option value="s">seconds</option>
+            <option value="ms">milliseconds</option>
+          </select>
+        </span>
+      </label>
+      </div>
       <label class="checkbox-label">
-        <input id="replication.stream_enabled" type="checkbox">
+        <input id="replication.stream_enabled" data-runtime-setting type="checkbox">
         <span>
           <span class="settings-label">Streaming replication</span>
           <span class="settings-help">Use credit-based streaming on followers. When disabled, followers fall back to polling pulls.</span>
@@ -189,21 +235,21 @@
         <label class="settings-field">
           <span class="settings-label">Stream apply linger</span>
           <span class="settings-help">Microseconds a streaming follower spends gathering contiguous frames before one fsynced apply. Higher trades apply latency for fsync amortization; 0 = drain-only.</span>
-          <input id="replication.stream_apply_linger_us" type="number" min="0" step="1">
+          <input id="replication.stream_apply_linger_us" data-runtime-setting type="number" min="0" step="1">
         </label>
         <label class="settings-field">
           <span class="settings-label">Stream apply max merge bytes</span>
           <span class="settings-help">Byte cap on a single coalesced streaming apply (peak memory vs fsync amortization).</span>
-          <input id="replication.stream_apply_max_merge_bytes" type="number" min="1" step="1">
+          <input id="replication.stream_apply_max_merge_bytes" data-runtime-setting type="number" min="1" step="1">
         </label>
         <label class="settings-field">
           <span class="settings-label">Stream buffer batches</span>
           <span class="settings-help">In-flight batch buffer depth (credit window) for the streaming follower. Applied on the next stream.</span>
-          <input id="replication.stream_buffer_batches" type="number" min="1" step="1">
+          <input id="replication.stream_buffer_batches" data-runtime-setting type="number" min="1" step="1">
         </label>
       </div>
       <label class="checkbox-label">
-        <input id="replication.eager_failover" type="checkbox">
+        <input id="replication.eager_failover" data-runtime-setting type="checkbox">
         <span>
           <span class="settings-label">Eager failover</span>
           <span class="settings-help">Opt in to faster reassignment after repeated explicit peer connection failures. Safe recovery still runs; heartbeat expiry handles silent failures. Brief network interruptions can cause extra recovery work.</span>
@@ -212,7 +258,7 @@
       <label class="settings-field">
         <span class="settings-label">Eager failover grace (ms)</span>
         <span class="settings-help">Require failed reconnects across this interval. Changing the policy restarts pending suspicion. Raft election and heartbeat timers stay unchanged.</span>
-        <input id="replication.eager_failover_grace_ms" type="number" min="100" max="60000" step="100">
+        <input id="replication.eager_failover_grace_ms" data-runtime-setting type="number" min="100" max="60000" step="100">
       </label>
     </section>
 
@@ -225,12 +271,12 @@
         <label class="settings-field">
           <span class="settings-label">Default partition count</span>
           <span class="settings-help">Partition count used when a new queue is declared without an explicit count.</span>
-          <input id="partitioning.default_partition_count" type="number" min="1" step="1">
+          <input id="partitioning.default_partition_count" data-runtime-setting type="number" min="1" step="1">
         </label>
         <label class="settings-field">
           <span class="settings-label">Target partitions per consumer</span>
           <span class="settings-help">Blank disables the exclusive-consumer-group under-provisioned signal.</span>
-          <input id="consumer_groups.default_target_per_consumer" type="number" min="1" step="1" placeholder="disabled">
+          <input id="consumer_groups.default_target_per_consumer" data-runtime-setting data-runtime-optional type="number" min="1" step="1" placeholder="disabled">
         </label>
       </div>
     </section>
@@ -241,7 +287,7 @@
         <p>Lets unused queues leave memory after they have no active publishers or subscribers for long enough.</p>
       </div>
       <label class="checkbox-label">
-        <input id="idle_queue_cleanup.enabled" type="checkbox">
+        <input id="idle_queue_cleanup.enabled" data-runtime-setting type="checkbox">
         <span>
           <span class="settings-label">Enabled</span>
           <span class="settings-help">When disabled, idle queues remain materialized after first use.</span>
@@ -252,7 +298,7 @@
         <span class="settings-label">Evict after</span>
         <span class="settings-help">How long a queue must have no publishers or subscribers before it can be removed from memory.</span>
         <span class="settings-duration">
-          <input id="idle_queue_cleanup.evict_after_ms" type="number" min="0" step="1">
+          <input id="idle_queue_cleanup.evict_after_ms" data-runtime-setting type="number" min="0" step="1">
           <select class="duration-unit" id="idle_queue_cleanup.evict_after_ms.unit" data-for="idle_queue_cleanup.evict_after_ms">
             <option value="s">seconds</option>
             <option value="ms">milliseconds</option>
@@ -263,7 +309,7 @@
         <span class="settings-label">Sweep interval</span>
         <span class="settings-help">How often the broker checks for queues that have become idle.</span>
         <span class="settings-duration">
-          <input id="idle_queue_cleanup.sweep_interval_ms" type="number" min="1" step="1">
+          <input id="idle_queue_cleanup.sweep_interval_ms" data-runtime-setting type="number" min="1" step="1">
           <select class="duration-unit" id="idle_queue_cleanup.sweep_interval_ms.unit" data-for="idle_queue_cleanup.sweep_interval_ms">
             <option value="s">seconds</option>
             <option value="ms">milliseconds</option>
@@ -274,7 +320,7 @@
         <span class="settings-label">Publisher idle timeout</span>
         <span class="settings-help">Blank disables publisher idle expiry. Otherwise, unused publisher leases stop keeping the queue active after this long.</span>
         <span class="settings-duration">
-          <input id="idle_queue_cleanup.publisher_idle_timeout_ms" type="number" min="0" step="1" placeholder="disabled">
+          <input id="idle_queue_cleanup.publisher_idle_timeout_ms" data-runtime-setting data-runtime-optional type="number" min="0" step="1" placeholder="disabled">
           <select class="duration-unit" id="idle_queue_cleanup.publisher_idle_timeout_ms.unit" data-for="idle_queue_cleanup.publisher_idle_timeout_ms">
             <option value="s">seconds</option>
             <option value="ms">milliseconds</option>
@@ -284,11 +330,61 @@
 </div>
     </section>
 
+    <section class="settings-section">
+      <div class="settings-section-heading">
+        <h5>Plexus Streams</h5>
+        <p>Cursor acknowledgment batching and idle channel eviction. Changes are adopted on the next commit batch or idle sweep; an active wait can finish using its previous interval.</p>
+      </div>
+      <div class="settings-grid settings-grid-two">
+      <label class="settings-field">
+        <span class="settings-label">Cursor commit window (µs)</span>
+        <span class="settings-help">Time to gather cursor acknowledgments into one durable batch. Zero flushes each drained batch immediately.</span>
+        <input id="stream.cursor_commit_window_us" data-runtime-setting type="number" min="0" step="1">
+      </label>
+      <label class="settings-field">
+        <span class="settings-label">Cursor commit batch size</span>
+        <span class="settings-help">Maximum distinct cursors in one commit batch. Effective minimum: 1.</span>
+        <input id="stream.cursor_commit_max_batch" data-runtime-setting type="number" min="1" step="1">
+      </label>
+      </div>
+      <label class="checkbox-label">
+        <input id="stream.idle_evict_enabled" data-runtime-setting type="checkbox">
+        <span>
+          <span class="settings-label">Evict idle stream channels</span>
+          <span class="settings-help">Release in-memory channels with no live subscriptions. Durable data remains and the channel is loaded again on use.</span>
+        </span>
+      </label>
+      <div class="settings-grid settings-grid-two">
+      <label class="settings-field">
+        <span class="settings-label">Stream idle timeout</span>
+        <span class="settings-help">How long an unused stream channel without subscriptions must remain idle before eviction.</span>
+        <span class="settings-duration">
+          <input id="stream.idle_evict_after_ms" data-runtime-setting type="number" min="0" step="any">
+          <select class="duration-unit" id="stream.idle_evict_after_ms.unit" data-for="stream.idle_evict_after_ms">
+            <option value="s">seconds</option>
+            <option value="ms">milliseconds</option>
+          </select>
+        </span>
+      </label>
+      <label class="settings-field">
+        <span class="settings-label">Stream sweep interval</span>
+        <span class="settings-help">Time between idle stream eviction sweeps. Effective minimum: 1 ms.</span>
+        <span class="settings-duration">
+          <input id="stream.idle_sweep_interval_ms" data-runtime-setting type="number" min="1" step="any">
+          <select class="duration-unit" id="stream.idle_sweep_interval_ms.unit" data-for="stream.idle_sweep_interval_ms">
+            <option value="s">seconds</option>
+            <option value="ms">milliseconds</option>
+          </select>
+        </span>
+      </label>
+      </div>
+    </section>
+
     <div class="settings-actions">
       <button class="btn btn-primary" type="submit">Save runtime settings</button>
       <button class="btn" type="button" id="reload-settings">Reload</button>
       <span class="settings-actions-note">Applies the Broker Runtime Settings
-        above, live - no restart. Startup Config below is read-only and set
+        above without a restart. Existing waits or sessions may retain earlier values until their next update boundary. Startup Config below is read-only and set
         before the broker starts.</span>
     </div>
   </form>
@@ -367,6 +463,16 @@
       <div>
         <dt>Min fsync interval</dt>
         <dd id="startup.keratin_min_fsync_interval_ms"></dd>
+      </div>
+      <div>
+        <dt>Batch linger</dt>
+        <dd id="startup.keratin_batch_linger_ms"></dd>
+        <small>Startup-only; maximum time to gather writes before committing.</small>
+      </div>
+      <div>
+        <dt>Message tail cache</dt>
+        <dd id="startup.keratin_tail_cache_bytes"></dd>
+        <small>Budget per message log. Event logs have no tail cache.</small>
       </div>
       <div>
         <dt>Segment preallocation</dt>
@@ -532,6 +638,7 @@
 <script src="/static/js/admin.js"></script>
 <script>
 let currentLocks = {};
+let currentSettings = null;
 let currentGlobalDlqTarget = null;
 
 function field(id) {
@@ -540,11 +647,6 @@ function field(id) {
 
 function numberValue(id) {
   return Number(field(id).value);
-}
-
-function optionalNumberValue(id) {
-  const value = field(id).value.trim();
-  return value === "" ? null : Number(value);
 }
 
 function optionalTextValue(id) {
@@ -556,11 +658,6 @@ function durationMsValue(id) {
   return durationMsValueWithUnit(id, field(`${id}.unit`).value);
 }
 
-function optionalDurationMsValue(id) {
-  const value = field(id).value.trim();
-  return value === "" ? null : durationMsValue(id);
-}
-
 function durationMsValueWithUnit(id, unit) {
   const value = Number(field(id).value);
   return Math.round(value * (unit === "s" ? 1000 : 1));
@@ -569,10 +666,18 @@ function durationMsValueWithUnit(id, unit) {
 function renderDuration(id, ms, preferredUnit = null) {
   const input = field(id);
   const select = field(`${id}.unit`);
+  // HTML limits describe milliseconds initially; keep them valid when showing
+  // fractional seconds (for example a 5 ms poll shown as 0.005 seconds).
+  input.dataset.minMs ??= input.min;
+  const applyUnit = unit => {
+    input.min = String(Number(input.dataset.minMs) / (unit === "s" ? 1000 : 1));
+    input.step = unit === "s" ? "0.001" : "1";
+  };
   if (ms === null || ms === undefined) {
     input.value = "";
     select.value = preferredUnit || "s";
     select.dataset.prevUnit = select.value;
+    applyUnit(select.value);
     return;
   }
 
@@ -580,6 +685,7 @@ function renderDuration(id, ms, preferredUnit = null) {
   input.value = unit === "s" ? ms / 1000 : ms;
   select.value = unit;
   select.dataset.prevUnit = unit;
+  applyUnit(unit);
 }
 
 function setMessage(text, kind = "info") {
@@ -629,49 +735,23 @@ function setDisabledForLockedGroups() {
   const idleLocked = !!currentLocks.idle_queue_cleanup;
   field("idle-lock").textContent = idleLocked ? "locked by startup config" : "";
   for (const input of document.querySelectorAll("#idle-section input, #idle-section select")) {
-    input.disabled = idleLocked;
+    input.disabled = idleLocked || currentSettings?.idle_queue_cleanup?.[input.id.split(".")[1]] === undefined;
   }
 }
 
 function renderSettings(data) {
+  // Preserve the complete document, including fields this UI does not expose.
+  // The version check still protects the full replacement from concurrent edits.
+  currentSettings = structuredClone(data.settings);
   field("version").value = data.version;
-  renderDuration("delivery.inflight_ttl_ms", data.settings.delivery.inflight_ttl_ms);
-  renderDuration("delivery.expiry_poll_min_ms", data.settings.delivery.expiry_poll_min_ms);
-  field("delivery.expiry_batch_max").value = data.settings.delivery.expiry_batch_max;
-  renderDuration("delivery.delivery_poll_max_ms", data.settings.delivery.delivery_poll_max_ms);
-
-  field("idle_queue_cleanup.enabled").checked = data.settings.idle_queue_cleanup.enabled;
-  renderDuration("idle_queue_cleanup.evict_after_ms", data.settings.idle_queue_cleanup.evict_after_ms);
-  renderDuration("idle_queue_cleanup.sweep_interval_ms", data.settings.idle_queue_cleanup.sweep_interval_ms);
-  renderDuration(
-    "idle_queue_cleanup.publisher_idle_timeout_ms",
-    data.settings.idle_queue_cleanup.publisher_idle_timeout_ms
-  );
-  renderDuration("connection.reconnect_grace_ms", data.settings.connection.reconnect_grace_ms);
-  renderDuration("replication.confirm_timeout_ms", data.settings.replication.confirm_timeout_ms);
-  renderDuration("replication.caught_up_poll_ms", data.settings.replication.caught_up_poll_ms);
-  renderDuration("replication.retry_poll_ms", data.settings.replication.retry_poll_ms);
-  renderDuration(
-    "replication.checkpoint_retry_poll_ms",
-    data.settings.replication.checkpoint_retry_poll_ms
-  );
-  field("replication.max_messages_per_read").value = data.settings.replication.max_messages_per_read;
-  field("replication.max_events_per_read").value = data.settings.replication.max_events_per_read;
-  field("replication.max_bytes_per_read").value = data.settings.replication.max_bytes_per_read;
-  field("replication.max_iterations_per_tick").value = data.settings.replication.max_iterations_per_tick;
-  field("replication.min_in_sync_replicas").value = data.settings.replication.min_in_sync_replicas;
-  renderDuration("replication.isr_timeout_ms", data.settings.replication.isr_timeout_ms);
-  field("replication.stream_enabled").checked = data.settings.replication.stream_enabled;
-  field("replication.stream_apply_linger_us").value = data.settings.replication.stream_apply_linger_us;
-  field("replication.stream_apply_max_merge_bytes").value =
-    data.settings.replication.stream_apply_max_merge_bytes;
-  field("replication.stream_buffer_batches").value = data.settings.replication.stream_buffer_batches;
-  field("replication.eager_failover").checked = data.settings.replication.eager_failover ?? false;
-  field("replication.eager_failover_grace_ms").value = data.settings.replication.eager_failover_grace_ms ?? 1000;
-  field("partitioning.default_partition_count").value = data.settings.partitioning.default_partition_count;
-  field("consumer_groups.default_target_per_consumer").value =
-    data.settings.consumer_groups.default_target_per_consumer ?? "";
-
+  for (const input of document.querySelectorAll("[data-runtime-setting]")) {
+    const [group, key] = input.id.split(".");
+    const value = currentSettings[group]?.[key];
+    input.disabled = value === undefined;
+    if (input.type === "checkbox") input.checked = value === true;
+    else if (field(`${input.id}.unit`)) renderDuration(input.id, value);
+    else input.value = value ?? "";
+  }
   currentLocks = data.locks || {};
   setDisabledForLockedGroups();
 }
@@ -695,6 +775,8 @@ function renderStartupConfig(data) {
   field("startup.tls_status").textContent = data.tls_status || "unknown";
   field("startup.keratin_fsync_interval_ms").textContent = `${data.keratin_fsync_interval_ms} ms`;
   field("startup.keratin_min_fsync_interval_ms").textContent = `${data.keratin_min_fsync_interval_ms} ms`;
+  field("startup.keratin_batch_linger_ms").textContent = `${data.keratin_batch_linger_ms} ms`;
+  field("startup.keratin_tail_cache_bytes").textContent = formatBytes(data.keratin_tail_cache_bytes);
   field("startup.keratin_segment_preallocate_bytes").textContent =
     data.keratin_segment_preallocate_bytes > 0 ? formatBytes(data.keratin_segment_preallocate_bytes) : "off";
   field("startup.keratin_writer_buffer_factor").textContent = `${data.keratin_writer_buffer_factor} (${64 * data.keratin_writer_buffer_factor} slots/channel)`;
@@ -722,47 +804,20 @@ function renderGlobalDlq(data) {
 }
 
 function collectSettings() {
-  return {
-    delivery: {
-      inflight_ttl_ms: durationMsValue("delivery.inflight_ttl_ms"),
-      expiry_poll_min_ms: durationMsValue("delivery.expiry_poll_min_ms"),
-      expiry_batch_max: numberValue("delivery.expiry_batch_max"),
-      delivery_poll_max_ms: durationMsValue("delivery.delivery_poll_max_ms"),
-    },
-    idle_queue_cleanup: {
-      enabled: field("idle_queue_cleanup.enabled").checked,
-      evict_after_ms: durationMsValue("idle_queue_cleanup.evict_after_ms"),
-      sweep_interval_ms: durationMsValue("idle_queue_cleanup.sweep_interval_ms"),
-      publisher_idle_timeout_ms: optionalDurationMsValue("idle_queue_cleanup.publisher_idle_timeout_ms"),
-    },
-    connection: {
-      reconnect_grace_ms: optionalDurationMsValue("connection.reconnect_grace_ms"),
-    },
-    replication: {
-      confirm_timeout_ms: durationMsValue("replication.confirm_timeout_ms"),
-      caught_up_poll_ms: durationMsValue("replication.caught_up_poll_ms"),
-      retry_poll_ms: durationMsValue("replication.retry_poll_ms"),
-      checkpoint_retry_poll_ms: durationMsValue("replication.checkpoint_retry_poll_ms"),
-      max_messages_per_read: numberValue("replication.max_messages_per_read"),
-      max_events_per_read: numberValue("replication.max_events_per_read"),
-      max_bytes_per_read: numberValue("replication.max_bytes_per_read"),
-      max_iterations_per_tick: numberValue("replication.max_iterations_per_tick"),
-      min_in_sync_replicas: numberValue("replication.min_in_sync_replicas"),
-      isr_timeout_ms: durationMsValue("replication.isr_timeout_ms"),
-      stream_enabled: field("replication.stream_enabled").checked,
-      stream_apply_linger_us: numberValue("replication.stream_apply_linger_us"),
-      stream_apply_max_merge_bytes: numberValue("replication.stream_apply_max_merge_bytes"),
-      stream_buffer_batches: numberValue("replication.stream_buffer_batches"),
-      eager_failover: field("replication.eager_failover").checked,
-      eager_failover_grace_ms: numberValue("replication.eager_failover_grace_ms"),
-    },
-    partitioning: {
-      default_partition_count: numberValue("partitioning.default_partition_count"),
-    },
-    consumer_groups: {
-      default_target_per_consumer: optionalNumberValue("consumer_groups.default_target_per_consumer"),
-    },
-  };
+  if (!currentSettings) throw new Error("Load settings before saving.");
+  const settings = structuredClone(currentSettings);
+  for (const input of document.querySelectorAll("[data-runtime-setting]")) {
+    const [group, key] = input.id.split(".");
+    if (input.disabled || settings[group]?.[key] === undefined) continue;
+    if (input.type === "checkbox") settings[group][key] = input.checked;
+    else if (input.hasAttribute("data-runtime-optional") && input.value.trim() === "") {
+      settings[group][key] = null;
+    } else {
+      settings[group][key] = field(`${input.id}.unit`)
+        ? durationMsValue(input.id) : numberValue(input.id);
+    }
+  }
+  return settings;
 }
 
 function collectGlobalDlqTarget() {
@@ -953,6 +1008,10 @@ async function loadCurrentQueueDlq() {
 
 async function saveSettings(event) {
   event.preventDefault();
+  if (!currentSettings) {
+    setMessage("Load settings before saving.", "error");
+    return;
+  }
   const response = await fetch("/admin/api/runtime-settings", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },

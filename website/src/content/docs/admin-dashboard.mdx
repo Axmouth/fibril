@@ -245,14 +245,23 @@ which offsets were replayed and which were skipped.
 
 ## Runtime Settings
 
-The settings page shows live broker settings and storage-owned runtime settings
-that can be updated while the process is running. Locked settings are shown as
-locked and cannot be edited through the dashboard. This includes the replication
-and streaming-replication settings when running in a cluster.
+The settings page exposes delivery, connection lifecycle, replication, partitioning,
+consumer-group defaults, idle queue cleanup and Plexus stream settings. The startup
+summary shows this node's storage configuration, including batching, tail-cache
+budget, writer buffers, adaptive staging and segment sizing; these values remain
+read-only and require a restart.
 
-Saving a settings group sends every field in that group, so values you do not
-change are preserved. Updates use a version check: if the settings changed since
-you loaded the page, the save is rejected and you are asked to reload and resubmit.
+Broker runtime settings are node-local in standalone mode and cluster-authoritative
+in coordinated mode. Saving preserves the complete loaded settings document,
+including fields not represented by the current form. A version conflict reloads
+the current document for review before another save. Startup-locked settings are
+shown as locked and cannot be edited through the dashboard.
+
+A successful save persists the requested settings. Workers adopt them at their
+supported boundaries: cursor batching reads the next batch's settings, replication
+buffer depth applies to the next replication stream, and an active drain keeps its original
+handoff timeout. Cluster propagation and worker adoption are asynchronous; the page
+does not yet report an applied version for every worker.
 
 Global DLQ target changes are persisted in storage-owned state and survive
 restart.

@@ -35,12 +35,13 @@
   const runtime = {
     delivery: { inflight_ttl_ms: 30000, expiry_poll_min_ms: 100, expiry_batch_max: 1024, delivery_poll_max_ms: 1000 },
     idle_queue_cleanup: { enabled: true, evict_after_ms: 60000, sweep_interval_ms: 10000, publisher_idle_timeout_ms: 30000 },
-    connection: { reconnect_grace_ms: 10000 },
-    replication: { confirm_timeout_ms: 10000, caught_up_poll_ms: 5, retry_poll_ms: 100,
+    connection: { reconnect_grace_ms: 10000, drain_handoff_timeout_ms: null, resume_session_restart_ttl_ms: 60000 },
+    replication: { eager_failover: false, eager_failover_grace_ms: 1000, read_timeout_slack_ms: 1000, owner_connect_timeout_ms: 5000, confirm_timeout_ms: 10000, caught_up_poll_ms: 5, retry_poll_ms: 100,
       checkpoint_retry_poll_ms: 1000, max_messages_per_read: 4096, max_events_per_read: 8192,
       max_bytes_per_read: 4194304, max_iterations_per_tick: 16, min_in_sync_replicas: 2,
       isr_timeout_ms: 10000, stream_enabled: true, stream_apply_linger_us: 100,
       stream_apply_max_merge_bytes: 1048576, stream_buffer_batches: 64 },
+    stream: { cursor_commit_window_us: 100, cursor_commit_max_batch: 1024, idle_evict_enabled: false, idle_evict_after_ms: 600000, idle_sweep_interval_ms: 60000 },
     partitioning: { default_partition_count: 1 }, consumer_groups: { default_target_per_consumer: null },
   };
   const fixtures = {
@@ -84,7 +85,7 @@
     'runtime-settings': { version: 3, settings: runtime, locks: {}, load_issue: null },
     'startup-config': { data_dir: '/example/fibril-data', broker_bind: '0.0.0.0:9876', admin_bind: '0.0.0.0:8081',
       tls_status: 'disabled (sample configuration)', admin_auth_enabled: false,
-      keratin_fsync_interval_ms: 5, keratin_min_fsync_interval_ms: 0, keratin_segment_preallocate_bytes: 0,
+      keratin_fsync_interval_ms: 5, keratin_min_fsync_interval_ms: 0, keratin_batch_linger_ms: 5, keratin_tail_cache_bytes: 67108864, keratin_segment_preallocate_bytes: 0,
       keratin_max_inflight_fsyncs: 8, keratin_pipeline_commit_records: 2048,
       keratin_writer_buffer_factor: 16, keratin_adaptive_staging: true,
       keratin_staging_decay_secs: 10, keratin_staging_idle_release_secs: 60,
