@@ -1,7 +1,7 @@
 //! Explicit, read-only comparison of two previously collected sealed witnesses.
 //! This diagnostic path never selects a source, installs state or activates it.
 
-use super::replication::{request_recovery_read, ProtocolOwnerPeerResolverConfig};
+use super::replication::{request_recovery_read_reusing, ProtocolOwnerPeerResolverConfig};
 use fibril_broker::{
     broker::BrokerError,
     recovery::{
@@ -201,15 +201,19 @@ async fn inspect_pair_inner<T: Send + 'static>(
         .map_err(BrokerError::InvalidArgument)?;
     }
     let inspect = async {
+        let mut left_connection = None;
+        let mut right_connection = None;
         while let Some((side, request)) = inspector
             .next_read()
             .map_err(BrokerError::InvalidArgument)?
         {
-            let replica = match side {
-                RecoverySide::Left => left,
-                RecoverySide::Right => right,
+            let (replica, connection) = match side {
+                RecoverySide::Left => (left, &mut left_connection),
+                RecoverySide::Right => (right, &mut right_connection),
             };
-            let page = request_recovery_read(config, command, replica, &request, deadline).await?;
+            let page = request_recovery_read_reusing(
+                config, command, replica, &request, deadline, connection,
+            ).await?;
             let page = RecoveryReadPage {
                 history_id: page.history_id,
                 source: request.source,

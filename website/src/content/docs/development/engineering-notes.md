@@ -10,6 +10,10 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Reusing authenticated inspection connections
+
+Recovery inspection reuses one authenticated connection per source within a bounded inspection; each page still receives fresh authorization and identity validation. Requests own their socket while in flight, so timeout, cancellation and invalid replies discard it before a retry. The 100k-backlog SATA gate passed at 42.17 seconds after artifact reuse measured 42.50 seconds, a difference too small to establish a speedup from these single runs.
+
 ### Reusing the selected recovery artifact
 
 The recovery driver keeps the selected replay artifact through plan persistence and verifies it against the committed plan before use, avoiding a second reconstruction in the same attempt. Completed target snapshots remain preferred, and resumed attempts reconstruct the source when no local artifact exists. The 100k-backlog SATA gate passed at 42.50 seconds to readiness, compared with 50.72 seconds before this change; repeated recovery and restart tests also passed.

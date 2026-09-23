@@ -2175,6 +2175,21 @@ pub async fn request_recovery_read(
     request: &fibril_broker::recovery::RecoveryReadRequest,
     deadline: std::time::Duration,
 ) -> Result<crate::v1::RecoveryReadOk, BrokerError> {
+    request_recovery_read_reusing(config, command, sealed, request, deadline, &mut None).await
+}
+
+/// The caller scopes this slot to one immutable source/seal and inspection.
+/// Take ownership before awaiting: cancellation, timeout or any reply error drops
+/// the socket. Only a fully consumed and identity-validated response returns it.
+pub(super) async fn request_recovery_read_reusing(
+    config: &ProtocolOwnerPeerResolverConfig,
+    command: &fibril_broker::recovery::RecoverySealCommand,
+    sealed: &fibril_broker::recovery::BrokerSealedReplica,
+    request: &fibril_broker::recovery::RecoveryReadRequest,
+    deadline: std::time::Duration,
+    idle: &mut Option<Conn>,
+) -> Result<crate::v1::RecoveryReadOk, BrokerError> {
+    let cached = idle.take();
     use fibril_broker::recovery::RecoveryReadSource;
     if request.seal != sealed.seal.request
         || request.history_id != sealed.seal.history.id
@@ -2212,15 +2227,17 @@ pub async fn request_recovery_read(
         max_bytes: request.max_bytes,
     };
     let operation = async {
-        let mut conn = open_protocol_owner_conn(
-            addr.clone(),
-            config.auth.as_ref(),
-            config.tls.as_ref(),
-            &config.client_name,
-            &config.client_version,
-            config.owner_connect_timeout_ms,
-        )
-        .await?;
+        let mut conn = match cached {
+            Some(conn) => conn,
+            None => open_protocol_owner_conn(
+                addr.clone(),
+                config.auth.as_ref(),
+                config.tls.as_ref(),
+                &config.client_name,
+                &config.client_version,
+                config.owner_connect_timeout_ms,
+            ).await?,
+        };
         conn.send(try_encode(Op::RecoveryRead, 3, &wire_request).map_err(protocol_error)?)
             .await
             .map_err(|err| BrokerError::Unknown(format!("recovery read send failed: {err}")))?;
@@ -2228,6 +2245,7 @@ pub async fn request_recovery_read(
             .await
             .map_err(|err| BrokerError::Unknown(format!("recovery read failed: {err}")))?;
         validate_recovery_read_reply(&sealed.node_id, &wire_request, &sealed.seal.history, &reply)?;
+        *idle = Some(conn);
         Ok(reply)
     };
     tokio::time::timeout(deadline, operation)
@@ -2301,6 +2319,95 @@ mod recovery_read_tests {
     use super::*;
     use crate::v1::{RecoveryRead, RecoveryReadOk, RecoverySeal, ReplicationMessageRecord};
     use fibril_broker::recovery::RetainedHistoryIdentity;
+
+    #[tokio::test]
+    async fn inspection_socket_reuse_discards_timeout_cancelled_and_invalid_replies() {
+        use std::time::Duration;
+        use fibril_broker::recovery::{RecoverySealCommand, RecoveryReadRequest, RecoveryReadSource};
+        let listener = fibril_util::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let handshakes = Arc::new(AtomicU64::new(0));
+        let auths = Arc::new(AtomicU64::new(0));
+        let reads = Arc::new(AtomicU64::new(0));
+        let counts = (handshakes.clone(), auths.clone(), reads.clone());
+        let server = tokio::spawn(async move {
+            let mut tasks = tokio::task::JoinSet::new();
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                let (handshakes, auths, reads) = counts.clone();
+                tasks.spawn(async move {
+                    let mut conn = helper::plain_conn(socket);
+                    while let Some(Ok(frame)) = conn.next().await {
+                        let response = match frame.opcode {
+                            op if op == Op::Hello as u16 => {
+                                handshakes.fetch_add(1, Ordering::SeqCst);
+                                try_encode(Op::HelloOk, frame.request_id, &HelloOk {
+                                    protocol_version: PROTOCOL_V1,
+                                    owner_id: uuid::Uuid::nil(), client_id: uuid::Uuid::nil(),
+                                    resume_token: uuid::Uuid::nil(), resume_outcome: crate::v1::ResumeOutcome::New,
+                                    server_name: "test".into(), compliance: crate::v1::COMPLIANCE_STRING.into(),
+                                }).unwrap()
+                            }
+                            op if op == Op::Auth as u16 => {
+                                let auth: Auth = try_decode(&frame).unwrap();
+                                assert_eq!(auth.username, "@node");
+                                assert_eq!(auth.password, "secret");
+                                auths.fetch_add(1, Ordering::SeqCst);
+                                try_encode(Op::AuthOk, frame.request_id, &()).unwrap()
+                            }
+                            op if op == Op::RecoveryRead as u16 => {
+                                let n = reads.fetch_add(1, Ordering::SeqCst) + 1;
+                                if n == 3 || n == 7 {
+                                    // Consume the request, but leave its response incomplete.
+                                    assert!(conn.next().await.is_none());
+                                    return;
+                                }
+                                let req: RecoveryRead = try_decode(&frame).unwrap();
+                                try_encode(Op::RecoveryReadOk, frame.request_id, &RecoveryReadOk {
+                                    replica_id: "b".into(), transition: req.seal.transition,
+                                    fence_epoch: req.seal.fence_epoch,
+                                    history_id: if n == 5 { [99; 32] } else { req.history_id },
+                                    source: req.source, from: 0, next: 0, end: 0,
+                                    records: vec![], snapshot_bytes: vec![],
+                                }).unwrap()
+                            }
+                            _ => panic!("unexpected operation"),
+                        };
+                        if conn.send(response).await.is_err() { return; }
+                    }
+                });
+            }
+        });
+        let command = RecoverySealCommand {
+            topic: "q".into(), partition: Partition::new(0), group: None, stream: false,
+            transition: [1; 32], fence_epoch: 8,
+        };
+        let sealed = validate_recovery_seal_reply("b", &command, crate::v1::RecoverySealOk {
+            storage_history: None, replica_id: "b".into(), transition: [1; 32], fence_epoch: 8,
+            history_version: 1, history_id: [2; 32], message_digest: [3; 32], event_digest: [4; 32],
+            snapshot_digest: None, message_head: 0, message_next: 0, event_head: 0, event_next: 0,
+        }).unwrap();
+        let request = RecoveryReadRequest { seal: sealed.seal.request.clone(), history_id: sealed.seal.history.id,
+            source: RecoveryReadSource::Messages, from: 0, max_records: 1, max_bytes: 32 };
+        let config = ProtocolOwnerPeerResolverConfig::new(HashMap::from([("b".into(), address)]))
+            .with_auth("@node", "secret");
+        let mut idle = None;
+        for n in 1..=8 {
+            let deadline = if n == 3 { Duration::from_millis(100) } else { Duration::from_secs(3) };
+            let call = request_recovery_read_reusing(&config, &command, &sealed, &request, deadline, &mut idle);
+            if n == 7 {
+                assert!(tokio::time::timeout(Duration::from_millis(100), call).await.is_err());
+            } else {
+                assert_eq!(call.await.is_err(), n == 3 || n == 5);
+            }
+            assert_eq!(idle.is_none(), n == 3 || n == 5 || n == 7);
+        }
+        assert_eq!(reads.load(Ordering::SeqCst), 8);
+        assert_eq!(handshakes.load(Ordering::SeqCst), 4);
+        assert_eq!(auths.load(Ordering::SeqCst), 4);
+        drop(idle);
+        server.abort();
+    }
 
     #[test]
     fn read_reply_rejects_wrong_identity_holes_bounds_and_budget_violations() {
