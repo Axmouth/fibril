@@ -10,6 +10,14 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Raft sockets after cancellation and peer restart
+
+A stopped embedded Raft core could keep answering fatal errors on a cached socket, preventing retries from reaching its replacement. Requests now own their socket until a complete response arrives; cancellation, failed exchanges and fatal replies retire it. Two deterministic regressions and the repeated learner-restart acceptance test cover the repair ([Ganglion 7e96cf0](https://github.com/Axmouth/ganglion/commit/7e96cf0)).
+
+### Metadata TCP delays during recovery
+
+Small recovery operations repeatedly spent around 170 ms waiting on quorum-backed metadata authorization. Enabling `TCP_NODELAY` on Ganglion's accepted/dialed TCP connections and forwarded writes reduced the measured recovery attempt from 6.75–6.96 s to 0.81–1.22 s across two controls and three changed single-host, three-replica SATA runs with one confirmed 1 KiB message. Durability and recovery authority checks are unchanged; larger histories, loaded clusters and pending-subscription recovery remain separate acceptance work.
+
 ### Node-local segment preallocation
 
 Storage preallocation can now be changed from the serving node's dashboard, with durable overrides and revision checks. Logs sample the shared policy at segment creation/reopen, keep existing segments unchanged, and report pending adoption or filesystem allocation fallback. Tests cover concurrent edits, caller cancellation, restart/reset, failed persistence, node isolation, rollover and recovery staging.

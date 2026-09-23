@@ -78,6 +78,25 @@ replication lag in the local metadata view from missing receipts or failed work.
 The current one-second worker poll, serial RPCs, fresh connections and whole-attempt
 retries are investigation leads; their individual costs are not yet measured.
 
+### Initial transport result
+
+A release-build three-replica, majority-durable SATA test with one confirmed 1 KiB
+message isolated repeated small metadata RPC delays. Enabling `TCP_NODELAY` on
+Ganglion's real TCP transport reduced the recovery attempt from 6.75–6.96 seconds
+to 0.81–1.22 seconds across two control and three changed runs, including a final
+run with the connection-lifecycle repair. Owner readiness moved
+from 8.8–9.3 seconds after the kill to 2.87–3.14 seconds. The fresh-subscription
+probe's first delivery moved from 9.5–11.2 seconds to 3.73–4.00 seconds; its two-second
+attempt timeout, routing and reconnect costs remain part of that measurement.
+These are small single-host acceptance measurements, not a failover guarantee.
+
+Every successful case checked confirmed-message recovery, new durable publication
+and convergence after old-owner restart. A separate subscription begun during
+recovery remained pending despite ready work in two diagnostic runs. Isolate that
+client/server transition before claiming uninterrupted recovery for existing
+subscriptions. A continuously attempting publisher, larger histories, healthy
+traffic, and combined owner/metadata-leader loss still need matched measurements.
+
 ### 2. Reduce overhead with the existing recovery proof
 
 Evaluate changes individually against that baseline:

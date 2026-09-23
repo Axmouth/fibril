@@ -25,6 +25,7 @@ impl RaftDialer for TlsRaftDialer {
 
     async fn dial(&self, addr: &str) -> io::Result<Self::Stream> {
         let tcp = TcpStream::connect(addr).await?;
+        tcp.set_nodelay(true)?;
         let host = addr
             .rsplit_once(':')
             .map(|(host, _)| host)
