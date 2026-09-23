@@ -10,6 +10,10 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Node-local segment preallocation
+
+Storage preallocation can now be changed from the serving node's dashboard, with durable overrides and revision checks. Logs sample the shared policy at segment creation/reopen, keep existing segments unchanged, and report pending adoption or filesystem allocation fallback. Tests cover concurrent edits, caller cancellation, restart/reset, failed persistence, node isolation, rollover and recovery staging.
+
 ### Dashboard settings preservation
 
 Saving an unrelated runtime setting rebuilt an incomplete document, resetting omitted connection, replication and Plexus stream settings to deserialization defaults. The form now edits a copy of the full loaded document, exposes every current runtime field and retains the version check; regression tests cover preservation, reloads, optional values, locks and duration conversion. A template coverage test compares controls against the serialized Rust settings model so newly added fields cannot silently miss the dashboard.

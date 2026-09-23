@@ -499,6 +499,50 @@ PUT /admin/api/runtime-settings
 
 Update requests include an `expected_version`. If another operator changed settings first, the API returns `409 Conflict` with the current settings instead of overwriting them.
 
+## Node-local Storage Settings
+
+The dashboard's **Node-local Storage** section edits the node serving that
+page. Use that node's dashboard address; this endpoint does not forward edits to
+another node. These overrides remain local even in a coordinated cluster.
+
+```http
+GET /admin/api/local-storage-settings
+PUT /admin/api/local-storage-settings
+```
+
+A PUT contains the node identity and revision returned by GET:
+
+```json
+{
+  "node_id": "broker-1",
+  "expected_version": 0,
+  "segment_preallocate_bytes": 1048576
+}
+```
+
+`segment_preallocate_bytes` sets the allocation chunk for message, event and
+internal metadata logs. Zero disables preallocation; `null` removes the override
+and follows `storage.keratin.segment_preallocate_bytes` from startup configuration.
+The override is durably saved before publication and survives restart. Startup
+file/environment/CLI changes remain the fallback until the override is reset.
+A stale revision returns `409 Conflict`; a different node identity is rejected.
+
+Existing segments keep their policy. Each log adopts the latest revision when
+creating or reopening an active segment, including recovery-created logs. Saving
+does not force rollover or resize current segments, so a quiet log can remain
+pending indefinitely. Future logs use the latest revision immediately. The shared
+configuration is sampled at these boundaries, without synchronization per record.
+
+The response reports the accepted revision, requested and startup values, pending
+log count, and each open log's adopted revision and effective allocation chunk.
+Filesystem allocation is best-effort: failure emits a warning, reports the error
+and effective zero, and retains normal extending writes. A later segment retries
+allocation. Closed logs are absent from the inventory. Applied status describes
+policy adoption, not a change to publish durability or an all-logs transaction.
+
+Fsync cadence, batching and adaptive-buffer settings remain startup-only. This
+endpoint has the same administrator authentication as other settings endpoints.
+
 ## Other Persisted Runtime Settings
 
 Some live settings are owned by storage-level state rather than the broker

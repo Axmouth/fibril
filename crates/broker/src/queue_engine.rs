@@ -9,18 +9,19 @@ use stroma_core::{
     AckEventMeta, CompletionPair, NackEventMeta, PublishItem, StromaDebugSnapshot, StromaMetrics,
 };
 pub use stroma_core::{
-    AdaptiveStagingConfig, EmptyBufferResize,
-    AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, DestroyOutcome, DiskUsedBreakdownEntry,
-    EnqueuedStreamAppend, EvictOutcome, FollowerStateCheckpointInstall,
-    FollowerStateCheckpointInstallOutcome, GlobalDLQ, GlobalDlqSnapshot, GlobalDlqUpdateOutcome,
-    GlobalKey, GlobalStore, GlobalValue, InspectMode, IoError, KDurability,
-    KeratinAppendCompletion, KeratinConfig, Message, MessageContentType, MessageHeaders,
-    MessageInspectionPage, MessageInspectionStatus, OwnerReplicationBatch, OwnerReplicationRead,
-    OwnerStateCheckpoint, PartitionKind, PutOutcome, QuarantineInfo, QueueInspectionState,
-    QueuePromotionOutcome, RecoveryMismatchPolicy, ReplicatedAppendOutcome, ReplicatedEventBatch,
-    ReplicatedMessageBatch, ReplicatedQueueApplyOutcome, RetentionConfig, SnapshotConfig, Stroma,
-    StromaError, StromaEvent, StromaKeratinConfig, StorageHistoryBinding, PreparedStorageHistory,
-    PreparedQueueRecovery, QueueRecoveryStage, QueueRecoveryStageSpec, QueueRecoveryStageReceipt, RecoveryStageLimits,
+    AdaptiveStagingConfig, AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, DestroyOutcome,
+    DiskUsedBreakdownEntry, EmptyBufferResize, EnqueuedStreamAppend, EvictOutcome,
+    FollowerStateCheckpointInstall, FollowerStateCheckpointInstallOutcome, GlobalDLQ,
+    GlobalDlqSnapshot, GlobalDlqUpdateOutcome, GlobalKey, GlobalStore, GlobalValue, InspectMode,
+    IoError, KDurability, KeratinAppendCompletion, KeratinConfig, LogRuntimeConfig,
+    LogRuntimeSettings, LogRuntimeSnapshot, LogRuntimeStatus, Message, MessageContentType,
+    MessageHeaders, MessageInspectionPage, MessageInspectionStatus, OwnerReplicationBatch,
+    OwnerReplicationRead, OwnerStateCheckpoint, PartitionKind, PreparedQueueRecovery,
+    PreparedStorageHistory, PutOutcome, QuarantineInfo, QueueInspectionState,
+    QueuePromotionOutcome, QueueRecoveryStage, QueueRecoveryStageReceipt, QueueRecoveryStageSpec,
+    RecoveryMismatchPolicy, RecoveryStageLimits, ReplicatedAppendOutcome, ReplicatedEventBatch,
+    ReplicatedMessageBatch, ReplicatedQueueApplyOutcome, RetentionConfig, SnapshotConfig,
+    StorageHistoryBinding, Stroma, StromaError, StromaEvent, StromaKeratinConfig,
 };
 use tokio::sync::Notify;
 
@@ -547,6 +548,18 @@ impl StromaEngine {
         snap_cfg: SnapshotConfig,
     ) -> Result<Self, StromaError> {
         let stroma = Stroma::open(root, keratin_cfg, snap_cfg).await?;
+        Ok(Self {
+            inner: Arc::new(stroma),
+        })
+    }
+
+    pub async fn open_with_runtime(
+        root: impl AsRef<Path>,
+        keratin_cfg: StromaKeratinConfig,
+        snap_cfg: SnapshotConfig,
+        runtime: Arc<LogRuntimeSettings>,
+    ) -> Result<Self, StromaError> {
+        let stroma = Stroma::open_with_runtime(root, keratin_cfg, snap_cfg, runtime).await?;
         Ok(Self {
             inner: Arc::new(stroma),
         })

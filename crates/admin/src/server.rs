@@ -263,6 +263,8 @@ pub struct AdminServer {
     pub storage: Arc<dyn QueueEngine + Send + Sync>,
     pub broker_queue_observability: Option<Arc<BrokerQueueObservability>>,
     pub runtime_settings: Option<Arc<RuntimeSettingsManager>>,
+    pub local_storage_settings:
+        Option<Arc<fibril_broker::local_storage_settings::LocalStorageSettings>>,
     pub sessions: AdminSessions,
     pub coordination: Option<Arc<dyn fibril_broker::Coordination>>,
     pub consensus_topology: Option<Arc<ConsensusTopologyProvider>>,
@@ -355,6 +357,7 @@ impl AdminServer {
             storage,
             broker_queue_observability,
             runtime_settings,
+            local_storage_settings: None,
             sessions: AdminSessions::default(),
             coordination: None,
             consensus_topology: None,
@@ -516,6 +519,14 @@ impl AdminServer {
         self
     }
 
+    pub fn with_local_storage_settings(
+        mut self,
+        settings: Arc<fibril_broker::local_storage_settings::LocalStorageSettings>,
+    ) -> Self {
+        self.local_storage_settings = Some(settings);
+        self
+    }
+
     /// Attach the cluster-authoritative runtime-settings store.
     pub fn with_runtime_settings_cluster(
         mut self,
@@ -621,6 +632,10 @@ impl AdminServer {
                 get(routes::runtime_settings).put(routes::update_runtime_settings),
             )
             .route("/admin/api/startup-config", get(routes::startup_config))
+            .route(
+                "/admin/api/local-storage-settings",
+                get(routes::local_storage_settings).put(routes::update_local_storage_settings),
+            )
             .route("/admin/api/topology", get(routes::topology))
             .route("/admin/api/cohorts", get(routes::cohorts))
             .route(
@@ -1253,10 +1268,19 @@ mod tests {
     ) -> Arc<AdminServer> {
         let root = std::env::temp_dir().join(format!("fibril-admin-{}", fastrand::u64(..)));
         std::fs::create_dir_all(&root).unwrap();
-        let engine = StromaEngine::open(
+        let log_runtime = Arc::new(
+            fibril_broker::queue_engine::LogRuntimeSettings::new(
+                fibril_broker::queue_engine::LogRuntimeConfig {
+                    segment_preallocate_bytes: 0,
+                },
+            )
+            .unwrap(),
+        );
+        let engine = StromaEngine::open_with_runtime(
             &root,
             StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
             SnapshotConfig::default(),
+            log_runtime.clone(),
         )
         .await
         .unwrap();
@@ -1267,42 +1291,55 @@ mod tests {
         )
         .await
         .unwrap();
+        let local_storage_settings =
+            fibril_broker::local_storage_settings::LocalStorageSettings::load(
+                "test-node".into(),
+                root.clone(),
+                0,
+                engine.global_store().await.unwrap(),
+                log_runtime,
+            )
+            .await
+            .unwrap();
         let admin_auth_enabled = auth.is_some();
-        Arc::new(AdminServer::new(
-            Metrics::new(60),
-            engine.metrics(),
-            AdminConfig {
-                bind: "127.0.0.1:0".into(),
-                auth,
-                tls: None,
-                metrics_per_channel: true,
-            },
-            Some(StartupConfigSummary {
-                data_dir: root.display().to_string(),
-                tls_status: "disabled".to_string(),
-                broker_bind: "127.0.0.1:9876".into(),
-                admin_bind: "127.0.0.1:0".into(),
-                admin_auth_enabled,
-                keratin_fsync_interval_ms: 5,
-                keratin_min_fsync_interval_ms: 0,
-                keratin_batch_linger_ms: 5,
-                keratin_tail_cache_bytes: 64 * 1024 * 1024,
-                keratin_segment_preallocate_bytes: 0,
-                keratin_writer_buffer_factor: 16,
-                keratin_adaptive_staging: true,
-                keratin_staging_decay_secs: 10,
-                keratin_staging_idle_release_secs: 60,
-                keratin_max_inflight_fsyncs: 8,
-                keratin_pipeline_commit_records: 2048,
-                keratin_message_log_segment_max_bytes: 16 * 1024 * 1024,
-                keratin_event_log_segment_max_bytes: 16 * 1024 * 1024,
-                coordination_heartbeat_interval_ms: 3000,
-                coordination_liveness_ttl_ms: 9000,
-            }),
-            Arc::new(engine),
-            None,
-            Some(Arc::new(runtime_settings)),
-        ))
+        Arc::new(
+            AdminServer::new(
+                Metrics::new(60),
+                engine.metrics(),
+                AdminConfig {
+                    bind: "127.0.0.1:0".into(),
+                    auth,
+                    tls: None,
+                    metrics_per_channel: true,
+                },
+                Some(StartupConfigSummary {
+                    data_dir: root.display().to_string(),
+                    tls_status: "disabled".to_string(),
+                    broker_bind: "127.0.0.1:9876".into(),
+                    admin_bind: "127.0.0.1:0".into(),
+                    admin_auth_enabled,
+                    keratin_fsync_interval_ms: 5,
+                    keratin_min_fsync_interval_ms: 0,
+                    keratin_batch_linger_ms: 5,
+                    keratin_tail_cache_bytes: 64 * 1024 * 1024,
+                    keratin_segment_preallocate_bytes: 0,
+                    keratin_writer_buffer_factor: 16,
+                    keratin_adaptive_staging: true,
+                    keratin_staging_decay_secs: 10,
+                    keratin_staging_idle_release_secs: 60,
+                    keratin_max_inflight_fsyncs: 8,
+                    keratin_pipeline_commit_records: 2048,
+                    keratin_message_log_segment_max_bytes: 16 * 1024 * 1024,
+                    keratin_event_log_segment_max_bytes: 16 * 1024 * 1024,
+                    coordination_heartbeat_interval_ms: 3000,
+                    coordination_liveness_ttl_ms: 9000,
+                }),
+                Arc::new(engine),
+                None,
+                Some(Arc::new(runtime_settings)),
+            )
+            .with_local_storage_settings(local_storage_settings),
+        )
     }
 
     async fn response_json(response: axum::response::Response) -> serde_json::Value {
@@ -2995,6 +3032,82 @@ mod tests {
         assert_eq!(body["settings"]["replication"]["eager_failover_grace_ms"], 1000);
         assert_eq!(body["locks"]["idle_queue_cleanup"], false);
         assert!(body["load_issue"].is_null());
+    }
+
+    #[tokio::test]
+    async fn local_storage_api_targets_serving_node_and_reports_pending_application() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server.clone());
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/local-storage-settings")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let initial = response_json(response).await;
+        assert_eq!(initial["node_id"], "test-node");
+        assert_eq!(initial["version"], 0);
+        assert!(!initial["logs"].as_array().unwrap().is_empty());
+        for (node, version, bytes, status) in [
+            ("other-node", 0, 4096, StatusCode::BAD_REQUEST),
+            ("test-node", 0, 4096, StatusCode::OK),
+            ("test-node", 0, 8192, StatusCode::CONFLICT),
+        ] {
+            let response = app.clone().oneshot(Request::builder().method("PUT")
+                .uri("/admin/api/local-storage-settings").header("content-type", "application/json")
+                .body(Body::from(json!({"node_id":node,"expected_version":version,"segment_preallocate_bytes":bytes}).to_string())).unwrap())
+                .await.unwrap();
+            assert_eq!(response.status(), status);
+        }
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/local-storage-settings")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let saved = response_json(response).await;
+        assert_eq!(saved["version"], 1);
+        assert_eq!(saved["requested_preallocate_bytes"], 4096);
+        assert!(saved["pending_logs"].as_u64().unwrap() > 0);
+        assert_eq!(
+            server.runtime_settings.as_ref().unwrap().current().settings,
+            RuntimeSettings::default()
+        );
+        server.storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_storage_api_requires_admin_auth_for_read_and_write() {
+        let server =
+            test_server_with_auth(RuntimeSettingsLocks::default(), Some(test_auth())).await;
+        let app = AdminServer::router(server.clone());
+        for method in ["GET", "PUT"] {
+            let request=Request::builder().method(method).uri("/admin/api/local-storage-settings")
+                .header("content-type","application/json")
+                .body(Body::from(json!({"node_id":"test-node","expected_version":0,"segment_preallocate_bytes":4096}).to_string())).unwrap();
+            assert_eq!(
+                app.clone().oneshot(request).await.unwrap().status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        assert_eq!(
+            server
+                .local_storage_settings
+                .as_ref()
+                .unwrap()
+                .status()
+                .await
+                .version,
+            0
+        );
+        server.storage.shutdown().await.unwrap();
     }
 
     #[tokio::test]

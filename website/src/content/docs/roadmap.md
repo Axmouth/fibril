@@ -139,16 +139,11 @@ The compatibility work follows this order:
   runtime API and the dashboard. Report requested versus locally applied settings,
   node/cluster scope and application boundaries; complete safe startup visibility
   for coordination and listener configuration.
-- Add a node-local dashboard settings section with explicitly targeted updates,
-  durable local overrides and defined precedence over startup configuration.
-  Introduce validated Keratin configuration updates for existing and future logs.
-  Publish coherent configuration snapshots and adopt them at operation boundaries,
-  keeping configuration synchronization out of per-record hot loops.
-  Start with preallocation applied at the next segment creation; classify fsync,
-  batching and adaptive-buffer controls by their safe application boundary.
-  Show requested and effective values, pending application and failures. Preserve
-  in-flight durability requirements and validate concurrent writes, failed updates,
-  restart persistence and isolation from other nodes.
+- Extend node-local storage settings with explicit remote-node routing and classify
+  fsync, batching and adaptive-buffer controls by their safe application boundary.
+  Preserve in-flight durability requirements. Extend failure acceptance to full-disk
+  persistence and process interruption during updates; report applied versions for
+  settings beyond segment preallocation.
 - Assess live updates for coordination heartbeat interval and liveness TTL,
   with coupled validation, safe adoption across nodes, controller propagation,
   admin visibility and rollback. Keep Raft election timing separate.

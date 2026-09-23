@@ -432,7 +432,7 @@
   <section class="settings-section settings-form-secondary" id="startup-config-section" hidden>
     <div class="settings-section-heading">
       <h5>Startup Config</h5>
-      <p>Read-only settings for this node, loaded from defaults, TOML, environment, and CLI. Changes require a broker restart.</p>
+      <p>Read-only settings for this node, loaded from defaults, TOML, environment, and CLI. These startup values require a restart to change. The node-local storage section can override preallocation without a restart.</p>
     </div>
 
     <dl class="settings-readonly-grid">
@@ -524,6 +524,37 @@
       </div>
     </dl>
   </section>
+
+  <form id="local-storage-form" class="settings-form-secondary" hidden>
+    <section class="settings-section">
+      <div class="settings-section-heading">
+        <h5>Node-local Storage</h5>
+        <p>Changes affect only <strong id="local-storage.node"></strong>, the node serving this dashboard. To edit another node, open its dashboard. Overrides survive restart and take precedence over its startup configuration.</p>
+      </div>
+      <div id="local-storage.message" class="settings-message" role="status"></div>
+      <label class="checkbox-label">
+        <input id="local-storage.override" type="checkbox">
+        <span class="settings-label">Override startup preallocation</span>
+      </label>
+      <label class="settings-field">
+        <span class="settings-label">Segment preallocation (bytes)</span>
+        <span class="settings-help">Zero disables preallocation. Applies to message, event and internal metadata logs when they next roll over or reopen. Existing segments keep their policy; no rollover is forced. Filesystem allocation failures fall back to extending writes and appear below.</span>
+        <input id="local-storage.bytes" type="number" min="0" max="9007199254740991" step="1" required>
+      </label>
+      <p id="local-storage.summary" class="settings-help"></p>
+      <div class="settings-actions">
+        <button class="btn btn-primary" type="submit">Save node storage settings</button>
+        <button class="btn" id="local-storage.reload" type="button">Refresh status</button>
+      </div>
+      <p class="settings-help">Uncheck the override and save to use this node's startup value again. Idle logs may remain pending until they roll over or reopen. Refresh to check adoption.</p>
+      <div class="table-responsive">
+        <table class="admin-table">
+          <thead><tr><th>Log</th><th>Segment</th><th>Applied revision</th><th>Effective preallocation</th><th>Status</th></tr></thead>
+          <tbody id="local-storage.logs"></tbody>
+        </table>
+      </div>
+    </section>
+  </form>
 
   <form id="global-dlq-form" class="settings-form-secondary">
     <input type="hidden" id="global-dlq.version">
@@ -639,6 +670,7 @@
 <script>
 let currentLocks = {};
 let currentSettings = null;
+let currentLocalStorage = null;
 let currentGlobalDlqTarget = null;
 
 function field(id) {
@@ -818,6 +850,68 @@ function collectSettings() {
     }
   }
   return settings;
+}
+
+function renderLocalStorage(data) {
+  currentLocalStorage = data;
+  field("local-storage-form").hidden = false;
+  field("local-storage.node").textContent = data.node_id;
+  field("local-storage.override").checked = data.override_preallocate_bytes !== null;
+  field("local-storage.bytes").value = data.requested_preallocate_bytes;
+  field("local-storage.bytes").disabled = data.override_preallocate_bytes === null;
+  field("local-storage.summary").textContent = `Accepted revision ${data.version}: ${formatBytes(data.requested_preallocate_bytes)}. Startup value: ${formatBytes(data.startup_preallocate_bytes)}. ${data.pending_logs} log(s) awaiting rollover or reopen; ${data.failed_logs} allocation fallback(s).`;
+  const body = field("local-storage.logs");
+  body.replaceChildren();
+  for (const log of data.logs) {
+    const row = document.createElement("tr");
+    const status = log.allocation_error
+      ? `Allocation fallback: ${log.allocation_error}`
+      : log.applied_revision === data.version ? "Applied" : "Pending rollover or reopen";
+    for (const value of [log.path, log.active_segment_base, log.applied_revision, formatBytes(log.effective_preallocate_bytes), status]) {
+      const cell = document.createElement("td"); cell.textContent = String(value); row.append(cell);
+    }
+    body.append(row);
+  }
+}
+
+async function loadLocalStorage() {
+  const response = await fetch("/admin/api/local-storage-settings");
+  if (response.status === 404) { field("local-storage-form").hidden = true; return; }
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.message || "Could not load node storage settings.");
+  renderLocalStorage(data);
+  field("local-storage.message").textContent = "Status loaded. Changes are local to the named node.";
+}
+
+function localStorageRequest() {
+  if (!currentLocalStorage) throw new Error("Load node storage settings before saving.");
+  const raw = field("local-storage.bytes").value.trim();
+  const bytes = field("local-storage.override").checked ? (raw === "" ? NaN : Number(raw)) : null;
+  if (bytes !== null && (!Number.isSafeInteger(bytes) || bytes < 0)) {
+    throw new Error("Preallocation must be a non-negative whole number of bytes.");
+  }
+  return { node_id: currentLocalStorage.node_id, expected_version: currentLocalStorage.version,
+    segment_preallocate_bytes: bytes };
+}
+
+async function saveLocalStorage(event) {
+  event.preventDefault();
+  try {
+    const response = await fetch("/admin/api/local-storage-settings", {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(localStorageRequest()),
+    });
+    const data = await response.json();
+    if (response.status === 409) {
+      renderLocalStorage(data);
+      field("local-storage.message").textContent = "Settings changed before this save. Current values reloaded; review before saving again.";
+      return;
+    }
+    if (!response.ok) throw new Error(data.message || "Node storage settings update failed. Refresh before retrying.");
+    renderLocalStorage(data);
+    field("local-storage.message").textContent = "Override persisted. Existing logs adopt it at their next rollover or reopen.";
+  } catch (error) {
+    field("local-storage.message").textContent = error.message;
+  }
 }
 
 function collectGlobalDlqTarget() {
@@ -1079,6 +1173,17 @@ async function saveQueueDlq(event) {
   setQueueDlqMessage("Queue DLQ policy declared.", "success");
 }
 
+field("local-storage-form").addEventListener("submit", saveLocalStorage);
+field("local-storage.reload").addEventListener("click", () => loadLocalStorage().catch(error => {
+  field("local-storage.message").textContent = error.message;
+}));
+field("local-storage.override").addEventListener("change", () => {
+  field("local-storage.bytes").disabled = !field("local-storage.override").checked;
+});
+loadLocalStorage().catch(error => {
+  field("local-storage-form").hidden = false;
+  field("local-storage.message").textContent = error.message;
+});
 field("settings-form").addEventListener("submit", saveSettings);
 field("reload-settings").addEventListener("click", () => loadSettings("Settings reloaded."));
 field("global-dlq-form").addEventListener("submit", saveGlobalDlq);

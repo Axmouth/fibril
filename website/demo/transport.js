@@ -36,7 +36,7 @@
     '[data-test-publish]', '#message-replay', '.quarantine-repair', '#drain-btn',
     '#repartition-submit', '#membership-add', '#membership-remove', '#tls-reload',
     '#user-save', '.user-del', '.user-delete',
-    '#settings-form button[type="submit"]', '#user-form button[type="submit"]',
+    '#settings-form button[type="submit"]', '#local-storage-form button[type="submit"]', '#user-form button[type="submit"]',
     '#global-dlq-form button[type="submit"]', '#queue-dlq-form button[type="submit"]',
   ].join(',');
   const protect = () => {

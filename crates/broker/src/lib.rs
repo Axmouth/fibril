@@ -2,6 +2,7 @@ pub mod auth_store;
 pub mod broker;
 pub mod coordination;
 pub mod queue_engine;
+pub mod local_storage_settings;
 pub mod recovery;
 pub mod recovery_transfer;
 pub mod initial_history;

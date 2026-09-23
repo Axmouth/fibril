@@ -249,7 +249,8 @@ The settings page exposes delivery, connection lifecycle, replication, partition
 consumer-group defaults, idle queue cleanup and Plexus stream settings. The startup
 summary shows this node's storage configuration, including batching, tail-cache
 budget, writer buffers, adaptive staging and segment sizing; these values remain
-read-only and require a restart.
+read-only startup values. The node-local section below can override preallocation;
+other storage controls require a restart.
 
 Broker runtime settings are node-local in standalone mode and cluster-authoritative
 in coordinated mode. Saving preserves the complete loaded settings document,
@@ -262,6 +263,13 @@ supported boundaries: cursor batching reads the next batch's settings, replicati
 buffer depth applies to the next replication stream, and an active drain keeps its original
 handoff timeout. Cluster propagation and worker adoption are asynchronous; the page
 does not yet report an applied version for every worker.
+
+The **Node-local Storage** section identifies the serving node and controls segment
+preallocation. Overrides survive restart; clearing the override restores the
+startup value. The table shows the accepted revision, each open log's adopted
+revision, pending rollover/reopen and filesystem allocation fallback. Use
+**Refresh status** to check adoption; saving does not force a rollover. Open the
+other node's dashboard to edit that node. See [node-local configuration](/configuration/#node-local-storage-settings).
 
 Global DLQ target changes are persisted in storage-owned state and survive
 restart.

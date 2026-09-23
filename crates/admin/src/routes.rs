@@ -1156,6 +1156,66 @@ pub async fn runtime_settings(
     .map(IntoResponse::into_response)
 }
 
+pub async fn local_storage_settings(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, StatusCode> {
+    check_auth(&server, &headers).await?;
+    let settings = server
+        .local_storage_settings
+        .as_ref()
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(settings.status().await).into_response())
+}
+
+pub async fn update_local_storage_settings(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<fibril_broker::local_storage_settings::LocalStorageUpdate>,
+) -> Result<Response, StatusCode> {
+    use fibril_broker::local_storage_settings::LocalStorageError;
+    check_auth(&server, &headers).await?;
+    let settings = server
+        .local_storage_settings
+        .as_ref()
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(match settings.update(request).await {
+        Ok(status) => {
+            server.audit.record(
+                "local_storage_settings",
+                "info",
+                format!("Node {} storage settings accepted", status.node_id),
+                format!(
+                    "Revision {}; {} logs awaiting segment rollover",
+                    status.version, status.pending_logs
+                ),
+            );
+            Json(status).into_response()
+        }
+        Err(LocalStorageError::Conflict) => {
+            (StatusCode::CONFLICT, Json(settings.status().await)).into_response()
+        }
+        Err(LocalStorageError::WrongNode) => admin_error(
+            StatusCode::BAD_REQUEST,
+            "wrong_node",
+            "This endpoint edits only its serving node. Reload settings on the intended node.",
+        ),
+        Err(LocalStorageError::Invalid(error)) => admin_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_local_storage_settings",
+            error,
+        ),
+        Err(error) => {
+            tracing::error!(%error, "node-local storage settings update failed");
+            admin_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "local_storage_settings_failed",
+                "Storage settings could not be persisted or applied. Reload status before retrying.",
+            )
+        }
+    })
+}
+
 pub async fn startup_config(
     State(server): State<Arc<AdminServer>>,
     headers: axum::http::HeaderMap,

@@ -8,11 +8,16 @@ const fixture = await readFile(new URL('../../../website/demo/fixtures.js', impo
 
 // Execute the production form functions with DOM-shaped controls. Startup
 // network requests and unrelated user/DLQ forms are outside these unit tests.
+function element() {
+  return { children: [], append(child) { this.children.push(child); },
+    replaceChildren() { this.children = []; }, textContent: "" };
+}
+
 function form() {
   const controls = new Map();
-  for (const match of template.matchAll(/<(input|select|span|div)[^>]*\bid="([^"]+)"[^>]*>/g)) {
+  for (const match of template.matchAll(/<(input|select|span|div|strong|form|tbody|p)[^>]*\bid="([^"]+)"[^>]*>/g)) {
     const tag = match[0];
-    controls.set(match[2], { id: match[2], _value: '', get value() { return this._value; },
+    controls.set(match[2], { ...element(), id: match[2], _value: '', get value() { return this._value; },
       set value(value) { this._value = String(value); }, checked: false, disabled: false,
       min: /min="([^"]+)"/.exec(tag)?.[1] || '',
       type: /type="([^"]+)"/.exec(tag)?.[1] || '', dataset: {}, textContent: '',
@@ -22,7 +27,7 @@ function form() {
     });
   }
   const context = vm.createContext({ structuredClone, btoa, window: {},
-    document: { getElementById: id => controls.get(id),
+    document: { createElement: element, getElementById: id => controls.get(id),
       querySelectorAll: selector => selector === '[data-runtime-setting]'
         ? [...controls.values()].filter(el => el.runtime)
         : selector === '#idle-section input, #idle-section select'
@@ -35,7 +40,7 @@ function form() {
   data.settings.stream = { cursor_commit_window_us: 17, cursor_commit_max_batch: 23,
     idle_evict_enabled: true, idle_evict_after_ms: 42000, idle_sweep_interval_ms: 1234 };
   const script = /<script>([\s\S]*?)<\/script>/.exec(template)[1];
-  vm.runInContext(script.split('field("settings-form").addEventListener')[0], context);
+  vm.runInContext(script.split('field("local-storage-form").addEventListener')[0], context);
   return { context, data, controls, collect: () => JSON.parse(JSON.stringify(context.collectSettings())) };
 }
 
@@ -139,4 +144,46 @@ test('save submits the loaded version and full document; conflict reloads withou
   assert.deepEqual(requests[0].body.settings, f.data.settings);
   assert.equal(f.controls.get('version').value, String(conflict.version));
   assert.deepEqual(f.collect(), conflict.settings);
+});
+
+function localForm() {
+  const f = form();
+  const data = f.context.window.fibrilDemoResponse(new URL('http://demo.test/admin/api/local-storage-settings'));
+  f.context.renderLocalStorage(data);
+  return { ...f, data, request: () => JSON.parse(JSON.stringify(f.context.localStorageRequest())) };
+}
+
+test('local storage targets the loaded node and version; reset differs from explicit zero', () => {
+  const f = localForm();
+  assert.equal(f.request().node_id, f.data.node_id);
+  assert.equal(f.request().expected_version, f.data.version);
+  f.controls.get('local-storage.bytes').value = '0';
+  assert.equal(f.request().segment_preallocate_bytes, 0);
+  for (const value of ['', '-1', '0.5', '9007199254740992']) {
+    f.controls.get('local-storage.bytes').value = value;
+    assert.throws(f.request, /non-negative whole/);
+  }
+  f.controls.get('local-storage.override').checked = false;
+  assert.equal(f.request().segment_preallocate_bytes, null);
+  assert.throws(() => form().context.localStorageRequest(), /Load node/);
+});
+
+test('local storage renders pending and allocation fallback; conflict reloads once', async () => {
+  const f = localForm();
+  assert.match(f.controls.get('local-storage.logs').children[1].children[4].textContent, /Pending/);
+  const fresh = structuredClone(f.data);
+  fresh.version++;
+  fresh.logs[0].allocation_error = '<filesystem unavailable>';
+  const requests = [];
+  f.context.fetch = async (url, options) => {
+    requests.push(JSON.parse(options.body));
+    return { status: 409, ok: false, json: async () => fresh };
+  };
+  await f.context.saveLocalStorage({ preventDefault() {} });
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].expected_version, f.data.version);
+  assert.equal(f.request().expected_version, fresh.version);
+  assert.equal(f.controls.get('local-storage.logs').children[0].children[4].textContent,
+    'Allocation fallback: <filesystem unavailable>');
+  assert.match(f.controls.get('local-storage.message').textContent, /review before saving/);
 });

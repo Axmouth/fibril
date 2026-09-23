@@ -169,6 +169,8 @@ pub struct GanglionBrokerTaskHandles {
 pub enum FibrilServerError {
     #[error("failed to open storage engine: {0}")]
     Storage(#[source] StromaError),
+    #[error(transparent)]
+    LocalStorage(#[from] fibril_broker::local_storage_settings::LocalStorageError),
     #[error("failed to load runtime settings: {0}")]
     RuntimeSettings(#[from] RuntimeSettingsError),
     #[error("coordination.ganglion.wire_format: {0}")]
@@ -1722,16 +1724,38 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         adaptive_staging,
         ..keratin_default
     };
-    let engine = StromaEngine::open(
+    let log_runtime = Arc::new(
+        fibril_broker::queue_engine::LogRuntimeSettings::new(
+            fibril_broker::queue_engine::LogRuntimeConfig {
+                segment_preallocate_bytes: config.storage.keratin.segment_preallocate_bytes,
+            },
+        )
+        .map_err(|e| {
+            fibril_broker::local_storage_settings::LocalStorageError::Invalid(e.to_string())
+        })?,
+    );
+    let engine = StromaEngine::open_with_runtime(
         &config.server.data_dir,
         StromaKeratinConfig {
             message_log: keratin_message_cfg,
             event_log: keratin_event_cfg,
         },
         SnapshotConfig::default(),
+        log_runtime.clone(),
     )
     .await
     .map_err(FibrilServerError::Storage)?;
+    let local_storage_settings = fibril_broker::local_storage_settings::LocalStorageSettings::load(
+        config.coordination.node_id.clone(),
+        config.server.data_dir.clone(),
+        config.storage.keratin.segment_preallocate_bytes,
+        engine
+            .global_store()
+            .await
+            .map_err(FibrilServerError::Storage)?,
+        log_runtime,
+    )
+    .await?;
 
     engine.set_recovery_mismatch_policy(match config.recovery.on_mismatch {
         RecoveryMismatchMode::Quarantine => RecoveryMismatchPolicy::Quarantine,
@@ -2100,7 +2124,9 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     );
 
     // Plexus stream observability + declare surface (the hosting broker).
-    let admin = admin.with_streams(broker.clone());
+    let admin = admin
+        .with_streams(broker.clone())
+        .with_local_storage_settings(local_storage_settings);
     let admin = admin.with_users(user_admin);
     let admin = match &server_tls {
         Some(tls) => {
