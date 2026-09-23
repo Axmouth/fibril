@@ -84,6 +84,19 @@ pub async fn recover_queue_once(
     config: &ProtocolOwnerPeerResolverConfig,
     pending: &PendingRecovery,
 ) -> Result<(), String> {
+    let mut timing = crate::recovery_timing::RecoveryTiming::new(pending)?;
+    let result = recover_queue_attempt(provider, broker, config, pending, &timing).await;
+    timing.finish(result.is_ok());
+    result
+}
+
+async fn recover_queue_attempt(
+    provider: &GanglionCoordination,
+    broker: &Broker<StromaEngine>,
+    config: &ProtocolOwnerPeerResolverConfig,
+    pending: &PendingRecovery,
+    timing: &crate::recovery_timing::RecoveryTiming,
+) -> Result<(), String> {
     if broker.is_shutting_down() {
         return Err("broker is shutting down".into());
     }
@@ -119,7 +132,14 @@ pub async fn recover_queue_once(
             .collect();
         let mut reports = vec![];
         for node in &eligible {
-            match request_recovery_seal(config, node, &seal_command, RPC).await {
+            match timing
+                .stage(
+                    "witness_seal",
+                    node,
+                    request_recovery_seal(config, node, &seal_command, RPC),
+                )
+                .await
+            {
                 Ok(report) => {
                     witnesses.record(
                         &provider.consensus_node().committed_snapshot(),
@@ -135,17 +155,22 @@ pub async fn recover_queue_once(
         for report in &reports {
             // A truncated source may fail replay while another witness supplies
             // its payloads. Preserve that witness and compare its retained data.
-            match inspect_recovery_source_artifact(
-                config,
-                &seal_command,
-                report,
-                Default::default(),
-                Default::default(),
-                16 * 1024 * 1024,
-                16 * 1024 * 1024,
-                RPC,
-            )
-            .await
+            match timing
+                .stage(
+                    "inspect_source",
+                    &report.node_id,
+                    inspect_recovery_source_artifact(
+                        config,
+                        &seal_command,
+                        report,
+                        Default::default(),
+                        Default::default(),
+                        16 * 1024 * 1024,
+                        16 * 1024 * 1024,
+                        RPC,
+                    ),
+                )
+                .await
             {
                 Ok(artifact) => {
                     artifacts.insert(report.node_id.clone(), artifact);
@@ -158,16 +183,21 @@ pub async fn recover_queue_once(
         let mut comparisons = vec![];
         for (i, left) in reports.iter().enumerate() {
             for right in &reports[i + 1..] {
-                let pair = inspect_recovery_pair(
-                    config,
-                    &seal_command,
-                    left,
-                    right,
-                    Default::default(),
-                    RPC,
-                )
-                .await
-                .map_err(err)?;
+                let pair = timing
+                    .stage(
+                        "compare_pair",
+                        &format!("{}+{}", left.node_id, right.node_id),
+                        inspect_recovery_pair(
+                            config,
+                            &seal_command,
+                            left,
+                            right,
+                            Default::default(),
+                            RPC,
+                        ),
+                    )
+                    .await
+                    .map_err(err)?;
                 comparisons.push(pair.evidence);
             }
         }
@@ -176,8 +206,12 @@ pub async fn recover_queue_once(
             &artifacts,
             &comparisons,
         )?;
-        provider
-            .persist_queue_recovery_plan(pending, &witnesses, &selection)
+        timing
+            .stage(
+                "commit_plan",
+                local,
+                provider.persist_queue_recovery_plan(pending, &witnesses, &selection),
+            )
             .await
             .map_err(err)?
     };
@@ -189,7 +223,13 @@ pub async fn recover_queue_once(
     let mut completed_source = None;
     let mut snapshot = None;
     for node in &members {
-        if let Ok(Reply::Snapshot(bytes)) = transfer(config, &plan, node, Operation::Snapshot).await
+        if let Ok(Reply::Snapshot(bytes)) = timing
+            .stage(
+                "probe_snapshot",
+                node,
+                transfer(config, &plan, node, Operation::Snapshot),
+            )
+            .await
         {
             completed_source = Some(node.clone());
             snapshot = Some(bytes);
@@ -197,18 +237,23 @@ pub async fn recover_queue_once(
         }
     }
     if snapshot.is_none() {
-        let artifact = inspect_recovery_source_artifact(
-            config,
-            &seal_command,
-            &source_report(&plan)?,
-            Default::default(),
-            Default::default(),
-            16 * 1024 * 1024,
-            16 * 1024 * 1024,
-            RPC,
-        )
-        .await
-        .map_err(err)?;
+        let artifact = timing
+            .stage(
+                "reinspect_source",
+                plan.source_node(),
+                inspect_recovery_source_artifact(
+                    config,
+                    &seal_command,
+                    &source_report(&plan)?,
+                    Default::default(),
+                    Default::default(),
+                    16 * 1024 * 1024,
+                    16 * 1024 * 1024,
+                    RPC,
+                ),
+            )
+            .await
+            .map_err(err)?;
         plan.verify_artifact(&artifact)?;
         snapshot = Some(artifact.state_snapshot().to_vec());
     }
@@ -217,106 +262,135 @@ pub async fn recover_queue_once(
     let mut owner_ready = false;
     let mut errors = vec![];
     for node in &members {
-        let result = async {
-            // Existing old storage must be durably fenced before replacement.
-            // Already installed targets reject this old seal and resume below.
-            if pending.previous.owner == *node || pending.previous.followers.contains(node) {
-                let _ = request_recovery_seal(config, node, &seal_command, RPC).await;
-            }
-            let Reply::Progress(mut next) = transfer(
-                config,
-                &plan,
-                node,
-                Operation::Begin {
-                    snapshot: snapshot.clone(),
-                },
-            )
-            .await?
-            else {
-                return Err("invalid staging progress response".into());
-            };
-            while next < plan.message_next() {
-                let page = if let Some(source) = &completed_source {
-                    let Reply::Page(page) = transfer(
-                        config,
-                        &plan,
-                        source,
-                        Operation::Read {
-                            from: next,
-                            max_records: 4096,
-                            max_bytes: 16 * 1024 * 1024,
-                        },
+        let result = timing
+            .stage("prepare_target", node, async {
+                // Existing old storage must be durably fenced before replacement.
+                // Already installed targets reject this old seal and resume below.
+                if pending.previous.owner == *node || pending.previous.followers.contains(node) {
+                    let _ = timing
+                        .stage(
+                            "target_seal",
+                            node,
+                            request_recovery_seal(config, node, &seal_command, RPC),
+                        )
+                        .await;
+                }
+                let Reply::Progress(mut next) = timing
+                    .stage(
+                        "begin_target",
+                        node,
+                        transfer(
+                            config,
+                            &plan,
+                            node,
+                            Operation::Begin {
+                                snapshot: snapshot.clone(),
+                            },
+                        ),
                     )
                     .await?
-                    else {
-                        return Err("invalid completed-source page".into());
-                    };
-                    page
-                } else {
-                    let report = source_report(&plan)?;
-                    let page = request_recovery_read(
-                        config,
-                        &seal_command,
-                        &report,
-                        &RecoveryReadRequest {
-                            seal: report.seal.request.clone(),
-                            history_id: report.seal.history.id,
-                            source: RecoveryReadSource::Messages,
-                            from: next,
-                            max_records: 4096,
-                            max_bytes: 16 * 1024 * 1024,
-                        },
-                        RPC,
-                    )
-                    .await
-                    .map_err(err)?;
-                    fibril_broker::recovery::RecoveryReadPage {
-                        history_id: page.history_id,
-                        source: RecoveryReadSource::Messages,
-                        from: page.from,
-                        next: page.next,
-                        end: page.end,
-                        records: page
-                            .records
-                            .into_iter()
-                            .map(|r| fibril_broker::recovery::RecoveryRecord {
-                                offset: r.offset,
-                                flags: r.flags,
-                                headers: r.headers,
-                                payload: r.payload,
-                            })
-                            .collect(),
-                        snapshot_bytes: page.snapshot_bytes,
-                    }
-                };
-                if page.next <= next || page.next > plan.message_next() {
-                    return Err("recovery page made no valid progress".into());
-                }
-                let Reply::Progress(progress) =
-                    transfer(config, &plan, node, Operation::Append { page }).await?
                 else {
-                    return Err("invalid append response".into());
+                    return Err("invalid staging progress response".into());
                 };
-                if progress <= next || progress > plan.message_next() {
-                    return Err("invalid staged progress".into());
+                timing
+                    .stage("copy_pages", node, async {
+                        while next < plan.message_next() {
+                            let page = if let Some(source) = &completed_source {
+                                let Reply::Page(page) = transfer(
+                                    config,
+                                    &plan,
+                                    source,
+                                    Operation::Read {
+                                        from: next,
+                                        max_records: 4096,
+                                        max_bytes: 16 * 1024 * 1024,
+                                    },
+                                )
+                                .await?
+                                else {
+                                    return Err("invalid completed-source page".into());
+                                };
+                                page
+                            } else {
+                                let report = source_report(&plan)?;
+                                let page = request_recovery_read(
+                                    config,
+                                    &seal_command,
+                                    &report,
+                                    &RecoveryReadRequest {
+                                        seal: report.seal.request.clone(),
+                                        history_id: report.seal.history.id,
+                                        source: RecoveryReadSource::Messages,
+                                        from: next,
+                                        max_records: 4096,
+                                        max_bytes: 16 * 1024 * 1024,
+                                    },
+                                    RPC,
+                                )
+                                .await
+                                .map_err(err)?;
+                                fibril_broker::recovery::RecoveryReadPage {
+                                    history_id: page.history_id,
+                                    source: RecoveryReadSource::Messages,
+                                    from: page.from,
+                                    next: page.next,
+                                    end: page.end,
+                                    records: page
+                                        .records
+                                        .into_iter()
+                                        .map(|r| fibril_broker::recovery::RecoveryRecord {
+                                            offset: r.offset,
+                                            flags: r.flags,
+                                            headers: r.headers,
+                                            payload: r.payload,
+                                        })
+                                        .collect(),
+                                    snapshot_bytes: page.snapshot_bytes,
+                                }
+                            };
+                            if page.next <= next || page.next > plan.message_next() {
+                                return Err("recovery page made no valid progress".into());
+                            }
+                            let Reply::Progress(progress) =
+                                transfer(config, &plan, node, Operation::Append { page }).await?
+                            else {
+                                return Err("invalid append response".into());
+                            };
+                            if progress <= next || progress > plan.message_next() {
+                                return Err("invalid staged progress".into());
+                            }
+                            next = progress;
+                        }
+                        Ok::<_, String>(())
+                    })
+                    .await?;
+                if !matches!(
+                    timing
+                        .stage(
+                            "finish_target",
+                            node,
+                            transfer(config, &plan, node, Operation::Finish)
+                        )
+                        .await?,
+                    Reply::Complete(_)
+                ) {
+                    return Err("invalid completion response".into());
                 }
-                next = progress;
-            }
-            if !matches!(
-                transfer(config, &plan, node, Operation::Finish).await?,
-                Reply::Complete(_)
-            ) {
-                return Err("invalid completion response".into());
-            }
-            if !matches!(
-                transfer(config, &plan, node, Operation::Install).await?,
-                Reply::Installed(_)
-            ) {
-                return Err("invalid installed response".into());
-            }
-            Ok::<_, String>(())
-        }
-        .await;
+                if !matches!(
+                    timing
+                        .stage(
+                            "install_target",
+                            node,
+                            transfer(config, &plan, node, Operation::Install)
+                        )
+                        .await?,
+                    Reply::Installed(_)
+                ) {
+                    return Err("invalid installed response".into());
+                }
+                Ok::<_, String>(())
+            })
+            .await;
         match result {
             Ok(()) => {
                 installed += 1;
@@ -335,12 +409,23 @@ pub async fn recover_queue_once(
             errors.join("; ")
         ));
     }
-    let activation = provider
-        .activate_queue_recovery(&plan, &broker.engine())
+    let activation = timing
+        .stage(
+            "activate",
+            local,
+            provider.activate_queue_recovery(&plan, &broker.engine()),
+        )
         .await
         .map_err(err)?;
     for node in activation.reports().keys() {
-        if let Err(e) = transfer(config, &plan, node, Operation::Admit).await {
+        if let Err(e) = timing
+            .stage(
+                "admit",
+                node,
+                transfer(config, &plan, node, Operation::Admit),
+            )
+            .await
+        {
             tracing::warn!(node,error=%e,"recovery activated; exact local admission will retry");
         }
     }

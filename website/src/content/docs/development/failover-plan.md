@@ -61,6 +61,13 @@ older first-delivery benchmark only after matching its method and build profile.
 Capture monotonic stage timings for failure observation, placement proposal,
 worker dispatch, seal/witness collection, source inspection, plan commit, transfer,
 installation, receipt publication/visibility, activation and local admission.
+The recovery driver emits payload-free `fibril::recovery_timing` events for each
+attempt and its witness, inspection, comparison, plan, transfer, installation,
+activation and admission stages. Fields include transition, resource, epoch, peer,
+sequence, monotonic microseconds and success/error/cancellation. Target preparation
+contains child stages; do not sum parent and child durations. Enable the target at
+`info` when using a restrictive log filter. No per-record timing events are emitted.
+
 Record RPC count, connection/handshake time, metadata waits, fsync time, bytes
 read/copied, retries and polling delay, keyed by resource and recovery transition.
 Keep payloads out of diagnostics and bound retained trace data.

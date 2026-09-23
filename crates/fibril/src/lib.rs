@@ -4,6 +4,7 @@
 //! reusable coordination primitives live in ganglion.
 
 pub mod recovery_driver;
+mod recovery_timing;
 pub mod initial_history_driver;
 pub mod queue_learner_driver;
 
