@@ -190,6 +190,18 @@ Pin matching demo assets when archiving documentation versions. Extend inline
 examples to additional dashboard pages where they clarify operational behavior.
 Assess coherent moving scenarios for backlog growth, slow consumers and recovery.
 
+Add approachable topology and sequence diagrams directly to the relevant concept,
+replication and recovery pages. Cover partition placement and owners, metadata
+leadership and controller planning, ordinary versus early replication, polling
+versus push replication, local and replicated speculative delivery, and the full
+failover/checkpoint recovery sequence. Distinguish eager failure detection from
+early replication, and label implemented, experimental and proposed behavior.
+Show delivery, consumer ACK, local/replica persistence and publisher-confirmation
+boundaries explicitly. Pair overview diagrams with detailed recovery steps and
+failure branches. Maintain shared diagram sources and visual conventions, with
+readable static fallbacks and vector exports suitable for presentations; version
+diagrams alongside the behavior documented on each page.
+
 ## Longer-term options
 
 These require a concrete use case or further design:
