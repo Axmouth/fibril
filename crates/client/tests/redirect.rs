@@ -47,6 +47,8 @@ struct SelfPartitions {
 
 #[derive(Clone, Default)]
 struct MockConfig {
+    stop: Option<Arc<tokio::sync::Notify>>,
+    reject_subscribes: Option<Arc<AtomicUsize>>,
     publish: Option<MockBehavior>,
     /// If set, answer `Op::Topology` with this.
     topology: Option<TopologyOk>,
@@ -81,7 +83,11 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         loop {
-            let Ok((sock, _)) = listener.accept().await else {
+            let accepted = tokio::select! {
+                accepted = listener.accept() => accepted,
+                _ = async { match &config.stop { Some(stop) => stop.notified().await, None => std::future::pending().await } } => return,
+            };
+            let Ok((sock, _)) = accepted else {
                 return;
             };
             let config = config.clone();
@@ -114,12 +120,24 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                         .send(try_encode(Op::HelloOk, frame.request_id, &hello_ok).unwrap())
                         .await;
                 }
-                while let Some(Ok(frame)) = framed.next().await {
+                loop {
+                    let next = tokio::select! {
+                        next = framed.next() => next,
+                        _ = async { match &config.stop { Some(stop) => stop.notified().await, None => std::future::pending().await } } => return,
+                    };
+                    let Some(Ok(frame)) = next else { return; };
                     // Subscribe is answered with SubscribeOk plus one tagged
                     // Deliver per partition (payload = partition), so a fan-in
                     // subscription receives a message from each partition.
                     if frame.opcode == Op::Subscribe as u16 {
                         let sub: Subscribe = try_decode(&frame).unwrap();
+                        if config.reject_subscribes.as_ref().is_some_and(|remaining| {
+                            remaining.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok()
+                        }) {
+                            let reply = fibril_wire::ErrorMsg { code: 503, message: "recovering".into() };
+                            framed.send(try_encode(Op::Error, frame.request_id, &reply).unwrap()).await.unwrap();
+                            continue;
+                        }
                         if let Some(recorder) = &config.subscribe_partitions {
                             if let Ok(mut parts) = recorder.lock() {
                                 parts.push(sub.partition.id());
@@ -783,4 +801,32 @@ async fn pattern_subscription_auto_ack_fans_in_matching_queues() {
         std::collections::HashSet::from(["events.click".to_string(), "events.view".to_string()]),
         "auto-ack pattern should fan in only the matching queues"
     );
+}
+
+#[tokio::test]
+async fn subscriber_discovers_survivor_and_waits_through_recovery() {
+    let layout = || SelfPartitions {
+        topic: "jobs".into(), group: None, partition_count: 1,
+        partitioning_version: 1, live_partition_count: None,
+    };
+    let retries = Arc::new(AtomicUsize::new(2));
+    let survivor = spawn_configurable_mock(MockConfig {
+        self_partitions: Some(layout()), reject_subscribes: Some(retries.clone()),
+        ..Default::default()
+    }).await;
+    let stop = Arc::new(tokio::sync::Notify::new());
+    let initial = spawn_configurable_mock(MockConfig {
+        self_partitions: Some(layout()), stop: Some(stop.clone()),
+        ..Default::default()
+    }).await;
+    let client = ClientOptions::new().discovery_endpoints([survivor.to_string()])
+        .connect(initial).await.unwrap();
+    let mut sub = client.subscribe("jobs").unwrap().sub().await.unwrap().into_stream().boxed();
+    tokio::time::timeout(std::time::Duration::from_secs(5), sub.next()).await.unwrap().unwrap();
+    stop.notify_waiters();
+    let delivered = tokio::time::timeout(std::time::Duration::from_secs(8), sub.next())
+        .await.expect("same subscription must migrate without a fresh client");
+    assert!(delivered.is_some());
+    assert_eq!(retries.load(Ordering::SeqCst), 0);
+    client.shutdown().await;
 }

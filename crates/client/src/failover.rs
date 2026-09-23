@@ -334,7 +334,7 @@ fn supervise_forward<R, M, F>(
                         part_reason = new_leg.reason;
                         break;
                     }
-                    Err(err) if err.is_transient() => {
+                    Err(err) if err.is_retryable() => {
                         tokio::time::sleep(publish_retry_nap(backoff_ms)).await;
                         backoff_ms = (backoff_ms * 2).min(PUBLISH_RETRY_MAX_BACKOFF_MS);
                     }

@@ -18,6 +18,8 @@ public sealed record Credentials(string Username, string Password);
 /// <summary>Connection-level options for a <see cref="Client"/>.</summary>
 public sealed record ClientOptions
 {
+    /// <summary>Trusted fallback host:port addresses for topology refresh, using the same TLS/auth. Initial connect uses its explicit address.</summary>
+    public IReadOnlyList<string> DiscoveryEndpoints { get; init; } = Array.Empty<string>();
     public Credentials? Credentials { get; init; }
     public string ClientName { get; init; } = "fibril-csharp";
     public string ClientVersion { get; init; } = "";
@@ -501,9 +503,24 @@ public sealed partial class Client : IAsyncDisposable
 
     private async Task<TopologyOk> FetchTopologyInternalAsync(TopologyRequest req, CancellationToken ct)
     {
-        var topo = await BootstrapOpAsync(eng => eng.FetchTopologyAsync(req, ct), ct).ConfigureAwait(false);
-        _topo.Replace(topo);
-        return topo;
+        var candidates = new List<string> { _bootstrapEndpoint };
+        candidates.AddRange(_opts.DiscoveryEndpoints);
+        candidates.AddRange(_topo.Endpoints());
+        lock (_poolLock) { candidates.AddRange(_pool.Keys); }
+        Exception? lastError = null;
+        foreach (var endpoint in candidates.Distinct())
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                var engine = await EngineForAsync(endpoint, ct).ConfigureAwait(false);
+                var topo = await engine.FetchTopologyAsync(req, ct).ConfigureAwait(false);
+                _topo.Replace(topo);
+                return topo;
+            }
+            catch (Exception error) when (!ct.IsCancellationRequested) { lastError = error; }
+        }
+        throw lastError ?? new DisconnectionException("No reachable topology endpoint");
     }
 
     // A cluster op handled on the bootstrap connection, reconnecting once on a

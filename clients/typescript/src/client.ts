@@ -103,6 +103,8 @@ export interface TlsOptions {
  * ```
  */
 export interface ClientOptionsInit {
+  /** Trusted fallback host:port addresses for topology refresh; same TLS/auth. Initial connect uses its explicit address. */
+  discoveryEndpoints?: readonly string[];
   /** Name sent to the broker during handshake. */
   clientName?: string;
   /** TLS options. Absent connects plaintext. */
@@ -165,6 +167,7 @@ const DEFAULT_CLIENT_VERSION = "0.4.0";
  * Use `new ClientOptions().withAuth(...).connect(...)` for the common path.
  */
 export class ClientOptions {
+  readonly discoveryEndpoints: readonly string[];
   readonly clientName: string;
   readonly clientVersion: string;
   readonly auth: AuthMsg | undefined;
@@ -184,6 +187,7 @@ export class ClientOptions {
   readonly writeCoalesceWindowMs: number;
 
   constructor(init: ClientOptionsInit = {}) {
+    this.discoveryEndpoints = [...(init.discoveryEndpoints ?? [])];
     this.tls = init.tls;
     this.clientName = init.clientName ?? DEFAULT_CLIENT_NAME;
     this.clientVersion = init.clientVersion ?? DEFAULT_CLIENT_VERSION;
@@ -206,6 +210,7 @@ export class ClientOptions {
   /** Return a copy with the given fields overridden. */
   #copy(overrides: ClientOptionsInit): ClientOptions {
     return new ClientOptions({
+      discoveryEndpoints: this.discoveryEndpoints,
       clientName: this.clientName,
       clientVersion: this.clientVersion,
       auth: this.auth,
@@ -1457,7 +1462,17 @@ provide one with withTlsClientCert(certPath, keyPath)`,
   async fetchTopology(
     filter: { topic?: string | null; group?: string | null } = {},
   ): Promise<TopologyOkMsg> {
-    const topology = await (await this._engineForOperation()).fetchTopology(filter);
+    const candidates = new Set([this.#bootstrapEndpoint, ...this.#opts.discoveryEndpoints,
+      ...this.#topology.endpoints(), ...this.#pool.keys()]);
+    let topology: TopologyOkMsg | undefined;
+    let lastError: unknown;
+    for (const endpoint of candidates) {
+      try {
+        topology = await (await this.#engineAt(endpoint)).fetchTopology(filter);
+        break;
+      } catch (error) { lastError = error; }
+    }
+    if (!topology) throw lastError;
     this.#topology.replace(topology);
     this.#topology.lastRefreshMs = Date.now();
     prunePoolToTopology(this.#topology, this.#pool);
@@ -1534,12 +1549,14 @@ provide one with withTlsClientCert(certPath, keyPath)`,
    */
   async _engineFor(topic: string, partition: number, group: string | null): Promise<Engine> {
     const owner = this.#topology.lookup(topic, partition, group);
-    if (!owner || owner.endpoint === this.#bootstrapEndpoint) {
-      return this._engineForOperation();
-    }
-    let conn = this.#pool.get(owner.endpoint);
+    return this.#engineAt(owner?.endpoint ?? this.#bootstrapEndpoint);
+  }
+
+  async #engineAt(endpoint: string): Promise<Engine> {
+    if (endpoint === this.#bootstrapEndpoint) return this._engineForOperation();
+    let conn = this.#pool.get(endpoint);
     if (!conn) {
-      const addr = parseAddress(owner.endpoint);
+      const addr = parseAddress(endpoint);
       conn = new PooledConnection(
         addr.host,
         addr.port,
@@ -1548,7 +1565,7 @@ provide one with withTlsClientCert(certPath, keyPath)`,
         this.#onTopologyUpdate,
         this.#emitGoingAway,
       );
-      this.#pool.set(owner.endpoint, conn);
+      this.#pool.set(endpoint, conn);
     }
     return conn.engineForOperation();
   }

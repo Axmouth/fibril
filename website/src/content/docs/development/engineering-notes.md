@@ -10,6 +10,10 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Subscriber discovery after owner loss
+
+A subscriber connected only to its queue owner stayed pending after that owner died because topology advertised no surviving address. All five clients now accept fallback discovery addresses and retry temporary recovery responses during supervised reattachment. A three-replica SATA warm-traffic test delivered fresh probes on the original subscription 8.13 seconds after SIGKILL, with all 16,959 confirmed IDs preserved and replicas converged after restart.
+
 ### Bounded recovery pages and buffered history scans
 
 Recovery inspection now uses the existing 4096-record / 16 MiB page limits, and Keratin buffers frozen reads while reusing bounded record scratch space. On the three-replica SATA acceptance host, 10k-backlog readiness fell from 15.12–15.22 s to 4.29 s; previously timing-out 100k backlog and settled-history cases completed in 50.72 s and 46.87 s with full ID, durable-write and restart/convergence checks. Full-history verification and deadlines remain unchanged; repeated scans, artifact reuse and connection reuse remain in the [recovery plan](/development/failover-plan/#longer-retained-histories).

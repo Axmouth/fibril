@@ -2430,26 +2430,7 @@ impl Client {
     /// returns an empty topology and the client keeps using its direct
     /// connection.
     pub async fn fetch_topology(&self) -> FibrilResult<TopologyOk> {
-        let engine = self
-            .shared
-            .bootstrap_slot()
-            .await?
-            .engine_for_operation()
-            .await?;
-        let topology = engine.fetch_topology().await?;
-        let now = unix_millis();
-        let snapshot = topology.clone();
-        self.shared.topology.rcu(|old| {
-            let mut updated = (**old).clone();
-            updated.replace(snapshot.clone());
-            updated.last_refresh_ms = now;
-            updated
-        });
-        // Full refresh -> prune pooled connections to endpoints that are no
-        // longer owners (e.g. a demoted/dead owner after failover).
-        self.shared.prune_pool_to_topology();
-        self.shared.refresh_catalogue(&topology);
-        Ok(topology)
+        self.shared.fetch_topology().await
     }
 
     /// The current cluster [`Catalogue`]: every queue and Plexus stream this
@@ -3286,21 +3267,28 @@ impl ClientShared {
             return false;
         }
 
+        self.fetch_topology().await.is_ok()
+    }
+
+    async fn fetch_topology(&self) -> FibrilResult<TopologyOk> {
         let mut candidates: Vec<String> = self.bootstrap.clone();
+        candidates.extend(self.opts.discovery_endpoints.iter().cloned());
+        candidates.extend(self.topology.load().endpoints());
         candidates.extend(self.pool.read().keys().cloned());
         let mut seen = std::collections::HashSet::new();
+        let mut last_error = FibrilError::BrokenPipe;
         for addr in candidates {
             if !seen.insert(addr.clone()) {
                 continue;
             }
-            let Ok(slot) = self.engine_slot(addr.clone()).await else {
-                continue;
-            };
-            let Ok(engine) = slot.engine_for_operation().await else {
-                continue;
-            };
-            let Ok(topology) = engine.fetch_topology().await else {
-                continue;
+            let result = async {
+                let slot = self.engine_slot(addr).await?;
+                let engine = slot.engine_for_operation().await?;
+                engine.fetch_topology().await
+            }.await;
+            let topology = match result {
+                Ok(topology) => topology,
+                Err(error) => { last_error = error; continue; }
             };
             let refreshed_at = unix_millis();
             self.topology.rcu(|old| {
@@ -3313,9 +3301,10 @@ impl ClientShared {
             // pooled connections to endpoints that are no longer owners (e.g. a
             // demoted/dead owner after failover).
             self.prune_pool_to_topology();
-            return true;
+            self.refresh_catalogue(&topology);
+            return Ok(topology);
         }
-        false
+        Err(last_error)
     }
 
     /// Drop pooled connections to endpoints that no longer own any partition
@@ -5358,6 +5347,10 @@ impl Default for AutoReconnect {
 /// # }
 /// ```
 pub struct ClientOptions {
+    /// Additional trusted broker addresses used to rediscover owners after the
+    /// initial endpoint fails. Authentication and TLS settings apply to each.
+    /// Initial connect still requires its explicit address to be reachable.
+    pub discovery_endpoints: Vec<String>,
     /// Name sent during the protocol handshake.
     pub client_name: String,
     /// Version sent during the protocol handshake.
@@ -5417,6 +5410,7 @@ impl ClientOptions {
         let client_name = "Fibril Rust Client";
         Self {
             client_name: client_name.into(),
+            discovery_endpoints: Vec::new(),
             client_version: client_version.into(),
             auth: None,
             heartbeat_interval: None,
@@ -5431,6 +5425,12 @@ impl ClientOptions {
             publish_timeout_ms: 30_000,
             tls: None,
         }
+    }
+
+    /// Set fallback addresses for topology discovery during failover.
+    pub fn discovery_endpoints(mut self, endpoints: impl IntoIterator<Item = String>) -> Self {
+        self.discovery_endpoints = endpoints.into_iter().collect();
+        self
     }
 
     /// Return a copy with TLS enabled using the OS trust store, for brokers

@@ -41,6 +41,28 @@ network call.
 
 For reconnect behavior and current limits, see [reconnects](/reliability/reconnects/).
 
+## Discovery during failover
+
+Configure additional trusted broker addresses when the initial node may be lost.
+Topology refresh tries the initial address, configured discovery addresses, known
+owners and pooled connections. Each connection uses the same authentication and
+TLS settings. Initial connection still requires the explicit connect address to
+be reachable; these addresses provide fallback discovery after connection.
+
+| Client | Connection option |
+| --- | --- |
+| Rust | `.discovery_endpoints(["node-b:9876".into(), "node-c:9876".into()])` |
+| TypeScript | `new ClientOptions({ discoveryEndpoints: ["node-b:9876", "node-c:9876"] })` |
+| Python | `ClientOptions(discovery_endpoints=("node-b:9876", "node-c:9876"))` |
+| Go | `ClientOptions{DiscoveryEndpoints: []string{"node-b:9876", "node-c:9876"}}` |
+| C# | `new ClientOptions { DiscoveryEndpoints = new[] { "node-b:9876", "node-c:9876" } }` |
+
+Topology currently advertises partition owners, so a client connected to the only
+owner it knows cannot discover an unknown survivor without a fallback address.
+Supervised subscriptions retry temporary ownership and server errors while the
+new owner recovers. Interrupted publish confirmations still have an unknown
+outcome; application retries require the usual duplicate handling.
+
 ## Connect
 
 <Tabs syncKey="client-language">

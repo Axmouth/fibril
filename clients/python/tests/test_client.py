@@ -622,3 +622,17 @@ async def test_nonretryable_close_surfaces_without_reconnect(broker: FakeBroker)
         assert len(broker._writers) == connections_before
     finally:
         await client.shutdown()
+
+
+async def test_discovery_endpoint_survives_bootstrap_loss(broker: FakeBroker) -> None:
+    survivor = FakeBroker(topology=wire.TopologyOk(generation=42, queues=[]))
+    await survivor.start()
+    client = await Client.connect((broker.host, broker.port), ClientOptions(
+        discovery_endpoints=(f"{survivor.host}:{survivor.port}",)))
+    try:
+        await broker.stop()
+        result = await asyncio.wait_for(client.fetch_topology(), 3)
+        assert result.generation == 42
+    finally:
+        await client.shutdown()
+        await survivor.stop()

@@ -105,7 +105,7 @@ func (c *Client) superviseLoop(topic string, attach func(context.Context) (*Subs
 				sub = newSub
 				break
 			}
-			if !isTransient(err) || c.closed.Load() {
+			if !IsRetryable(err) || c.closed.Load() {
 				return
 			}
 		}

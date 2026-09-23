@@ -20,7 +20,7 @@ from .errors import (
     BrokenPipeError,
     FibrilError,
     SubscriptionClosedError,
-    is_transient_error,
+    is_retryable,
 )
 from .internal.bounded_queue import BoundedQueue
 from .internal.retry import (
@@ -324,7 +324,7 @@ class _PartitionSupervisor:
                 self._bound_owner = self._owner_now()
                 return True
             except Exception as err:
-                if is_transient_error(err):
+                if is_retryable(err):
                     await sleep_ms(publish_retry_nap_ms(backoff))
                     backoff = min(backoff * 2, PUBLISH_RETRY_MAX_BACKOFF_MS)
                     continue

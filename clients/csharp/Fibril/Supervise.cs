@@ -152,7 +152,7 @@ public sealed partial class Client
                         sub = await attach(cancel).ConfigureAwait(false);
                         reattached = true;
                     }
-                    catch (Exception ex) when (IsTransient(ex) && !IsClientClosed)
+                    catch (Exception ex) when (Retry.IsRetryable(ex) && !IsClientClosed)
                     {
                         // Transient: retry the re-attach.
                     }

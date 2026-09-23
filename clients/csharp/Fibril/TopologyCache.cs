@@ -141,6 +141,11 @@ internal sealed class TopologyCache
 
     // Returns the cached owner endpoint for a partition, or "" when unknown (route
     // to the bootstrap and let a redirect correct it).
+    public IReadOnlyList<string> Endpoints()
+    {
+        lock (_lock) { return _owners.Values.Distinct().ToArray(); }
+    }
+
     public string OwnerOf(string topic, uint partition, string? group)
     {
         lock (_lock)

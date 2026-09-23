@@ -2560,3 +2560,21 @@ for (const count of [1, 127, 128, 129, 513]) {
     }
   });
 }
+
+test("discovery endpoint survives bootstrap loss", async () => {
+  const initial = new FakeBroker(); const survivor = new FakeBroker();
+  await initial.start(); await survivor.start();
+  for (const broker of [initial, survivor]) {
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      if (f.opcode === Op.Topology) broker.send(s, buildFrame(Op.TopologyOk, f.requestId,
+        { generation: broker === survivor ? 42n : 1n, queues: [], streams: [] }));
+    };
+  }
+  const client = await new ClientOptions({ discoveryEndpoints: [`127.0.0.1:${survivor.port}`] })
+    .connect(`127.0.0.1:${initial.port}`);
+  try {
+    await initial.stop();
+    assert.equal((await client.fetchTopology()).generation, 42n);
+  } finally { await client.shutdown(); await survivor.stop(); }
+});

@@ -141,3 +141,42 @@ func TestClientIgnoresStaleTopologyPush(t *testing.T) {
 		t.Errorf("owner = %q, want 127.0.0.1:9999 (stale push must be ignored)", ep)
 	}
 }
+
+func TestDiscoveryEndpointSurvivesBootstrapLoss(t *testing.T) {
+	initial, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	survivor, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer survivor.Close()
+	for _, listener := range []net.Listener{initial, survivor} {
+		go func(l net.Listener) {
+			for {
+				conn, err := l.Accept()
+				if err != nil {
+					return
+				}
+				go serveSupervised(conn, 9)
+			}
+		}(listener)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	c, err := Dial(ctx, initial.Addr().String(), ClientOptions{DiscoveryEndpoints: []string{survivor.Addr().String()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Shutdown()
+	initial.Close()
+	c.bootstrap.Shutdown()
+	topo, err := c.FetchTopology(ctx, TopologyRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if topo.Generation != 9 {
+		t.Fatalf("generation = %d", topo.Generation)
+	}
+}

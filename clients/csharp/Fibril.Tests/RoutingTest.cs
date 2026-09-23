@@ -14,6 +14,18 @@ public class RoutingTest
     };
 
     [Fact]
+    public async Task DiscoveryEndpointSurvivesBootstrapLoss()
+    {
+        var initial = new FakeBroker();
+        await using var survivor = new FakeBroker();
+        await using var client = await Client.ConnectAsync(initial.Address,
+            Opts() with { DiscoveryEndpoints = new[] { survivor.Address } }, Timeout());
+        await initial.DisposeAsync();
+        await client.FetchTopologyAsync(ct: Timeout());
+        Assert.True(await survivor.WaitForAsync(Op.Topology, Timeout()));
+    }
+
+    [Fact]
     public async Task FollowsRedirectToOwner()
     {
         // The bootstrap redirects the first publish to a second broker, which owns

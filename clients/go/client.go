@@ -25,10 +25,13 @@ const defaultMaxRedirects = 3
 
 // ClientOptions configure a cluster client.
 type ClientOptions struct {
-	ClientName        string
-	ClientVersion     string
-	Credentials       *Credentials
-	HeartbeatInterval time.Duration
+	// DiscoveryEndpoints are trusted fallback host:port addresses for topology
+	// refresh using the same TLS/auth. Initial connect uses its explicit address.
+	DiscoveryEndpoints []string
+	ClientName         string
+	ClientVersion      string
+	Credentials        *Credentials
+	HeartbeatInterval  time.Duration
 	// MaxRedirects bounds how many owner redirects a single op will follow.
 	MaxRedirects int
 	// SuperviseBackoff is the pause between re-subscribe attempts after a drop in
@@ -738,22 +741,38 @@ func (c *Client) DeclarePlexus(ctx context.Context, d StreamConfig) (DeclarePlex
 // FetchTopology fetches the topology and warms the routing cache, reconnecting
 // once on a transient failure.
 func (c *Client) FetchTopology(ctx context.Context, req TopologyRequest) (TopologyOk, error) {
-	for attempt := 0; attempt < 2; attempt++ {
-		eng, err := c.bootstrapEngine(ctx)
-		if err != nil {
-			return TopologyOk{}, err
+	candidates := append([]string{c.bootstrapEndpoint}, c.opts.DiscoveryEndpoints...)
+	for endpoint := range c.topo.endpoints() {
+		candidates = append(candidates, endpoint)
+	}
+	c.poolMu.Lock()
+	for endpoint := range c.pool {
+		candidates = append(candidates, endpoint)
+	}
+	c.poolMu.Unlock()
+	seen := map[string]bool{}
+	var lastErr error
+	for _, endpoint := range candidates {
+		if seen[endpoint] {
+			continue
 		}
-		topo, err := eng.FetchTopology(ctx, req)
+		seen[endpoint] = true
+		eng, err := c.engineFor(ctx, endpoint)
 		if err == nil {
-			c.topo.replace(topo)
-			c.prunePool()
-			return topo, nil
+			var topo TopologyOk
+			topo, err = eng.FetchTopology(ctx, req)
+			if err == nil {
+				c.topo.replace(topo)
+				c.prunePool()
+				return topo, nil
+			}
 		}
-		if !isTransient(err) {
-			return TopologyOk{}, err
+		lastErr = err
+		if ctx.Err() != nil {
+			return TopologyOk{}, ctx.Err()
 		}
 	}
-	return TopologyOk{}, &DisconnectionError{Message: "topology fetch failed after reconnect"}
+	return TopologyOk{}, lastErr
 }
 
 // Close shuts the client down, the idiomatic io.Closer form of Shutdown. It

@@ -3,7 +3,7 @@ import {
   DeserializationError,
   FibrilError,
   SubscriptionClosedError,
-  isTransientError,
+  retryAdvice,
 } from "./errors.js";
 import { REASON_CODES } from "./wire.js";
 import { contentTypeHeader, deserializeByContentType } from "./message.js";
@@ -501,7 +501,7 @@ class PartitionSupervisor<R> {
         this.#boundOwner = this.#ownerNow();
         return true;
       } catch (err) {
-        if (isTransientError(err)) {
+        if (retryAdvice(err) === "retry") {
           await sleep(publishRetryNap(backoffMs));
           backoffMs = Math.min(backoffMs * 2, PUBLISH_RETRY_MAX_BACKOFF_MS);
           continue;

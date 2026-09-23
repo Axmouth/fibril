@@ -107,6 +107,9 @@ class ClientOptions:
     #: advises a safe recreate (the default). Off, a recreate ends the
     #: subscription with the typed close reason instead.
     auto_resubscribe: bool = True
+    #: Trusted fallback host:port addresses for topology refresh, using the same TLS/auth.
+    #: Initial connect still requires its explicit address.
+    discovery_endpoints: tuple[str, ...] = ()
     max_redirects: int = 3
     publish_timeout_ms: int = 30_000
     topology_refresh_cooldown_ms: int = 1_000
@@ -1047,8 +1050,19 @@ class Client:
     async def fetch_topology(
         self, topic: Optional[str] = None, group: Optional[str] = None
     ) -> wire.TopologyOk:
-        engine = await self._engine_for_operation()
-        topology = await engine.fetch_topology(topic, group)
+        candidates = dict.fromkeys((self._bootstrap_endpoint, *self._opts.discovery_endpoints,
+                                    *self._topology.endpoints(), *self._pool))
+        last_error: Optional[Exception] = None
+        for endpoint in candidates:
+            try:
+                engine = await self._engine_at(endpoint)
+                topology = await engine.fetch_topology(topic, group)
+                break
+            except Exception as error:
+                last_error = error
+        else:
+            assert last_error is not None
+            raise last_error
         self._topology.replace(topology)
         self._topology.last_refresh_ms = asyncio.get_running_loop().time() * 1000
         _prune_pool_to_topology(self._topology, self._pool)
@@ -1125,11 +1139,14 @@ class Client:
         self, topic: str, partition: int, group: Optional[str]
     ) -> Engine:
         owner = self._topology.lookup(topic, partition, group)
-        if owner is None or owner.endpoint == self._bootstrap_endpoint:
+        return await self._engine_at(owner.endpoint if owner else self._bootstrap_endpoint)
+
+    async def _engine_at(self, endpoint: str) -> Engine:
+        if endpoint == self._bootstrap_endpoint:
             return await self._engine_for_operation()
-        conn = self._pool.get(owner.endpoint)
+        conn = self._pool.get(endpoint)
         if conn is None:
-            host, port = parse_address(owner.endpoint)
+            host, port = parse_address(endpoint)
             conn = _PooledConnection(
                 host,
                 port,
@@ -1138,7 +1155,7 @@ class Client:
                 self._on_topology_update,
                 self._emit_going_away,
             )
-            self._pool[owner.endpoint] = conn
+            self._pool[endpoint] = conn
         return await conn.engine_for_operation()
 
     async def subscribe_once(self, req: wire.Subscribe) -> SubscribeHandle:
