@@ -149,6 +149,9 @@ The compatibility work follows this order:
   admin visibility and rollback. Keep Raft election timing separate.
 - Verify subscriptions that begin during recovery resume delivery after local
   admission; retain confirmed-message checks and independent fresh-client probes.
+- Remove repeated full-history scans from bounded recovery inspection without
+  weakening integrity checks; retain 10k backlog and 100k backlog/settled-history
+  acceptance cases. Current 100k histories repeatedly exceed inspection deadlines.
 - Target common-case queue recovery within two seconds: measure release-build
   stage costs, remove avoidable waits, prove promotion using compatible existing
   storage, then assess agreed checkpoints and suffix-only comparison. See the

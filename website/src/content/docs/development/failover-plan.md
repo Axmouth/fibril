@@ -97,6 +97,26 @@ client/server transition before claiming uninterrupted recovery for existing
 subscriptions. A continuously attempting publisher, larger histories, healthy
 traffic, and combined owner/metadata-leader loss still need matched measurements.
 
+### Longer retained histories
+
+A subsequent matched SATA check with 10,000 outstanding 1 KiB messages recovered
+all confirmed IDs, accepted new durable work and converged after owner restart.
+Two runs reached owner readiness in 15.12–15.22 seconds and fresh-client delivery
+in 15.86–15.97 seconds. In the first run, 11.27 seconds of the 13.14-second recovery
+attempt went into source inspection, comparison and reinspection. With 100,000 outstanding messages, or 100,000 settled messages plus
+one outstanding message, inspection repeatedly exceeded its ten-second deadline
+and the queue remained fenced throughout the 90-second observation window. The
+settled case retained history from offset zero; it does not establish compacted
+checkpoint behavior. The saved pre-transport control also timed out at 10,000
+messages, so this scale limit predates the transport improvement.
+
+Inspection currently requests 256 records per page and verifies both complete
+retained logs on every page read. Keep the larger-history cases as availability
+gates while assessing larger bounded pages, verified progress reuse and connection
+reuse. Separate scan/verification work from RPC setup and authorization costs;
+preserve content, identity and quorum checks throughout. Larger queues also need
+explicit acceptance for the total page, record and byte limits.
+
 ### 2. Reduce overhead with the existing recovery proof
 
 Evaluate changes individually against that baseline:
