@@ -220,7 +220,16 @@ pub struct StaticProtocolOwnerPeerResolver {
     cfg: ProtocolOwnerPeerResolverConfig,
     // Keyed by (owner, kind): a stream peer reads via the stream-mode pull op, so
     // it is cached separately from a queue peer to the same owner.
-    peers: Mutex<HashMap<(String, ReplicationResourceKind, Option<fibril_broker::coordination::QueueIdentity>), Arc<ProtocolOwnerReplicationPeer>>>,
+    peers: Mutex<
+        HashMap<
+            (
+                String,
+                ReplicationResourceKind,
+                Option<fibril_broker::coordination::QueueIdentity>,
+            ),
+            Arc<ProtocolOwnerReplicationPeer>,
+        >,
+    >,
 }
 
 impl StaticProtocolOwnerPeerResolver {
@@ -263,12 +272,32 @@ impl BrokerOwnerReplicationPeerResolver for StaticProtocolOwnerPeerResolver {
                 return Ok(None);
             };
 
-            let history = assignment.history.as_ref().map(|history| {
-                let sender = self.cfg.reporter_node_id.as_deref().ok_or_else(|| BrokerError::InvalidArgument("history replication requires local replica identity".into()))?;
-                history.session(&assignment.queue.topic, assignment.queue.partition, assignment.queue.group.as_deref(),
-                    kind == ReplicationResourceKind::Stream, sender, &assignment.owner).map_err(BrokerError::InvalidArgument)
-            }).transpose()?;
-            let cache_key = (assignment.owner.clone(), kind, history.as_ref().map(|_| assignment.queue.clone()));
+            let history = assignment
+                .history
+                .as_ref()
+                .map(|history| {
+                    let sender = self.cfg.reporter_node_id.as_deref().ok_or_else(|| {
+                        BrokerError::InvalidArgument(
+                            "history replication requires local replica identity".into(),
+                        )
+                    })?;
+                    history
+                        .session(
+                            &assignment.queue.topic,
+                            assignment.queue.partition,
+                            assignment.queue.group.as_deref(),
+                            kind == ReplicationResourceKind::Stream,
+                            sender,
+                            &assignment.owner,
+                        )
+                        .map_err(BrokerError::InvalidArgument)
+                })
+                .transpose()?;
+            let cache_key = (
+                assignment.owner.clone(),
+                kind,
+                history.as_ref().map(|_| assignment.queue.clone()),
+            );
             let mut peers = self.peers.lock().await;
             if let Some(peer) = peers.get(&cache_key) {
                 if peer.history == history {
@@ -319,7 +348,16 @@ pub struct CoordinationProtocolOwnerPeerResolver {
     cfg: ProtocolOwnerPeerResolverConfig,
     // Keyed by (owner, kind): a stream peer reads via the stream-mode pull op, so
     // it is cached separately from a queue peer to the same owner.
-    peers: Mutex<HashMap<(String, ReplicationResourceKind, Option<fibril_broker::coordination::QueueIdentity>), CachedProtocolOwnerPeer>>,
+    peers: Mutex<
+        HashMap<
+            (
+                String,
+                ReplicationResourceKind,
+                Option<fibril_broker::coordination::QueueIdentity>,
+            ),
+            CachedProtocolOwnerPeer,
+        >,
+    >,
 }
 
 impl CoordinationProtocolOwnerPeerResolver {
@@ -369,15 +407,38 @@ impl BrokerOwnerReplicationPeerResolver for CoordinationProtocolOwnerPeerResolve
     > {
         Box::pin(async move {
             if assignment.history.is_some()
-                && self.cfg.reporter_node_id.as_deref() != Some(self.coordination.node_id()) {
-                return Err(BrokerError::InvalidArgument("history reporter must identify the local coordination node".into()));
+                && self.cfg.reporter_node_id.as_deref() != Some(self.coordination.node_id())
+            {
+                return Err(BrokerError::InvalidArgument(
+                    "history reporter must identify the local coordination node".into(),
+                ));
             }
-            let history = assignment.history.as_ref().map(|history| {
-                let sender = self.cfg.reporter_node_id.as_deref().ok_or_else(|| BrokerError::InvalidArgument("history replication requires local replica identity".into()))?;
-                history.session(&assignment.queue.topic, assignment.queue.partition, assignment.queue.group.as_deref(),
-                    kind == ReplicationResourceKind::Stream, sender, &assignment.owner).map_err(BrokerError::InvalidArgument)
-            }).transpose()?;
-            let cache_key = (assignment.owner.clone(), kind, history.as_ref().map(|_| assignment.queue.clone()));
+            let history = assignment
+                .history
+                .as_ref()
+                .map(|history| {
+                    let sender = self.cfg.reporter_node_id.as_deref().ok_or_else(|| {
+                        BrokerError::InvalidArgument(
+                            "history replication requires local replica identity".into(),
+                        )
+                    })?;
+                    history
+                        .session(
+                            &assignment.queue.topic,
+                            assignment.queue.partition,
+                            assignment.queue.group.as_deref(),
+                            kind == ReplicationResourceKind::Stream,
+                            sender,
+                            &assignment.owner,
+                        )
+                        .map_err(BrokerError::InvalidArgument)
+                })
+                .transpose()?;
+            let cache_key = (
+                assignment.owner.clone(),
+                kind,
+                history.as_ref().map(|_| assignment.queue.clone()),
+            );
             let snapshot = self.coordination.snapshot();
             let Some(node) = snapshot.nodes.get(&assignment.owner) else {
                 self.peers.lock().await.remove(&cache_key);
@@ -659,14 +720,19 @@ pub struct ProtocolOwnerReplicationPeer {
 }
 
 impl ProtocolOwnerReplicationPeer {
-    pub fn with_history_session(mut self, history: fibril_broker::history_replication::HistoryReplicationSession) -> Self {
+    pub fn with_history_session(
+        mut self,
+        history: fibril_broker::history_replication::HistoryReplicationSession,
+    ) -> Self {
         self.history = Some(history);
         self
     }
 
     fn history_frame(&self, frame: Frame) -> Result<Frame, BrokerError> {
         match &self.history {
-            Some(history) => crate::v1::history_replication::encode_frame(history, frame).map_err(protocol_error),
+            Some(history) => {
+                crate::v1::history_replication::encode_frame(history, frame).map_err(protocol_error)
+            }
             None => Ok(frame),
         }
     }
@@ -850,24 +916,26 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
             let mut conn = self.take_conn().await?;
             if let Err(err) = conn
                 .send(
-                    self.history_frame(try_encode(
-                        read_op,
-                        request_id,
-                        &ReplicationRead {
-                            reporter_epoch: reporter_epoch,
-                            topic: topic.to_string(),
-                            group: group.map(str::to_string),
-                            partition,
-                            message_from,
-                            event_from,
-                            max_messages,
-                            max_events,
-                            max_bytes,
-                            max_wait_ms,
-                            reporter_node_id: self.reporter_node_id.clone(),
-                        },
-                    )
-                    .map_err(protocol_error)?)?,
+                    self.history_frame(
+                        try_encode(
+                            read_op,
+                            request_id,
+                            &ReplicationRead {
+                                reporter_epoch: reporter_epoch,
+                                topic: topic.to_string(),
+                                group: group.map(str::to_string),
+                                partition,
+                                message_from,
+                                event_from,
+                                max_messages,
+                                max_events,
+                                max_bytes,
+                                max_wait_ms,
+                                reporter_node_id: self.reporter_node_id.clone(),
+                            },
+                        )
+                        .map_err(protocol_error)?,
+                    )?,
                 )
                 .await
             {
@@ -933,16 +1001,18 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
             let mut conn = self.take_conn().await?;
             if let Err(err) = conn
                 .send(
-                    self.history_frame(try_encode(
-                        Op::ReplicationCheckpointExport,
-                        request_id,
-                        &ReplicationCheckpointExport {
-                            topic: topic.to_string(),
-                            group: group.map(str::to_string),
-                            partition,
-                        },
-                    )
-                    .map_err(protocol_error)?)?,
+                    self.history_frame(
+                        try_encode(
+                            Op::ReplicationCheckpointExport,
+                            request_id,
+                            &ReplicationCheckpointExport {
+                                topic: topic.to_string(),
+                                group: group.map(str::to_string),
+                                partition,
+                            },
+                        )
+                        .map_err(protocol_error)?,
+                    )?,
                 )
                 .await
             {
@@ -2047,7 +2117,10 @@ fn validate_recovery_seal_reply(
     if reply.replica_id != replica_id
         || reply.transition != command.transition
         || reply.fence_epoch != command.fence_epoch
-        || !matches!((reply.history_version, reply.storage_history.is_some()), (1, false) | (2, true))
+        || !matches!(
+            (reply.history_version, reply.storage_history.is_some()),
+            (1, false) | (2, true)
+        )
         || reply.message_head > reply.message_next
         || reply.event_head > reply.event_next
     {
@@ -2064,11 +2137,19 @@ fn validate_recovery_seal_reply(
             },
             history: RetainedHistoryIdentity {
                 version: reply.history_version,
-                storage_history: reply.storage_history.map(|h| fibril_broker::queue_engine::PreparedStorageHistory {
-                    topic: command.topic.clone(), partition: command.partition.id(), group: command.group.clone(), stream: command.stream,
-                    binding: fibril_broker::queue_engine::StorageHistoryBinding {
-                        resource_incarnation: h.resource_incarnation, accepted_history: h.accepted_history, writer_session: h.writer_session,
-                    }, storage_instance: h.storage_instance,
+                storage_history: reply.storage_history.map(|h| {
+                    fibril_broker::queue_engine::PreparedStorageHistory {
+                        topic: command.topic.clone(),
+                        partition: command.partition.id(),
+                        group: command.group.clone(),
+                        stream: command.stream,
+                        binding: fibril_broker::queue_engine::StorageHistoryBinding {
+                            resource_incarnation: h.resource_incarnation,
+                            accepted_history: h.accepted_history,
+                            writer_session: h.writer_session,
+                        },
+                        storage_instance: h.storage_instance,
+                    }
                 }),
                 id: reply.history_id,
                 message_digest: reply.message_digest,
@@ -2189,6 +2270,29 @@ pub(super) async fn request_recovery_read_reusing(
     deadline: std::time::Duration,
     idle: &mut Option<Conn>,
 ) -> Result<crate::v1::RecoveryReadOk, BrokerError> {
+    request_recovery_read_mode(config, command, sealed, request, deadline, idle, false).await
+}
+
+pub(super) async fn request_recovery_read_sequential_reusing(
+    config: &ProtocolOwnerPeerResolverConfig,
+    command: &fibril_broker::recovery::RecoverySealCommand,
+    sealed: &fibril_broker::recovery::BrokerSealedReplica,
+    request: &fibril_broker::recovery::RecoveryReadRequest,
+    deadline: std::time::Duration,
+    idle: &mut Option<Conn>,
+) -> Result<crate::v1::RecoveryReadOk, BrokerError> {
+    request_recovery_read_mode(config, command, sealed, request, deadline, idle, true).await
+}
+
+async fn request_recovery_read_mode(
+    config: &ProtocolOwnerPeerResolverConfig,
+    command: &fibril_broker::recovery::RecoverySealCommand,
+    sealed: &fibril_broker::recovery::BrokerSealedReplica,
+    request: &fibril_broker::recovery::RecoveryReadRequest,
+    deadline: std::time::Duration,
+    idle: &mut Option<Conn>,
+    sequential: bool,
+) -> Result<crate::v1::RecoveryReadOk, BrokerError> {
     let cached = idle.take();
     use fibril_broker::recovery::RecoveryReadSource;
     if request.seal != sealed.seal.request
@@ -2229,18 +2333,32 @@ pub(super) async fn request_recovery_read_reusing(
     let operation = async {
         let mut conn = match cached {
             Some(conn) => conn,
-            None => open_protocol_owner_conn(
-                addr.clone(),
-                config.auth.as_ref(),
-                config.tls.as_ref(),
-                &config.client_name,
-                &config.client_version,
-                config.owner_connect_timeout_ms,
-            ).await?,
+            None => {
+                open_protocol_owner_conn(
+                    addr.clone(),
+                    config.auth.as_ref(),
+                    config.tls.as_ref(),
+                    &config.client_name,
+                    &config.client_version,
+                    config.owner_connect_timeout_ms,
+                )
+                .await?
+            }
         };
-        conn.send(try_encode(Op::RecoveryRead, 3, &wire_request).map_err(protocol_error)?)
-            .await
-            .map_err(|err| BrokerError::Unknown(format!("recovery read send failed: {err}")))?;
+        conn.send(
+            try_encode(
+                if sequential {
+                    Op::RecoveryReadSequential
+                } else {
+                    Op::RecoveryRead
+                },
+                3,
+                &wire_request,
+            )
+            .map_err(protocol_error)?,
+        )
+        .await
+        .map_err(|err| BrokerError::Unknown(format!("recovery read send failed: {err}")))?;
         let reply: crate::v1::RecoveryReadOk = recv_response(&mut conn, 3, Op::RecoveryReadOk)
             .await
             .map_err(|err| BrokerError::Unknown(format!("recovery read failed: {err}")))?;
@@ -2322,9 +2440,13 @@ mod recovery_read_tests {
 
     #[tokio::test]
     async fn inspection_socket_reuse_discards_timeout_cancelled_and_invalid_replies() {
+        use fibril_broker::recovery::{
+            RecoveryReadRequest, RecoveryReadSource, RecoverySealCommand,
+        };
         use std::time::Duration;
-        use fibril_broker::recovery::{RecoverySealCommand, RecoveryReadRequest, RecoveryReadSource};
-        let listener = fibril_util::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = fibril_util::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
         let address = listener.local_addr().unwrap().to_string();
         let handshakes = Arc::new(AtomicU64::new(0));
         let auths = Arc::new(AtomicU64::new(0));
@@ -2341,12 +2463,20 @@ mod recovery_read_tests {
                         let response = match frame.opcode {
                             op if op == Op::Hello as u16 => {
                                 handshakes.fetch_add(1, Ordering::SeqCst);
-                                try_encode(Op::HelloOk, frame.request_id, &HelloOk {
-                                    protocol_version: PROTOCOL_V1,
-                                    owner_id: uuid::Uuid::nil(), client_id: uuid::Uuid::nil(),
-                                    resume_token: uuid::Uuid::nil(), resume_outcome: crate::v1::ResumeOutcome::New,
-                                    server_name: "test".into(), compliance: crate::v1::COMPLIANCE_STRING.into(),
-                                }).unwrap()
+                                try_encode(
+                                    Op::HelloOk,
+                                    frame.request_id,
+                                    &HelloOk {
+                                        protocol_version: PROTOCOL_V1,
+                                        owner_id: uuid::Uuid::nil(),
+                                        client_id: uuid::Uuid::nil(),
+                                        resume_token: uuid::Uuid::nil(),
+                                        resume_outcome: crate::v1::ResumeOutcome::New,
+                                        server_name: "test".into(),
+                                        compliance: crate::v1::COMPLIANCE_STRING.into(),
+                                    },
+                                )
+                                .unwrap()
                             }
                             op if op == Op::Auth as u16 => {
                                 let auth: Auth = try_decode(&frame).unwrap();
@@ -2363,40 +2493,87 @@ mod recovery_read_tests {
                                     return;
                                 }
                                 let req: RecoveryRead = try_decode(&frame).unwrap();
-                                try_encode(Op::RecoveryReadOk, frame.request_id, &RecoveryReadOk {
-                                    replica_id: "b".into(), transition: req.seal.transition,
-                                    fence_epoch: req.seal.fence_epoch,
-                                    history_id: if n == 5 { [99; 32] } else { req.history_id },
-                                    source: req.source, from: 0, next: 0, end: 0,
-                                    records: vec![], snapshot_bytes: vec![],
-                                }).unwrap()
+                                try_encode(
+                                    Op::RecoveryReadOk,
+                                    frame.request_id,
+                                    &RecoveryReadOk {
+                                        replica_id: "b".into(),
+                                        transition: req.seal.transition,
+                                        fence_epoch: req.seal.fence_epoch,
+                                        history_id: if n == 5 { [99; 32] } else { req.history_id },
+                                        source: req.source,
+                                        from: 0,
+                                        next: 0,
+                                        end: 0,
+                                        records: vec![],
+                                        snapshot_bytes: vec![],
+                                    },
+                                )
+                                .unwrap()
                             }
                             _ => panic!("unexpected operation"),
                         };
-                        if conn.send(response).await.is_err() { return; }
+                        if conn.send(response).await.is_err() {
+                            return;
+                        }
                     }
                 });
             }
         });
         let command = RecoverySealCommand {
-            topic: "q".into(), partition: Partition::new(0), group: None, stream: false,
-            transition: [1; 32], fence_epoch: 8,
+            topic: "q".into(),
+            partition: Partition::new(0),
+            group: None,
+            stream: false,
+            transition: [1; 32],
+            fence_epoch: 8,
         };
-        let sealed = validate_recovery_seal_reply("b", &command, crate::v1::RecoverySealOk {
-            storage_history: None, replica_id: "b".into(), transition: [1; 32], fence_epoch: 8,
-            history_version: 1, history_id: [2; 32], message_digest: [3; 32], event_digest: [4; 32],
-            snapshot_digest: None, message_head: 0, message_next: 0, event_head: 0, event_next: 0,
-        }).unwrap();
-        let request = RecoveryReadRequest { seal: sealed.seal.request.clone(), history_id: sealed.seal.history.id,
-            source: RecoveryReadSource::Messages, from: 0, max_records: 1, max_bytes: 32 };
+        let sealed = validate_recovery_seal_reply(
+            "b",
+            &command,
+            crate::v1::RecoverySealOk {
+                storage_history: None,
+                replica_id: "b".into(),
+                transition: [1; 32],
+                fence_epoch: 8,
+                history_version: 1,
+                history_id: [2; 32],
+                message_digest: [3; 32],
+                event_digest: [4; 32],
+                snapshot_digest: None,
+                message_head: 0,
+                message_next: 0,
+                event_head: 0,
+                event_next: 0,
+            },
+        )
+        .unwrap();
+        let request = RecoveryReadRequest {
+            seal: sealed.seal.request.clone(),
+            history_id: sealed.seal.history.id,
+            source: RecoveryReadSource::Messages,
+            from: 0,
+            max_records: 1,
+            max_bytes: 32,
+        };
         let config = ProtocolOwnerPeerResolverConfig::new(HashMap::from([("b".into(), address)]))
             .with_auth("@node", "secret");
         let mut idle = None;
         for n in 1..=8 {
-            let deadline = if n == 3 { Duration::from_millis(100) } else { Duration::from_secs(3) };
-            let call = request_recovery_read_reusing(&config, &command, &sealed, &request, deadline, &mut idle);
+            let deadline = if n == 3 {
+                Duration::from_millis(100)
+            } else {
+                Duration::from_secs(3)
+            };
+            let call = request_recovery_read_reusing(
+                &config, &command, &sealed, &request, deadline, &mut idle,
+            );
             if n == 7 {
-                assert!(tokio::time::timeout(Duration::from_millis(100), call).await.is_err());
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(100), call)
+                        .await
+                        .is_err()
+                );
             } else {
                 assert_eq!(call.await.is_err(), n == 3 || n == 5);
             }

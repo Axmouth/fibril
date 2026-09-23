@@ -10,6 +10,10 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Sequential sealed-history inspection
+
+Inspection now reads each frozen log once per traversal, checks record CRCs and the complete sealed digest, and creates evidence only after full receiver verification. Bounded sessions preserve authorization, cancellation ownership and deadlines; strict target-copy reads remain unchanged. Single-run three-replica SATA readiness improved from 50.72 to 24.11 seconds for 100k outstanding 1 KiB messages and from 46.87 to 18.97 seconds for 100k settled plus one outstanding; retained-data copying is now the main cost ([internals](/development/recovery-internals/#bounded-sequential-inspection)).
+
 ### Reusing authenticated inspection connections
 
 Recovery inspection reuses one authenticated connection per source within a bounded inspection; each page still receives fresh authorization and identity validation. Requests own their socket while in flight, so timeout, cancellation and invalid replies discard it before a retry. The 100k-backlog SATA gate passed at 42.17 seconds after artifact reuse measured 42.50 seconds, a difference too small to establish a speedup from these single runs.
@@ -24,7 +28,7 @@ A subscriber connected only to its queue owner stayed pending after that owner d
 
 ### Bounded recovery pages and buffered history scans
 
-Recovery inspection now uses the existing 4096-record / 16 MiB page limits, and Keratin buffers frozen reads while reusing bounded record scratch space. On the three-replica SATA acceptance host, 10k-backlog readiness fell from 15.12–15.22 s to 4.29 s; previously timing-out 100k backlog and settled-history cases completed in 50.72 s and 46.87 s with full ID, durable-write and restart/convergence checks. Full-history verification and deadlines remain unchanged; repeated scans, artifact reuse and connection reuse remain in the [recovery plan](/development/failover-plan/#longer-retained-histories).
+Recovery inspection now uses the existing 4096-record / 16 MiB page limits, and Keratin buffers frozen reads while reusing bounded record scratch space. On the three-replica SATA acceptance host, 10k-backlog readiness fell from 15.12–15.22 s to 4.29 s; previously timing-out 100k backlog and settled-history cases completed in 50.72 s and 46.87 s with full ID, durable-write and restart/convergence checks. Full-history verification and deadlines remain unchanged; subsequent artifact, connection and sequential-inspection improvements are recorded above.
 
 ### Raft sockets after cancellation and peer restart
 

@@ -63,3 +63,34 @@ for ordinary owner delivery, which does not append a lease event. Timer state,
 resource incarnation and checkpoint authority still require explicit proof before
 source selection; see [recovery sealing](/reliability/recovery-sealing/) and the
 [failover plan](/development/failover-plan/).
+
+## Bounded sequential inspection
+
+Automatic sealed-history inspection uses the node-only `RecoveryReadSequential`
+operation (112). Each connection owns at most one tentative cursor, bound to the
+resource, partition/group, transition, complete retained-history identity and log
+source. Every page receives fresh consensus authorization and seal/storage-receipt
+validation. Records are checked for CRC and contiguous offsets while reading;
+the final page is withheld if the complete canonical digest differs from the seal.
+The receiver independently verifies complete histories, checkpoints and replay
+before producing an artifact or selecting a source. Partial pages confer no
+recovery authority.
+
+Each storage engine admits two sessions and one active sealed read. Idle sessions
+expire after ten seconds without a successful recovery page. Completion, disconnect,
+error and cancellation release cursor resources; admitted blocking work retains its
+own lifecycle guards until it finishes. Read buffers and pages are bounded, and
+existing whole-inspection deadlines, byte/record/page and replay limits still apply.
+Snapshot reads retain complete envelope verification. No payload history cache is
+kept across attempts.
+
+Strict `RecoveryRead` (105), used for diagnostics and target copying, still verifies
+both retained logs per page. A selected artifact can be reused within its attempt
+only after verification against the persisted plan; restart falls back to source
+reconstruction or a completed target snapshot. Inspection connections are reused
+only after a valid reply, and discarded on timeout, cancellation or invalid data.
+
+This adds an internal broker opcode without changing the storage format. All
+participating brokers must support operation 112 for automatic inspection; an
+older peer rejects it and recovery remains fenced. Mixed-version rolling recovery
+with older binaries is not supported by this change.

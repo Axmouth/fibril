@@ -3068,8 +3068,13 @@ pub fn encode_recovery_seal_ok(
     request_id: u64,
     reply: &crate::RecoverySealOk,
 ) -> WireResult<Frame> {
-    if !matches!((reply.history_version, reply.storage_history.is_some()), (1, false) | (2, true)) {
-        return Err(WireError::InvalidRecordSequence("invalid sealed history version or binding"));
+    if !matches!(
+        (reply.history_version, reply.storage_history.is_some()),
+        (1, false) | (2, true)
+    ) {
+        return Err(WireError::InvalidRecordSequence(
+            "invalid sealed history version or binding",
+        ));
     }
     let mut out = payload_builder(b"RSO1");
     put_str(&mut out, &reply.replica_id)?;
@@ -3120,14 +3125,20 @@ pub fn decode_recovery_seal_ok(frame: &Frame) -> WireResult<crate::RecoverySealO
         event_next: r.u64()?,
     };
     match reply.history_version {
-        1 => {},
-        2 => reply.storage_history = Some(crate::RecoveryStorageHistory {
-            resource_incarnation: r.take(16)?.try_into().unwrap(),
-            accepted_history: r.take(16)?.try_into().unwrap(),
-            writer_session: r.take(16)?.try_into().unwrap(),
-            storage_instance: r.take(16)?.try_into().unwrap(),
-        }),
-        _ => return Err(WireError::InvalidRecordSequence("unsupported sealed history version")),
+        1 => {}
+        2 => {
+            reply.storage_history = Some(crate::RecoveryStorageHistory {
+                resource_incarnation: r.take(16)?.try_into().unwrap(),
+                accepted_history: r.take(16)?.try_into().unwrap(),
+                writer_session: r.take(16)?.try_into().unwrap(),
+                storage_instance: r.take(16)?.try_into().unwrap(),
+            })
+        }
+        _ => {
+            return Err(WireError::InvalidRecordSequence(
+                "unsupported sealed history version",
+            ));
+        }
     }
     r.finish()?;
     Ok(reply)
@@ -3156,6 +3167,19 @@ pub fn encode_recovery_read(id: u64, req: &crate::RecoveryRead) -> WireResult<Fr
         return Err(WireError::FieldTooLarge("recovery request"));
     }
     Ok(frame(Op::RecoveryRead, id, out.freeze()))
+}
+
+pub fn encode_recovery_read_sequential(id: u64, req: &crate::RecoveryRead) -> WireResult<Frame> {
+    let mut frame = encode_recovery_read(id, req)?;
+    frame.opcode = Op::RecoveryReadSequential as u16;
+    Ok(frame)
+}
+
+pub fn decode_recovery_read_sequential(f: &Frame) -> WireResult<crate::RecoveryRead> {
+    expect_op(f, Op::RecoveryReadSequential)?;
+    let mut strict = f.clone();
+    strict.opcode = Op::RecoveryRead as u16;
+    decode_recovery_read(&strict)
 }
 
 pub fn decode_recovery_read(f: &Frame) -> WireResult<crate::RecoveryRead> {
@@ -3281,6 +3305,24 @@ mod recovery_read_wire_tests {
             snapshot_bytes: vec![],
         };
         let req = encode_recovery_read(9, &request).unwrap();
+        let sequential = encode_recovery_read_sequential(9, &request).unwrap();
+        assert_eq!(
+            decode_recovery_read_sequential(&sequential).unwrap(),
+            request
+        );
+        assert!(decode_recovery_read(&sequential).is_err());
+        assert!(decode_recovery_read_sequential(&req).is_err());
+        for length in 0..sequential.payload.len() {
+            let mut broken = sequential.clone();
+            broken.payload = broken.payload.slice(..length);
+            assert!(decode_recovery_read_sequential(&broken).is_err());
+        }
+        let mut trailing = sequential.clone();
+        let mut bytes = trailing.payload.to_vec();
+        bytes.push(0);
+        trailing.payload = bytes.into();
+        assert!(decode_recovery_read_sequential(&trailing).is_err());
+
         let res = encode_recovery_read_ok(9, &reply).unwrap();
         assert_eq!(decode_recovery_read(&req).unwrap(), request);
         assert_eq!(decode_recovery_read_ok(&res).unwrap(), reply);
@@ -3646,33 +3688,85 @@ mod bound_seal_tests {
     use super::*;
     #[test]
     fn sealed_history_versions_preserve_legacy_frames_and_require_complete_binding() {
-        let mut reply = crate::RecoverySealOk {replica_id:"b".into(),transition:[1;32],fence_epoch:8,history_version:1,
-            storage_history:None,history_id:[2;32],message_digest:[3;32],event_digest:[4;32],snapshot_digest:None,
-            message_head:0,message_next:7,event_head:0,event_next:9};
-        let legacy=encode_recovery_seal_ok(1,&reply).unwrap();
-        assert_eq!(decode_recovery_seal_ok(&legacy).unwrap(),reply);
-        reply.history_version=2;
-        assert!(encode_recovery_seal_ok(1,&reply).is_err());
-        reply.storage_history=Some(crate::RecoveryStorageHistory {resource_incarnation:[5;16],accepted_history:[6;16],writer_session:[7;16],storage_instance:[8;16]});
-        let bound=encode_recovery_seal_ok(1,&reply).unwrap();
-        assert_eq!(bound.payload.len(),legacy.payload.len()+64);
-        assert_eq!(decode_recovery_seal_ok(&bound).unwrap(),reply);
-        for size in 0..bound.payload.len() {let mut truncated=bound.clone();truncated.payload=truncated.payload.slice(..size);assert!(decode_recovery_seal_ok(&truncated).is_err());}
-        reply.history_version=1;
-        assert!(encode_recovery_seal_ok(1,&reply).is_err());
+        let mut reply = crate::RecoverySealOk {
+            replica_id: "b".into(),
+            transition: [1; 32],
+            fence_epoch: 8,
+            history_version: 1,
+            storage_history: None,
+            history_id: [2; 32],
+            message_digest: [3; 32],
+            event_digest: [4; 32],
+            snapshot_digest: None,
+            message_head: 0,
+            message_next: 7,
+            event_head: 0,
+            event_next: 9,
+        };
+        let legacy = encode_recovery_seal_ok(1, &reply).unwrap();
+        assert_eq!(decode_recovery_seal_ok(&legacy).unwrap(), reply);
+        reply.history_version = 2;
+        assert!(encode_recovery_seal_ok(1, &reply).is_err());
+        reply.storage_history = Some(crate::RecoveryStorageHistory {
+            resource_incarnation: [5; 16],
+            accepted_history: [6; 16],
+            writer_session: [7; 16],
+            storage_instance: [8; 16],
+        });
+        let bound = encode_recovery_seal_ok(1, &reply).unwrap();
+        assert_eq!(bound.payload.len(), legacy.payload.len() + 64);
+        assert_eq!(decode_recovery_seal_ok(&bound).unwrap(), reply);
+        for size in 0..bound.payload.len() {
+            let mut truncated = bound.clone();
+            truncated.payload = truncated.payload.slice(..size);
+            assert!(decode_recovery_seal_ok(&truncated).is_err());
+        }
+        reply.history_version = 1;
+        assert!(encode_recovery_seal_ok(1, &reply).is_err());
     }
 }
 
-pub fn encode_recovery_transfer(id:u64, req:&crate::RecoveryTransfer, reply:bool) -> WireResult<Frame> {
-    if req.body.len()+8 > crate::MAX_RECOVERY_TRANSFER_FRAME_BYTES {return Err(WireError::InvalidRecordSequence("recovery transfer exceeds size limit"));}
-    let mut out=payload_builder(b"RXT1"); put_bytes(&mut out,&req.body)?;
-    Ok(frame(if reply {Op::RecoveryTransferOk} else {Op::RecoveryTransfer},id,out.freeze()))
+pub fn encode_recovery_transfer(
+    id: u64,
+    req: &crate::RecoveryTransfer,
+    reply: bool,
+) -> WireResult<Frame> {
+    if req.body.len() + 8 > crate::MAX_RECOVERY_TRANSFER_FRAME_BYTES {
+        return Err(WireError::InvalidRecordSequence(
+            "recovery transfer exceeds size limit",
+        ));
+    }
+    let mut out = payload_builder(b"RXT1");
+    put_bytes(&mut out, &req.body)?;
+    Ok(frame(
+        if reply {
+            Op::RecoveryTransferOk
+        } else {
+            Op::RecoveryTransfer
+        },
+        id,
+        out.freeze(),
+    ))
 }
-pub fn decode_recovery_transfer(f:&Frame,reply:bool) -> WireResult<crate::RecoveryTransfer> {
-    expect_op(f,if reply {Op::RecoveryTransferOk} else {Op::RecoveryTransfer})?;
-    if f.payload.len()>crate::MAX_RECOVERY_TRANSFER_FRAME_BYTES {return Err(WireError::InvalidRecordSequence("recovery transfer exceeds size limit"));}
-    let mut r=Reader::new(&f.payload); r.expect_magic(b"RXT1","recovery transfer")?;
-    let body=r.bytes()?.to_vec();r.finish()?;Ok(crate::RecoveryTransfer {body})
+pub fn decode_recovery_transfer(f: &Frame, reply: bool) -> WireResult<crate::RecoveryTransfer> {
+    expect_op(
+        f,
+        if reply {
+            Op::RecoveryTransferOk
+        } else {
+            Op::RecoveryTransfer
+        },
+    )?;
+    if f.payload.len() > crate::MAX_RECOVERY_TRANSFER_FRAME_BYTES {
+        return Err(WireError::InvalidRecordSequence(
+            "recovery transfer exceeds size limit",
+        ));
+    }
+    let mut r = Reader::new(&f.payload);
+    r.expect_magic(b"RXT1", "recovery transfer")?;
+    let body = r.bytes()?.to_vec();
+    r.finish()?;
+    Ok(crate::RecoveryTransfer { body })
 }
 
 #[cfg(test)]
@@ -3680,17 +3774,23 @@ mod recovery_transfer_tests {
     use super::*;
     #[test]
     fn recovery_transfer_codec_rejects_truncation_wrong_op_and_trailing_bytes() {
-        let payload=crate::RecoveryTransfer {body:vec![0,1,255,42]};
-        for reply in [false,true] {
-            let encoded=encode_recovery_transfer(9,&payload,reply).unwrap();
-            assert_eq!(decode_recovery_transfer(&encoded,reply).unwrap(),payload);
-            assert!(decode_recovery_transfer(&encoded,!reply).is_err());
+        let payload = crate::RecoveryTransfer {
+            body: vec![0, 1, 255, 42],
+        };
+        for reply in [false, true] {
+            let encoded = encode_recovery_transfer(9, &payload, reply).unwrap();
+            assert_eq!(decode_recovery_transfer(&encoded, reply).unwrap(), payload);
+            assert!(decode_recovery_transfer(&encoded, !reply).is_err());
             for len in 0..encoded.payload.len() {
-                let mut short=encoded.clone(); short.payload=short.payload.slice(..len);
-                assert!(decode_recovery_transfer(&short,reply).is_err());
+                let mut short = encoded.clone();
+                short.payload = short.payload.slice(..len);
+                assert!(decode_recovery_transfer(&short, reply).is_err());
             }
-            let mut trailing=encoded.clone();let mut body=encoded.payload.to_vec();body.push(0);trailing.payload=body.into();
-            assert!(decode_recovery_transfer(&trailing,reply).is_err());
+            let mut trailing = encoded.clone();
+            let mut body = encoded.payload.to_vec();
+            body.push(0);
+            trailing.payload = body.into();
+            assert!(decode_recovery_transfer(&trailing, reply).is_err());
         }
     }
 }

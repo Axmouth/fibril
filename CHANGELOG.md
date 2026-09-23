@@ -12,6 +12,10 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Breaking changes
 
+- Automatic recovery inspection uses the new node-only operation 112. All
+  participating brokers must support it; older peers reject it and recovery
+  remains fenced. The storage format and strict recovery-read operation are unchanged.
+
 - The new replicated-queue recovery path requires creation-time history
   enrollment. Existing experimental queue histories have no supported migration
   into this path. Drain queues on a compatible broker revision, retire them and
@@ -28,6 +32,10 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   migrated.
 
 ### Added
+
+- Explicit trusted fallback discovery endpoints in Rust, Python, TypeScript, Go
+  and C# clients, with supervised reattachment retries for temporary recovery
+  replies. Initial connection still requires the configured bootstrap endpoint.
 
 - Opt-in eager failover through cluster runtime settings and the dashboard.
   Repeated explicit peer connection failures across a reconnect grace can start
@@ -299,6 +307,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   and the matching `FIBRIL_KERATIN_*` env overrides).
 
 ### Changed
+
+- Recovery inspection reuses authenticated connections and the selected artifact
+  within one attempt, and verifies retained logs through bounded sequential
+  sessions. CRCs, complete sealed digests, receiver replay and fresh authorization
+  remain mandatory. Strict target-copy verification and total budgets are unchanged.
 
 - Reorganize current documentation: completed capabilities and conditions live
   in implemented surface; active plans track remaining work. Refresh reconnect

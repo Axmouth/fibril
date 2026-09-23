@@ -642,8 +642,15 @@ impl replication_stream::OwnerStreamSource for BrokerOwnerStreamSource {
         max_bytes: usize,
         max_wait_ms: u64,
     ) -> Result<ReplicationReadOk, String> {
-        crate::v1::history_replication::check_resource(&self.broker, self.history.as_ref(), topic, partition, group, true)
-            .map_err(|e| e.to_string())?;
+        crate::v1::history_replication::check_resource(
+            &self.broker,
+            self.history.as_ref(),
+            topic,
+            partition,
+            group,
+            true,
+        )
+        .map_err(|e| e.to_string())?;
         let records = self
             .broker
             .read_owner_replication_records(
@@ -659,8 +666,15 @@ impl replication_stream::OwnerStreamSource for BrokerOwnerStreamSource {
             )
             .await
             .map_err(|err| broker_error_response(&err).1.to_string())?;
-        crate::v1::history_replication::check_resource(&self.broker, self.history.as_ref(), topic, partition, group, true)
-            .map_err(|e| e.to_string())?;
+        crate::v1::history_replication::check_resource(
+            &self.broker,
+            self.history.as_ref(),
+            topic,
+            partition,
+            group,
+            true,
+        )
+        .map_err(|e| e.to_string())?;
         to_replication_read_ok(records).map_err(|err| err.to_string())
     }
 
@@ -673,8 +687,20 @@ impl replication_stream::OwnerStreamSource for BrokerOwnerStreamSource {
         durable_message_next: u64,
         durable_event_next: u64,
     ) {
-        if crate::v1::history_replication::check_resource(&self.broker, self.history.as_ref(), topic, partition, group, true).is_err()
-            || crate::v1::history_replication::check_reporter(self.history.as_ref(), Some(reporter)).is_err() { return; }
+        if crate::v1::history_replication::check_resource(
+            &self.broker,
+            self.history.as_ref(),
+            topic,
+            partition,
+            group,
+            true,
+        )
+        .is_err()
+            || crate::v1::history_replication::check_reporter(self.history.as_ref(), Some(reporter))
+                .is_err()
+        {
+            return;
+        }
         if let Some(session) = &self.progress {
             self.broker.record_replication_session_progress(
                 session,
@@ -2919,7 +2945,10 @@ where
     // Owner-side replication streams opened by followers on this connection,
     // keyed by stream id (the frame request_id). Dropping a control sender (on
     // Stop or when this map drops at connection end) makes its sender task exit.
-    let mut owner_stream_histories: HashMap<u64, Option<fibril_broker::history_replication::HistoryReplicationSession>> = HashMap::new();
+    let mut owner_stream_histories: HashMap<
+        u64,
+        Option<fibril_broker::history_replication::HistoryReplicationSession>,
+    > = HashMap::new();
     let mut owner_streams: HashMap<u64, mpsc::Sender<replication_stream::OwnerStreamControl>> =
         HashMap::new();
     let mut pull_progress: HashMap<
@@ -2927,8 +2956,16 @@ where
         (u64, fibril_broker::replication::ReplicationProgressSession),
     > = HashMap::new();
 
+    // One bounded sequential inspection cursor per authenticated connection.
+    // Idle expiry also releases the node's session permit and buffered record.
+    let mut recovery_cursor = None;
+    let mut recovery_cursor_expires = tokio::time::Instant::now();
     loop {
         let loop_event = tokio::select! {
+            _ = tokio::time::sleep_until(recovery_cursor_expires), if recovery_cursor.is_some() => {
+                recovery_cursor = None;
+                continue;
+            }
             // ---- Heartbeat tick ----
             _ = heartbeat.tick() => {
                 if last_seen.elapsed() > timeout {
@@ -3056,13 +3093,13 @@ where
             || x == Op::ReplicationStreamStop as u16
             || x == Op::RecoverySeal as u16
             || x == Op::RecoveryRead as u16
+            || x == Op::RecoveryReadSequential as u16
             || x == Op::RecoveryTransfer as u16
             || x == Op::InitialHistoryPrepare as u16
             || x == Op::HistoryReplication as u16
         );
         if node_control
-            && authenticated_principal.as_deref()
-                != Some(fibril_broker::auth_store::NODE_PRINCIPAL)
+            && authenticated_principal.as_deref() != Some(fibril_broker::auth_store::NODE_PRINCIPAL)
         {
             send_error_response_and_count(
                 &frame_tx_high_prio,
@@ -3256,9 +3293,19 @@ where
 
                 // A stamped read doubles as the follower's durable-progress
                 // report (followers apply durably; pull offsets = watermarks).
-                if let Err(error) = crate::v1::history_replication::check_reporter(history.as_ref(), read.reporter_node_id.as_deref()) {
+                if let Err(error) = crate::v1::history_replication::check_reporter(
+                    history.as_ref(),
+                    read.reporter_node_id.as_deref(),
+                ) {
                     let (code, message) = broker_error_response(&error);
-                    send_error_response_and_count(&frame_tx_high_prio, &metrics, frame.request_id, code, message).await;
+                    send_error_response_and_count(
+                        &frame_tx_high_prio,
+                        &metrics,
+                        frame.request_id,
+                        code,
+                        message,
+                    )
+                    .await;
                     continue;
                 }
                 if let (Some(reporter), Some(epoch)) = (&read.reporter_node_id, read.reporter_epoch)
@@ -3309,11 +3356,16 @@ where
                     )
                     .await
                     .and_then(|records| {
-                        crate::v1::history_replication::check_resource(&broker, history.as_ref(),
-                            &read.topic, read.partition, read.group.as_deref(), true)?;
+                        crate::v1::history_replication::check_resource(
+                            &broker,
+                            history.as_ref(),
+                            &read.topic,
+                            read.partition,
+                            read.group.as_deref(),
+                            true,
+                        )?;
                         Ok(records)
-                    })
-                {
+                    }) {
                     Ok(records) => {
                         let response = match to_replication_read_ok(records) {
                             Ok(response) => response,
@@ -3366,9 +3418,19 @@ where
                 // A stamped read doubles as the stream follower's durable-progress
                 // report (group None), feeding the owner's replica-durable confirm
                 // gate exactly as the queue ReplicationRead path does.
-                if let Err(error) = crate::v1::history_replication::check_reporter(history.as_ref(), read.reporter_node_id.as_deref()) {
+                if let Err(error) = crate::v1::history_replication::check_reporter(
+                    history.as_ref(),
+                    read.reporter_node_id.as_deref(),
+                ) {
                     let (code, message) = broker_error_response(&error);
-                    send_error_response_and_count(&frame_tx_high_prio, &metrics, frame.request_id, code, message).await;
+                    send_error_response_and_count(
+                        &frame_tx_high_prio,
+                        &metrics,
+                        frame.request_id,
+                        code,
+                        message,
+                    )
+                    .await;
                     continue;
                 }
                 if let (Some(reporter), Some(epoch)) = (&read.reporter_node_id, read.reporter_epoch)
@@ -3423,11 +3485,16 @@ where
                     )
                     .await
                     .and_then(|records| {
-                        crate::v1::history_replication::check_resource(&broker, history.as_ref(),
-                            &read.topic, read.partition, read.group.as_deref(), true)?;
+                        crate::v1::history_replication::check_resource(
+                            &broker,
+                            history.as_ref(),
+                            &read.topic,
+                            read.partition,
+                            read.group.as_deref(),
+                            true,
+                        )?;
                         Ok(records)
-                    })
-                {
+                    }) {
                     Ok(records) => match to_replication_read_ok(records) {
                         Ok(response) => {
                             frame_tx_high_prio
@@ -3474,9 +3541,19 @@ where
                     metrics,
                     wire::decode_replication_stream_start
                 );
-                if let Err(error) = crate::v1::history_replication::check_reporter(history.as_ref(), start.reporter_node_id.as_deref()) {
+                if let Err(error) = crate::v1::history_replication::check_reporter(
+                    history.as_ref(),
+                    start.reporter_node_id.as_deref(),
+                ) {
                     let (code, message) = broker_error_response(&error);
-                    send_error_response_and_count(&frame_tx_high_prio, &metrics, frame.request_id, code, message).await;
+                    send_error_response_and_count(
+                        &frame_tx_high_prio,
+                        &metrics,
+                        frame.request_id,
+                        code,
+                        message,
+                    )
+                    .await;
                     continue;
                 }
                 let stream_id = frame.request_id;
@@ -3554,35 +3631,69 @@ where
             // Recovery always requires an authenticated cluster principal,
             // including when ordinary client authentication is disabled.
             x if x == Op::RecoveryTransfer as u16 => {
-                let envelope: RecoveryTransfer = decode_or_400!(frame, frame_tx_high_prio, metrics, RecoveryTransfer);
-                let result = match crate::v1::recovery_transfer::decode_body::<fibril_broker::recovery_transfer::QueueRecoveryRequest>(&envelope.body) {
+                let envelope: RecoveryTransfer =
+                    decode_or_400!(frame, frame_tx_high_prio, metrics, RecoveryTransfer);
+                let result = match crate::v1::recovery_transfer::decode_body::<
+                    fibril_broker::recovery_transfer::QueueRecoveryRequest,
+                >(&envelope.body)
+                {
                     Ok(request) => broker.recovery_transfer(request).await,
-                    Err(error) => Err(fibril_broker::broker::BrokerError::InvalidArgument(format!("invalid recovery operation: {error}"))),
+                    Err(error) => Err(fibril_broker::broker::BrokerError::InvalidArgument(
+                        format!("invalid recovery operation: {error}"),
+                    )),
                 };
                 match result {
                     Ok(reply) => {
-                        let body = rmp_serde::to_vec_named(&reply).map_err(std::io::Error::other)?;
-                        frame_tx_high_prio.send(try_encode(Op::RecoveryTransferOk,frame.request_id,&RecoveryTransfer {body})?).await?;
+                        let body =
+                            rmp_serde::to_vec_named(&reply).map_err(std::io::Error::other)?;
+                        frame_tx_high_prio
+                            .send(try_encode(
+                                Op::RecoveryTransferOk,
+                                frame.request_id,
+                                &RecoveryTransfer { body },
+                            )?)
+                            .await?;
                     }
                     Err(err) => {
-                        let (code,message) = broker_error_response(&err);
-                        send_error_response_and_count(&frame_tx_high_prio,&metrics,frame.request_id,code,message).await;
+                        let (code, message) = broker_error_response(&err);
+                        send_error_response_and_count(
+                            &frame_tx_high_prio,
+                            &metrics,
+                            frame.request_id,
+                            code,
+                            message,
+                        )
+                        .await;
                     }
                 }
             }
 
             x if x == Op::InitialHistoryPrepare as u16 => {
-                let request: InitialHistoryPrepare = decode_or_400!(frame, frame_tx_high_prio, metrics, InitialHistoryPrepare);
+                let request: InitialHistoryPrepare =
+                    decode_or_400!(frame, frame_tx_high_prio, metrics, InitialHistoryPrepare);
                 let command = crate::v1::initial_history::broker_command(request);
                 match broker.prepare_initial_history_replica(command).await {
                     Ok(receipt) => {
                         let reply = crate::v1::initial_history::wire_receipt(receipt);
-                        frame_tx_high_prio.send(try_encode(Op::InitialHistoryPrepareOk, frame.request_id, &reply)?).await?;
+                        frame_tx_high_prio
+                            .send(try_encode(
+                                Op::InitialHistoryPrepareOk,
+                                frame.request_id,
+                                &reply,
+                            )?)
+                            .await?;
                     }
                     Err(err) => {
                         tracing::warn!(error = %err, "initial history preparation refused or incomplete");
                         let (code, message) = broker_error_response(&err);
-                        send_error_response_and_count(&frame_tx_high_prio, &metrics, frame.request_id, code, message).await;
+                        send_error_response_and_count(
+                            &frame_tx_high_prio,
+                            &metrics,
+                            frame.request_id,
+                            code,
+                            message,
+                        )
+                        .await;
                     }
                 }
             }
@@ -3608,11 +3719,13 @@ where
                             transition: sealed.request.transition,
                             fence_epoch: sealed.request.fence_epoch,
                             history_version: h.version,
-                            storage_history: h.storage_history.map(|receipt| crate::v1::RecoveryStorageHistory {
-                                resource_incarnation: receipt.binding.resource_incarnation,
-                                accepted_history: receipt.binding.accepted_history,
-                                writer_session: receipt.binding.writer_session,
-                                storage_instance: receipt.storage_instance,
+                            storage_history: h.storage_history.map(|receipt| {
+                                crate::v1::RecoveryStorageHistory {
+                                    resource_incarnation: receipt.binding.resource_incarnation,
+                                    accepted_history: receipt.binding.accepted_history,
+                                    writer_session: receipt.binding.writer_session,
+                                    storage_instance: receipt.storage_instance,
+                                }
                             }),
                             history_id: h.id,
                             message_digest: h.message_digest,
@@ -3642,10 +3755,13 @@ where
                 }
             }
 
-            x if x == Op::RecoveryRead as u16 => {
+            x if x == Op::RecoveryRead as u16 || x == Op::RecoveryReadSequential as u16 => {
                 use fibril_broker::recovery::{
-                    RecoveryReadRequest, RecoveryReadSource, RecoverySealCommand, RecoverySealRequest,
+                    RecoveryReadRequest, RecoveryReadSource, RecoverySealCommand,
+                    RecoverySealRequest,
                 };
+                let sequential = frame.opcode == Op::RecoveryReadSequential as u16;
+                let cursor = recovery_cursor.take();
                 let read: RecoveryRead =
                     decode_or_400!(frame, frame_tx_high_prio, metrics, RecoveryRead);
                 let command = RecoverySealCommand {
@@ -3671,8 +3787,22 @@ where
                     max_records: read.max_records,
                     max_bytes: read.max_bytes,
                 };
-                match broker.read_sealed_replica(command, request).await {
-                    Ok((replica_id, page)) => {
+                let result = if sequential {
+                    broker
+                        .read_sealed_replica_sequential(command, request, cursor)
+                        .await
+                } else {
+                    drop(cursor);
+                    broker
+                        .read_sealed_replica(command, request)
+                        .await
+                        .map(|(node, page)| (node, page, None))
+                };
+                match result {
+                    Ok((replica_id, page, cursor)) => {
+                        recovery_cursor = cursor;
+                        recovery_cursor_expires =
+                            tokio::time::Instant::now() + std::time::Duration::from_secs(10);
                         let reply = RecoveryReadOk {
                             replica_id,
                             transition: read.seal.transition,

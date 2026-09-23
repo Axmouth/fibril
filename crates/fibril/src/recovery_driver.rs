@@ -29,7 +29,7 @@ use std::{
 };
 const RPC: Duration = Duration::from_secs(10);
 const MAX_REPLICAS: usize = 16;
-// Each sealed page verifies the retained history. Use the existing wire limits
+// Sequential inspection verifies each complete retained history. Use the wire limits
 // to amortize those scans, while keeping total inspection budgets unchanged.
 fn automatic_inspection_limits() -> RecoveryInspectionLimits {
     RecoveryInspectionLimits {

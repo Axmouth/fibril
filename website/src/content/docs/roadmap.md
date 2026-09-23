@@ -147,12 +147,11 @@ The compatibility work follows this order:
 - Assess live updates for coordination heartbeat interval and liveness TTL,
   with coupled validation, safe adoption across nodes, controller propagation,
   admin visibility and rollback. Keep Raft election timing separate.
-- Verify subscriptions that begin during recovery resume delivery after local
-  admission; retain confirmed-message checks and independent fresh-client probes.
-- Remove repeated full-history scans from bounded recovery inspection without
-  weakening integrity checks; retain 10k backlog and 100k backlog/settled-history
-  acceptance cases. Larger pages and buffered scans pass these initial cases,
-  but recovery time still grows substantially with retained history.
+- Extend recovery acceptance to sustained high-rate and aged workloads, distinguishing
+  retained history, live backlog and checkpoint age. Add matched large-history
+  RabbitMQ/JetStream checks to the internal reproducible harness. Reduce retained-data
+  copying with separately proven generation reuse; existing inspection uses bounded
+  sequential verification.
 - Target common-case queue recovery within two seconds: measure release-build
   stage costs, remove avoidable waits, prove promotion using compatible existing
   storage, then assess agreed checkpoints and suffix-only comparison. See the

@@ -226,6 +226,7 @@ See also: [reconnects](/reliability/reconnects/) and
 | Reconnect observability | Implemented | Admin overview, TCP metrics log, structured reconciliation logs |
 | Planned restart drain | Implemented | `POST /admin/api/drain` broadcasts a `GoingAway` push (grace deadline + message) to connected clients, surfaced by the clients as an app-observable event. In coordinated mode the node also marks itself draining: the controller holds replicated handoffs as pending recovery requests until confirmed-history proof is available, the draining node receives no new placements, and the call returns with handoff progress once ownership has moved or `connection.drain_handoff_timeout_ms` (default 30s) elapses. Follower-less partitions stay put and fail over reactively as before |
 | Typed subscription closure | Implemented | Rust `SubEvent::Closed` and `close_reason()`, TypeScript/Python `SubscriptionClosedError`, Go `CloseReason()` after channel closure, C# `SubscriptionClosedException` |
+| Fallback topology discovery | Implemented | Explicit trusted discovery endpoints in all five clients; supervised reattachment retries temporary recovery replies. Initial connection still requires its configured bootstrap endpoint |
 | Safe automatic resubscription | Implemented | Supervised subscriptions recreate on supported owner-move or broker-advised recreate outcomes; opt-out exposes the typed close instead |
 | Durable broker restart reconciliation | Implemented | Broker-local persisted session identity and subscription metadata; `resumed_after_restart` within `connection.resume_session_restart_ttl_ms` (default 60s, 0 disables) |
 | Stale-delivery settlement | Implemented | All five clients stamp manual deliveries with their connection incarnation, reject stale settles without sending a frame, and route valid settles through the current connection |
@@ -758,3 +759,10 @@ Conditions and limits:
 The repository includes a [shared Rust queue workload](https://github.com/Axmouth/fibril/tree/main/benchmarks/comparison) with fixed offered rates, saturation, payload identity checks and completion histograms. A Python/Docker runner provisions fresh single-node Fibril, JetStream and RabbitMQ instances, verifies final settlement and records CPU/memory samples. Existing-server modes support RPC reply pipelining, multiple connections and declarations requesting three copies; cluster placement and durability must be verified separately.
 
 Stream adapters, portable cluster/fault provisioning and a repeated workload matrix remain planned. These tools provide reproducible measurements and do not establish power-loss safety or production capacity.
+
+### Recovery inspection efficiency
+
+Automatic inspection reuses authenticated source connections and a verified source
+artifact within one attempt. Bounded sequential reads validate complete sealed
+log digests and receiver replay before producing evidence. Strict target copying
+retains per-page verification. See [limits and broker compatibility](/development/recovery-internals/#bounded-sequential-inspection).

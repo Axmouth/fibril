@@ -91,11 +91,10 @@ attempt timeout, routing and reconnect costs remain part of that measurement.
 These are small single-host acceptance measurements, not a failover guarantee.
 
 Every successful case checked confirmed-message recovery, new durable publication
-and convergence after old-owner restart. A separate subscription begun during
-recovery remained pending despite ready work in two diagnostic runs. Isolate that
-client/server transition before claiming uninterrupted recovery for existing
-subscriptions. A continuously attempting publisher, larger histories, healthy
-traffic, and combined owner/metadata-leader loss still need matched measurements.
+and convergence after old-owner restart. The initial pending-subscription failure is resolved by fallback discovery and
+retrying temporary recovery responses; the mixed-traffic gate below covers the
+original subscriber. Continuously retrying publishers, heavier traffic and combined
+owner/metadata-leader loss still need matched measurements.
 
 ### Longer retained histories
 
@@ -120,43 +119,58 @@ all expected IDs, new durable work and old-owner restart/convergence. These are
 individual acceptance runs, with no claim of a history-independent failover bound.
 Larger pages alone improved 10k but still timed out at 100k.
 
-Both retained logs are still verified on every page read. In the combined 100k
-backlog run, inspection/comparison/reinspection took about 31 seconds and copying
-about 14 seconds. Keep these histories as availability gates while assessing
-same-attempt source-artifact reuse, authenticated connection reuse and bounded
-streaming verification. Separate scan work from RPC setup and authorization costs;
-preserve content, identity and quorum checks throughout. Larger queues also need
-explicit acceptance for total page, record, byte and replay-operation limits.
+Automatic inspection now traverses each retained log sequentially, validates its
+sealed digest before completing it, and constructs recovery evidence only after
+full receiver verification. It reuses authenticated connections and the selected
+artifact within one attempt. Strict diagnostic reads and target copying retain
+complete verification on every page. See [implementation details](/development/recovery-internals/#bounded-sequential-inspection).
+
+The latest single-run SATA results, with the same three-replica majority-durable
+profile, are:
+
+| Retained workload | Owner ready | First fresh delivery |
+| --- | ---: | ---: |
+| 10k outstanding, 1 KiB | 3.90 s | 4.80 s |
+| 100k outstanding, 1 KiB | 24.11 s | 24.99 s |
+| 100k settled + one outstanding, 1 KiB | 18.97 s | 19.83 s |
+| 200k outstanding, 64 bytes | 15.82 s | 16.77 s |
+
+Every case preserved expected IDs, accepted new durable work and converged after
+old-owner restart. The 200k case uses smaller payloads to remain within the
+unchanged total inspection byte budget. These counts describe retained history,
+not an offered rate of 100k or 200k messages/s. Copying retained data accounts for
+14.56 seconds in the 100k-backlog run, including settled payloads when still
+retained. Live backlog alone does not bound recovery cost. A final-binary repeat of the
+100k/1KiB case passed at 24.57 seconds ready / 25.47 seconds delivery.
 
 ### Mixed traffic across owner loss
 
 A 30-second warm-up at 500 offered 1 KiB messages/s with an active ACKing consumer
-exercises snapshot creation and a longer event history before owner SIGKILL. In
-the initial SATA run with larger pages and buffered scans, the replacement owner
-was ready after 7.95 seconds. Every journaled confirmed ID was delivered, new
-publication succeeded and all replicas converged after restart.
+exercises snapshots and ACK history before owner SIGKILL. Clients can now use
+explicit fallback discovery addresses; the original subscriber successfully
+reattaches through temporary recovery responses. With sequential inspection,
+owner readiness was 5.02 seconds and the original subscriber received a newly
+published probe at 5.51 seconds. All 17,034 journaled confirmed IDs were delivered
+and replicas converged after restart. Buffered postkill deliveries are excluded
+from the resumed-service timing. In-flight publisher requests can still fail on
+connection loss; applications must handle unknown outcomes. A final-binary repeat
+passed at 6.05 seconds ready / 6.11 seconds for the original subscriber's fresh
+probe, preserving all 17,030 observed confirmed IDs.
 
-Client recovery remains a separate gate: the original publisher exited on
-connection reset; the original subscriber stayed alive but received none of the
-fresh probe messages during an eight-second observation window. A fresh consumer
-drained them. Keep that observation separate from successful broker recovery,
-and distinguish buffered postkill replies/deliveries from newly resumed service.
+Extend these gates to sustained 100k/200k offered workloads, recording achieved
+throughput, retained log heads/bytes, checkpoint age and live backlog separately.
+Run matched large-history and aged-traffic process-loss cases for RabbitMQ and
+JetStream: the earlier comparison used only 100 confirmed messages before the
+kill and does not establish their recovery behavior at these sizes.
 
 ### 2. Reduce overhead with the existing recovery proof
 
 Evaluate changes individually against that baseline:
 
-- Reuse the selected source artifact within the same attempt only after checking
-  it against the persisted plan. Keep completed-target snapshots preferred and
-  retain reconstruction when resuming without that artifact.
-- Replace repeated complete scans with bounded sequential verification or a
-  transition-bound verification session. Preserve detection of changed bytes,
-  generation replacement, corruption, truncation and stale seals; a cached digest
-  alone does not certify later reads. Retain cancellation ownership of I/O.
-
 - Wake recovery and admission on relevant committed metadata changes, with bounded
   periodic retry as a fallback. Prevent lost wakeups and tight retry loops.
-- Reuse authenticated peer connections across recovery operations. Reconnect,
+- Extend inspection connection reuse to other recovery operations if measured costs
+  justify it. Reconnect,
   cancellation, stale replies and per-operation deadlines must preserve identity
   checks and bounded resource use.
 - Overlap independent witness/inspection and target-installation work with bounded

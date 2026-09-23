@@ -2716,7 +2716,11 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
         .register_self(&node("b-follower", "127.0.0.1:1".parse().unwrap()))
         .await
         .unwrap();
-    register_legacy_test_queue(&coordination, &QueueIdentity::new(topic, Partition::new(0), None)).await;
+    register_legacy_test_queue(
+        &coordination,
+        &QueueIdentity::new(topic, Partition::new(0), None),
+    )
+    .await;
 
     // Follower broker: ONLY the supervised watcher — no manual transitions.
     let (follower_broker, _follower_dir) = open_test_broker().await;
@@ -2898,7 +2902,11 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
         .register_self(&node("b-follower", "127.0.0.1:1".parse().unwrap()))
         .await
         .unwrap();
-    register_legacy_test_queue(&coordination, &QueueIdentity::new(topic, Partition::new(0), None)).await;
+    register_legacy_test_queue(
+        &coordination,
+        &QueueIdentity::new(topic, Partition::new(0), None),
+    )
+    .await;
 
     let (follower_broker, _follower_dir) = open_test_broker().await;
     let resolver = Arc::new(
@@ -3106,7 +3114,11 @@ async fn ganglion_returning_old_owner_is_demoted_and_refuses_publishes() {
         .register_self(&node("b-follower", 9101))
         .await
         .unwrap();
-    register_legacy_test_queue(&coordination, &QueueIdentity::new(topic, Partition::new(0), None)).await;
+    register_legacy_test_queue(
+        &coordination,
+        &QueueIdentity::new(topic, Partition::new(0), None),
+    )
+    .await;
 
     // The owner broker runs the supervised watcher (it will see both the
     // initial ownership and, later, its own demotion).
@@ -7296,7 +7308,6 @@ async fn replication_controls_do_not_inherit_node_privileges_from_a_resumed_sess
     broker.shutdown().await;
 }
 
-
 // Exercise every internal request before payload decoding, including stream
 // controls that otherwise return no response when no stream has been opened.
 async fn assert_replication_controls_forbidden(conn: &mut Conn) {
@@ -7312,6 +7323,7 @@ async fn assert_replication_controls_forbidden(conn: &mut Conn) {
         Op::ReplicationStreamStop,
         Op::RecoverySeal,
         Op::RecoveryRead,
+        Op::RecoveryReadSequential,
         Op::InitialHistoryPrepare,
         Op::RecoveryTransfer,
         Op::HistoryReplication,
@@ -7440,7 +7452,6 @@ async fn replication_controls_reject_anonymous_and_ordinary_users() {
         broker.shutdown().await;
     }
 }
-
 
 #[tokio::test]
 async fn owner_peer_reauthenticates_after_transport_loss() {
@@ -7723,25 +7734,54 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
                     first_offset: 0,
                     durability: None,
                     events: vec![
-                        stroma_core::StromaEvent::EnqueueMany { reqs: vec![
-                            stroma_core::EnqueueEventMeta { off: 0, retries: 0, expire_at: None },
-                            stroma_core::EnqueueEventMeta { off: 1, retries: 2, expire_at: Some(500) },
-                        ] },
-                        stroma_core::StromaEvent::MarkInflight { off: 0, deadline: 300 },
+                        stroma_core::StromaEvent::EnqueueMany {
+                            reqs: vec![
+                                stroma_core::EnqueueEventMeta {
+                                    off: 0,
+                                    retries: 0,
+                                    expire_at: None,
+                                },
+                                stroma_core::EnqueueEventMeta {
+                                    off: 1,
+                                    retries: 2,
+                                    expire_at: Some(500),
+                                },
+                            ],
+                        },
+                        stroma_core::StromaEvent::MarkInflight {
+                            off: 0,
+                            deadline: 300,
+                        },
                         stroma_core::StromaEvent::Ack { off: 0 },
-                    ].into_iter().take(if checkpoints { index + 2 } else { 3 }).collect(),
+                    ]
+                    .into_iter()
+                    .take(if checkpoints { index + 2 } else { 3 })
+                    .collect(),
                 }),
             )
             .await
             .unwrap();
         if checkpoints {
-            engine.snapshot_partition(&command.topic, 0, None).await.unwrap();
+            engine
+                .snapshot_partition(&command.topic, 0, None)
+                .await
+                .unwrap();
             if index == 0 {
-                engine.apply_replicated_queue_batch(&command.topic, 0, None, None,
-                    Some(stroma_core::ReplicatedEventBatch {
-                        epoch: pending.previous.epoch, first_offset: 2, durability: None,
-                        events: vec![stroma_core::StromaEvent::Ack { off: 0 }],
-                    })).await.unwrap();
+                engine
+                    .apply_replicated_queue_batch(
+                        &command.topic,
+                        0,
+                        None,
+                        None,
+                        Some(stroma_core::ReplicatedEventBatch {
+                            epoch: pending.previous.epoch,
+                            first_offset: 2,
+                            durability: None,
+                            events: vec![stroma_core::StromaEvent::Ack { off: 0 }],
+                        }),
+                    )
+                    .await
+                    .unwrap();
             }
         }
         seals.push(
@@ -7756,27 +7796,31 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
         let stop = tokio_util::sync::CancellationToken::new();
         let cancelled = stop.clone();
         let task = tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
             loop {
                 let (socket, peer) = tokio::select! { _=cancelled.cancelled()=>break, accepted=listener.accept()=>accepted.unwrap() };
                 let stats = ConnectionStats::new();
                 let conn_id = stats.add_connection(peer, Instant::now(), false);
-                handle_connection(
-                    socket,
-                    Some(peer),
-                    serving.clone(),
-                    TcpStats::new(10),
-                    stats,
-                    conn_id,
-                    Some(node_auth()),
-                    None,
-                    ConnectionSettings::new(Some(60)),
-                    None,
-                    None,
-                    None,
-                )
-                .await
-                .unwrap();
+                let serving = serving.clone();
+                connections.spawn(async move {
+                    handle_connection(
+                        socket,
+                        Some(peer),
+                        serving.clone(),
+                        TcpStats::new(10),
+                        stats,
+                        conn_id,
+                        Some(node_auth()),
+                        None,
+                        ConnectionSettings::new(Some(60)),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+                });
             }
+            connections.shutdown().await;
         });
         servers.push((stop, task));
         brokers.push(broker);
@@ -7813,9 +7857,19 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
             .contains(&RecoveryProofRequirement::CommonOriginAndInstalledLineage)
     );
     for target in [0, 3] {
-        let replay = fibril_protocol::v1::recovery_inspection::inspect_recovery_pair_with_queue_replay(
-            &config, &command, &seals[0], &seals[1], limits, target, Default::default(), Duration::from_secs(10),
-        ).await.unwrap();
+        let replay =
+            fibril_protocol::v1::recovery_inspection::inspect_recovery_pair_with_queue_replay(
+                &config,
+                &command,
+                &seals[0],
+                &seals[1],
+                limits,
+                target,
+                Default::default(),
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
         let [left, right] = replay.evidence.queue_replay.unwrap();
         assert_eq!(left.event_next, target);
         assert_eq!(left.state_digest, right.state_digest);
@@ -7824,24 +7878,48 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
         assert_ne!(left.history_id, right.history_id);
     }
     if checkpoints {
-        let result = fibril_protocol::v1::recovery_inspection::inspect_recovery_pair_with_checkpoints(
-            &config, &command, &seals[0], &seals[1], limits, 3, Default::default(), 1024 * 1024,
-            Duration::from_secs(10),
-        ).await.unwrap();
+        let result =
+            fibril_protocol::v1::recovery_inspection::inspect_recovery_pair_with_checkpoints(
+                &config,
+                &command,
+                &seals[0],
+                &seals[1],
+                limits,
+                3,
+                Default::default(),
+                1024 * 1024,
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
         let [left, right] = result.evidence.queue_replay.unwrap();
         assert_eq!(left.checkpoint_event_next, Some(2));
         assert_eq!(right.checkpoint_event_next, Some(3));
-        assert_eq!(left.lease_normalized_state_digest, right.lease_normalized_state_digest);
+        assert_eq!(
+            left.lease_normalized_state_digest,
+            right.lease_normalized_state_digest
+        );
         assert_eq!(left.live_payload_digest, right.live_payload_digest);
         assert!(left.live_payload_digest.is_some());
         assert_ne!(left.message_digest, right.message_digest);
         let artifact = fibril_protocol::v1::recovery_inspection::inspect_recovery_source_artifact(
-            &config, &command, &seals[0], limits, Default::default(), 1024 * 1024,
-            1024 * 1024, Duration::from_secs(10),
-        ).await.unwrap();
+            &config,
+            &command,
+            &seals[0],
+            limits,
+            Default::default(),
+            1024 * 1024,
+            1024 * 1024,
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
         assert_eq!(artifact.evidence().history_id, seals[0].seal.history.id);
         assert_eq!(artifact.evidence().event_next, seals[0].seal.event_next);
-        assert_eq!(artifact.evidence().live_payload_digest, left.live_payload_digest);
+        assert_eq!(
+            artifact.evidence().live_payload_digest,
+            left.live_payload_digest
+        );
         assert!(!artifact.state_snapshot().is_empty());
     }
     let error = inspect_recovery_pair(
@@ -7870,6 +7948,92 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
         .await
         .is_err()
     );
+
+    if !checkpoints {
+        // Two bounded cursors may remain idle. Disconnect and idle expiry must
+        // release them, while stale authority must invalidate the current one.
+        let mut sessions = Vec::new();
+        for _ in 0..3 {
+            let mut conn = plain_conn(TcpStream::connect(&config.nodes["b"]).await.unwrap());
+            node_handshake(&mut conn).await;
+            sessions.push(conn);
+        }
+        let request = fibril_protocol::v1::RecoveryRead {
+            seal: fibril_protocol::v1::RecoverySeal {
+                topic: command.topic.clone(),
+                partition: command.partition,
+                group: command.group.clone(),
+                stream: command.stream,
+                transition: command.transition,
+                fence_epoch: command.fence_epoch,
+            },
+            history_id: seals[0].seal.history.id,
+            source: 0,
+            from: 0,
+            max_records: 1,
+            max_bytes: 1024,
+        };
+        for (i, conn) in sessions.iter_mut().enumerate() {
+            conn.send(try_encode(Op::RecoveryReadSequential, 50, &request).unwrap())
+                .await
+                .unwrap();
+            let response = recv_frame(conn).await;
+            assert_eq!(
+                response.opcode,
+                if i == 2 {
+                    Op::Error
+                } else {
+                    Op::RecoveryReadOk
+                } as u16
+            );
+        }
+        drop(sessions.remove(0));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                sessions[1]
+                    .send(try_encode(Op::RecoveryReadSequential, 51, &request).unwrap())
+                    .await
+                    .unwrap();
+                if recv_frame(&mut sessions[1]).await.opcode == Op::RecoveryReadOk as u16 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("disconnect must release sequential admission");
+        tokio::time::sleep(Duration::from_secs(11)).await;
+        let mut next = request.clone();
+        next.from = 1;
+        sessions[0]
+            .send(try_encode(Op::RecoveryReadSequential, 52, &next).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(recv_frame(&mut sessions[0]).await.opcode, Op::Error as u16);
+        sessions[0]
+            .send(try_encode(Op::RecoveryReadSequential, 53, &request).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            recv_frame(&mut sessions[0]).await.opcode,
+            Op::RecoveryReadOk as u16
+        );
+        next.seal.transition[0] ^= 1;
+        sessions[0]
+            .send(try_encode(Op::RecoveryReadSequential, 54, &next).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(recv_frame(&mut sessions[0]).await.opcode, Op::Error as u16);
+        sessions[0]
+            .send(try_encode(Op::RecoveryReadSequential, 55, &request).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            recv_frame(&mut sessions[0]).await.opcode,
+            Op::RecoveryReadOk as u16
+        );
+        drop(sessions);
+    }
 
     // Bound the whole operation when a peer accepts but never handshakes.
     let hanging = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -8031,11 +8195,37 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
         task.await.unwrap().unwrap();
         (reply, dir)
     }
-    async fn transfer(broker: Arc<Broker<StromaEngine>>,dir: TempDir,request: &fibril_broker::recovery_transfer::QueueRecoveryRequest) -> (Result<fibril_broker::recovery_transfer::QueueRecoveryReply,fibril_broker::broker::BrokerError>,TempDir) {
-        let (addr,task,dir,_) = start_protocol_listener_for_broker(ConnectionSettings::new(Some(60)),broker,dir,Some(node_auth())).await;
-        let config=ProtocolOwnerPeerResolverConfig::new(HashMap::from([(request.command.replica_id.clone(),addr.to_string())])).with_auth("@node","secret");
-        let result=fibril_protocol::v1::recovery_transfer::request_transfer(&config,request,Duration::from_secs(10)).await;
-        task.await.unwrap().unwrap(); (result,dir)
+    async fn transfer(
+        broker: Arc<Broker<StromaEngine>>,
+        dir: TempDir,
+        request: &fibril_broker::recovery_transfer::QueueRecoveryRequest,
+    ) -> (
+        Result<
+            fibril_broker::recovery_transfer::QueueRecoveryReply,
+            fibril_broker::broker::BrokerError,
+        >,
+        TempDir,
+    ) {
+        let (addr, task, dir, _) = start_protocol_listener_for_broker(
+            ConnectionSettings::new(Some(60)),
+            broker,
+            dir,
+            Some(node_auth()),
+        )
+        .await;
+        let config = ProtocolOwnerPeerResolverConfig::new(HashMap::from([(
+            request.command.replica_id.clone(),
+            addr.to_string(),
+        )]))
+        .with_auth("@node", "secret");
+        let result = fibril_protocol::v1::recovery_transfer::request_transfer(
+            &config,
+            request,
+            Duration::from_secs(10),
+        )
+        .await;
+        task.await.unwrap().unwrap();
+        (result, dir)
     }
     async fn synced(providers: &[Arc<GanglionCoordination>], generation: u64) {
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -8111,7 +8301,11 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
                     let previous = snapshot.assignments[resource].clone();
                     let mut proposed = previous.clone();
                     proposed.owner = candidate.into();
-                    proposed.followers = ["a", "b", "c"].into_iter().filter(|n| *n != candidate).map(str::to_owned).collect();
+                    proposed.followers = ["a", "b", "c"]
+                        .into_iter()
+                        .filter(|n| *n != candidate)
+                        .map(str::to_owned)
+                        .collect();
                     proposed.epoch += 1;
                     let pending = fibril_coordination_ganglion::promotion::PendingRecovery {
                         version: 1,
@@ -9125,7 +9319,13 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
     // Fencing closes the live session but retains the accepted certificate.
     // The one surviving prepared follower is enough: every previous majority
     // confirm needed both prepared replicas, and c was never eligible to vote.
-    let pending = persist_pending(&providers, &resource, history.activation, if handoff { "c" } else { "b" }).await;
+    let pending = persist_pending(
+        &providers,
+        &resource,
+        history.activation,
+        if handoff { "c" } else { "b" },
+    )
+    .await;
     synced(&providers, pending.requested_generation).await;
     let command = pending.seal_command().unwrap();
     let (addr, task, dir, _) = start_protocol_listener_for_broker(
@@ -9178,13 +9378,16 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
     // artifact. One source contributes one witness even though the bounded pair
     // inspector verifies it against itself internally.
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let config = ProtocolOwnerPeerResolverConfig::new(HashMap::from([
-        ("b".into(), listener.local_addr().unwrap().to_string()),
-    ])).with_auth("@node", "secret");
+    let config = ProtocolOwnerPeerResolverConfig::new(HashMap::from([(
+        "b".into(),
+        listener.local_addr().unwrap().to_string(),
+    )]))
+    .with_auth("@node", "secret");
     let serving = brokers[1].clone();
     let stop_reads = tokio_util::sync::CancellationToken::new();
     let cancelled = stop_reads.clone();
     let reads = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
         loop {
             let (socket, peer) = tokio::select! {
                 _ = cancelled.cancelled() => break,
@@ -9192,106 +9395,289 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
             };
             let stats = ConnectionStats::new();
             let conn_id = stats.add_connection(peer, Instant::now(), false);
-            handle_connection(socket, Some(peer), serving.clone(), TcpStats::new(10),
-                stats, conn_id, Some(node_auth()), None, ConnectionSettings::new(Some(60)),
-                None, None, None).await.unwrap();
+            connections.spawn(handle_connection(
+                socket,
+                Some(peer),
+                serving.clone(),
+                TcpStats::new(10),
+                stats,
+                conn_id,
+                Some(node_auth()),
+                None,
+                ConnectionSettings::new(Some(60)),
+                None,
+                None,
+                None,
+            ));
         }
+        connections.shutdown().await;
     });
     let artifact = fibril_protocol::v1::recovery_inspection::inspect_recovery_source_artifact(
-        &config, &command, &sealed, Default::default(), Default::default(),
-        1024 * 1024, 1024 * 1024, Duration::from_secs(10),
-    ).await.unwrap();
-    let chosen = witnesses.select_queue_source(
-        &providers[0].consensus_node().committed_snapshot(),
-        &BTreeMap::from([("b".into(), artifact.clone())]), &[],
-    ).unwrap();
+        &config,
+        &command,
+        &sealed,
+        Default::default(),
+        Default::default(),
+        1024 * 1024,
+        1024 * 1024,
+        Duration::from_secs(10),
+    )
+    .await
+    .unwrap();
+    let chosen = witnesses
+        .select_queue_source(
+            &providers[0].consensus_node().committed_snapshot(),
+            &BTreeMap::from([("b".into(), artifact.clone())]),
+            &[],
+        )
+        .unwrap();
     assert_eq!(chosen.source_node(), "b");
     assert_eq!((chosen.event_next(), chosen.message_next()), (2, 2));
-    assert!(providers[0].persist_queue_recovery_plan(&pending, &witnesses, &chosen).await.is_err());
+    assert!(
+        providers[0]
+            .persist_queue_recovery_plan(&pending, &witnesses, &chosen)
+            .await
+            .is_err()
+    );
     let original_candidate = if handoff { 2 } else { 1 };
-    let plan = retry_metadata(|| providers[original_candidate].persist_queue_recovery_plan(&pending, &witnesses, &chosen)).await;
+    let plan = retry_metadata(|| {
+        providers[original_candidate].persist_queue_recovery_plan(&pending, &witnesses, &chosen)
+    })
+    .await;
     // Forwarded consensus completion can precede this provider's local watch.
     // Wait for the actual intent rather than sampling a possibly older generation.
     tokio::time::timeout(Duration::from_secs(10), async {
-        while providers.iter().any(|provider| provider.queue_recovery_plan(&pending).unwrap() != Some(plan.clone())) {
+        while providers
+            .iter()
+            .any(|provider| provider.queue_recovery_plan(&pending).unwrap() != Some(plan.clone()))
+        {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     assert_eq!(plan.source_node(), "b");
     assert_eq!((plan.event_next(), plan.message_next()), (2, 2));
     assert_ne!(plan.binding(), &decision.binding);
-    assert_eq!(providers[2].queue_recovery_plan(&pending).unwrap(), Some(plan.clone()));
+    assert_eq!(
+        providers[2].queue_recovery_plan(&pending).unwrap(),
+        Some(plan.clone())
+    );
     // A lost response retries the exact intent, including its generated IDs.
-    assert_eq!(retry_metadata(|| providers[original_candidate].persist_queue_recovery_plan(&pending, &witnesses, &chosen)).await, plan);
-    assert_eq!(providers[0].pending_recoveries().unwrap(), vec![pending.clone()]);
+    assert_eq!(
+        retry_metadata(|| providers[original_candidate]
+            .persist_queue_recovery_plan(&pending, &witnesses, &chosen))
+        .await,
+        plan
+    );
+    assert_eq!(
+        providers[0].pending_recoveries().unwrap(),
+        vec![pending.clone()]
+    );
     // A proposed replica receives the selected state and native-log payloads in
     // non-serving staging. The old source stays sealed and readable throughout.
-    let stage = retry_metadata(|| providers[2].open_local_queue_recovery_stage(
-        &plan, &engines[2], &artifact, Default::default())).await;
+    let stage = retry_metadata(|| {
+        providers[2].open_local_queue_recovery_stage(
+            &plan,
+            &engines[2],
+            &artifact,
+            Default::default(),
+        )
+    })
+    .await;
     while stage.next_offset().await < plan.message_next() {
         let reply = fibril_protocol::v1::replication::request_recovery_read(
-            &config, &command, &sealed,
+            &config,
+            &command,
+            &sealed,
             &fibril_broker::recovery::RecoveryReadRequest {
-                seal: sealed.seal.request.clone(), history_id: sealed.seal.history.id,
+                seal: sealed.seal.request.clone(),
+                history_id: sealed.seal.history.id,
                 source: fibril_broker::recovery::RecoveryReadSource::Messages,
-                from: stage.next_offset().await, max_records:1, max_bytes:65536,
-            }, Duration::from_secs(10),
-        ).await.unwrap();
-        stage.append(fibril_broker::recovery::RecoveryReadPage {
-            history_id: reply.history_id,
-            source: fibril_broker::recovery::RecoveryReadSource::Messages,
-            from: reply.from, next: reply.next, end: reply.end,
-            snapshot_bytes: reply.snapshot_bytes,
-            records: reply.records.into_iter().map(|r| fibril_broker::recovery::RecoveryRecord {
-                offset:r.offset, flags:r.flags, headers:r.headers, payload:r.payload,
-            }).collect(),
-        }).await.unwrap();
+                from: stage.next_offset().await,
+                max_records: 1,
+                max_bytes: 65536,
+            },
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+        stage
+            .append(fibril_broker::recovery::RecoveryReadPage {
+                history_id: reply.history_id,
+                source: fibril_broker::recovery::RecoveryReadSource::Messages,
+                from: reply.from,
+                next: reply.next,
+                end: reply.end,
+                snapshot_bytes: reply.snapshot_bytes,
+                records: reply
+                    .records
+                    .into_iter()
+                    .map(|r| fibril_broker::recovery::RecoveryRecord {
+                        offset: r.offset,
+                        flags: r.flags,
+                        headers: r.headers,
+                        payload: r.payload,
+                    })
+                    .collect(),
+            })
+            .await
+            .unwrap();
     }
     let staged = stage.finish().await.unwrap();
     assert_eq!(staged.plan, plan.digest().unwrap());
-    assert_eq!((staged.event_next, staged.message_next), (2,2));
-    assert!(providers[2].admit_local_initial_history(&decision, &engines[2]).await.is_err());
+    assert_eq!((staged.event_next, staged.message_next), (2, 2));
+    assert!(
+        providers[2]
+            .admit_local_initial_history(&decision, &engines[2])
+            .await
+            .is_err()
+    );
     drop(stage);
     stop_reads.cancel();
     reads.await.unwrap();
-    let resumed = retry_metadata(|| providers[2].resume_local_queue_recovery_stage(
-        &plan, &engines[2], Default::default())).await;
+    let resumed = retry_metadata(|| {
+        providers[2].resume_local_queue_recovery_stage(&plan, &engines[2], Default::default())
+    })
+    .await;
     assert_eq!(resumed.finish().await.unwrap(), staged);
     drop(resumed);
-    use fibril_broker::recovery_transfer::{QueueRecoveryRequest,QueueRecoveryCommand,QueueRecoveryOperation as RecoveryOp,QueueRecoveryReply as RecoveryReply};
-    let transfer_command=|id:&str|QueueRecoveryCommand {replica_id:id.into(),topic:"initial-wire".into(),partition:0,group:None,plan:plan.digest().unwrap()};
-    let request=|id:&str,operation|QueueRecoveryRequest {command:transfer_command(id),operation};
-    let (result,dir)=transfer(brokers[2].clone(),dirs[2].take().unwrap(),&request("c",RecoveryOp::Install)).await;
-    dirs[2]=Some(dir);
-    let RecoveryReply::Installed(installed_c)=result.unwrap() else {panic!("expected installed receipt")};
-    assert!(engines[2].ensure_queue_owner_epoch("initial-wire",0,None,Some(2)).await.is_err());
-    assert!(providers[1].activate_queue_recovery(&plan,&engines[1]).await.is_err());
-    let (result,dir)=transfer(brokers[2].clone(),dirs[2].take().unwrap(),&request("c",RecoveryOp::Snapshot)).await;
-    dirs[2]=Some(dir);
-    let RecoveryReply::Snapshot(source_snapshot)=result.unwrap() else {panic!("expected completed snapshot")};
-    let (result,dir)=transfer(brokers[1].clone(),dirs[1].take().unwrap(),&request("b",RecoveryOp::Begin {snapshot:source_snapshot})).await;
-    dirs[1]=Some(dir); result.unwrap();
+    use fibril_broker::recovery_transfer::{
+        QueueRecoveryCommand, QueueRecoveryOperation as RecoveryOp,
+        QueueRecoveryReply as RecoveryReply, QueueRecoveryRequest,
+    };
+    let transfer_command = |id: &str| QueueRecoveryCommand {
+        replica_id: id.into(),
+        topic: "initial-wire".into(),
+        partition: 0,
+        group: None,
+        plan: plan.digest().unwrap(),
+    };
+    let request = |id: &str, operation| QueueRecoveryRequest {
+        command: transfer_command(id),
+        operation,
+    };
+    let (result, dir) = transfer(
+        brokers[2].clone(),
+        dirs[2].take().unwrap(),
+        &request("c", RecoveryOp::Install),
+    )
+    .await;
+    dirs[2] = Some(dir);
+    let RecoveryReply::Installed(installed_c) = result.unwrap() else {
+        panic!("expected installed receipt")
+    };
+    assert!(
+        engines[2]
+            .ensure_queue_owner_epoch("initial-wire", 0, None, Some(2))
+            .await
+            .is_err()
+    );
+    assert!(
+        providers[1]
+            .activate_queue_recovery(&plan, &engines[1])
+            .await
+            .is_err()
+    );
+    let (result, dir) = transfer(
+        brokers[2].clone(),
+        dirs[2].take().unwrap(),
+        &request("c", RecoveryOp::Snapshot),
+    )
+    .await;
+    dirs[2] = Some(dir);
+    let RecoveryReply::Snapshot(source_snapshot) = result.unwrap() else {
+        panic!("expected completed snapshot")
+    };
+    let (result, dir) = transfer(
+        brokers[1].clone(),
+        dirs[1].take().unwrap(),
+        &request(
+            "b",
+            RecoveryOp::Begin {
+                snapshot: source_snapshot,
+            },
+        ),
+    )
+    .await;
+    dirs[1] = Some(dir);
+    result.unwrap();
     for from in 0..2 {
-        let (result,dir)=transfer(brokers[2].clone(),dirs[2].take().unwrap(),&request("c",RecoveryOp::Read {from,max_records:1,max_bytes:65536})).await;
-        dirs[2]=Some(dir);
-        let RecoveryReply::Page(page)=result.unwrap() else {panic!("expected completed page")};
-        if from==0 {
-            let mut invalid=page.clone(); invalid.records[0].offset+=1;
-            let (result,dir)=transfer(brokers[1].clone(),dirs[1].take().unwrap(),&request("b",RecoveryOp::Append {page:invalid})).await;
-            dirs[1]=Some(dir); assert!(result.is_err());
+        let (result, dir) = transfer(
+            brokers[2].clone(),
+            dirs[2].take().unwrap(),
+            &request(
+                "c",
+                RecoveryOp::Read {
+                    from,
+                    max_records: 1,
+                    max_bytes: 65536,
+                },
+            ),
+        )
+        .await;
+        dirs[2] = Some(dir);
+        let RecoveryReply::Page(page) = result.unwrap() else {
+            panic!("expected completed page")
+        };
+        if from == 0 {
+            let mut invalid = page.clone();
+            invalid.records[0].offset += 1;
+            let (result, dir) = transfer(
+                brokers[1].clone(),
+                dirs[1].take().unwrap(),
+                &request("b", RecoveryOp::Append { page: invalid }),
+            )
+            .await;
+            dirs[1] = Some(dir);
+            assert!(result.is_err());
         }
-        let (result,dir)=transfer(brokers[1].clone(),dirs[1].take().unwrap(),&request("b",RecoveryOp::Append {page})).await;
-        dirs[1]=Some(dir); result.unwrap();
+        let (result, dir) = transfer(
+            brokers[1].clone(),
+            dirs[1].take().unwrap(),
+            &request("b", RecoveryOp::Append { page }),
+        )
+        .await;
+        dirs[1] = Some(dir);
+        result.unwrap();
     }
-    let (result,dir)=transfer(brokers[1].clone(),dirs[1].take().unwrap(),&request("b",RecoveryOp::Finish)).await;
-    dirs[1]=Some(dir); result.unwrap();
-    let (result,dir)=transfer(brokers[1].clone(),dirs[1].take().unwrap(),&request("b",RecoveryOp::Install)).await;
-    dirs[1]=Some(dir);
-    let RecoveryReply::Installed(installed_b)=result.unwrap() else {panic!("expected installed receipt")};
-    tokio::time::timeout(Duration::from_secs(10),async {
-        let expected = [serde_json::to_string(&installed_b).unwrap(),serde_json::to_string(&installed_c).unwrap()];
-        while providers.iter().any(|p| expected.iter().any(|r| !p.consensus_node().committed_snapshot().attributes.values().any(|v|v==r))) {tokio::time::sleep(Duration::from_millis(5)).await;}
-    }).await.unwrap();
+    let (result, dir) = transfer(
+        brokers[1].clone(),
+        dirs[1].take().unwrap(),
+        &request("b", RecoveryOp::Finish),
+    )
+    .await;
+    dirs[1] = Some(dir);
+    result.unwrap();
+    let (result, dir) = transfer(
+        brokers[1].clone(),
+        dirs[1].take().unwrap(),
+        &request("b", RecoveryOp::Install),
+    )
+    .await;
+    dirs[1] = Some(dir);
+    let RecoveryReply::Installed(installed_b) = result.unwrap() else {
+        panic!("expected installed receipt")
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let expected = [
+            serde_json::to_string(&installed_b).unwrap(),
+            serde_json::to_string(&installed_c).unwrap(),
+        ];
+        while providers.iter().any(|p| {
+            expected.iter().any(|r| {
+                !p.consensus_node()
+                    .committed_snapshot()
+                    .attributes
+                    .values()
+                    .any(|v| v == r)
+            })
+        }) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
     if handoff {
         // Both targets are fully installed. The old candidate could activate at
         // this point; removing it from liveness must fence that exact attempt.
@@ -9363,67 +9749,222 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
         };
         assert_eq!(completed, staged);
     }
-    let recovered = retry_metadata(|| providers[1].activate_queue_recovery(&plan,&engines[1])).await;
-    tokio::time::timeout(Duration::from_secs(10),async {
-        while providers.iter().any(|p|p.queue_recovery_activation(&plan).unwrap()!=Some(recovered.clone())) {tokio::time::sleep(Duration::from_millis(5)).await;}
-    }).await.unwrap();
+    let recovered =
+        retry_metadata(|| providers[1].activate_queue_recovery(&plan, &engines[1])).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while providers
+            .iter()
+            .any(|p| p.queue_recovery_activation(&plan).unwrap() != Some(recovered.clone()))
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
     // A lost activation reply is resolved by the exact certificate, with no
     // reinstall or reset. Ordinary roles remain closed until local admission.
-    assert_eq!(retry_metadata(||providers[1].activate_queue_recovery(&plan,&engines[1])).await,recovered);
-    for index in [1,2] {
-        let id=if index==1 {"b"} else {"c"};
-        let (result,dir)=transfer(brokers[index].clone(),dirs[index].take().unwrap(),&request(id,RecoveryOp::Admit)).await;
-        dirs[index]=Some(dir); assert!(matches!(result.unwrap(),RecoveryReply::Admitted(_)));
+    assert_eq!(
+        retry_metadata(|| providers[1].activate_queue_recovery(&plan, &engines[1])).await,
+        recovered
+    );
+    for index in [1, 2] {
+        let id = if index == 1 { "b" } else { "c" };
+        let (result, dir) = transfer(
+            brokers[index].clone(),
+            dirs[index].take().unwrap(),
+            &request(id, RecoveryOp::Admit),
+        )
+        .await;
+        dirs[index] = Some(dir);
+        assert!(matches!(result.unwrap(), RecoveryReply::Admitted(_)));
     }
-    assert!(providers[0].admit_local_queue_recovery(&recovered,&engines[0]).await.is_err());
-    let (result,dir)=transfer(brokers[2].clone(),dirs[2].take().unwrap(),&request("c",RecoveryOp::Install)).await;
-    dirs[2]=Some(dir); assert!(result.is_err());
-    for index in [1,2] {
-        let id = if index==1 {"b"} else {"c"};
-        for result in brokers[index].apply_assignment_snapshot_transitions(id,&CoordinationSnapshot::default(),&providers[index].snapshot()).await {result.unwrap();}
+    assert!(
+        providers[0]
+            .admit_local_queue_recovery(&recovered, &engines[0])
+            .await
+            .is_err()
+    );
+    let (result, dir) = transfer(
+        brokers[2].clone(),
+        dirs[2].take().unwrap(),
+        &request("c", RecoveryOp::Install),
+    )
+    .await;
+    dirs[2] = Some(dir);
+    assert!(result.is_err());
+    for index in [1, 2] {
+        let id = if index == 1 { "b" } else { "c" };
+        for result in brokers[index]
+            .apply_assignment_snapshot_transitions(
+                id,
+                &CoordinationSnapshot::default(),
+                &providers[index].snapshot(),
+            )
+            .await
+        {
+            result.unwrap();
+        }
     }
-    let recovered_assignment = providers[1].snapshot().assignment_for("initial-wire",Partition::new(0),None).unwrap().clone();
+    let recovered_assignment = providers[1]
+        .snapshot()
+        .assignment_for("initial-wire", Partition::new(0), None)
+        .unwrap()
+        .clone();
     let recovered_history = recovered_assignment.history.as_ref().unwrap();
-    assert_eq!(recovered_history.activation,recovered.digest().unwrap());
-    assert_eq!(recovered_assignment.owner,"b");
+    assert_eq!(recovered_history.activation, recovered.digest().unwrap());
+    assert_eq!(recovered_assignment.owner, "b");
     assert!(recovered_assignment.is_followed_by("c"));
     assert!(!recovered_assignment.is_followed_by("a"));
-    let recovered_session = recovered_history.session("initial-wire",Partition::new(0),None,false,"c","b").unwrap();
-    brokers[1].authorize_history_replication(&recovered_session,true).unwrap();
-    assert!(brokers[1].authorize_history_replication(&session,true).is_err());
+    let recovered_session = recovered_history
+        .session("initial-wire", Partition::new(0), None, false, "c", "b")
+        .unwrap();
+    brokers[1]
+        .authorize_history_replication(&recovered_session, true)
+        .unwrap();
+    assert!(
+        brokers[1]
+            .authorize_history_replication(&session, true)
+            .is_err()
+    );
     // A new majority confirmation must use the recovered process/storage
     // identities and retain the selected offset continuation.
-    let (mut recovered_connection,recovered_task,dir,_) = open_node_connection_for_broker(ConnectionSettings::new(Some(60)),brokers[1].clone(),dirs[1].take().unwrap()).await;
-    dirs[1]=Some(dir);node_handshake(&mut recovered_connection).await;
-    let recovered_peer=ProtocolOwnerReplicationPeer::new(recovered_connection).with_reporter("c").with_history_session(recovered_session.clone());
-    let publisher_b=brokers[1].get_publisher("initial-wire",Partition::new(0),&None).await.unwrap();
-    let mut new_confirm=publisher_b.publish(b"after recovered activation".to_vec(),unix_millis(),unix_millis(),None,Default::default(),None).await.unwrap();
+    let (mut recovered_connection, recovered_task, dir, _) = open_node_connection_for_broker(
+        ConnectionSettings::new(Some(60)),
+        brokers[1].clone(),
+        dirs[1].take().unwrap(),
+    )
+    .await;
+    dirs[1] = Some(dir);
+    node_handshake(&mut recovered_connection).await;
+    let recovered_peer = ProtocolOwnerReplicationPeer::new(recovered_connection)
+        .with_reporter("c")
+        .with_history_session(recovered_session.clone());
+    let publisher_b = brokers[1]
+        .get_publisher("initial-wire", Partition::new(0), &None)
+        .await
+        .unwrap();
+    let mut new_confirm = publisher_b
+        .publish(
+            b"after recovered activation".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+            None,
+        )
+        .await
+        .unwrap();
     let records=tokio::time::timeout(Duration::from_secs(10),async {
         loop {
             let records=recovered_peer.read_owner_replication_records_fenced("initial-wire",Partition::new(0),None,plan.message_next(),plan.event_next(),8,8,65536,20,Some(2)).await.unwrap();
             if matches!(&records.messages,OwnerReplicationRead::Batch(batch) if !batch.records.is_empty()) && matches!(&records.events,OwnerReplicationRead::Batch(batch) if !batch.records.is_empty()) {break records}
         }
     }).await.unwrap();
-    assert!(matches!(new_confirm.try_recv(),Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
-    let message_next=match &records.messages {OwnerReplicationRead::Batch(batch)=>batch.records.last().unwrap().0+1,_=>unreachable!()};
-    let event_next=match &records.events {OwnerReplicationRead::Batch(batch)=>batch.records.last().unwrap().0+1,_=>unreachable!()};
-    brokers[2].apply_follower_replication_records("initial-wire",Partition::new(0),None,ReplicationResourceKind::Queue,records).await.unwrap();
-    recovered_peer.read_owner_replication_records_fenced("initial-wire",Partition::new(0),None,message_next,event_next,8,8,65536,0,Some(2)).await.unwrap();
-    assert_eq!(tokio::time::timeout(Duration::from_secs(10),new_confirm).await.unwrap().unwrap().unwrap(),2);
-    drop(recovered_peer);recovered_task.await.unwrap().unwrap();
-    assert_eq!(retry_metadata(||providers[1].activate_queue_recovery(&plan,&engines[1])).await,recovered);
-    retry_metadata(||providers[1].admit_local_queue_recovery(&recovered,&engines[1])).await;
-    assert_eq!(engines[1].queue_durable_frontiers("initial-wire",0,None).await.unwrap().message_next,3);
+    assert!(matches!(
+        new_confirm.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    let message_next = match &records.messages {
+        OwnerReplicationRead::Batch(batch) => batch.records.last().unwrap().0 + 1,
+        _ => unreachable!(),
+    };
+    let event_next = match &records.events {
+        OwnerReplicationRead::Batch(batch) => batch.records.last().unwrap().0 + 1,
+        _ => unreachable!(),
+    };
+    brokers[2]
+        .apply_follower_replication_records(
+            "initial-wire",
+            Partition::new(0),
+            None,
+            ReplicationResourceKind::Queue,
+            records,
+        )
+        .await
+        .unwrap();
+    recovered_peer
+        .read_owner_replication_records_fenced(
+            "initial-wire",
+            Partition::new(0),
+            None,
+            message_next,
+            event_next,
+            8,
+            8,
+            65536,
+            0,
+            Some(2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), new_confirm)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        2
+    );
+    drop(recovered_peer);
+    recovered_task.await.unwrap().unwrap();
+    assert_eq!(
+        retry_metadata(|| providers[1].activate_queue_recovery(&plan, &engines[1])).await,
+        recovered
+    );
+    retry_metadata(|| providers[1].admit_local_queue_recovery(&recovered, &engines[1])).await;
+    assert_eq!(
+        engines[1]
+            .queue_durable_frontiers("initial-wire", 0, None)
+            .await
+            .unwrap()
+            .message_next,
+        3
+    );
     // Seal the recovered generation under a second transition. Its authority
     // comes from the recovered quorum, rather than the old initial assignment.
-    let again = persist_pending(&providers,&resource,recovered.digest().unwrap(),"b").await;
-    synced(&providers,again.requested_generation).await;
-    let again_sealed = brokers[1].seal_replica_for_recovery(again.seal_command().unwrap()).await.unwrap();
-    assert_eq!(again_sealed.seal.history.storage_history.as_ref().unwrap().binding,*plan.binding());
-    let mut again_witnesses = fibril_coordination_ganglion::recovery_witnesses::RecoveryWitnessSet::new(&providers[1].consensus_node().committed_snapshot(),&again).unwrap();
-    again_witnesses.record(&providers[1].consensus_node().committed_snapshot(),"b",again_sealed).unwrap();
-    assert_eq!(again_witnesses.accepted_history(&providers[1].consensus_node().committed_snapshot()).unwrap().unwrap().activation,recovered.digest().unwrap());
-    assert!(providers[1].admit_local_queue_recovery(&recovered,&engines[1]).await.is_err());
+    let again = persist_pending(&providers, &resource, recovered.digest().unwrap(), "b").await;
+    synced(&providers, again.requested_generation).await;
+    let again_sealed = brokers[1]
+        .seal_replica_for_recovery(again.seal_command().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        again_sealed
+            .seal
+            .history
+            .storage_history
+            .as_ref()
+            .unwrap()
+            .binding,
+        *plan.binding()
+    );
+    let mut again_witnesses =
+        fibril_coordination_ganglion::recovery_witnesses::RecoveryWitnessSet::new(
+            &providers[1].consensus_node().committed_snapshot(),
+            &again,
+        )
+        .unwrap();
+    again_witnesses
+        .record(
+            &providers[1].consensus_node().committed_snapshot(),
+            "b",
+            again_sealed,
+        )
+        .unwrap();
+    assert_eq!(
+        again_witnesses
+            .accepted_history(&providers[1].consensus_node().committed_snapshot())
+            .unwrap()
+            .unwrap()
+            .activation,
+        recovered.digest().unwrap()
+    );
+    assert!(
+        providers[1]
+            .admit_local_queue_recovery(&recovered, &engines[1])
+            .await
+            .is_err()
+    );
 
     // Replacing storage under the same metadata/provider instance cannot reuse
     // the durable preparation receipt as permission for a fresh storage process.
@@ -9469,10 +10010,18 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
     // check, including on a replica that had not prepared any storage yet.
     let generation = set_assignment(&providers, &resource, 2).await;
     synced(&providers, generation).await;
-    assert!(providers[2].open_local_queue_recovery_stage(
-        &plan, &engines[2], &artifact, Default::default()).await.is_err());
-    assert!(providers[2].resume_local_queue_recovery_stage(
-        &plan, &engines[2], Default::default()).await.is_err());
+    assert!(
+        providers[2]
+            .open_local_queue_recovery_stage(&plan, &engines[2], &artifact, Default::default())
+            .await
+            .is_err()
+    );
+    assert!(
+        providers[2]
+            .resume_local_queue_recovery_stage(&plan, &engines[2], Default::default())
+            .await
+            .is_err()
+    );
     assert!(
         peer.read_owner_replication_records_fenced(
             "initial-wire",
@@ -9499,7 +10048,13 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
     .await;
     dirs[2] = Some(dir);
     assert!(stale.is_err());
-    assert_eq!(engines[2].storage_history_binding("initial-wire",0,None).unwrap().as_ref(),Some(plan.binding()));
+    assert_eq!(
+        engines[2]
+            .storage_history_binding("initial-wire", 0, None)
+            .unwrap()
+            .as_ref(),
+        Some(plan.binding())
+    );
     for broker in &brokers {
         broker.shutdown().await;
     }
@@ -9519,9 +10074,18 @@ async fn register_legacy_test_queue(
 ) {
     let mut snapshot = provider.consensus_node().committed_snapshot();
     let generation = snapshot.generation;
-    snapshot.resources.insert(ganglion_core::ResourceIdentity::new(
-        "fibril/queue", queue.topic.clone(), u64::from(queue.partition.id()), queue.group.clone(),
-    ));
+    snapshot
+        .resources
+        .insert(ganglion_core::ResourceIdentity::new(
+            "fibril/queue",
+            queue.topic.clone(),
+            u64::from(queue.partition.id()),
+            queue.group.clone(),
+        ));
     snapshot.generation += 1;
-    provider.consensus_node().write_snapshot_guarded(generation, snapshot).await.unwrap();
+    provider
+        .consensus_node()
+        .write_snapshot_guarded(generation, snapshot)
+        .await
+        .unwrap();
 }

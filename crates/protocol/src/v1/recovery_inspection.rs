@@ -1,16 +1,18 @@
 //! Explicit, read-only comparison of two previously collected sealed witnesses.
 //! This diagnostic path never selects a source, installs state or activates it.
 
-use super::replication::{request_recovery_read_reusing, ProtocolOwnerPeerResolverConfig};
+use super::replication::{
+    ProtocolOwnerPeerResolverConfig, request_recovery_read_sequential_reusing,
+};
 use fibril_broker::{
     broker::BrokerError,
     recovery::{
+        BrokerSealedReplica, RecoveryReadPage, RecoveryRecord, RecoverySealCommand,
         inspection::{
             RecoveryInspectionLimits, RecoveryOverlap, RecoveryPairInspection,
             RecoveryPairInspector, RecoverySide,
         },
         replay::{RecoveryQueueStateArtifact, RecoveryReplayLimits},
-        BrokerSealedReplica, RecoveryReadPage, RecoveryRecord, RecoverySealCommand,
     },
 };
 
@@ -161,8 +163,8 @@ async fn inspect_pair_inner<T: Send + 'static>(
     deadline: std::time::Duration,
     allow_same_source: bool,
     finish: impl FnOnce(RecoveryPairInspector) -> Result<(RecoveryPairInspection, T), String>
-        + Send
-        + 'static,
+    + Send
+    + 'static,
 ) -> Result<(ProtocolRecoveryPairInspection, T), BrokerError> {
     if left.node_id.is_empty()
         || right.node_id.is_empty()
@@ -211,9 +213,10 @@ async fn inspect_pair_inner<T: Send + 'static>(
                 RecoverySide::Left => (left, &mut left_connection),
                 RecoverySide::Right => (right, &mut right_connection),
             };
-            let page = request_recovery_read_reusing(
+            let page = request_recovery_read_sequential_reusing(
                 config, command, replica, &request, deadline, connection,
-            ).await?;
+            )
+            .await?;
             let page = RecoveryReadPage {
                 history_id: page.history_id,
                 source: request.source,

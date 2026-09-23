@@ -210,6 +210,9 @@ pub fn try_encode<T: Serialize + Any>(op: Op, req_id: u64, msg: &T) -> ProtocolR
         Op::RecoverySealOk => encode_typed(msg, "RecoverySealOk", |msg| {
             wire::encode_recovery_seal_ok(req_id, msg)
         }),
+        Op::RecoveryReadSequential => encode_typed(msg, "RecoveryReadSequential", |msg| {
+            wire::encode_recovery_read_sequential(req_id, msg)
+        }),
         Op::RecoveryRead => encode_typed(msg, "RecoveryRead", |msg| {
             wire::encode_recovery_read(req_id, msg)
         }),
@@ -222,9 +225,15 @@ pub fn try_encode<T: Serialize + Any>(op: Op, req_id: u64, msg: &T) -> ProtocolR
         Op::InitialHistoryPrepareOk => encode_typed(msg, "InitialHistoryPrepareOk", |msg| {
             wire::encode_initial_history_prepare_ok(req_id, msg)
         }),
-        Op::RecoveryTransfer => encode_typed(msg, "RecoveryTransfer", |msg| wire::encode_recovery_transfer(req_id,msg,false)),
-        Op::RecoveryTransferOk => encode_typed(msg, "RecoveryTransfer", |msg| wire::encode_recovery_transfer(req_id,msg,true)),
-        Op::HistoryReplication => encode_typed(msg, "HistoryReplication", |msg| wire::encode_history_replication(req_id, msg)),
+        Op::RecoveryTransfer => encode_typed(msg, "RecoveryTransfer", |msg| {
+            wire::encode_recovery_transfer(req_id, msg, false)
+        }),
+        Op::RecoveryTransferOk => encode_typed(msg, "RecoveryTransfer", |msg| {
+            wire::encode_recovery_transfer(req_id, msg, true)
+        }),
+        Op::HistoryReplication => encode_typed(msg, "HistoryReplication", |msg| {
+            wire::encode_history_replication(req_id, msg)
+        }),
         Op::Error => encode_error_like(op, req_id, msg),
     }
 }
@@ -372,6 +381,9 @@ pub fn try_decode<T: for<'de> Deserialize<'de> + Any>(frame: &Frame) -> Protocol
         x if x == Op::RecoverySealOk as u16 => wire::decode_recovery_seal_ok(frame)
             .map_err(wire_decode_error)
             .and_then(cast_decoded),
+        x if x == Op::RecoveryReadSequential as u16 => wire::decode_recovery_read_sequential(frame)
+            .map_err(wire_decode_error)
+            .and_then(cast_decoded),
         x if x == Op::RecoveryRead as u16 => wire::decode_recovery_read(frame)
             .map_err(wire_decode_error)
             .and_then(cast_decoded),
@@ -379,12 +391,22 @@ pub fn try_decode<T: for<'de> Deserialize<'de> + Any>(frame: &Frame) -> Protocol
             .map_err(wire_decode_error)
             .and_then(cast_decoded),
         x if x == Op::InitialHistoryPrepare as u16 => wire::decode_initial_history_prepare(frame)
-            .map_err(wire_decode_error).and_then(cast_decoded),
-        x if x == Op::InitialHistoryPrepareOk as u16 => wire::decode_initial_history_prepare_ok(frame)
-            .map_err(wire_decode_error).and_then(cast_decoded),
-        x if x == Op::RecoveryTransfer as u16 => wire::decode_recovery_transfer(frame,false).map_err(wire_decode_error).and_then(cast_decoded),
-        x if x == Op::RecoveryTransferOk as u16 => wire::decode_recovery_transfer(frame,true).map_err(wire_decode_error).and_then(cast_decoded),
-        x if x == Op::HistoryReplication as u16 => wire::decode_history_replication(frame).map_err(wire_decode_error).and_then(cast_decoded),
+            .map_err(wire_decode_error)
+            .and_then(cast_decoded),
+        x if x == Op::InitialHistoryPrepareOk as u16 => {
+            wire::decode_initial_history_prepare_ok(frame)
+                .map_err(wire_decode_error)
+                .and_then(cast_decoded)
+        }
+        x if x == Op::RecoveryTransfer as u16 => wire::decode_recovery_transfer(frame, false)
+            .map_err(wire_decode_error)
+            .and_then(cast_decoded),
+        x if x == Op::RecoveryTransferOk as u16 => wire::decode_recovery_transfer(frame, true)
+            .map_err(wire_decode_error)
+            .and_then(cast_decoded),
+        x if x == Op::HistoryReplication as u16 => wire::decode_history_replication(frame)
+            .map_err(wire_decode_error)
+            .and_then(cast_decoded),
         x if x == Op::Error as u16 => decode_error_like(frame),
         opcode => Err(ProtocolError::Decode(format!("unknown opcode {opcode}"))),
     }
@@ -815,7 +837,7 @@ mod tests {
     #[test]
     fn replication_read_roundtrips() {
         let msg = ReplicationRead {
-        reporter_epoch: None,
+            reporter_epoch: None,
             topic: "orders".into(),
             group: Some("workers".into()),
             partition: Partition::new(3),

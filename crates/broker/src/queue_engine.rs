@@ -598,10 +598,16 @@ impl StromaEngine {
 
     /// Requires fresh authority proving this origin has never activated.
     pub async fn resume_empty_storage_history(
-        &self, tp: &str, part: u32, group: Option<&str>,
-        kind: PartitionKind, binding: StorageHistoryBinding,
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        kind: PartitionKind,
+        binding: StorageHistoryBinding,
     ) -> Result<PreparedStorageHistory, StromaError> {
-        self.inner.resume_empty_storage_history(tp, part, group, kind, binding).await
+        self.inner
+            .resume_empty_storage_history(tp, part, group, kind, binding)
+            .await
     }
 
     /// Requires fresh authority excluding this replica from the accepted write set.
@@ -653,39 +659,68 @@ impl StromaEngine {
             .await
     }
 
-    pub fn verify_admitted_storage_history(&self, prepared: &PreparedStorageHistory) -> Result<(), StromaError> {
+    pub fn verify_admitted_storage_history(
+        &self,
+        prepared: &PreparedStorageHistory,
+    ) -> Result<(), StromaError> {
         self.inner.verify_admitted_storage_history(prepared)
     }
 
-    pub fn verify_prepared_storage_history(&self, prepared: &PreparedStorageHistory) -> Result<(), StromaError> {
+    pub fn verify_prepared_storage_history(
+        &self,
+        prepared: &PreparedStorageHistory,
+    ) -> Result<(), StromaError> {
         self.inner.verify_prepared_storage_history(prepared)
     }
 
     /// The caller must first obtain fresh activation authority for this exact receipt.
-    pub async fn admit_prepared_storage_history(&self, prepared: PreparedStorageHistory) -> Result<(), StromaError> {
+    pub async fn admit_prepared_storage_history(
+        &self,
+        prepared: PreparedStorageHistory,
+    ) -> Result<(), StromaError> {
         self.inner.admit_prepared_storage_history(prepared).await
     }
 
     /// Stage a recovery baseline separately after fresh plan authorization.
     pub async fn open_queue_recovery_stage(
-        &self, spec: QueueRecoveryStageSpec, snapshot: Vec<u8>, limits: RecoveryStageLimits,
+        &self,
+        spec: QueueRecoveryStageSpec,
+        snapshot: Vec<u8>,
+        limits: RecoveryStageLimits,
     ) -> Result<QueueRecoveryStage, StromaError> {
-        self.inner.open_queue_recovery_stage(spec, snapshot, limits).await
+        self.inner
+            .open_queue_recovery_stage(spec, snapshot, limits)
+            .await
     }
 
     pub async fn resume_queue_recovery_stage(
-        &self, spec: QueueRecoveryStageSpec, limits: RecoveryStageLimits,
+        &self,
+        spec: QueueRecoveryStageSpec,
+        limits: RecoveryStageLimits,
     ) -> Result<QueueRecoveryStage, StromaError> {
         self.inner.resume_queue_recovery_stage(spec, limits).await
     }
 
-    pub async fn install_queue_recovery_stage(&self, spec: QueueRecoveryStageSpec, seal: crate::recovery::RecoverySealRequest, stage: &QueueRecoveryStage) -> Result<PreparedQueueRecovery, StromaError> {
-        self.inner.install_queue_recovery_stage(spec, seal, stage).await
+    pub async fn install_queue_recovery_stage(
+        &self,
+        spec: QueueRecoveryStageSpec,
+        seal: crate::recovery::RecoverySealRequest,
+        stage: &QueueRecoveryStage,
+    ) -> Result<PreparedQueueRecovery, StromaError> {
+        self.inner
+            .install_queue_recovery_stage(spec, seal, stage)
+            .await
     }
-    pub fn verify_prepared_queue_recovery(&self, prepared: &PreparedQueueRecovery) -> Result<(), StromaError> {
+    pub fn verify_prepared_queue_recovery(
+        &self,
+        prepared: &PreparedQueueRecovery,
+    ) -> Result<(), StromaError> {
         self.inner.verify_prepared_queue_recovery(prepared)
     }
-    pub async fn admit_prepared_queue_recovery(&self, prepared: PreparedQueueRecovery) -> Result<(), StromaError> {
+    pub async fn admit_prepared_queue_recovery(
+        &self,
+        prepared: PreparedQueueRecovery,
+    ) -> Result<(), StromaError> {
         self.inner.admit_prepared_queue_recovery(prepared).await
     }
 
@@ -706,7 +741,10 @@ impl StromaEngine {
 
     /// Persist a queue checkpoint without triggering log compaction.
     pub async fn snapshot_partition(
-        &self, tp: &str, part: u32, group: Option<&str>,
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
     ) -> Result<(), StromaError> {
         self.inner.snapshot_partition(tp, part, group).await
     }
@@ -777,6 +815,34 @@ impl StromaEngine {
     ) -> Result<FollowerStateCheckpointInstallOutcome, StromaError> {
         self.inner
             .install_follower_state_checkpoint(tp, part, group, install)
+            .await
+    }
+
+    pub async fn read_sealed_replica_sequential(
+        &self,
+        command: &crate::recovery::RecoverySealCommand,
+        request: stroma_core::RecoveryReadRequest,
+        cursor: Option<stroma_core::RecoverySequentialRead>,
+    ) -> Result<
+        (
+            stroma_core::RecoveryReadPage,
+            Option<stroma_core::RecoverySequentialRead>,
+        ),
+        StromaError,
+    > {
+        self.inner
+            .read_sealed_replica_sequential(
+                &command.topic,
+                command.partition.id(),
+                command.group.as_deref(),
+                if command.stream {
+                    PartitionKind::Stream
+                } else {
+                    PartitionKind::Queue
+                },
+                request,
+                cursor,
+            )
             .await
     }
 

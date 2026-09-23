@@ -142,6 +142,9 @@ pub enum Op {
 
     RecoveryRead = 105,
     RecoveryReadOk = 106,
+    /// Node-only tentative sequential inspection. A complete sealed digest must
+    /// be verified before the caller may produce recovery evidence.
+    RecoveryReadSequential = 112,
 
     InitialHistoryPrepare = 107,
     InitialHistoryPrepareOk = 108,
@@ -1269,5 +1272,7 @@ pub const MAX_HISTORY_REPLICATION_FRAME_BYTES: usize = 64 * 1024 * 1024;
 /// Versioned internal recovery control body. Only authenticated cluster peers
 /// can use it; the broker verifies its plan and operation-specific budgets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RecoveryTransfer { pub body: Vec<u8> }
+pub struct RecoveryTransfer {
+    pub body: Vec<u8>,
+}
 pub const MAX_RECOVERY_TRANSFER_FRAME_BYTES: usize = 34 * 1024 * 1024;

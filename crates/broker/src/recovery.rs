@@ -10,7 +10,7 @@ pub use stroma_core::recovery_inspection as inspection;
 pub use stroma_core::recovery_replay as replay;
 pub use stroma_core::{
     RecoveryReadPage, RecoveryReadRequest, RecoveryReadSource, RecoveryRecord, RecoverySealRequest,
-    RetainedHistoryIdentity, SealedReplicaFrontiers,
+    RecoverySequentialRead, RetainedHistoryIdentity, SealedReplicaFrontiers,
 };
 use tokio::sync::watch;
 
@@ -51,6 +51,37 @@ impl Broker<StromaEngine> {
         command: RecoverySealCommand,
         request: RecoveryReadRequest,
     ) -> Result<(String, RecoveryReadPage), BrokerError> {
+        let node_id = self.authorize_recovery_read(&command, &request).await?;
+        let page = self
+            .engine
+            .read_sealed_replica(&command, request)
+            .await
+            .map_err(|err| BrokerError::InvalidArgument(err.to_string()))?;
+        Ok((node_id, page))
+    }
+
+    /// Tentative pages for a receiver that verifies complete sealed histories.
+    /// Fresh authorization is required even when the transport/cursor is reused.
+    pub async fn read_sealed_replica_sequential(
+        &self,
+        command: RecoverySealCommand,
+        request: RecoveryReadRequest,
+        cursor: Option<RecoverySequentialRead>,
+    ) -> Result<(String, RecoveryReadPage, Option<RecoverySequentialRead>), BrokerError> {
+        let node_id = self.authorize_recovery_read(&command, &request).await?;
+        let (page, cursor) = self
+            .engine
+            .read_sealed_replica_sequential(&command, request, cursor)
+            .await
+            .map_err(|err| BrokerError::InvalidArgument(err.to_string()))?;
+        Ok((node_id, page, cursor))
+    }
+
+    async fn authorize_recovery_read(
+        &self,
+        command: &RecoverySealCommand,
+        request: &RecoveryReadRequest,
+    ) -> Result<String, BrokerError> {
         if request.seal.transition != command.transition
             || request.seal.fence_epoch != command.fence_epoch
         {
@@ -58,19 +89,13 @@ impl Broker<StromaEngine> {
                 "recovery read transition mismatch".into(),
             ));
         }
-        let node_id = tokio::time::timeout(
+        tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            self.ownership.authorize_recovery_seal(&command),
+            self.ownership.authorize_recovery_seal(command),
         )
         .await
         .map_err(|_| BrokerError::Unknown("recovery authorization timed out".into()))?
-        .map_err(BrokerError::InvalidArgument)?;
-        let page = self
-            .engine
-            .read_sealed_replica(&command, request)
-            .await
-            .map_err(|err| BrokerError::InvalidArgument(err.to_string()))?;
-        Ok((node_id, page))
+        .map_err(BrokerError::InvalidArgument)
     }
 
     /// The protocol authenticates the peer first. Only one recovery seal runs
