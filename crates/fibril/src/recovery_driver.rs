@@ -129,6 +129,9 @@ async fn recover_queue_attempt(
         return Err("automatic recovery exceeds the 16-replica work budget".into());
     }
     let seal_command = pending.seal_command()?;
+    // Attempt-local only: a resumed persisted plan reconstructs its source as
+    // before. Keep the selected replay result alive across plan persistence.
+    let mut selected_artifact = None;
     let plan = if let Some(plan) = provider.queue_recovery_plan(pending).map_err(err)? {
         plan
     } else {
@@ -217,14 +220,16 @@ async fn recover_queue_attempt(
             &artifacts,
             &comparisons,
         )?;
-        timing
+        let plan = timing
             .stage(
                 "commit_plan",
                 local,
                 provider.persist_queue_recovery_plan(pending, &witnesses, &selection),
             )
             .await
-            .map_err(err)?
+            .map_err(err)?;
+        selected_artifact = artifacts.remove(plan.source_node());
+        plan
     };
     let members: Vec<_> = std::iter::once(&candidate.owner)
         .chain(candidate.followers.iter())
@@ -248,23 +253,27 @@ async fn recover_queue_attempt(
         }
     }
     if snapshot.is_none() {
-        let artifact = timing
-            .stage(
-                "reinspect_source",
-                plan.source_node(),
-                inspect_recovery_source_artifact(
-                    config,
-                    &seal_command,
-                    &source_report(&plan)?,
-                    automatic_inspection_limits(),
-                    Default::default(),
-                    16 * 1024 * 1024,
-                    16 * 1024 * 1024,
-                    RPC,
-                ),
-            )
-            .await
-            .map_err(err)?;
+        let artifact = if let Some(artifact) = selected_artifact.take() {
+            artifact
+        } else {
+            timing
+                .stage(
+                    "reinspect_source",
+                    plan.source_node(),
+                    inspect_recovery_source_artifact(
+                        config,
+                        &seal_command,
+                        &source_report(&plan)?,
+                        automatic_inspection_limits(),
+                        Default::default(),
+                        16 * 1024 * 1024,
+                        16 * 1024 * 1024,
+                        RPC,
+                    ),
+                )
+                .await
+                .map_err(err)?
+        };
         plan.verify_artifact(&artifact)?;
         snapshot = Some(artifact.state_snapshot().to_vec());
     }

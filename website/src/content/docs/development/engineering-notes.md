@@ -10,6 +10,10 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Reusing the selected recovery artifact
+
+The recovery driver keeps the selected replay artifact through plan persistence and verifies it against the committed plan before use, avoiding a second reconstruction in the same attempt. Completed target snapshots remain preferred, and resumed attempts reconstruct the source when no local artifact exists. The 100k-backlog SATA gate passed at 42.50 seconds to readiness, compared with 50.72 seconds before this change; repeated recovery and restart tests also passed.
+
 ### Subscriber discovery after owner loss
 
 A subscriber connected only to its queue owner stayed pending after that owner died because topology advertised no surviving address. All five clients now accept fallback discovery addresses and retry temporary recovery responses during supervised reattachment. A three-replica SATA warm-traffic test delivered fresh probes on the original subscription 8.13 seconds after SIGKILL, with all 16,959 confirmed IDs preserved and replicas converged after restart.
