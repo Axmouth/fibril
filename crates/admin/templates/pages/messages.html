@@ -60,14 +60,16 @@
         <input id="message-payload-limit" type="number" min="1" max="1048576" step="1" value="4096">
       </label>
 
-      <fieldset class="message-status-filter">
+      <fieldset class="message-status-filter" aria-describedby="message-status-help">
         <legend class="settings-label">Status filter</legend>
-        <span class="settings-help">Leave all unchecked to show every status returned by this inspection mode.</span>
-        <label><input class="message-status-filter-input" type="checkbox" value="ready"> Ready</label>
-        <label><input class="message-status-filter-input" type="checkbox" value="inflight"> Inflight</label>
-        <label><input class="message-status-filter-input" type="checkbox" value="delayed"> Delayed</label>
-        <label><input class="message-status-filter-input" type="checkbox" value="pending_dlq"> Pending DLQ</label>
-        <label><input class="message-status-filter-input" type="checkbox" value="settled"> Settled</label>
+        <span class="settings-help" id="message-status-help">Choose statuses to include. Leave all unchecked to show every available status.</span>
+        <div class="message-status-options">
+          <label><input class="message-status-filter-input" type="checkbox" value="ready"> Ready</label>
+          <label><input class="message-status-filter-input" type="checkbox" value="inflight"> Inflight</label>
+          <label><input class="message-status-filter-input" type="checkbox" value="delayed"> Delayed</label>
+          <label><input class="message-status-filter-input" type="checkbox" value="pending_dlq"> Pending DLQ</label>
+          <label><input class="message-status-filter-input" type="checkbox" value="settled"> Settled</label>
+        </div>
       </fieldset>
 
       <div class="settings-actions">

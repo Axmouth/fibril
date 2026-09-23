@@ -7,6 +7,8 @@ on:
       - ".github/workflows/website-ci.yaml"
       - "compose.website.deploy.yaml"
       - "website/**"
+      - "crates/admin/templates/**"
+      - "crates/admin/admin-ui/**"
 
 permissions:
   contents: read
