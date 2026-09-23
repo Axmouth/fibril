@@ -4,6 +4,7 @@ use fibril_broker::{
     broker::{Broker, QueueOwnership},
     queue_engine::StromaEngine,
     recovery::{
+        inspection::RecoveryInspectionLimits,
         BrokerSealedReplica, RecoveryReadRequest, RecoveryReadSource, RecoverySealRequest,
         SealedReplicaFrontiers,
     },
@@ -28,6 +29,16 @@ use std::{
 };
 const RPC: Duration = Duration::from_secs(10);
 const MAX_REPLICAS: usize = 16;
+// Each sealed page verifies the retained history. Use the existing wire limits
+// to amortize those scans, while keeping total inspection budgets unchanged.
+fn automatic_inspection_limits() -> RecoveryInspectionLimits {
+    RecoveryInspectionLimits {
+        page_records: 4096,
+        page_bytes: 16 * 1024 * 1024,
+        ..Default::default()
+    }
+}
+
 fn err(e: impl ToString) -> String {
     e.to_string()
 }
@@ -163,7 +174,7 @@ async fn recover_queue_attempt(
                         config,
                         &seal_command,
                         report,
-                        Default::default(),
+                        automatic_inspection_limits(),
                         Default::default(),
                         16 * 1024 * 1024,
                         16 * 1024 * 1024,
@@ -192,7 +203,7 @@ async fn recover_queue_attempt(
                             &seal_command,
                             left,
                             right,
-                            Default::default(),
+                            automatic_inspection_limits(),
                             RPC,
                         ),
                     )
@@ -245,7 +256,7 @@ async fn recover_queue_attempt(
                     config,
                     &seal_command,
                     &source_report(&plan)?,
-                    Default::default(),
+                    automatic_inspection_limits(),
                     Default::default(),
                     16 * 1024 * 1024,
                     16 * 1024 * 1024,

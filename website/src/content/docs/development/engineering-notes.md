@@ -10,6 +10,10 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Bounded recovery pages and buffered history scans
+
+Recovery inspection now uses the existing 4096-record / 16 MiB page limits, and Keratin buffers frozen reads while reusing bounded record scratch space. On the three-replica SATA acceptance host, 10k-backlog readiness fell from 15.12–15.22 s to 4.29 s; previously timing-out 100k backlog and settled-history cases completed in 50.72 s and 46.87 s with full ID, durable-write and restart/convergence checks. Full-history verification and deadlines remain unchanged; repeated scans, artifact reuse and connection reuse remain in the [recovery plan](/development/failover-plan/#longer-retained-histories).
+
 ### Raft sockets after cancellation and peer restart
 
 A stopped embedded Raft core could keep answering fatal errors on a cached socket, preventing retries from reaching its replacement. Requests now own their socket until a complete response arrives; cancellation, failed exchanges and fatal replies retire it. Two deterministic regressions and the repeated learner-restart acceptance test cover the repair ([Ganglion 7e96cf0](https://github.com/Axmouth/ganglion/commit/7e96cf0)).

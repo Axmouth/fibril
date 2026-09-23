@@ -110,16 +110,49 @@ settled case retained history from offset zero; it does not establish compacted
 checkpoint behavior. The saved pre-transport control also timed out at 10,000
 messages, so this scale limit predates the transport improvement.
 
-Inspection currently requests 256 records per page and verifies both complete
-retained logs on every page read. Keep the larger-history cases as availability
-gates while assessing larger bounded pages, verified progress reuse and connection
-reuse. Separate scan/verification work from RPC setup and authorization costs;
+Automatic inspection now uses pages of up to 4096 records / 16 MiB, within the
+existing wire limits; total history budgets and deadlines are unchanged. Keratin
+buffers sequential frozen reads and reuses bounded record scratch space. In the
+same SATA profiles, the combined changes reached readiness/delivery in 4.29/5.21
+seconds for 10k outstanding messages, 50.72/51.68 seconds for 100k outstanding,
+and 46.87/47.70 seconds for 100k settled plus one outstanding. Every case verified
+all expected IDs, new durable work and old-owner restart/convergence. These are
+individual acceptance runs, with no claim of a history-independent failover bound.
+Larger pages alone improved 10k but still timed out at 100k.
+
+Both retained logs are still verified on every page read. In the combined 100k
+backlog run, inspection/comparison/reinspection took about 31 seconds and copying
+about 14 seconds. Keep these histories as availability gates while assessing
+same-attempt source-artifact reuse, authenticated connection reuse and bounded
+streaming verification. Separate scan work from RPC setup and authorization costs;
 preserve content, identity and quorum checks throughout. Larger queues also need
-explicit acceptance for the total page, record and byte limits.
+explicit acceptance for total page, record, byte and replay-operation limits.
+
+### Mixed traffic across owner loss
+
+A 30-second warm-up at 500 offered 1 KiB messages/s with an active ACKing consumer
+exercises snapshot creation and a longer event history before owner SIGKILL. In
+the initial SATA run with larger pages and buffered scans, the replacement owner
+was ready after 7.95 seconds. Every journaled confirmed ID was delivered, new
+publication succeeded and all replicas converged after restart.
+
+Client recovery remains a separate gate: the original publisher exited on
+connection reset; the original subscriber stayed alive but received none of the
+fresh probe messages during an eight-second observation window. A fresh consumer
+drained them. Keep that observation separate from successful broker recovery,
+and distinguish buffered postkill replies/deliveries from newly resumed service.
 
 ### 2. Reduce overhead with the existing recovery proof
 
 Evaluate changes individually against that baseline:
+
+- Reuse the selected source artifact within the same attempt only after checking
+  it against the persisted plan. Keep completed-target snapshots preferred and
+  retain reconstruction when resuming without that artifact.
+- Replace repeated complete scans with bounded sequential verification or a
+  transition-bound verification session. Preserve detection of changed bytes,
+  generation replacement, corruption, truncation and stale seals; a cached digest
+  alone does not certify later reads. Retain cancellation ownership of I/O.
 
 - Wake recovery and admission on relevant committed metadata changes, with bounded
   periodic retry as a fallback. Prevent lost wakeups and tight retry loops.
