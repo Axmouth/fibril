@@ -137,10 +137,11 @@ impl Broker<StromaEngine> {
                 let stage = match &request.operation {
                     QueueRecoveryOperation::Begin { snapshot } => {
                         engine
-                            .open_queue_recovery_stage(
+                            .open_queue_recovery_stage_reusing(
                                 authority.spec.clone(),
                                 snapshot.clone(),
                                 Default::default(),
+                                authority.seal.clone(),
                             )
                             .await
                     }

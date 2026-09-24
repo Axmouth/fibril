@@ -94,3 +94,31 @@ This adds an internal broker opcode without changing the storage format. All
 participating brokers must support operation 112 for automatic inspection; an
 older peer rejects it and recovery remains fenced. Mixed-version rolling recovery
 with older binaries is not supported by this change.
+
+
+## Compatible retained-data reuse
+
+A target with the exact selected message range can initialize its recovery stage
+from its own sealed log. The target checks its resource incarnation and durable
+seal, then reads the actual records to validate CRCs, the full payload digest and
+the selected snapshot's live-payload dependencies. Unequal bounds or payloads use
+the existing verified transfer path. A matching local actor state is not required;
+installation still uses the selected, independently verified snapshot.
+
+Keratin closes the outgoing writable segment and gives each generation a new,
+private active tail. Closed payload segments can share filesystem inodes; indexes
+and metadata stay independent. Installation similarly forks the completed stage.
+Later suffix repair or unclean-open truncation copies a shared segment before
+mutating it. Appends use the private tail, and retention only removes local names.
+Logs report shared bytes, copied bytes and shared segment counts.
+
+Sharing requires manifest version 3, persisted on the source before linking.
+Older binaries reject these logs. Version 2 logs remain readable, and ordinary
+unshared logs keep their existing format. A failed filesystem link falls back to
+copying. Never downgrade a shared log by editing its manifest version.
+
+The existing intent, stage completion, installation receipt and atomic route
+publication still control admission. Interrupted destinations remain unreferenced;
+process-kill tests cover file sharing, private-copy repair and publication. Full
+history verification remains necessary; agreed checkpoints that bound comparison
+to a suffix are separate planned work.

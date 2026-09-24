@@ -701,6 +701,18 @@ impl StromaEngine {
         self.inner.resume_queue_recovery_stage(spec, limits).await
     }
 
+    pub async fn open_queue_recovery_stage_reusing(
+        &self,
+        spec: QueueRecoveryStageSpec,
+        snapshot: Vec<u8>,
+        limits: RecoveryStageLimits,
+        seal: crate::recovery::RecoverySealRequest,
+    ) -> Result<QueueRecoveryStage, StromaError> {
+        self.inner
+            .open_queue_recovery_stage_reusing(spec, snapshot, limits, seal)
+            .await
+    }
+
     pub async fn install_queue_recovery_stage(
         &self,
         spec: QueueRecoveryStageSpec,

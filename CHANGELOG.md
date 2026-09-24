@@ -12,6 +12,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Breaking changes
 
+- Compatible retained-data reuse during queue recovery can upgrade Keratin
+  manifests to version 3. Older binaries reject these shared-segment logs; do not
+  downgrade them by editing manifests. All participating brokers need compatible
+  storage code. Logs that have never shared a segment retain version 2.
+
 - Automatic recovery inspection uses the new node-only operation 112. All
   participating brokers must support it; older peers reject it and recovery
   remains fenced. The storage format and strict recovery-read operation are unchanged.
@@ -307,6 +312,12 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   and the matching `FIBRIL_KERATIN_*` env overrides).
 
 ### Changed
+
+- Queue recovery reuses exactly matching, sealed local payloads after full bounds,
+  CRC and digest verification. Completed stages also share closed payload segments
+  into the installed generation, with independent writable tails and metadata.
+  Divergent replicas retain the verified transfer path; selected snapshots,
+  fencing, durability and quorum activation requirements are unchanged.
 
 - Recovery inspection reuses authenticated connections and the selected artifact
   within one attempt, and verifies retained logs through bounded sequential

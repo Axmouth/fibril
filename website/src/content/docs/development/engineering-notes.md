@@ -10,9 +10,13 @@ remaining work is in the [roadmap](/roadmap/).
 
 ## Adoption — September 2026
 
+### Reusing compatible retained message segments
+
+Recovery targets can reuse their exact sealed payload range after full CRC and digest checks, and installation shares the completed stage's closed segments with a private writable tail. The 100k-message, three-replica SATA readiness gate improved from a fresh 23.99-second baseline to 9.31–10.34 seconds; the 14.48-second payload-transfer phase disappeared for matching replicas. Repair privatizes shared files before mutation, and the new manifest format fences older binaries ([storage and recovery boundaries](/development/recovery-internals/#compatible-retained-data-reuse)).
+
 ### Sequential sealed-history inspection
 
-Inspection now reads each frozen log once per traversal, checks record CRCs and the complete sealed digest, and creates evidence only after full receiver verification. Bounded sessions preserve authorization, cancellation ownership and deadlines; strict target-copy reads remain unchanged. Single-run three-replica SATA readiness improved from 50.72 to 24.11 seconds for 100k outstanding 1 KiB messages and from 46.87 to 18.97 seconds for 100k settled plus one outstanding; retained-data copying is now the main cost ([internals](/development/recovery-internals/#bounded-sequential-inspection)).
+Inspection now reads each frozen log once per traversal, checks record CRCs and the complete sealed digest, and creates evidence only after full receiver verification. Bounded sessions preserve authorization, cancellation ownership and deadlines; strict target-copy reads remain unchanged. Single-run three-replica SATA readiness improved from 50.72 to 24.11 seconds for 100k outstanding 1 KiB messages and from 46.87 to 18.97 seconds for 100k settled plus one outstanding; retained-data copying was the main cost after this increment ([internals](/development/recovery-internals/#bounded-sequential-inspection)).
 
 ### Reusing authenticated inspection connections
 

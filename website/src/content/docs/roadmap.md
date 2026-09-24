@@ -148,13 +148,13 @@ The compatibility work follows this order:
   with coupled validation, safe adoption across nodes, controller propagation,
   admin visibility and rollback. Keep Raft election timing separate.
 - Extend recovery acceptance to sustained high-rate and aged workloads, distinguishing
-  retained history, live backlog and checkpoint age. Add matched large-history
-  RabbitMQ/JetStream checks to the internal reproducible harness. Reduce retained-data
-  copying with separately proven generation reuse; existing inspection uses bounded
-  sequential verification.
+  retained history, live backlog and checkpoint age. Extend the internal matched
+  RabbitMQ/JetStream history checks to more sustained traffic and failure modes.
+  Add safe reclamation of retained recovery generations and measure shared-segment
+  repair costs under storage pressure.
 - Target common-case queue recovery within two seconds: measure release-build
-  stage costs, remove avoidable waits, prove promotion using compatible existing
-  storage, then assess agreed checkpoints and suffix-only comparison. See the
+  stage costs, remove avoidable waits, and establish agreed checkpoints with
+  suffix-only comparison while preserving payload dependencies and quorum proof. See the
   [staged fast-recovery plan](/development/failover-plan/#fast-recovery).
 - Extend eager failover acceptance to packet-level partitions, CPU/storage stalls,
   planned drains and durable streams. Measure detection, recovery time, false

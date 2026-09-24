@@ -692,7 +692,7 @@ See also: [clustering](/concepts/clustering/) and
 | Retained-history inspection | Partial | Verified snapshots and logs reconstruct exact queue state and live-payload digests across retained ranges. Accepted queue lineage supports source selection; legacy timer semantics and stream state need additional proofs |
 | Queue recovery source selection | Partial | Accepted version-two queue origins and subsequent recovered activations support complete source selection, old witness verification and exact state artifacts. Crossed tails without a complete source, legacy baselines and stream state remain fenced |
 | Queue recovery intent | Partial | Guarded consensus fixes the selected source, witness identities, fingerprints and fresh history/session IDs. Retries retain the first plan while installation prepares the new quorum |
-| Queue recovery staging | Partial | Fresh plan checks authorize bounded native-log transfer with immutable metadata, exact retries and disk verification. A completed stage can serve another target after source loss through authenticated control frames |
+| Queue recovery staging | Partial | Fresh plan checks authorize bounded native-log transfer or exact verified local payload reuse. Closed segments can be shared with private writable tails; metadata, retries and full disk verification remain mandatory. A completed stage can serve another target after source loss through authenticated control frames |
 | Queue recovery installation and activation | Partial | Verified generations preserve old sealed sources; one durable route publishes storage. Exact target receipts gate atomic assignment/activation and fresh local admission. Consecutive recoveries, source loss, majority confirms and Linux SIGKILL are covered |
 | Recovery candidate handoff | Partial | Guarded controller changes select a live, non-draining member of the fixed proposed replica set. Seals, plans, completed stages and write thresholds remain unchanged; stale candidates cannot activate. Membership expansion remains a separate gate |
 | Background learner admission | Partial | Assigned replicas outside the activated write set catch up without an owner recovery fence. Exact durable/applied cuts and payload completeness gate additive consensus admission; old sessions and confirms retain valid progress, and later recovery uses the enlarged witness set. Partial checkpoint backfill and older retained storage generations are supported |
@@ -764,5 +764,5 @@ Stream adapters, portable cluster/fault provisioning and a repeated workload mat
 
 Automatic inspection reuses authenticated source connections and a verified source
 artifact within one attempt. Bounded sequential reads validate complete sealed
-log digests and receiver replay before producing evidence. Strict target copying
-retains per-page verification. See [limits and broker compatibility](/development/recovery-internals/#bounded-sequential-inspection).
+log digests and receiver replay before producing evidence. Fallback target copying
+retains per-page verification; [compatible retained-data reuse](/development/recovery-internals/#compatible-retained-data-reuse) avoids transfer and installation copies for matching payloads. See [limits and broker compatibility](/development/recovery-internals/#bounded-sequential-inspection).
