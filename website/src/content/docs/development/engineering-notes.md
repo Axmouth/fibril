@@ -19,6 +19,18 @@ confirmed-suffix tests cover the publication and recovery boundaries.
 
 ## Adoption — September 2026
 
+### Prompt explicit-disconnect detection
+
+Zero-grace eager mode monitors idle Raft connections on the active controller and immediately verifies explicit connection loss; successful RPCs clear suspicion and silent failures retain heartbeat expiry. Four same-host, three-replica SATA process-kill screens recorded suspicion 26–34 ms after injection, with majority-durable history checks and old-owner rejoin passing. Recovery remains separately fenced and validated; the default policy stays disabled with a one-second grace ([settings and scope](/reliability/replication/#eager-failover)).
+
+### Prefetching recovery payload pages
+
+A copying target reads one page ahead while appending the current page; both operations finish before progress is accepted, and installation still waits for every source reader. A same-host SATA release ABBA test with a missing 64 MiB suffix measured copying at 0.95–1.13 seconds sequentially and 0.75–0.76 seconds with prefetch; complete attempts fell from 1.85–2.08 to 1.70 seconds. The tradeoff is one additional page of at most 16 MiB per active copying target, with concurrency capped at two.
+
+### Overlapping seal and inspection
+
+Each of at most two replica pipelines now starts inspection immediately after its own seal succeeds. Source selection waits for all collected evidence, and every source read finishes before installation can replace storage. Repeated recovery, checkpoint, learner-restart and three-replica release gates cover those barriers.
+
 ### Reusing compatible retained message segments
 
 Recovery targets can reuse their exact sealed payload range after full CRC and digest checks, and installation shares the completed stage's closed segments with a private writable tail. The 100k-message, three-replica SATA readiness gate improved from a fresh 23.99-second baseline to 9.31–10.34 seconds; the 14.48-second payload-transfer phase disappeared for matching replicas. Repair privatizes shared files before mutation, and the new manifest format fences older binaries ([storage and recovery boundaries](/development/recovery-internals/#compatible-retained-data-reuse)).

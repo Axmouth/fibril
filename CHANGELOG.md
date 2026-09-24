@@ -38,6 +38,17 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- Opt-in zero-grace eager failover: the active controller monitors idle Raft
+  connections and verifies explicit disconnects immediately. The grace range is
+  now 0–60000 ms; defaults remain disabled with a 1000 ms grace. Silent failures
+  retain heartbeat expiry, and recovery proof still gates serving authority.
+- One-page look-ahead during recovery payload copying overlaps source reads with
+  target append. Existing progress validation, page limits, source-read barriers
+  and installation verification remain required; at most two targets copy at once.
+- Bounded recovery seal/inspection pipelines: each replica begins inspection after
+  its own seal, while source selection still waits for all evidence and installation
+  waits for every source read to finish.
+
 - Rust client receive loops now close promptly on peer EOF and classify read-side
   transport failures as retryable. Pending topology requests no longer wait for
   a later heartbeat write to discover the disconnect; EOF contract tests cover

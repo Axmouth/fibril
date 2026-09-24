@@ -88,7 +88,12 @@ impl Detector {
                 .or_insert_with(|| Episode {
                     transport_since: failure.since,
                     started: now,
-                    baseline: failure.attempts.saturating_sub(1),
+                    // Immediate mode can observe both failures together after
+                    // the transport's immediate reconnect check. Default grace
+                    // still requires a later failed attempt across the interval.
+                    baseline: failure
+                        .attempts
+                        .saturating_sub(if grace_ms == 0 { 2 } else { 1 }),
                     heartbeat: heartbeat.clone(),
                     process: process.clone(),
                 });
@@ -131,6 +136,56 @@ impl Detector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn immediate_mode_accepts_coalesced_probe_but_resets_after_heartbeat() {
+        let mut state = CoordinationSnapshot::default();
+        let mut node = ganglion_core::NodeInfo::new("b", "127.0.0.1:1", None::<String>);
+        node.labels.insert(crate::RAFT_ID_LABEL.into(), "2".into());
+        state.nodes.insert("b".into(), node);
+        let now = Instant::now();
+        let mut failures = BTreeMap::from([(
+            2,
+            PeerTransportFailure {
+                since: now,
+                latest: now,
+                attempts: 2,
+                kind: std::io::ErrorKind::ConnectionRefused,
+            },
+        )]);
+        let mut detector = Detector::default();
+        assert_eq!(
+            detector.suspects(true, 0, &state, &failures, 1, now).len(),
+            1
+        );
+        state
+            .nodes
+            .get_mut("b")
+            .unwrap()
+            .labels
+            .insert(crate::HEARTBEAT_LABEL.into(), "1".into());
+        assert!(
+            detector
+                .suspects(true, 0, &state, &failures, 1, now)
+                .is_empty()
+        );
+        failures.get_mut(&2).unwrap().attempts = 3;
+        assert!(
+            detector
+                .suspects(true, 0, &state, &failures, 1, now)
+                .is_empty()
+        );
+        failures.get_mut(&2).unwrap().attempts = 4;
+        assert_eq!(
+            detector.suspects(true, 0, &state, &failures, 1, now).len(),
+            1
+        );
+        failures.clear();
+        assert!(
+            detector
+                .suspects(true, 0, &state, &failures, 1, now)
+                .is_empty()
+        );
+    }
     #[test]
     fn grace_reconnect_heartbeat_success_and_settings_changes() {
         let mut state = CoordinationSnapshot::default();

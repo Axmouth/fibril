@@ -94,9 +94,9 @@ impl RuntimeSettings {
         if self.replication.agreed_checkpoint_interval_ms != 0 && !(1_000..=86_400_000).contains(&self.replication.agreed_checkpoint_interval_ms) {
             return Err(RuntimeSettingsError::Invalid("replication.agreed_checkpoint_interval_ms must be 0 or between 1000 and 86400000".into()));
         }
-        if !(100..=60_000).contains(&self.replication.eager_failover_grace_ms) {
+        if !(0..=60_000).contains(&self.replication.eager_failover_grace_ms) {
             return Err(RuntimeSettingsError::Invalid(
-                "replication.eager_failover_grace_ms must be between 100 and 60000".into(),
+                "replication.eager_failover_grace_ms must be between 0 and 60000".into(),
             ));
         }
 
@@ -737,11 +737,11 @@ mod tests {
         assert!(!old.eager_failover);
         assert_eq!(old.eager_failover_grace_ms, 1000);
         let mut settings = super::RuntimeSettings::default();
-        for grace in [0, 99, 60_001, u64::MAX] {
+        for grace in [60_001, u64::MAX] {
             settings.replication.eager_failover_grace_ms = grace;
             assert!(settings.validate().is_err());
         }
-        for grace in [100, 1000, 60_000] {
+        for grace in [0, 1, 100, 1000, 60_000] {
             settings.replication.eager_failover_grace_ms = grace;
             assert!(settings.validate().is_ok());
         }

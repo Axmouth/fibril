@@ -93,15 +93,21 @@ eager_failover_grace_ms = 1000
 ```
 
 `eager_failover` defaults to `false`; the grace defaults to 1,000 ms and accepts
-100–60,000 ms. The saved cluster runtime-settings document takes precedence over
+0–60,000 ms. The saved cluster runtime-settings document takes precedence over
 startup seeds. Keep seeds consistent across nodes. Runtime policy changes restart
-pending suspicion, and a newly elected controller starts its own grace.
+pending suspicion; a newly elected controller evaluates its own transport observations.
 
 A successful Raft RPC, a fresh broker heartbeat or a changed broker process
 identity resets suspicion. Client disconnects and replication-stream restarts do
 not trigger it. Timeouts and silent packet loss continue to use heartbeat expiry.
-The detector reuses normal Raft reconnect attempts; it does not change Raft
-heartbeat/election timing or broker heartbeat/TTL settings.
+Explicit RPC disconnects trigger one immediate retry, bounded to 200 ms. Setting
+`eager_failover_grace_ms = 0` also monitors idle Raft connections on the active
+controller and checks reconnection immediately after an explicit close. An explicit
+close followed by a refused reconnect can trigger placement without waiting for
+another heartbeat. A successful dial alone does not establish Raft health, and a
+probe timeout supplies no second explicit-failure observation. Positive grace
+values still require failed contact across that interval. Raft heartbeat/election
+timing and broker heartbeat/TTL settings remain unchanged.
 
 Excluding a peer starts the existing placement/recovery process. Verified history,
 fencing and the configured confirmation threshold still gate activation. A crash

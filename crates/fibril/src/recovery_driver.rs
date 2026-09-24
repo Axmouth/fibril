@@ -29,7 +29,9 @@ use std::{
 };
 const RPC: Duration = Duration::from_secs(10);
 const MAX_REPLICAS: usize = 16;
-// Each transfer can retain a 16 MiB page. Bound aggregate memory and disk pressure.
+// Each copying target retains at most an append page and one look-ahead page,
+// each limited to 16 MiB. Bound aggregate page retention and disk pressure;
+// wire encoding and storage buffers are additional allocations.
 const PARALLEL_REPLICAS: usize = 2;
 // Sequential inspection verifies each complete retained history. Use the wire limits
 // to amortize those scans, while keeping total inspection budgets unchanged.
@@ -146,23 +148,43 @@ async fn recover_queue_attempt(
             .keys()
             .cloned()
             .collect();
-        let mut reports = vec![];
-        let sealed = stream::iter(
+        // Each source may be inspected as soon as its seal is available. Keep
+        // the entire pipeline bounded and collect all evidence before selection.
+        let inspected = stream::iter(
             eligible
                 .iter()
                 .map(|node| {
                     let seal_command = &seal_command;
                     async move {
-                        (
-                            node,
-                            timing
-                                .stage(
-                                    "witness_seal",
-                                    node,
-                                    request_recovery_seal(config, node, seal_command, RPC),
-                                )
-                                .await,
-                        )
+                        let report = timing
+                            .stage(
+                                "witness_seal",
+                                node,
+                                request_recovery_seal(config, node, seal_command, RPC),
+                            )
+                            .await;
+                        let artifact = match &report {
+                            Ok(report) => Some(
+                                timing
+                                    .stage(
+                                        "inspect_source",
+                                        node,
+                                        inspect_recovery_source_artifact(
+                                            config,
+                                            seal_command,
+                                            report,
+                                            automatic_inspection_limits(),
+                                            Default::default(),
+                                            16 * 1024 * 1024,
+                                            16 * 1024 * 1024,
+                                            RPC,
+                                        ),
+                                    )
+                                    .await,
+                            ),
+                            Err(_) => None,
+                        };
+                        (node, report, artifact)
                     }
                 })
                 .collect::<Vec<_>>(),
@@ -170,64 +192,35 @@ async fn recover_queue_attempt(
         .buffer_unordered(PARALLEL_REPLICAS)
         .collect::<Vec<_>>()
         .await;
-        for (node, result) in sealed {
-            match result {
+        let mut reports = vec![];
+        let mut artifacts = BTreeMap::new();
+        for (node, report, artifact) in inspected {
+            match report {
                 Ok(report) => {
                     witnesses.record(
                         &provider.consensus_node().committed_snapshot(),
                         node,
                         report.clone(),
                     )?;
+                    match artifact.expect("a sealed source was inspected") {
+                        Ok(artifact) => {
+                            artifacts.insert(node.clone(), artifact);
+                        }
+                        Err(error) => {
+                            // Preserve the witness even if another source must
+                            // supply payloads missing from this replica.
+                            tracing::warn!(node, message_next=report.seal.message_next,
+                                event_next=report.seal.event_next, %error,
+                                "sealed replica cannot supply a complete recovery artifact");
+                        }
+                    }
                     reports.push(report);
                 }
-                Err(e) => tracing::debug!(node,error=%e,"recovery witness unavailable"),
+                Err(error) => tracing::debug!(node, %error, "recovery witness unavailable"),
             }
         }
         // Completion order must not alter deterministic source selection.
         reports.sort_by(|a, b| a.node_id.cmp(&b.node_id));
-        let inspected = stream::iter(
-            reports
-                .iter()
-                .map(|report| {
-                    let seal_command = &seal_command;
-                    async move {
-                        let result = timing
-                            .stage(
-                                "inspect_source",
-                                &report.node_id,
-                                inspect_recovery_source_artifact(
-                                    config,
-                                    &seal_command,
-                                    report,
-                                    automatic_inspection_limits(),
-                                    Default::default(),
-                                    16 * 1024 * 1024,
-                                    16 * 1024 * 1024,
-                                    RPC,
-                                ),
-                            )
-                            .await;
-                        (report, result)
-                    }
-                })
-                .collect::<Vec<_>>(),
-        )
-        .buffer_unordered(PARALLEL_REPLICAS)
-        .collect::<Vec<_>>()
-        .await;
-        let mut artifacts = BTreeMap::new();
-        for (report, result) in inspected {
-            match result {
-                Ok(artifact) => {
-                    artifacts.insert(report.node_id.clone(), artifact);
-                }
-                Err(e) => {
-                    // Keep the witness: another replica may supply missing payloads.
-                    tracing::warn!(node=report.node_id,message_next=report.seal.message_next,event_next=report.seal.event_next,error=%e,
-                        "sealed replica cannot supply a complete recovery artifact");
-                }
-            }
-        }
         let mut comparisons = vec![];
         for (i, left) in reports.iter().enumerate() {
             for right in &reports[i + 1..] {
@@ -504,75 +497,55 @@ async fn prepare_target(
             };
             timing
                 .stage("copy_pages", node, async {
+                    let mut prefetched = None;
                     while next < plan.message_next() {
-                        let page = {
-                            // Completed-stage reads share one per-broker stage lock.
-                            // Serialize source reads while target appends still overlap.
-                            let _read = source_reads.lock().await;
-                            if let Some(source) = completed_source {
-                                let Reply::Page(page) = transfer(
+                        let page = match prefetched.take() {
+                            Some(page) => page,
+                            None => {
+                                read_source_page(
                                     config,
-                                    &plan,
-                                    source,
-                                    Operation::Read {
-                                        from: next,
-                                        max_records: 4096,
-                                        max_bytes: 16 * 1024 * 1024,
-                                    },
+                                    plan,
+                                    &seal_command,
+                                    completed_source,
+                                    source_reads,
+                                    next,
                                 )
                                 .await?
-                                else {
-                                    return Err("invalid completed-source page".into());
-                                };
-                                page
-                            } else {
-                                let report = source_report(&plan)?;
-                                let page = request_recovery_read(
-                                    config,
-                                    &seal_command,
-                                    &report,
-                                    &RecoveryReadRequest {
-                                        seal: report.seal.request.clone(),
-                                        history_id: report.seal.history.id,
-                                        source: RecoveryReadSource::Messages,
-                                        from: next,
-                                        max_records: 4096,
-                                        max_bytes: 16 * 1024 * 1024,
-                                    },
-                                    RPC,
-                                )
-                                .await
-                                .map_err(err)?;
-                                fibril_broker::recovery::RecoveryReadPage {
-                                    history_id: page.history_id,
-                                    source: RecoveryReadSource::Messages,
-                                    from: page.from,
-                                    next: page.next,
-                                    end: page.end,
-                                    records: page
-                                        .records
-                                        .into_iter()
-                                        .map(|r| fibril_broker::recovery::RecoveryRecord {
-                                            offset: r.offset,
-                                            flags: r.flags,
-                                            headers: r.headers,
-                                            payload: r.payload,
-                                        })
-                                        .collect(),
-                                    snapshot_bytes: page.snapshot_bytes,
-                                }
                             }
                         };
                         if page.next <= next || page.next > plan.message_next() {
                             return Err("recovery page made no valid progress".into());
                         }
-                        let Reply::Progress(progress) =
-                            transfer(config, &plan, node, Operation::Append { page }).await?
-                        else {
+                        let expected_next = page.next;
+                        let append = transfer(config, &plan, node, Operation::Append { page });
+                        // Own both futures through completion: a failed append
+                        // must not leave an unbounded/detached source read behind.
+                        let (appended, ahead) = tokio::join!(append, async {
+                            if expected_next < plan.message_next() {
+                                read_source_page(
+                                    config,
+                                    plan,
+                                    &seal_command,
+                                    completed_source,
+                                    source_reads,
+                                    expected_next,
+                                )
+                                .await
+                                .map(Some)
+                            } else {
+                                Ok(None)
+                            }
+                        });
+                        let Reply::Progress(progress) = appended? else {
                             return Err("invalid append response".into());
                         };
                         if progress <= next || progress > plan.message_next() {
                             return Err("invalid staged progress".into());
+                        }
+                        // A resumed target can already be ahead. Discard a page
+                        // fetched for a different frontier and read the exact one.
+                        if progress == expected_next {
+                            prefetched = ahead?;
                         }
                         next = progress;
                     }
@@ -594,6 +567,72 @@ async fn prepare_target(
             Ok(())
         })
         .await
+}
+
+async fn read_source_page(
+    config: &ProtocolOwnerPeerResolverConfig,
+    plan: &QueueRecoveryPlan,
+    seal_command: &fibril_broker::recovery::RecoverySealCommand,
+    completed_source: Option<&str>,
+    source_reads: &tokio::sync::Mutex<()>,
+    next: u64,
+) -> Result<fibril_broker::recovery::RecoveryReadPage, String> {
+    // Completed-stage reads share one per-broker stage lock.
+    // Serialize source reads while target appends still overlap.
+    let _read = source_reads.lock().await;
+    Ok(if let Some(source) = completed_source {
+        let Reply::Page(page) = transfer(
+            config,
+            &plan,
+            source,
+            Operation::Read {
+                from: next,
+                max_records: 4096,
+                max_bytes: 16 * 1024 * 1024,
+            },
+        )
+        .await?
+        else {
+            return Err("invalid completed-source page".into());
+        };
+        page
+    } else {
+        let report = source_report(&plan)?;
+        let page = request_recovery_read(
+            config,
+            &seal_command,
+            &report,
+            &RecoveryReadRequest {
+                seal: report.seal.request.clone(),
+                history_id: report.seal.history.id,
+                source: RecoveryReadSource::Messages,
+                from: next,
+                max_records: 4096,
+                max_bytes: 16 * 1024 * 1024,
+            },
+            RPC,
+        )
+        .await
+        .map_err(err)?;
+        fibril_broker::recovery::RecoveryReadPage {
+            history_id: page.history_id,
+            source: RecoveryReadSource::Messages,
+            from: page.from,
+            next: page.next,
+            end: page.end,
+            records: page
+                .records
+                .into_iter()
+                .map(|r| fibril_broker::recovery::RecoveryRecord {
+                    offset: r.offset,
+                    flags: r.flags,
+                    headers: r.headers,
+                    payload: r.payload,
+                })
+                .collect(),
+            snapshot_bytes: page.snapshot_bytes,
+        }
+    })
 }
 
 /// Start bounded recovery and exact local readmission for enrolled histories.

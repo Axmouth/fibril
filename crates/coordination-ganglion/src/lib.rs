@@ -2433,6 +2433,9 @@ impl GanglionCoordination {
                     _ => Default::default(),
                 };
                 let active = provider.node.is_leader().await;
+                provider.node.set_monitor_idle_peer_connections(
+                    active && policy.eager_failover && policy.eager_failover_grace_ms == 0,
+                );
                 let suspects = detector.suspects(
                     active && policy.eager_failover,
                     policy.eager_failover_grace_ms,

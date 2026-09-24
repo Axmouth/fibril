@@ -857,9 +857,9 @@ impl ServerConfig {
         if self.runtime_seed.replication.agreed_checkpoint_interval_ms != 0 && !(1_000..=86_400_000).contains(&self.runtime_seed.replication.agreed_checkpoint_interval_ms) {
             return Err(ConfigError::validation("runtime_seed.replication.agreed_checkpoint_interval_ms must be 0 or between 1000 and 86400000"));
         }
-        if !(100..=60_000).contains(&self.runtime_seed.replication.eager_failover_grace_ms) {
+        if !(0..=60_000).contains(&self.runtime_seed.replication.eager_failover_grace_ms) {
             return Err(ConfigError::validation(
-                "runtime_seed.replication.eager_failover_grace_ms must be between 100 and 60000",
+                "runtime_seed.replication.eager_failover_grace_ms must be between 0 and 60000",
             ));
         }
         if self.runtime_seed.replication.caught_up_poll_ms == 0
@@ -1920,7 +1920,7 @@ mod tests {
         let default = ServerConfig::from_toml_str("").unwrap();
         assert!(!default.runtime_seed.replication.eager_failover);
         assert_eq!(default.runtime_seed.replication.eager_failover_grace_ms, 1000);
-        for grace in [100, 1000, 60_000] {
+        for grace in [0, 1, 100, 1000, 60_000] {
             let config = ServerConfig::from_toml_str(&format!(
                 "[runtime_seed.replication]\neager_failover = true\neager_failover_grace_ms = {grace}"
             ))
@@ -1928,7 +1928,7 @@ mod tests {
             assert!(config.runtime_seed.replication.eager_failover);
             assert_eq!(config.runtime_seed.replication.eager_failover_grace_ms, grace);
         }
-        for grace in [0, 99, 60_001] {
+        for grace in [60_001] {
             let error = ServerConfig::from_toml_str(&format!(
                 "[runtime_seed.replication]\neager_failover_grace_ms = {grace}"
             ))

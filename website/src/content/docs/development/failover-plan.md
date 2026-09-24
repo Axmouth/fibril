@@ -76,8 +76,9 @@ Exit criterion: account for the dominant elapsed time, including why an activati
 attempt can lack quorum receipts after installation calls returned. Distinguish
 replication lag in the local metadata view from missing receipts or failed work.
 Recovery and local admission now wake on committed metadata changes, with a
-one-second fallback and 25 ms burst coalescing. Replica seals, inspections, private
-stage preparation and installation use at most two concurrent operations. All
+one-second fallback and 25 ms burst coalescing. Replica seal/inspection pipelines, private stage preparation and installation
+use at most two concurrent operations; each inspection can start as soon as its
+replica seals, while source selection still waits for all collected evidence. All
 stage reads finish before any installation can replace a source; completed-stage
 source reads serialize. Local storage admission also wakes deferred assignment
 transitions so follower reporting need not wait for the periodic retry.
@@ -100,10 +101,20 @@ checked all expected confirmed IDs, new durable work and old-owner rejoin.
 Warm 500/s traffic passed age-, event- and byte-triggered checkpoint gates, with
 owner readiness at 1.71–1.91 seconds. The original subscriber received the new
 post-recovery probe at 4.94–4.96 seconds. A separate instrumented run spent
-3.93 seconds refreshing client topology and 19 ms resubscribing. Evaluate bounded
-discovery fallback and healthy-connection preference across all five SDKs, including
-silent endpoints, cancellation and stale topology; retain unknown-outcome publish
-semantics. These small screens establish useful leads, not a p95 latency bound.
+3.93 seconds refreshing client topology and 19 ms resubscribing. The Rust receive
+loop ignored clean EOF because a `Some(frame)` select pattern disabled the receive
+arm; it now closes pending work immediately and treats transport read errors as
+retryable. Equivalent pending-request EOF tests pass in all five SDKs. With the
+same immediate-retry server, the original subscriber received fresh work at 1.06
+seconds; silent-endpoint discovery remains a separate case.
+
+A subsequent zero-grace idle-monitor and per-replica seal/inspection screen measured
+0.51–1.13 seconds to sampled readiness for small backlogs, 0.82–1.95 seconds to
+fresh-subscription delivery, and 1.06 seconds for fresh work on the original
+subscriber under warm 500/s traffic. With 100k outstanding messages, readiness was
+4.50 seconds and first fresh delivery 5.45 seconds. All gates checked confirmed IDs,
+new durable work and old-owner rejoin. These small screens establish useful leads,
+not a p95 latency bound.
 
 ### Initial transport result
 
@@ -198,18 +209,29 @@ Evaluate changes individually against that baseline:
   justify it. Reconnect,
   cancellation, stale replies and per-operation deadlines must preserve identity
   checks and bounded resource use.
-- Extend RPC overlap where inputs are already known: start inspection after each
-  seal, prefetch a bounded page during target append, or combine finish/install
-  with server-side ordering. Exact activation can be awaited by an admission
-  request; no request itself grants serving authority. Measure each extension.
-- Wait for the exact required committed receipts when local metadata visibility is
-  behind, avoiding a repeat of successful installation. Preserve deadlines and
-  retry behavior for genuinely missing evidence.
+- Per-replica seal/inspection overlap and one-page prefetch during target append
+  are implemented. A SATA release ABBA test copying a missing 64 MiB suffix
+  measured 0.95–1.13 seconds copying before and 0.75–0.76 seconds after; complete
+  attempts measured 1.85–2.08 and 1.70 seconds. Two active targets can each retain
+  two 16 MiB pages, plus wire/storage allocations. Compatible retained-data reuse
+  avoids this copy path entirely.
+- Keep separate Finish and Install operations for now. A completed write quorum
+  and the all-source-reads barrier preserve retry sources before replacement;
+  combining the operations cannot eliminate their verification or durability work.
+  A warm SATA trace spent 17–19 ms in Finish and 162–168 ms in Install, so the
+  removable network overhead is only part of the smaller stage.
+- Reproduce missing local visibility of successful installation receipts before
+  adding a dedicated exact-receipt wait. Such a wait must preserve current plan,
+  process, deadline and activation checks; it cannot repair genuinely absent
+  receipts. Existing committed-change wakeups already shorten ordinary retries.
+- Keep admission after committed activation. The two admission calls totaled
+  about 11 ms in the same trace; a prequeued waiter adds lifecycle and stale-plan
+  handling without removing the authority check. Revisit on higher-RTT networks.
 - Resume completed stages and cache verified evidence within its exact immutable
   transition where safe, retaining all invalidation checks.
-- Reduce subscriber discovery delay with bounded endpoint attempts or staggered
-  requests to independent discovery peers. Preserve topology generation checks,
-  cancellation and connection cleanup, and validate equivalent behavior across SDKs.
+- Explicit EOF handling is repaired in Rust and covered across all five SDKs.
+  Test silent-endpoint discovery separately before adding bounded or staggered
+  attempts. Preserve topology generation checks, cancellation and cleanup.
 
 Adopt each change only after correctness checks and matched timing runs. Do not
 shorten safety deadlines or weaken confirmation thresholds to meet the target.
@@ -344,11 +366,13 @@ retention and pending-task memory require separate investigation.
 
 ## Failure-detection rollout
 
-Opt-in eager detection is implemented through cluster runtime settings; see
-[replication](/reliability/replication/#eager-failover). Repeated explicit Raft
-transport errors and failed reconnects can remove a peer from placement after a
-grace period. Heartbeat expiry remains the default and handles silent failures.
-Recovery proof still gates authority to serve.
+Opt-in eager detection includes immediate reconnect verification and zero-grace
+idle-connection monitoring on the active metadata controller. See
+[replication](/reliability/replication/#eager-failover) for settings and safeguards.
+Four single-host SATA owner-SIGKILL screens recorded suspicion 26–34 ms after the
+injection timestamp; that includes the container kill overhead. Metadata leadership
+survived. These measurements do not describe silent partitions or restoration of
+service: verified history, fencing and installed-quorum activation remain required.
 
 Remaining work includes packet-level partitions, longer CPU/storage stalls,
 planned drains, repeated membership changes and durable-stream acceptance.

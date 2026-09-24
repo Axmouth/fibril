@@ -518,20 +518,34 @@ enum LearnerCase {
 }
 
 async fn three_node_owner_loss(recover: bool, learner: LearnerCase) {
-    three_node_owner_loss_with_checkpoints(recover, learner, false, false).await;
+    three_node_owner_loss_with_checkpoints(recover, learner, false, false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agreed_checkpoint_requires_three_receipts_then_recovers_confirmed_suffix() {
-    three_node_owner_loss_with_checkpoints(true, LearnerCase::None, true, false).await;
+    three_node_owner_loss_with_checkpoints(true, LearnerCase::None, true, false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agreed_checkpoint_partial_installation_recovers_using_compatible_old_history() {
-    three_node_owner_loss_with_checkpoints(true, LearnerCase::None, true, true).await;
+    three_node_owner_loss_with_checkpoints(true, LearnerCase::None, true, true, false).await;
 }
 
-async fn three_node_owner_loss_with_checkpoints(recover: bool, learner: LearnerCase, checkpoints: bool, partial_checkpoint: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recovery_copies_multiple_pages_to_a_lagging_checkpoint_replica() {
+    if std::env::var_os("FIBRIL_TEST_RECOVERY_TRACE").is_some() {
+        fibril_util::init_tracing();
+    }
+    three_node_owner_loss_with_checkpoints(true, LearnerCase::None, true, false, true).await;
+}
+
+async fn three_node_owner_loss_with_checkpoints(
+    recover: bool,
+    learner: LearnerCase,
+    checkpoints: bool,
+    partial_checkpoint: bool,
+    copy_pages: bool,
+) {
     use fibril_broker::coordination::{NodeInfo, QueueIdentity};
     let root = std::env::temp_dir().join(format!(
         "fibril-three-node-enrollment-{}",
@@ -1095,22 +1109,137 @@ async fn three_node_owner_loss_with_checkpoints(recover: bool, learner: LearnerC
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }).await.unwrap();
-        let confirm = publisher.publish(16u64.to_le_bytes().to_vec(), unix_millis(), unix_millis(), None, Default::default(), None).await.unwrap();
+        if copy_pages {
+            // Only b receives this confirmed suffix; c retains the agreed
+            // checkpoint. More than 64 MiB forces multiple transfer pages after
+            // a stops, so recovery must copy real payloads into c's new stage.
+            let mut confirms = Vec::new();
+            for n in 16..1041u64 {
+                let mut payload = vec![0x5a; 64 * 1024];
+                payload[..8].copy_from_slice(&n.to_le_bytes());
+                confirms.push(
+                    publisher
+                        .publish(
+                            payload,
+                            unix_millis(),
+                            unix_millis(),
+                            None,
+                            Default::default(),
+                            None,
+                        )
+                        .await
+                        .unwrap(),
+                );
+            }
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    let from = brokers[1]
+                        .engine()
+                        .queue_replication_next_offsets("q", 0, None)
+                        .await
+                        .unwrap();
+                    if from.0 >= 1041 {
+                        break;
+                    }
+                    brokers[1]
+                        .catch_up_replication_follower_from_owner(
+                            &peers[0],
+                            "q",
+                            Partition::new(0),
+                            None,
+                            fibril_broker::broker::ReplicationResourceKind::Queue,
+                            fibril_broker::broker::BrokerReplicationCatchUpOptions {
+                                message_from: from.0,
+                                event_from: from.1,
+                                max_messages_per_read: 4096,
+                                max_events_per_read: 4096,
+                                max_bytes_per_read: 16 * 1024 * 1024,
+                                max_iterations: 16,
+                                max_wait_ms: 0,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            for (index, confirm) in confirms.into_iter().enumerate() {
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(10), confirm)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap(),
+                    index as u64 + 16
+                );
+            }
+            assert_eq!(
+                brokers[2]
+                    .engine()
+                    .queue_replication_next_offsets("q", 0, None)
+                    .await
+                    .unwrap(),
+                (16, 16)
+            );
+        } else {
+            let confirm = publisher
+                .publish(
+                    16u64.to_le_bytes().to_vec(),
+                    unix_millis(),
+                    unix_millis(),
+                    None,
+                    Default::default(),
+                    None,
+                )
+                .await
+                .unwrap();
             for i in 1..3 {
                 tokio::time::timeout(Duration::from_secs(10), async {
                     loop {
-                        let from = brokers[i].engine().queue_replication_next_offsets("q", 0, None).await.unwrap();
-                        if from.0 >= 17 && from.1 >= 17 { break; }
-                        brokers[i].catch_up_replication_follower_from_owner(&peers[i-1], "q", Partition::new(0), None,
-                            fibril_broker::broker::ReplicationResourceKind::Queue,
-                            fibril_broker::broker::BrokerReplicationCatchUpOptions { message_from: from.0, event_from: from.1,
-                                max_messages_per_read: 4096, max_events_per_read: 4096, max_bytes_per_read: 16*1024*1024,
-                                max_iterations: 16, max_wait_ms: 0 }).await.unwrap();
+                        let from = brokers[i]
+                            .engine()
+                            .queue_replication_next_offsets("q", 0, None)
+                            .await
+                            .unwrap();
+                        if from.0 >= 17 && from.1 >= 17 {
+                            break;
+                        }
+                        brokers[i]
+                            .catch_up_replication_follower_from_owner(
+                                &peers[i - 1],
+                                "q",
+                                Partition::new(0),
+                                None,
+                                fibril_broker::broker::ReplicationResourceKind::Queue,
+                                fibril_broker::broker::BrokerReplicationCatchUpOptions {
+                                    message_from: from.0,
+                                    event_from: from.1,
+                                    max_messages_per_read: 4096,
+                                    max_events_per_read: 4096,
+                                    max_bytes_per_read: 16 * 1024 * 1024,
+                                    max_iterations: 16,
+                                    max_wait_ms: 0,
+                                },
+                            )
+                            .await
+                            .unwrap();
                         tokio::time::sleep(Duration::from_millis(5)).await;
                     }
-                }).await.unwrap();
+                })
+                .await
+                .unwrap();
             }
-        assert_eq!(tokio::time::timeout(Duration::from_secs(10), confirm).await.unwrap().unwrap().unwrap(), 16);
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(10), confirm)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap(),
+                16
+            );
+        }
         drop(publisher);
     }
     for i in 1..3 {
@@ -1291,8 +1420,8 @@ async fn three_node_owner_loss_with_checkpoints(recover: bool, learner: LearnerC
             ReplicationDurabilityPolicy::MajorityDurable
         );
         if checkpoints {
-            let deliveries = brokers[1].engine().poll_ready("q", 0, None, 32, unix_millis() + 60_000, u64::MAX).await.unwrap();
-            assert_eq!(deliveries.iter().map(|m| u64::from_le_bytes(m.payload.as_slice().try_into().unwrap())).collect::<Vec<_>>(), (0..17).collect::<Vec<_>>());
+            let deliveries = brokers[1].engine().poll_ready("q", 0, None, 2048, unix_millis() + 60_000, u64::MAX).await.unwrap();
+            assert_eq!(deliveries.iter().map(|m| u64::from_le_bytes(m.payload[..8].try_into().unwrap())).collect::<Vec<_>>(), (0..if copy_pages { 1041 } else { 17 }).collect::<Vec<_>>());
         }
 
     }

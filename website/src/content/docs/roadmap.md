@@ -23,8 +23,8 @@ separate rounds when their dependencies permit.
    checkpoint path under higher sustained rates and many partitions. Tune the
    implemented event/byte/age triggers, verification budgets and retention limits;
    extend diagnostics to physical retained bytes and per-stage costs. Evaluate
-   bounded RPC pipelining, subscriber discovery delay across SDKs and remaining
-   live-payload verification costs. See the
+   remaining live-payload verification costs and silent-endpoint discovery across
+   SDKs; explicit Rust EOF handling and per-replica seal/inspection overlap are implemented. See the
    [fast-recovery plan](/development/failover-plan/#fast-recovery).
 3. **Speculative delivery adoption.** Reconcile the retained local-queue prototype
    with current recovery and ordered application. Close ACK-before-durability,

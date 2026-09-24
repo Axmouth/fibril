@@ -274,8 +274,8 @@
       </label>
       <label class="settings-field">
         <span class="settings-label">Eager failover grace (ms)</span>
-        <span class="settings-help">Require failed reconnects across this interval. Changing the policy restarts pending suspicion. Raft election and heartbeat timers stay unchanged.</span>
-        <input id="replication.eager_failover_grace_ms" data-runtime-setting type="number" min="100" max="60000" step="100">
+        <span class="settings-help">Require failed reconnects across this interval. Zero reacts after an immediate failed reconnect check. Changing the policy restarts pending suspicion; Raft timers stay unchanged.</span>
+        <input id="replication.eager_failover_grace_ms" data-runtime-setting type="number" min="0" max="60000" step="1">
       </label>
     </section>
 
