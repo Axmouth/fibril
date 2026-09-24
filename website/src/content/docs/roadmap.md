@@ -17,12 +17,13 @@ separate rounds when their dependencies permit.
 1. **Admin settings and recovery visibility.** Unify defaults/validation metadata
    and extend requested-versus-applied reporting beyond node-local preallocation.
    Add explicit remote-node edit routing and classify additional live storage
-   controls. Show recovery stages and account for retained generations and staging
-   data before adding automatic reclamation.
+   controls. Account for retained generations and staging data before adding
+   automatic reclamation. Extend worker timelines with cross-node detection and
+   client-reconnect correlation.
 2. **Checkpoint policy and recovery overhead.** Measure the opt-in agreed
    checkpoint path under higher sustained rates and many partitions. Tune the
    implemented event/byte/age triggers, verification budgets and retention limits;
-   extend diagnostics to physical retained bytes and per-stage costs. Evaluate
+   extend diagnostics to physical retained bytes and stage-level resource costs. Evaluate
    remaining live-payload verification costs and silent-endpoint discovery across
    SDKs; explicit Rust EOF handling and per-replica seal/inspection overlap are implemented. See the
    [fast-recovery plan](/development/failover-plan/#fast-recovery).

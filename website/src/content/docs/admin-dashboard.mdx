@@ -309,6 +309,23 @@ cluster: registered brokers, per-partition ownership with fencing epochs and
 followers, and the consensus block (leader and voters). See
 [clustering](/concepts/clustering/).
 
+The **Recovery timeline** shows recent recovery worker attempts on the serving
+node. Select an attempt to see its resource, epoch, transition identity, peers,
+individual stage durations and overlapping work. Failed and cancelled stages
+remain visible alongside completed attempts. Failures are red, cancellations use
+amber striped bars, and phases without recorded stages are grey. Retries can reuse
+work, so an unobserved phase does not imply a failure. Timing begins at worker entry;
+failure detection and client reconnect are outside that interval. A completed
+attempt has activated its assignment, but replica admission can still retry.
+
+The shared topology API exposes these observations under
+`consensus.recovery_timeline`. The store holds 32 attempts with at most 256 stages
+each, preferring to evict completed attempts; omission and eviction counts are
+visible. Labels are capped at 128 characters, and message payloads and raw error
+bodies are excluded. History resets when the node restarts. Switch to another
+broker for its local attempts, and use the transition identity to correlate the
+existing `fibril::recovery_timing` log events.
+
 The diagram view renders each broker as the fibril ring: active brokers blink
 more often than idle ones, and one that drops out of the cluster lingers
 briefly as a dimmed X-eyed ghost so the gap is visible. Replication links

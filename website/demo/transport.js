@@ -4,6 +4,12 @@
   const root = '/dashboard-demo/';
   const embedded = new URL(location.href).searchParams.get('embed') === '1';
   if (embedded) document.documentElement.dataset.demoEmbed = 'true';
+  // A finite panel choice keeps documentation focus predictable. The full demo
+  // remains the complete production page, including its ordinary navigation.
+  if (embedded && /\/admin\/topology\/?$/.test(location.pathname)
+      && new URL(location.href).searchParams.get('panel') === 'recovery') {
+    document.documentElement.dataset.demoPanel = 'recovery';
+  }
   // Exercising the normal polling path avoids emulating broker SSE state.
   window.EventSource = undefined;
   window.fetch = async (input, init = {}) => {

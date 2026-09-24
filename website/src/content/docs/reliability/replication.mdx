@@ -3,6 +3,8 @@ title: Replication
 description: Replica-durable queues, follower catch-up, and failover in Fibril's experimental cluster mode.
 ---
 
+import DashboardDemo from "../../../components/DashboardDemo.astro";
+
 By default a queue partition lives on a single broker. That broker fsyncs every
 durable write, so the data survives a process restart, but it does not survive
 losing that node, and while the node is down the partition is unavailable.
@@ -43,12 +45,15 @@ The assignment durability policy decides what a confirmed publish waits for. It
 is set per cluster through `coordination.ganglion.assignment_durability` (see
 [configuration](/configuration/)):
 
-| Mode | A confirmed publish returns once... |
-| --- | --- |
-| `local_durable` | the owner has durably written the append (the default, same as a single node) |
-| `replica_accepted` | N assigned nodes (including the owner) have accepted the append (weaker than fsync) |
-| `replica_durable` | N assigned nodes (including the owner) have durably written the append |
-| `majority_durable` | a durable majority of the assigned replica set has the append |
+<table>
+  <thead><tr><th>Mode</th><th>A confirmed publish returns once…</th></tr></thead>
+  <tbody>
+    <tr><td><code>local_durable</code></td><td>the owner has durably written the append (the default, same as a single node)</td></tr>
+    <tr><td><code>replica_accepted</code></td><td>N assigned nodes (including the owner) have accepted the append (weaker than fsync)</td></tr>
+    <tr><td><code>replica_durable</code></td><td>N assigned nodes (including the owner) have durably written the append</td></tr>
+    <tr><td><code>majority_durable</code></td><td>a durable majority of the assigned replica set has the append</td></tr>
+  </tbody>
+</table>
 
 `N` includes the owner, so `replica_durable` with `N = 2` means the owner plus
 one durable follower.
@@ -119,6 +124,17 @@ recovery work, so eager detection remains opt-in and experimental.
 The controller logs the peer, error kind, failed attempts and elapsed suspicion
 time without payloads. `/admin/api/topology` exposes current exclusions in
 `consensus.controller.eager_suspects`.
+
+## Recovery observations
+
+The Cluster dashboard records the recovery worker's stages, peers and outcomes.
+Overlapping bars show concurrent work; failure detection and client reconnect
+happen outside this timing window. Select the failed or cancelled attempts below to
+inspect earlier retries of the same transition. Grey phases have no recorded
+stages; a retry can reuse work or stop before reaching them. These are illustrative timings, and the
+live view holds bounded history for the current process.
+
+<DashboardDemo view="topology" panel="recovery" title="Recovery stages and overlapping work" height={1080} />
 
 ## In-sync replicas
 

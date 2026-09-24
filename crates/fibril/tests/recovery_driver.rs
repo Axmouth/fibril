@@ -468,6 +468,29 @@ async fn automatic_recovery_repeats_and_preserves_confirmed_messages() {
             cycle + 1
         );
     }
+    // The same production stage guards feed the admin snapshot. Wait for the
+    // attempt's final guard as activation can become visible just before it drops.
+    let diagnostics = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let snapshot = provider.recovery_diagnostics().snapshot();
+            if snapshot.attempts.iter().filter(|a| a.outcome ==
+                fibril_coordination_ganglion::recovery_diagnostics::Outcome::Ok).count() >= 2 {
+                break snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    for attempt in diagnostics.attempts.iter().filter(|a| a.outcome ==
+        fibril_coordination_ganglion::recovery_diagnostics::Outcome::Ok) {
+        assert_eq!(attempt.topic, "q");
+        assert_eq!(attempt.omitted_stages, 0);
+        assert!(attempt.stages.iter().any(|s| s.name == "activate"));
+        assert!(attempt.stages.iter().any(|s| s.name == "admit"));
+        assert!(attempt.stages.iter().all(|s| s.start_us + s.elapsed_us <= attempt.elapsed_us));
+    }
+    let wire = serde_json::to_value(diagnostics).unwrap();
+    assert_eq!(wire["scope"], "local_process");
+    assert_eq!(wire["capacity"], 32);
     let messages = engine
         .poll_ready("q", 0, None, 10, unix_millis() + 60_000, u64::MAX)
         .await

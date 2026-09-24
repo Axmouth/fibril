@@ -3,12 +3,25 @@ title: Recovery sealing
 description: Recovery authorization, verified staging, durable installation and exact quorum activation.
 ---
 
+import DashboardDemo from "../../../components/DashboardDemo.astro";
+
 Recovery sealing freezes a replica's retained records for inspection. Fresh Unix
 cluster queues enroll automatically; a bounded worker collects witnesses, verifies
 a source, installs a new durable quorum and activates its exact process/storage
 instances. The previous assignment stays fenced until activation commits.
 Stream-state recovery remains a separate gate. Legacy migration is unsupported
 and is not planned.
+
+## Recovery observations
+
+The Cluster dashboard records the recovery worker's stages, peers and outcomes.
+Overlapping bars show concurrent work; failure detection and client reconnect
+happen outside this timing window. Select the failed or cancelled attempts below to
+inspect earlier retries of the same transition. Grey phases have no recorded
+stages; a retry can reuse work or stop before reaching them. These are illustrative timings, and the
+live view holds bounded history for the current process.
+
+<DashboardDemo view="topology" panel="recovery" title="Recovery stages and overlapping work" height={1080} />
 
 ## Request authority
 

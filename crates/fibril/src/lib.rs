@@ -2327,6 +2327,11 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
                             "listener_serving".into(),
                             serde_json::Value::Bool(consensus_server.is_serving()),
                         );
+                        object.insert(
+                            "recovery_timeline".into(),
+                            serde_json::to_value(topology_source.recovery_diagnostics().snapshot())
+                                .unwrap_or(serde_json::Value::Null),
+                        );
                         let work = topology_source.queue_checkpoint_work(false);
                         let checkpoints = work.iter().take(128).map(|resource| {
                             let activity = u32::try_from(resource.partition).ok().and_then(|p|

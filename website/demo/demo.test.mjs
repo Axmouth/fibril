@@ -128,3 +128,19 @@ test('embedded views disable navigation while keeping data reads and local contr
   await context.window.fetch('/dashboard-demo/static/js/admin.js');
   assert.equal(requested.length, 1);
 });
+
+test('focused recovery embeds are opt-in and restricted to the topology page', async () => {
+  const source = await readFile(new URL('transport.js', import.meta.url), 'utf8');
+  for (const [path, panel] of [
+    ['/admin/topology/?embed=1&panel=recovery', 'recovery'],
+    ['/admin/topology/?panel=recovery', undefined],
+    ['/admin/messages/?embed=1&panel=recovery', undefined],
+    ['/admin/topology/?embed=1&panel=unknown', undefined],
+  ]) {
+    const context = vm.createContext({ URL, location: new URL(`http://demo.test/dashboard-demo${path}`),
+      document: { documentElement: { dataset: {} }, addEventListener() {} },
+      window: { fetch() {} } });
+    vm.runInContext(source, context);
+    assert.equal(context.document.documentElement.dataset.demoPanel, panel);
+  }
+});

@@ -99,7 +99,10 @@ pub async fn recover_queue_once(
     config: &ProtocolOwnerPeerResolverConfig,
     pending: &PendingRecovery,
 ) -> Result<(), String> {
-    let mut timing = crate::recovery_timing::RecoveryTiming::new(pending)?;
+    let mut timing = crate::recovery_timing::RecoveryTiming::new(
+        pending,
+        provider.recovery_diagnostics().clone(),
+    )?;
     let result = recover_queue_attempt(provider, broker, config, pending, &timing).await;
     timing.finish(result.is_ok());
     result

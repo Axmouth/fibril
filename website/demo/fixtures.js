@@ -101,6 +101,42 @@
     users: [{ username: 'demo-operator', created_ms: now - 86400000, updated_ms: now - 86400000 }],
     tls: null,
   };
+  // Illustrative worker timings, not benchmark results. Parent stages overlap
+  // their children, matching the production observation schema.
+  const stage = (sequence, name, peer, start_us, elapsed_us, outcome = 'ok') =>
+    ({ sequence, name, peer, start_us, elapsed_us, outcome });
+  fixtures.topology.consensus.recovery_timeline = {
+    scope: 'local_process', capacity: 32, stage_capacity: 256, evicted_attempts: 0,
+    attempts: [{ id: 2, topic: 'orders.created', partition: 0, group: null, epoch: '12',
+      transition: 'demo-recovery-12', started_at_ms: now - 240000, elapsed_us: 640000,
+      outcome: 'ok', omitted_stages: 0, labels_truncated: false, stages: [
+        stage(0, 'witness_seal', 'broker-2', 0, 23000),
+        stage(1, 'witness_seal', 'broker-3', 0, 28000),
+        stage(2, 'inspect_source', 'broker-2', 23000, 32000),
+        stage(3, 'inspect_source', 'broker-3', 28000, 34000),
+        stage(4, 'compare_sources', '', 62000, 41000),
+        stage(5, 'commit_plan', '', 103000, 18000),
+        stage(6, 'prepare_target', 'broker-2', 121000, 402000),
+        stage(7, 'begin_target', 'broker-2', 121000, 22000),
+        stage(8, 'copy_pages', 'broker-2', 143000, 360000),
+        stage(9, 'finish_target', 'broker-2', 503000, 20000),
+        stage(10, 'install_target', 'broker-2', 523000, 58000),
+        stage(11, 'activate', '', 581000, 26000),
+        stage(12, 'admit', 'broker-2', 607000, 33000),
+      ] }, { id: 1, topic: 'orders.created', partition: 0, group: null, epoch: '12',
+      transition: 'demo-recovery-12', started_at_ms: now - 245000, elapsed_us: 1200000,
+      outcome: 'error', omitted_stages: 0, labels_truncated: false, stages: [
+        stage(0, 'witness_seal', 'broker-2', 0, 20000),
+        stage(1, 'witness_seal', 'broker-3', 0, 1200000, 'error'),
+        stage(2, 'inspect_source', 'broker-2', 20000, 35000),
+      ] }, { id: 0, topic: 'orders.created', partition: 0, group: null, epoch: '12',
+      transition: 'demo-recovery-12', started_at_ms: now - 250000, elapsed_us: 1600000,
+      outcome: 'cancelled', omitted_stages: 0, labels_truncated: false, stages: [
+        stage(0, 'witness_seal', 'broker-2', 0, 20000),
+        stage(1, 'witness_seal', 'broker-3', 0, 1600000, 'cancelled'),
+        stage(2, 'inspect_source', 'broker-2', 20000, 1580000, 'cancelled'),
+      ] }],
+  };
   const latest = samples.at(-1);
   latest.backlog = queues.reduce((sum, q) => sum + q.state.ready_count, 0);
   latest.inflight = queues.reduce((sum, q) => sum + q.state.inflight_count, 0);

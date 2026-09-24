@@ -2494,3 +2494,45 @@ html[data-theme="light"][data-flavor="carotene"] {
 .stream-cursors-table th:nth-child(4) { width: 84px; }
 .stream-cursors-table th:nth-child(5) { width: 84px; }
 .stream-cursors-table th:nth-child(6) { width: 130px; }
+
+/* Recovery observations share the dashboard palette in both themes. */
+.recovery-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 12px 24px; margin-bottom: 20px; }
+.recovery-controls label { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; min-width: 0; width: min(520px, 100%); max-width: 100%; font-size: 12px; color: var(--muted); }
+.recovery-controls select { min-width: 0; max-width: 100%; width: 100%; }
+.recovery-controls .settings-note { margin: 0; }
+.recovery-heading { display: flex; justify-content: space-between; gap: 20px; margin-bottom: 16px; overflow-wrap: anywhere; }
+.recovery-heading p { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
+.recovery-total { display: grid; text-align: right; flex: none; }
+.recovery-total strong { font-size: 24px; font-variant-numeric: tabular-nums; }
+.recovery-total span { font-size: 12px; }
+.recovery-axis { display: flex; justify-content: space-between; margin: 0 168px 8px 170px; color: var(--muted); font-size: 11px; }
+.recovery-row { display: grid; grid-template-columns: 158px minmax(0, 1fr) 156px; gap: 12px; align-items: center; padding: 7px 0; border-top: 1px solid var(--line); }
+.recovery-stage, .recovery-measure { display: grid; gap: 2px; min-width: 0; font-size: 12px; overflow-wrap: anywhere; }
+.recovery-stage strong, .recovery-measure strong { font-weight: 500; }
+.recovery-stage span, .recovery-measure span { color: var(--muted); font-size: 11px; }
+.recovery-measure { text-align: right; font-variant-numeric: tabular-nums; }
+.recovery-track { position: relative; height: 20px; background: var(--accent-soft); border-radius: 3px; overflow: hidden; }
+.recovery-bar { position: absolute; top: 3px; height: 14px; min-width: 2px; background: currentColor; border-radius: 2px; }
+.recovery-ok { color: var(--ok); }
+.recovery-error { color: var(--bad); }
+.recovery-running { color: var(--active); }
+.recovery-cancelled { color: var(--warn); }
+.recovery-identity { margin-top: 16px; font-size: 12px; color: var(--muted); }
+.recovery-identity summary { cursor: pointer; }
+.recovery-identity code { overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .recovery-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px; }
+  .recovery-track { grid-column: 1 / -1; grid-row: 2; }
+  .recovery-axis { margin-left: 0; margin-right: 0; }
+  .recovery-total strong { font-size: 20px; }
+}
+
+.recovery-phases { display: flex; flex-wrap: wrap; padding: 0; margin: 0; list-style: none; gap: 6px; }
+.recovery-phases li { display: grid; flex: 1 1 80px; gap: 3px; padding: 9px 10px; border: 1px solid var(--line); border-top: 3px solid currentColor; border-radius: 4px; font-size: 11px; }
+.recovery-phases strong { font-weight: 500; }
+.recovery-phases span { color: var(--muted); font-size: 10px; }
+.recovery-unobserved { color: var(--muted); background: var(--panel-2); }
+.recovery-legend { margin: 9px 0 16px; color: var(--muted); font-size: 11px; }
+.recovery-issues { padding: 10px 12px; margin-bottom: 16px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; font-size: 12px; }
+.recovery-issues p { margin: 3px 0; }
+.recovery-bar.recovery-cancelled { background: repeating-linear-gradient(135deg, currentColor 0 4px, transparent 4px 7px); border: 1px solid currentColor; }

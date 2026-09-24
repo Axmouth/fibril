@@ -67,6 +67,9 @@ activation and admission stages. Fields include transition, resource, epoch, pee
 sequence, monotonic microseconds and success/error/cancellation. Target preparation
 contains child stages; do not sum parent and child durations. Enable the target at
 `info` when using a restrictive log filter. No per-record timing events are emitted.
+The same instrumentation feeds the [Cluster dashboard](/admin-dashboard/#topology)
+with bounded, process-local worker timelines. Failure detection and client
+reconnection require separate observations; they are excluded from worker totals.
 
 Record RPC count, connection/handshake time, metadata waits, fsync time, bytes
 read/copied, retries and polling delay, keyed by resource and recovery transition.

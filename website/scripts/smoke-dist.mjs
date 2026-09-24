@@ -4,6 +4,9 @@ import { join } from "node:path";
 const root = new URL("../dist/", import.meta.url).pathname;
 
 const checks = [
+  { path: "reliability/replication/index.html", includes: ["/dashboard-demo/admin/topology/?embed=1&amp;panel=recovery", "Recovery stages and overlapping work", "#recovery-panel", "<table>", "<code>majority_durable</code>"] },
+  { path: "reliability/recovery-sealing/index.html", includes: ["panel=recovery", "Recovery observations"] },
+  { path: "dashboard-demo/admin/topology/index.html", includes: ["recovery-timeline.js", 'id="recovery-panel"', "Recovery timeline"] },
   { path: "concepts/plexus-streams/index.html", includes: ["/dashboard-demo/admin/streams/?embed=1", "Stream retention and consumer positions"] },
   { path: "concepts/clustering/index.html", includes: ["/dashboard-demo/admin/topology/?embed=1", "Owners, followers and cluster membership"] },
   { path: "deployment/monitoring/index.html", includes: ["/dashboard-demo/?embed=1", "Broker health and recent activity"] },

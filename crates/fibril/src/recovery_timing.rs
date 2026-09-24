@@ -1,5 +1,8 @@
 //! Payload-free recovery timing. One event per bounded stage, never per record.
-use fibril_coordination_ganglion::promotion::PendingRecovery;
+use fibril_coordination_ganglion::{
+    promotion::PendingRecovery,
+    recovery_diagnostics::{Outcome, RecoveryDiagnostics},
+};
 use std::{
     future::Future,
     sync::atomic::{AtomicU64, Ordering},
@@ -15,10 +18,15 @@ pub(crate) struct RecoveryTiming {
     started: Instant,
     sequence: AtomicU64,
     outcome: &'static str,
+    diagnostics: RecoveryDiagnostics,
+    observation: u64,
 }
 impl RecoveryTiming {
-    pub(crate) fn new(pending: &PendingRecovery) -> Result<Self, String> {
-        Ok(Self {
+    pub(crate) fn new(
+        pending: &PendingRecovery,
+        diagnostics: RecoveryDiagnostics,
+    ) -> Result<Self, String> {
+        let mut timing = Self {
             topic: pending.proposed.resource.name.clone(),
             partition: pending.proposed.resource.partition as u64,
             group: pending.proposed.resource.group.clone(),
@@ -31,7 +39,17 @@ impl RecoveryTiming {
             started: Instant::now(),
             sequence: AtomicU64::new(0),
             outcome: "cancelled",
-        })
+            observation: 0,
+            diagnostics,
+        };
+        timing.observation = timing.diagnostics.begin(
+            &timing.topic,
+            timing.partition,
+            timing.group.as_deref(),
+            timing.epoch,
+            &timing.transition,
+        );
+        Ok(timing)
     }
     pub(crate) async fn stage<F, T, E>(
         &self,
@@ -50,6 +68,8 @@ impl RecoveryTiming {
             started: Instant::now(),
             outcome: "cancelled",
         };
+        self.diagnostics
+            .start_stage(self.observation, guard.sequence, stage, peer);
         let result = future.await;
         guard.outcome = if result.is_ok() { "ok" } else { "error" };
         result
@@ -60,6 +80,8 @@ impl RecoveryTiming {
 }
 impl Drop for RecoveryTiming {
     fn drop(&mut self) {
+        self.diagnostics
+            .finish(self.observation, outcome(self.outcome));
         tracing::info!(target: "fibril::recovery_timing", topic=self.topic, partition=self.partition,
             group=?self.group, epoch=self.epoch, transition=self.transition,
             elapsed_us=self.started.elapsed().as_micros() as u64,
@@ -78,12 +100,23 @@ struct StageTiming<'a> {
 impl Drop for StageTiming<'_> {
     fn drop(&mut self) {
         let trace = self.attempt;
+        trace
+            .diagnostics
+            .finish_stage(trace.observation, self.sequence, outcome(self.outcome));
         tracing::info!(target: "fibril::recovery_timing", topic=trace.topic, partition=trace.partition,
             group=?trace.group, epoch=trace.epoch, transition=trace.transition,
             stage=self.stage, peer=self.peer, sequence=self.sequence,
             stage_us=self.started.elapsed().as_micros() as u64,
             attempt_us=trace.started.elapsed().as_micros() as u64, outcome=self.outcome,
             "recovery stage timing");
+    }
+}
+
+fn outcome(value: &str) -> Outcome {
+    match value {
+        "ok" => Outcome::Ok,
+        "error" => Outcome::Error,
+        _ => Outcome::Cancelled,
     }
 }
 
@@ -137,7 +170,11 @@ mod tests {
                 started: Instant::now(),
                 sequence: AtomicU64::new(0),
                 outcome: "cancelled",
+                diagnostics: RecoveryDiagnostics::default(),
+                observation: 0,
             };
+            timing.observation = timing.diagnostics.begin("q", 0, Some("g"), 2, "0123");
+            let diagnostics = timing.diagnostics.clone();
             futures::executor::block_on(async {
                 assert_eq!(
                     timing.stage("first", "a", async { Ok::<_, ()>(7) }).await,
@@ -156,6 +193,17 @@ mod tests {
                 drop(cancelled);
             });
             timing.finish(false);
+            drop(timing);
+            let observed = diagnostics.snapshot();
+            assert_eq!(observed.attempts[0].outcome, Outcome::Error);
+            assert_eq!(
+                observed.attempts[0]
+                    .stages
+                    .iter()
+                    .map(|s| s.outcome)
+                    .collect::<Vec<_>>(),
+                vec![Outcome::Ok, Outcome::Error, Outcome::Cancelled]
+            );
         });
         let events = capture.0.lock().unwrap();
         assert_eq!(events.len(), 4);

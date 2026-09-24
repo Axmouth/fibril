@@ -19,6 +19,14 @@ confirmed-suffix tests cover the publication and recovery boundaries.
 
 ## Adoption — September 2026
 
+### Bounded recovery worker timelines
+
+The existing recovery stage guards now also populate the Cluster dashboard with
+process-local attempts, peer timings, outcomes and overlapping work, using the same
+renderer in the docs demo. Retention is bounded to 32 attempts and 256 stages per
+attempt, with omission counts and restart scope visible; failure detection and
+client reconnect remain separate measurements ([dashboard details](/admin-dashboard/#topology)).
+
 ### Prompt explicit-disconnect detection
 
 Zero-grace eager mode monitors idle Raft connections on the active controller and immediately verifies explicit connection loss; successful RPCs clear suspicion and silent failures retain heartbeat expiry. Four same-host, three-replica SATA process-kill screens recorded suspicion 26–34 ms after injection, with majority-durable history checks and old-owner rejoin passing. Recovery remains separately fenced and validated; the default policy stays disabled with a one-second grace ([settings and scope](/reliability/replication/#eager-failover)).

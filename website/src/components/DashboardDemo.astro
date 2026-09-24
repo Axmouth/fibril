@@ -2,14 +2,16 @@
 interface Props {
   view?: 'overview' | 'queues' | 'queue' | 'streams' | 'topology' | 'settings' | 'messages' | 'connections' | 'subscriptions' | 'activity' | 'diagnostics' | 'dlq' | 'security';
   topic?: string;
+  panel?: 'recovery';
   title: string;
   height?: number;
 }
-const { view = 'overview', topic, title, height = 860 } = Astro.props;
+const { view = 'overview', topic, panel, title, height = 860 } = Astro.props;
 const path = view === 'overview' ? '/dashboard-demo/' : `/dashboard-demo/admin/${view}/`;
 const params = new URLSearchParams(topic ? { topic } : {});
-const fullView = params.size ? `${path}?${params}` : path;
+const fullView = (params.size ? `${path}?${params}` : path) + (panel === 'recovery' ? '#recovery-panel' : '');
 params.set('embed', '1');
+if (panel === 'recovery' && view === 'topology') params.set('panel', panel);
 const src = `${path}?${params}`;
 ---
 <figure class="dashboard-example">

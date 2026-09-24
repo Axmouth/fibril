@@ -24,3 +24,6 @@ html[data-demo-embed] #broker-switch { display: none !important; }
 html[data-demo-embed] .main-container { min-height: 100vh; }
 html[data-demo-embed] .site-header { top: 0; }
 html[data-demo-embed] a[aria-disabled] { cursor: default; text-decoration: none; }
+
+html[data-demo-panel="recovery"] #page-root > :not(#recovery-panel) { display: none; }
+html[data-demo-panel="recovery"] #recovery-panel { margin-top: 0; }

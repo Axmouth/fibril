@@ -38,6 +38,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- Bounded recovery worker timelines in the Cluster dashboard and topology API:
+  recent attempts, peer stages, overlapping durations and failure/cancellation
+  outcomes. The docs demo reuses the production renderer; observations are local
+  to the serving process and reset on restart.
+
 - Opt-in zero-grace eager failover: the active controller monitors idle Raft
   connections and verifies explicit disconnects immediately. The grace range is
   now 0–60000 ms; defaults remain disabled with a 1000 ms grace. Silent failures

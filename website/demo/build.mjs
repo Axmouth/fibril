@@ -36,7 +36,7 @@ export async function buildDemo() {
   await mkdir(output, { recursive: true });
   await cp(new URL('admin-ui/', admin), new URL('static/', output), { recursive: true });
   // Rebase shared script asset and navigation paths in generated output only.
-  for (const name of ['api.js', 'admin.js', 'tendrils.js']) {
+  for (const name of ['api.js', 'admin.js', 'tendrils.js', 'recovery-timeline.js']) {
     const p = new URL(`static/js/${name}`, output);
     const source = await readFile(p, 'utf8'); hash.update(source);
     await writeFile(p, source.replaceAll('/static/', `${base}/static/`).replace(/\/admin\/(?!api)/g, `${base}/admin/`));

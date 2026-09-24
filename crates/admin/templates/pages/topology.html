@@ -80,6 +80,15 @@
   <div id="checkpoint-status" class="table-wrap"></div>
 </section>
 
+<section class="overview-panel" id="recovery-panel" aria-label="Recovery timeline">
+  <div class="overview-panel-heading">
+    <h5>Recovery timeline</h5>
+    <p>Recent recovery worker attempts on this node. Timing starts when the worker begins; failure detection and client reconnection are outside this window. Concurrent stages overlap. Completed means the attempt returned successfully; replica admission can continue on retry.</p>
+    <p>History is held in memory and resets on restart. Inspect other nodes for their attempts.</p>
+  </div>
+  <div id="recovery-timeline">loading…</div>
+</section>
+
 <section class="overview-panel" aria-label="Brokers">
   <div class="overview-panel-heading" style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px;">
     <div>
@@ -168,6 +177,7 @@
 <script src="/static/js/api.js"></script>
 <script src="/static/js/admin.js"></script>
 <script src="/static/js/tendrils.js"></script>
+<script src="/static/js/recovery-timeline.js"></script>
 <script>
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -228,6 +238,7 @@ function renderSummary(data) {
       (learners ? `, learners [${learners}]` : ""));
   }
   document.getElementById("topology-summary").innerHTML = parts.join(" · ");
+  FibrilRecoveryTimeline.render(document.getElementById("recovery-timeline"), raft?.recovery_timeline, coordination?.node_id);
   const checkpoints = raft?.queue_checkpoints;
   const entries = checkpoints?.entries || [];
   const target = document.getElementById("checkpoint-status");

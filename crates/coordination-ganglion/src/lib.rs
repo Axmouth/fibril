@@ -25,6 +25,7 @@ use ganglion_openraft::{
 };
 use tokio::sync::watch;
 
+pub mod recovery_diagnostics;
 pub mod history_identity;
 pub mod initial_history;
 pub mod history_activation;
@@ -1008,6 +1009,7 @@ pub struct GanglionCoordination {
     // Private instance identity: a replacement provider cannot inherit an old writer grant.
     history_process: [u8; 16],
     checkpoint_operation: tokio::sync::Mutex<()>,
+    recovery_diagnostics: recovery_diagnostics::RecoveryDiagnostics,
     node: RaftMetadataNode,
     tx: watch::Sender<CoordinationSnapshot>,
     forwarder: tokio::task::JoinHandle<()>,
@@ -1025,6 +1027,11 @@ impl std::fmt::Debug for GanglionCoordination {
 }
 
 impl GanglionCoordination {
+    /// Bounded node-local recovery observations; never used for authority.
+    pub fn recovery_diagnostics(&self) -> &recovery_diagnostics::RecoveryDiagnostics {
+        &self.recovery_diagnostics
+    }
+
     /// Wrap a started raft node as a fibril coordination provider.
     ///
     /// `node_id` is the fibril-side node identity (string); the raft node id
@@ -1075,6 +1082,7 @@ impl GanglionCoordination {
             node_id,
             history_process,
             checkpoint_operation: tokio::sync::Mutex::new(()),
+            recovery_diagnostics: Default::default(),
             node,
             tx,
             forwarder,
