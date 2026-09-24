@@ -44,8 +44,9 @@ async fn run_inner(args: &Args, started: u128) -> Result<Value> {
     let mut first_received_ns = None;
     match role {
         "publish" => {
+            let mut pending = futures::stream::FuturesOrdered::new();
             for id in args.fault_start..args.fault_start + args.fault_count {
-                prepared
+                let confirmation = prepared
                     .publisher
                     .send_response(
                         Stamp {
@@ -55,9 +56,22 @@ async fn run_inner(args: &Args, started: u128) -> Result<Value> {
                         }
                         .encode(args.payload_bytes),
                     )
-                    .await?
                     .await?;
-                confirmed.push(id);
+                pending.push_back(async move {
+                    confirmation.await?;
+                    Ok::<u64, anyhow::Error>(id)
+                });
+                if pending.len() >= args.confirm_window {
+                    confirmed.push(
+                        pending
+                            .next()
+                            .await
+                            .context("confirmation window empty")??,
+                    );
+                }
+            }
+            while let Some(result) = pending.next().await {
+                confirmed.push(result?);
             }
         }
         "worker" | "worker-pause" => {

@@ -382,8 +382,9 @@ transferred-digest mismatch, timeout and source loss return an error without a
 partial success report. Dependency decoding accepts at most 65,536 entries in an
 event batch; larger or unfamiliar encodings leave an explicit semantic gap.
 The automatic worker admits one recovery at a time per node, with at most 16
-replicas and a two-minute attempt budget. Source reads still rescan retained data
-per page.
+replicas and a two-minute attempt budget. Automatic inspection reuses authenticated
+connections and sequential read cursors. Strict diagnostic and copy-fallback reads
+retain per-page scans.
 
 ## Queue state at an exact boundary
 
@@ -572,16 +573,33 @@ broker and metadata revisions are required.
 
 ## Automatic recovery bounds and rollout gates
 
-The current recovery candidate's worker processes accepted queue histories sequentially. It
-retains an immutable plan across retries, resumes staged offsets and prefers a
-completed transferred source. Attempts have a two-minute deadline and exponential
-backoff capped at 30 seconds; admitted storage work survives caller cancellation.
+Each node's recovery worker drives one queue recovery at a time. Within an attempt,
+it pipelines witness sealing and source inspection for up to two replicas at once.
+Target preparation and installation also allow two replicas at a time. Pairwise
+history comparisons remain sequential. Source page reads during transfer are
+serialized, with one page prefetched while the preceding append completes.
+
+The worker retains an immutable plan across retries, resumes staged offsets and
+prefers a completed transferred source. Attempts have a two-minute deadline and
+exponential backoff capped at 30 seconds. Storage operations already admitted to
+owned tasks continue through caller cancellation.
 Every node independently retries exact-process admission after activation, covering
 a lost activation response or an owner disappearing before all admission replies.
 
-Current automatic limits are 16 replicas, a 16 MiB page/snapshot, one million
-records and 1 GiB of logical staged payloads. Oversized records, incompatible
-histories, crossed tails without a complete source, unsupported legacy origins and
+Automatic recovery accepts at most 16 replicas in either the old or proposed set.
+Its inspection pages allow 4096 records and 16 MiB. Snapshot/artifact transfers
+also have a 16 MiB cap. Inspection retains separate totals of 1024 pages, one
+million records and 256 MiB of canonical record bytes per inspection operation.
+Pair inspection shares those totals across both replicas. Queue replay permits
+one million semantic operations per replica, including entries within batches.
+Each storage stage permits one million records and 1 GiB of logical transferred
+record bytes. These are separate budgets, so the staging cap is not a promise
+that every backlog below 1 GiB can recover automatically.
+
+Budget exhaustion leaves the queue fenced and schedules a retry. An unchanged
+history that still exceeds a budget needs operator or implementation intervention.
+The worker does not discard records or weaken quorum requirements to fit a limit.
+Oversized records, incompatible histories, crossed tails without a complete source, unsupported legacy origins and
 stream state remain fenced. When the recovery candidate becomes unavailable or
 starts draining, the controller can select another live, non-draining member of
 the fixed proposed replica set. The guarded metadata update preserves the pending

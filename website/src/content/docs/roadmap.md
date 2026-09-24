@@ -172,6 +172,19 @@ The compatibility work follows this order:
   hardware settings such as storage paths and log tuning.
 - Expand deployment, failover and rolling-upgrade runbooks.
 
+## Large-history recovery availability
+
+High priority: make automatic recovery progress through large valid histories
+without fixed total-size ceilings. Keep bounded pages, memory and transfer windows,
+and add verifiable continuation for inspection/replay and chunked snapshots.
+Progress must survive attempt deadlines and restart while retaining exact history,
+quorum and activation requirements. Exercise the current byte, record, semantic
+operation and snapshot limits with boundary-crossing fault tests. Expose exhausted
+budgets and progress in recovery diagnostics.
+
+Assess pairwise history comparison scaling separately. Preserve equivalent evidence
+when reducing repeated reads or changing comparison scheduling.
+
 ## Performance and observability
 
 - Profile client scheduling, decoding and delivery costs in Python and TypeScript.

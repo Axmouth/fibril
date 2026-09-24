@@ -111,7 +111,14 @@ impl Args {
             (1..=16).contains(&self.connections) && self.prefetch as usize % self.connections == 0,
             "connections must be 1..16 and divide total prefetch"
         );
-        ensure!(matches!(self.copies, 1 | 3), "copies must be 1 or 3");
+        ensure!(
+            matches!(self.copies, 1 | 3 | 5 | 7),
+            "copies must be 1, 3, 5 or 7"
+        );
+        ensure!(
+            matches!(self.broker, Broker::Fibril) || matches!(self.copies, 1 | 3),
+            "larger replica groups currently require the Fibril cluster runner"
+        );
         ensure!(
             self.request_window > 0
                 && self.request_window <= 1_000_000
@@ -554,6 +561,25 @@ mod tests {
             "unused.json",
         ])
         .unwrap()
+    }
+    #[test]
+    fn larger_replica_profiles_are_explicitly_fibril_only() {
+        let mut a = args();
+        for copies in [1, 3, 5, 7] {
+            a.copies = copies;
+            a.validate().unwrap();
+        }
+        for copies in [0, 2, 4, 6, 8] {
+            a.copies = copies;
+            assert!(a.validate().is_err());
+        }
+        for broker in [Broker::Nats, Broker::Rabbitmq] {
+            a.broker = broker;
+            a.copies = 3;
+            a.validate().unwrap();
+            a.copies = 5;
+            assert!(a.validate().is_err());
+        }
     }
     #[test]
     fn warmup_cohort_has_exact_boundaries() {

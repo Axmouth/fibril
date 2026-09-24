@@ -321,7 +321,7 @@ async fn prepare_single(args: &Args) -> Result<Prepared> {
                 publisher: Publisher::Fibril(p.publisher(&args.queue)?),
                 deliveries,
                 connections: Connections::Fibril(p, c),
-                settings: json!({"queue":"single partition", "confirm":if args.copies==3 {
+                settings: json!({"queue":"single partition", "confirm":if args.copies>1 {
                     "majority_durable requested; verify assignment externally"
                 } else {
                     "local_durable requested; verify deployment policy externally"

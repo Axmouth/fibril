@@ -89,7 +89,7 @@ python3 benchmarks/comparison/table.py /path/to/result-directory
 
 ## Existing-server RPC and clustered workloads
 
-The Rust executable also supports three stored copies (`--copies 3`), multiple connection pairs (`--connections N`), and a two-queue request/reply workload (`--rpc`). These modes target deployments provisioned separately. The automated Python runner and its table remain single-node queue tools. `--copies` configures NATS/Rabbit declarations; Fibril placement and confirmation policy must be configured and checked separately. A successful client run does not verify replica placement, disk-sync settings, server settlement or cluster recovery.
+The Rust executable supports three stored copies (`--copies 3`), plus five or seven for externally provisioned Fibril clusters, multiple connection pairs (`--connections N`), and a two-queue request/reply workload (`--rpc`). These modes target deployments provisioned separately. The automated Python runner and its table remain single-node queue tools. `--copies` configures NATS/Rabbit declarations; Fibril placement and confirmation policy must be configured and checked separately. A successful client run does not verify replica placement, disk-sync settings, server settlement or cluster recovery.
 
 For an existing broker with benchmark credentials and fresh queue names:
 
@@ -105,7 +105,7 @@ RPC uses a request queue and a separate reply queue, preserving payload correlat
 
 Multiple connections divide total consumer credit and share publisher credit. They do not multiply the offered rate. Merged deliveries are checked for identity and completeness, without a global-order assertion. Fibril's settlement transport barrier covers each connection in the pool.
 
-The source also preserves low-level process-failure probe helpers used during development. They require external orchestration and phase-file handling; they are not part of the automated comparison or a power-loss safety certification. Cluster provisioning and fault runners still need a portable, documented entry point before joining the one-command suite.
+The source also preserves low-level process-failure probe helpers used during development. Their publish-only history preparation uses the bounded confirmation window and waits for every confirmation before reporting completion. They require external orchestration and phase-file handling; they are not part of the automated comparison or a power-loss safety certification. Cluster provisioning and fault runners still need a portable, documented entry point before joining the one-command suite.
 
 ## Next supported shapes
 
