@@ -684,7 +684,7 @@ See also: [clustering](/concepts/clustering/) and
 | Checkpoint epoch checks | Implemented | Both source epochs are validated before reset and checked again by each storage writer in command order |
 | Recovery seal receiver and retained identity | Partial | Node-authenticated requests bind to fresh consensus and the exact pending transition. Durable local seals and retained fingerprints support interrupted retry and automatic collection for enrolled queues; Linux validated, non-Unix unsupported |
 | Recovery witness admission | Partial | Authenticated replies identify distinct accepted replicas and their original durable storage instances. Fixed eligible-set witness thresholds intersect the configured write requirement; source validation follows collection |
-| Sealed-source reads | Partial | Bounded authenticated pages verify retained contents and preserve live/cold seals. Retained generations remain readable during installation; reads currently rescan retained data per page |
+| Sealed-source reads | Partial | Bounded authenticated pages preserve live/cold seals and retained generations during installation. Automatic inspection reuses authenticated connections and sequential cursors, verifying complete sealed digests; strict diagnostic and copy-fallback reads retain per-page scans |
 | Resource incarnation | Partial | Atomic creation and retirement identities bind recovery and stale deletion checks. Fresh Unix cluster queues enroll on declaration and withhold serving until preparation and activation. Legacy migration is unsupported and not planned |
 | Initial history preparation | Partial | Explicit consensus decisions require creation-time enrollment and bind assignment and owner instance to fixed history/session IDs. Replica preparation leaves storage non-writable; exact prepared-quorum receipts persist through consensus, require the owner and write threshold, and survive restart. Node-authenticated remote preparation checks fresh consensus and exact replica identity with bounded work/deadlines. Automatic enrollment renews pristine preparation after owner/process replacement before activation |
 | Initial activation and replication identity | Partial | Explicit activation binds the prepared process/storage quorum. Live replication carries accepted identity and retains the full confirmation threshold; recovered activations extend that authority. Ordinary queue creation orchestrates preparation and activation; each replica independently retries admission |
@@ -698,6 +698,7 @@ See also: [clustering](/concepts/clustering/) and
 | Background learner admission | Partial | Assigned replicas outside the activated write set catch up without an owner recovery fence. Exact durable/applied cuts and payload completeness gate additive consensus admission; old sessions and confirms retain valid progress, and later recovery uses the enlarged witness set. Partial checkpoint backfill and older retained storage generations are supported |
 | Bounded queue recovery worker | Partial | New cluster queues enroll automatically and collect witnesses, select a verified source, resume transfer and activate with bounded retries. Stream origins, recovery membership expansion and recovery-data reclamation remain gates. Legacy histories require recreation to adopt this path |
 | Checkpoint recovery | Partial | Unix installation journals resume interrupted replacement of both logs and queue state before ordinary replay; completion receipts preserve later backfill on retry. Payload dependencies gate promotion across restart. Linux fault/SIGKILL tests pass; non-Unix installation is unsupported pending durable metadata support |
+| Agreed recovery checkpoints | Planned runtime path | Agreement evidence validates exact accepted membership, exclusive applied cuts, content equality and monotonic replacement, with conflicting reports poisoning an attempt. Durable local capsules, consensus publication, retention integration and suffix recovery remain unwired; matching reports alone grant no authority |
 | Conflict diagnostics | Implemented | Bounded, payload-free control history, offsets and effective record identities accompany overlap reports; checkpoint logs show source epochs and continuation offsets |
 | Replica-durable confirms | Partial | Queues require the same follower to cover the payload batch and exact enqueue frontier; epoch/session-fenced progress feeds confirmation and delivery visibility, with timeout and ISR floor |
 | Durable stream replication (Plexus) | Partial | Tier-gated: the durable tier replicates record + cursor logs to `stream_replication_factor` followers (express tiers stay owner-only), durable publishes confirm on replica durability, and owner loss triggers follower selection and local promotion checks. Reuses the queue follower-worker, confirm gate, and failover-candidate selection |
@@ -719,10 +720,11 @@ Conditions and limits:
   ordered transport session.
 - Failover checks assignment epochs, completed application and payload dependencies
   in queue state. Checkpoints awaiting payload backfill remain followers after
-  restart, and client admission waits for explicit promotion. A locally complete
-  candidate can still lack a batch confirmed on another replica: heartbeat tails
-  are advisory and promotion does not yet prove the cluster-wide confirmed
-  prefix. That proof and broader broker-level interruption coverage remain pending.
+  restart, and client admission waits for explicit promotion. Enrolled queues
+  collect witnesses that intersect the configured write requirement, verify a
+  complete source and require exact installed-quorum activation. Heartbeat tails
+  alone cannot authorize promotion. Crossed histories, legacy origins and
+  authoritative stream-state recovery remain unsupported by this proof.
 - The placement controller holds ownership, follower-set and durability-policy
   changes involving replicated confirmation, including replicated durable
   streams. Pending recovery records survive metadata restart and are exposed in
@@ -749,9 +751,6 @@ Conditions and limits:
 | Queue expiration (auto-delete idle queue) | Planned | Distinct from message TTL; needs global/coordinated idle tracking |
 | Log retention by age (truncate old messages) | Planned or undecided | Not currently exposed as a user feature |
 | Message purge (empty a queue) | Planned | Re-scoped: needs a replicated reset, not in-memory only |
-| Python client | Implemented | Full parity, async plus a blocking facade; see Client Surface |
-| Go client | Planned | Next client priority |
-| C# client | Planned | Future client priority |
 | Java client | Planned | Future client priority |
 
 ## Benchmark tooling

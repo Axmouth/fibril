@@ -125,8 +125,8 @@ full receiver verification. It reuses authenticated connections and the selected
 artifact within one attempt. Strict diagnostic reads and target copying retain
 complete verification on every page. See [implementation details](/development/recovery-internals/#bounded-sequential-inspection).
 
-The latest single-run SATA results, with the same three-replica majority-durable
-profile, are:
+Before retained-data reuse, the sequential-inspection SATA results with the same
+three-replica majority-durable profile were:
 
 | Retained workload | Owner ready | First fresh delivery |
 | --- | ---: | ---: |
@@ -159,9 +159,9 @@ probe, preserving all 17,030 observed confirmed IDs.
 
 Extend these gates to sustained 100k/200k offered workloads, recording achieved
 throughput, retained log heads/bytes, checkpoint age and live backlog separately.
-Run matched large-history and aged-traffic process-loss cases for RabbitMQ and
-JetStream: the earlier comparison used only 100 confirmed messages before the
-kill and does not establish their recovery behavior at these sizes.
+Extend the internal matched RabbitMQ/JetStream 10k/100k backlog and settled-history
+checks to sustained traffic and additional failure modes. Keep durability,
+placement and client concurrency explicit; process loss does not test power loss.
 
 ### 2. Reduce overhead with the existing recovery proof
 
@@ -186,27 +186,25 @@ Adopt each change only after correctness checks and matched timing runs. Do not
 shorten safety deadlines or weaken confirmation thresholds to meet the target.
 Reassess the remaining delay before introducing new recovery metadata or formats.
 
-### 3. Prove promotion using existing storage
+### 3. Extend compatible retained-data reuse
 
-Design a path that can reuse a compatible replica's current generation without
-copying and reinstalling it. Fresh fencing and intersecting survivor evidence must
-establish that the proposed owner contains the required authoritative history,
-including all confirmed payload/event dependencies and completely applied state.
-Equal offsets, matching current state hashes or an old checkpoint alone cannot
-establish this authority. Replicas may have different valid suffixes; define which
-ones can be reconciled and when reconstruction remains necessary.
+Matching sealed payloads can now be shared into recovery staging and installed
+generations after full CRC and digest verification. Each generation keeps private
+metadata and a private writable tail; mutations of shared segments first create
+private copies. Exact selected state, fresh writer identity and installed-quorum
+activation remain required. See [compatible retained-data reuse](/development/recovery-internals/#compatible-retained-data-reuse).
 
-Specify the durable transition before implementation: exact incarnation/history,
-configuration, writer and storage identities; new write authority; quorum receipts;
-crash/retry behavior; and how existing seals interact with generation reuse.
-Retaining the same files must not reopen an old writer or invalidate evidence.
-Define safe fallback at every stage, including a crash after local preparation but
-before quorum activation. Reuse must be idempotent and preserve the current
-confirmation threshold; unsupported evidence stays fenced.
+In the matched three-replica SATA 100k-backlog checks, owner readiness improved
+from a fresh 23.99-second baseline to 9.31–10.34 seconds. Fresh first delivery was
+10.14–11.19 seconds. The 100k-settled-plus-one case reached readiness/delivery in
+9.17/10.98 seconds; the warm-traffic case reached readiness/original-subscriber
+fresh-probe delivery in 4.84/4.98 seconds. These checks preserved confirmed IDs and
+verified old-owner restart; they do not establish a general latency bound.
 
-Exit criterion: a reviewed state transition and deterministic fault tests prove
-that the common compatible-history case can activate without full generation
-replacement. Retain verified reconstruction for cases that need repair.
+Remaining work includes safe generation reclamation, shared-file repair latency
+under pressure and wider compatibility when retained bounds differ. Promotion
+within an existing generation is a separate design option; current reuse
+preserves the durable generation-installation protocol.
 
 ### 4. Assess agreed checkpoints and suffix comparison
 
@@ -218,13 +216,19 @@ with the existing explicit treatment of owner-local leases and delayed activatio
 A shared boundary is additional recovery evidence; it does not change the normal
 publish-confirm contract.
 
-Design and measure the following before choosing a cadence or format:
+Agreement evidence validation now binds exact admitted membership, exclusive
+boundaries and content identities, rejects stale metadata, requires every admitted
+replica and prevents a conflicting report from being overwritten by a later reply.
+This foundation does not persist checkpoint material or certificates and cannot
+authorize compaction or recovery shortcuts. Durable runtime integration remains:
 
 - Capture an exact cut while later writes continue. Avoid hashing moving actor
   state against unrelated log positions or stalling the actor for full encoding.
-- Obtain durable receipts from a set sufficient for the configured policy and
-  future recovery intersection, then commit the boundary certificate through
-  coordination. Reject stale configuration, history, storage or writer identities.
+- Initially obtain durable receipts from every currently admitted replica, including
+  the owner, then commit the boundary certificate through coordination. A missing
+  replica delays new checkpoints while ordinary service continues. Reject stale
+  configuration, history, storage or writer identities; learner admission also
+  changes eligibility even if the activation identifier remains unchanged.
 - Retain a usable checkpoint and required suffix records/live payloads until a
   replacement boundary is safely committed. Define retention across compaction,
   membership changes, process replacement and interrupted checkpoint publication.

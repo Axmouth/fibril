@@ -384,6 +384,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     include!("recovery_selection_tests.rs");
+    include!("queue_checkpoint_tests.rs");
 
     fn activated() -> (
         CoordinationSnapshot,

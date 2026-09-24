@@ -14,18 +14,18 @@ The next rounds prioritize bounded operational work, recovery latency and adopti
 of the retained delivery experiment. Client and stream work can proceed as
 separate rounds when their dependencies permit.
 
-1. **Admin settings and recovery visibility.** Complete defaults/validation
-   metadata and requested-versus-applied reporting, including node/cluster scope
-   and live versus restart-only changes. Add a node-local settings section and safe live storage
-   tuning through Keratin, starting with segment preallocation. Show recovery
-   stages and account for retained generations and staging data before adding
-   automatic reclamation.
-2. **Recovery overhead.** Establish matched release-build timelines and remove
-   avoidable polling, repeated connections and activation retries. Measure first
-   delivery and new durable confirmation, separating owner loss from metadata-
-   leader loss. Start with steps 1–2 of the
-   [fast-recovery plan](/development/failover-plan/#fast-recovery); promotion in
-   place and agreed checkpoints follow their own proof and measurement gates.
+1. **Admin settings and recovery visibility.** Unify defaults/validation metadata
+   and extend requested-versus-applied reporting beyond node-local preallocation.
+   Add explicit remote-node edit routing and classify additional live storage
+   controls. Show recovery stages and account for retained generations and staging
+   data before adding automatic reclamation.
+2. **Agreed checkpoints and recovery overhead.** Add durable local checkpoint
+   capsules and retention pins, authenticated receipt publication and an opt-in,
+   coalesced agreement driver. Use accepted checkpoints to bound suffix comparison
+   without losing older live payloads or confirmed later work. Measure remaining
+   metadata/polling and verification costs after retained-data reuse, separating
+   owner loss from metadata-leader loss. See the
+   [fast-recovery plan](/development/failover-plan/#fast-recovery).
 3. **Speculative delivery adoption.** Reconcile the retained local-queue prototype
    with current recovery and ordered application. Close ACK-before-durability,
    crash/error, slow-consumer, memory-budget and expiry/fallback gaps, then repeat

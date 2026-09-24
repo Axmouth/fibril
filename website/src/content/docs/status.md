@@ -3,7 +3,8 @@ title: Project status
 description: A candid feature matrix for the current Fibril implementation.
 ---
 
-Fibril is pre-alpha infrastructure. This table distinguishes the working baseline from active design and wiring work.
+Fibril is pre-alpha infrastructure. This page summarizes the current main-branch
+implementation and its operational limits. Cluster operation remains experimental.
 
 For a more detailed checklist of what is wired and what conditions apply, see
 [implemented surface](/implemented-surface/).
@@ -18,23 +19,35 @@ For a more detailed checklist of what is wired and what conditions apply, see
 | Delayed publish | Available | Broker path and Rust, TypeScript, Python, Go, and C# client methods are wired |
 | Message TTL | Available | Per-message or per-queue default; expired messages drop or dead-letter. Not queue expiration |
 | Dead lettering | Available | Global and per-queue policy are configurable, replay tooling is still early |
-| Sparse queues | Available | Lazy loading and idle cleanup are wired, observability is still growing |
+| Sparse queues | Available | Lazy loading, idle cleanup and default adaptive storage buffers reduce idle allocations; memory under busy multi-queue loads remains a measurement focus |
 | Message inspection | Available | Browse active queue messages from admin tooling, with optional settled offsets and payload previews |
 | Partitioned queues | Available | Declared queues can have multiple partitions, with client-side key routing and transparent fan-in |
 | Plexus streams | Available | Fan-out channel type: every subscriber receives every record, durable named cursors, per-stream durability tiers, partitioning with client-side fan-in, and header filters. Rust, TypeScript, Python, Go, and C# clients |
 | Wildcard subscribe | Available | Opt-in `client.routing()` subscribes to every queue or stream whose topic matches a `*`-glob and auto-attaches channels that start matching later, driven by a live cluster catalogue. Client-side only. Rust, TypeScript, Python, Go, and C# clients |
 | Partition ownership | Experimental | Embedded coordination can assign queue ownership, fence stale owners, and redirect clients to the current owner |
-| Replication | Experimental | Follower pull replication, failover promotion, in-sync checks, and replica-durable confirms are wired on this branch |
+| Queue replication | Experimental | Authenticated pull/streaming replication, ordered event application and replica-durable confirms bound to exact history and replica identities |
+| Automatic queue recovery | Experimental | Enrolled Unix queues fence ownership changes, verify surviving history and activate an installed quorum. Compatible retained payloads can be reused after full verification; contradictory or unsupported histories remain fenced |
+| Background replica catch-up | Experimental | Excluded assigned replicas catch up while the owner continues serving; durable/applied state and complete payloads gate admission |
+| Eager failure detection | Experimental, opt-in | Runtime policy can react to repeated explicit peer transport failures before heartbeat expiry. Recovery proof still gates service; silent failures use heartbeat expiry |
 | Stream replication | Experimental | Durable-tier streams replicate record and cursor logs to followers with replica-durable confirms and caught-up failover, placed and owned through embedded coordination. Express tiers stay owner-only |
 | Live repartitioning | Experimental | Grow or shrink a queue's partition count in coordinated mode, from the admin topology page |
-| Reconnect and restart resume | Available | Typed subscription closure, safe automatic recreation, broker-local persisted resume sessions and stale-delivery settlement across all five clients |
-| Checkpoint recovery | Partial | Epoch-fenced installation and message backfill exist; interruption recovery and promotion before required backfill have reproduced storage-level gaps |
+| Reconnect and restart resume | Available | Typed subscription closure, broker-local persisted resume sessions and stale-delivery settlement across all five clients. Explicit fallback discovery endpoints and temporary-recovery retries support owner-loss reattachment |
+| Checkpoint installation | Experimental, Unix | Journaled installation resumes across interruption; required payload backfill blocks promotion, including after restart. Linux fault and process-kill tests cover the path |
+| Agreed recovery checkpoints | In development | Agreement validation has focused tests. Durable checkpoint capsules, consensus publication and recovery from a bounded suffix are not wired yet; recovery still verifies retained history |
+| Speculative queue delivery | Experimental prototype, unmerged | Local-queue results remain separate from main. Correctness reconciliation and replicated speculation are pending; Plexus stream tiers have their own existing contract |
 | Recovery quarantine | Available | A damaged queue log is detected on recovery and isolated per the `recovery.on_mismatch` policy, with operator repair |
 | TLS in transit | Available | The broker listener serves TLS from operator PEMs or generated per-deployment material, mismatches are named in both directions, the clients connect with CA-file, fingerprint-pin, or OS-roots trust, the dashboard serves HTTPS from the same material, and first-boot setup mode offers generate/supply/skip before the broker ever serves. Inter-broker replication and coordination traffic is encrypted too (`tls.inter_broker`, shared-CA lane for generated material), the serving certificate rotates live via `fibrilctl admin reload-tls`, and `tls.client_auth` turns client certificates into credentials (a verified identity authenticates as the matching user with no password, `require` closes the handshake to certless peers) |
 | Broker authentication | Available | Argon2 user store seeded from config, managed from the dashboard and `fibrilctl`, replicated across the cluster. Built-in `fibril`/`fibril` credentials work from loopback only. Node-to-node connections authenticate with a cluster shared secret, never a user account |
+| Admin dashboard and demo | Available | Shared production views cover queues, messages, topology, resources and settings; the docs include a read-only simulated demo |
+| Runtime and node-local settings | Available, scoped | Runtime fields have version-checked dashboard controls. Node-local segment preallocation persists separately and reports adoption at segment rollover/reopen; other storage tuning remains startup configuration |
 | Prometheus metrics | Available | `GET /metrics` on the admin listener behind the same auth and HTTPS as the dashboard: node-level aggregates always, per-channel series from materialized channels gated by `admin.metrics_per_channel` |
 | Exclusive consumer groups | Partial | Rust, TypeScript, Python, Go, and C# client opt-in for one active consumer per partition, with sticky assignment and cross-broker coordinator wiring |
 | Transactions | Out of scope | Not planned. Transactional publish/consume workflows are intentionally excluded |
+
+Cluster recovery still needs broader partition, power-loss and sustained-load
+acceptance, authoritative stream-history recovery and safe reclamation of retained
+recovery data. There is no history-independent failover latency guarantee; see the
+[failover plan](/development/failover-plan/) for the remaining gates.
 
 ## Early performance observations
 

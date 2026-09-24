@@ -38,6 +38,14 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- Checkpoint agreement evidence and validation tests bind exact admitted history,
+  exclusive applied cuts, payload/state identities and monotonic replacement.
+  This is a protocol foundation only: durable capsules, consensus publication,
+  compaction integration and bounded-suffix recovery remain pending.
+- Current project-status and roadmap reconciliation covers adopted recovery,
+  client discovery, dynamic buffers and node-local settings; obsolete checkpoint
+  blockers and planned Go/C# client entries are removed.
+
 - Explicit trusted fallback discovery endpoints in Rust, Python, TypeScript, Go
   and C# clients, with supervised reattachment retries for temporary recovery
   replies. Initial connection still requires the configured bootstrap endpoint.
