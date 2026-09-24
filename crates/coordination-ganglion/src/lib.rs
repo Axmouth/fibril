@@ -1007,6 +1007,7 @@ pub struct GanglionCoordination {
     node_id: String,
     // Private instance identity: a replacement provider cannot inherit an old writer grant.
     history_process: [u8; 16],
+    checkpoint_operation: tokio::sync::Mutex<()>,
     node: RaftMetadataNode,
     tx: watch::Sender<CoordinationSnapshot>,
     forwarder: tokio::task::JoinHandle<()>,
@@ -1073,6 +1074,7 @@ impl GanglionCoordination {
         Self {
             node_id,
             history_process,
+            checkpoint_operation: tokio::sync::Mutex::new(()),
             node,
             tx,
             forwarder,

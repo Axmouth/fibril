@@ -119,6 +119,7 @@ copying. Never downgrade a shared log by editing its manifest version.
 
 The existing intent, stage completion, installation receipt and atomic route
 publication still control admission. Interrupted destinations remain unreferenced;
-process-kill tests cover file sharing, private-copy repair and publication. Full
-history verification remains necessary; agreed checkpoints that bound comparison
-to a suffix are separate planned work.
+process-kill tests cover file sharing, private-copy repair and publication. All retained payloads and event records still require verification. Opt-in agreed
+queue checkpoints can advance the retained event boundary to a common snapshot;
+comparison then verifies that snapshot and its later suffix. Live payloads retain
+their ordinary integrity checks. See [checkpoint policy](/development/failover-plan/#4-agreed-checkpoints-and-suffix-comparison).

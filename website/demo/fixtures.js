@@ -36,7 +36,7 @@
     delivery: { inflight_ttl_ms: 30000, expiry_poll_min_ms: 100, expiry_batch_max: 1024, delivery_poll_max_ms: 1000 },
     idle_queue_cleanup: { enabled: true, evict_after_ms: 60000, sweep_interval_ms: 10000, publisher_idle_timeout_ms: 30000 },
     connection: { reconnect_grace_ms: 10000, drain_handoff_timeout_ms: null, resume_session_restart_ttl_ms: 60000 },
-    replication: { eager_failover: false, eager_failover_grace_ms: 1000, read_timeout_slack_ms: 1000, owner_connect_timeout_ms: 5000, confirm_timeout_ms: 10000, caught_up_poll_ms: 5, retry_poll_ms: 100,
+    replication: { agreed_checkpoint_interval_ms: 0, eager_failover: false, eager_failover_grace_ms: 1000, read_timeout_slack_ms: 1000, owner_connect_timeout_ms: 5000, confirm_timeout_ms: 10000, caught_up_poll_ms: 5, retry_poll_ms: 100,
       checkpoint_retry_poll_ms: 1000, max_messages_per_read: 4096, max_events_per_read: 8192,
       max_bytes_per_read: 4194304, max_iterations_per_tick: 16, min_in_sync_replicas: 2,
       isr_timeout_ms: 10000, stream_enabled: true, stream_apply_linger_us: 100,

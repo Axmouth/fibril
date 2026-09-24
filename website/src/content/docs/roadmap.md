@@ -19,12 +19,11 @@ separate rounds when their dependencies permit.
    Add explicit remote-node edit routing and classify additional live storage
    controls. Show recovery stages and account for retained generations and staging
    data before adding automatic reclamation.
-2. **Agreed checkpoints and recovery overhead.** Add durable local checkpoint
-   capsules and retention pins, authenticated receipt publication and an opt-in,
-   coalesced agreement driver. Use accepted checkpoints to bound suffix comparison
-   without losing older live payloads or confirmed later work. Measure remaining
-   metadata/polling and verification costs after retained-data reuse, separating
-   owner loss from metadata-leader loss. See the
+2. **Checkpoint policy and recovery overhead.** Measure the opt-in agreed
+   checkpoint path under sustained traffic and many partitions. Tune cadence,
+   verification budgets and retention limits; expose checkpoint age, failed
+   attempts and retained bytes in admin diagnostics. Profile remaining metadata,
+   polling and live-payload verification costs. See the
    [fast-recovery plan](/development/failover-plan/#fast-recovery).
 3. **Speculative delivery adoption.** Reconcile the retained local-queue prototype
    with current recovery and ordered application. Close ACK-before-durability,
@@ -153,7 +152,7 @@ The compatibility work follows this order:
   Add safe reclamation of retained recovery generations and measure shared-segment
   repair costs under storage pressure.
 - Target common-case queue recovery within two seconds: measure release-build
-  stage costs, remove avoidable waits, and establish agreed checkpoints with
+  stage costs, remove avoidable waits, and tune agreed checkpoints with
   suffix-only comparison while preserving payload dependencies and quorum proof. See the
   [staged fast-recovery plan](/development/failover-plan/#fast-recovery).
 - Extend eager failover acceptance to packet-level partitions, CPU/storage stalls,

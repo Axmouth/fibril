@@ -248,6 +248,11 @@
           <input id="replication.stream_buffer_batches" data-runtime-setting type="number" min="1" step="1">
         </label>
       </div>
+      <label class="settings-field">
+        <span class="settings-label">Agreed checkpoint interval (ms)</span>
+        <span class="settings-help">Opt-in background checkpoints on all admitted queue replicas. 0 disables new attempts; 1000–86400000 sets the minimum interval. Existing attempts finish. Snapshot and payload verification uses bounded background work.</span>
+        <input id="replication.agreed_checkpoint_interval_ms" data-runtime-setting type="number" min="0" max="86400000" step="1000">
+      </label>
       <label class="checkbox-label">
         <input id="replication.eager_failover" data-runtime-setting type="checkbox">
         <span>

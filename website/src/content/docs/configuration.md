@@ -435,6 +435,7 @@ These settings apply to the experimental cluster replication path.
 | TOML field | Default | Meaning |
 | --- | --- | --- |
 | `runtime_seed.replication.confirm_timeout_ms` | `5000` | How long a replica-durable publish confirm can wait for enough durable follower progress. |
+| `runtime_seed.replication.agreed_checkpoint_interval_ms` | `0` | Opt-in agreed queue checkpoints; 0 disables new attempts, otherwise 1000–86400000 ms. Existing attempts finish and the last accepted base/suffix remain retained. All admitted replicas must agree. See [checkpoint policy](/development/failover-plan/#4-agreed-checkpoints-and-suffix-comparison). |
 | `runtime_seed.replication.eager_failover` | `false` | Opt-in explicit peer-connection failure detection on the active metadata controller. Recovery proof is still required; see [eager failover](/reliability/replication/#eager-failover). |
 | `runtime_seed.replication.eager_failover_grace_ms` | `1000` | Failed-reconnect grace, 100–60000 ms. Runtime changes restart pending suspicion; heartbeat expiry remains the silent-failure fallback. |
 | `runtime_seed.replication.caught_up_poll_ms` | `1000` | Follower pull interval while already caught up with the owner. Lower values can reduce idle replica-durable confirm latency at the cost of more wakeups. |

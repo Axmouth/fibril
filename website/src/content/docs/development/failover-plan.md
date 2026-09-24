@@ -206,44 +206,44 @@ under pressure and wider compatibility when retained bounds differ. Promotion
 within an existing generation is a separate design option; current reuse
 preserves the durable generation-installation protocol.
 
-### 4. Assess agreed checkpoints and suffix comparison
+### 4. Agreed checkpoints and suffix comparison
 
-If history inspection remains significant, establish periodic agreed recovery
-boundaries during healthy operation. An agreed boundary represents a durable,
-fully applied cut under a specific accepted history and replica configuration.
-It must cover queue state, message/event dependencies and live-payload identity,
-with the existing explicit treatment of owner-local leases and delayed activation.
-A shared boundary is additional recovery evidence; it does not change the normal
-publish-confirm contract.
+An opt-in Unix queue worker now establishes a common applied boundary during
+healthy operation. `replication.agreed_checkpoint_interval_ms` defaults to zero;
+positive values start periodic attempts on materialized queues. Each admitted
+replica pins a separate durable replay base before the owner chooses the common
+cut. Local replay and disk verification reconstruct the same normalized state,
+retained payload range and live-payload identities while later writes continue.
 
-Agreement evidence validation now binds exact admitted membership, exclusive
-boundaries and content identities, rejects stale metadata, requires every admitted
-replica and prevents a conflicting report from being overwritten by a later reply.
-This foundation does not persist checkpoint material or certificates and cannot
-authorize compaction or recovery shortcuts. Durable runtime integration remains:
+Every admitted replica, including the owner, publishes its own durable capsule
+receipt through the existing consensus metadata channel. One guarded certificate
+binds exact history, membership, process/storage identities and content. A learner
+joining the accepted set invalidates an in-progress agreement even when the base
+activation identifier stays unchanged. Contradictory reports stop that attempt.
 
-- Capture an exact cut while later writes continue. Avoid hashing moving actor
-  state against unrelated log positions or stalling the actor for full encoding.
-- Initially obtain durable receipts from every currently admitted replica, including
-  the owner, then commit the boundary certificate through coordination. A missing
-  replica delays new checkpoints while ordinary service continues. Reject stale
-  configuration, history, storage or writer identities; learner admission also
-  changes eligibility even if the activation identifier remains unchanged.
-- Retain a usable checkpoint and required suffix records/live payloads until a
-  replacement boundary is safely committed. Define retention across compaction,
-  membership changes, process replacement and interrupted checkpoint publication.
-- During failover, validate surviving evidence against the boundary and compare
-  the subsequent suffix. Preserve messages confirmed after that boundary and
-  resolve unconfirmed suffixes using the same history rules as full recovery.
-- Fall back safely when no compatible boundary or adequate survivor evidence
-  exists. Incomplete, stale or corrupted certificates cannot authorize promotion.
+Local installation persists a covering restart snapshot and accepted retention
+record before advancing either logical log head. Interruption can leave extra
+retained data. The next checkpoint waits for installation acknowledgements from
+all participants. Recovery prefers the accepted capsule, verifies all retained
+payloads and the later event suffix, and retains the existing source selection,
+quorum and activation checks. Missing compatible capsules use ordinary verified
+snapshot recovery; corrupt or contradictory material grants no shortcut.
 
-Start with time/byte-triggered, coalesced background work and at most one pending
-boundary per partition. Measure checkpoint/hash CPU, memory, retained disk,
-metadata traffic and publish/delivery latency for idle queues, busy queues and
-many partitions before selecting defaults. Incremental digests require a separate
-proof of what they cover; a compact digest is not a replacement for recoverable
-state or quorum authority.
+The first policy limits one candidate per queue and one local build at a time,
+with record, byte and elapsed-work budgets. An uncommitted attempt expires after
+two minutes. Old live messages remain retained; a large live backlog still costs
+payload verification. Disabling the interval stops new attempts and allows an
+existing attempt to finish; the last accepted checkpoint and its suffix remain
+pinned. An unavailable admitted replica can delay replacement and increase retained
+disk. Retention limits, administrative abandonment and age/disk diagnostics need
+further operational tuning before considering a default-on policy.
+
+Current tests cover unequal replay bases, zero, compaction, bounded physical reads,
+interruption at each storage publication boundary, unanimous agreement, partial
+local installation, repeated metadata/broker restarts and confirmed suffix recovery.
+Further acceptance should cover high offered rates, many partitions, checkpoint/hash
+CPU, memory, retained disk, metadata traffic and healthy publish/delivery latency.
+Incremental digests require a separate proof of what they cover.
 
 ### Validation and adoption
 

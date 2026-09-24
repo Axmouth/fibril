@@ -53,6 +53,23 @@ is set per cluster through `coordination.ganglion.assignment_durability` (see
 `N` includes the owner, so `replica_durable` with `N = 2` means the owner plus
 one durable follower.
 
+## Agreed recovery checkpoints
+
+Unix cluster queues can periodically agree on a durable recovery snapshot. Set
+`runtime_seed.replication.agreed_checkpoint_interval_ms` at startup, or change
+`replication.agreed_checkpoint_interval_ms` in the dashboard's cluster settings.
+The default is `0`; positive intervals range from 1,000 to 86,400,000 ms.
+
+Each admitted replica verifies and persists the same applied cut before consensus
+accepts it. Recovery verifies the retained snapshot and later event suffix, plus
+all required payloads. Large live backlogs still require payload reads. A missing
+replica delays replacement while ordinary replication continues.
+
+Setting the interval to zero stops new attempts; existing attempts finish and the
+last accepted checkpoint remains pinned. Retained disk can grow while replacement
+is delayed. This policy is opt-in pending broader workload and retention tuning;
+see the [checkpoint plan](/development/failover-plan/#4-agreed-checkpoints-and-suffix-comparison).
+
 ## Eager failover
 
 The default detector uses broker heartbeat expiry. An optional policy lets the

@@ -17,6 +17,8 @@ pub use stroma_core::{
     LogRuntimeSettings, LogRuntimeSnapshot, LogRuntimeStatus, Message, MessageContentType,
     MessageHeaders, MessageInspectionPage, MessageInspectionStatus, OwnerReplicationBatch,
     OwnerReplicationRead, OwnerStateCheckpoint, PartitionKind, PreparedQueueRecovery,
+    QueueCheckpointBase, QueueCheckpointPin, QueueCheckpointTarget, QueueCheckpointContents,
+    QueueCheckpointCapsule, QueueCheckpointBuildLimits,
     PreparedStorageHistory, PutOutcome, QuarantineInfo, QueueInspectionState,
     QueuePromotionOutcome, QueueRecoveryStage, QueueRecoveryStageReceipt, QueueRecoveryStageSpec,
     RecoveryMismatchPolicy, RecoveryStageLimits, ReplicatedAppendOutcome, ReplicatedEventBatch,
@@ -657,6 +659,22 @@ impl StromaEngine {
         self.inner
             .verify_queue_learner_caught_up(tp, part, group, epoch, message_target, event_target)
             .await
+    }
+
+    pub async fn begin_queue_checkpoint_pin(&self, storage: PreparedStorageHistory, attempt: [u8; 32]) -> Result<QueueCheckpointBase, StromaError> {
+        self.inner.begin_queue_checkpoint_pin(storage, attempt).await
+    }
+    pub async fn queue_checkpoint_target(&self, storage: PreparedStorageHistory, event: u64, head: u64, next: u64) -> Result<QueueCheckpointTarget, StromaError> {
+        self.inner.queue_checkpoint_target(storage, event, head, next).await
+    }
+    pub async fn build_queue_checkpoint_capsule(&self, pin: QueueCheckpointPin, target: QueueCheckpointTarget, limits: QueueCheckpointBuildLimits) -> Result<QueueCheckpointCapsule, StromaError> {
+        self.inner.build_queue_checkpoint_capsule(pin, target, limits).await
+    }
+    pub async fn accept_queue_checkpoint(&self, pin: QueueCheckpointPin, certificate: [u8; 32], capsule: [u8; 32], previous: Option<[u8; 32]>) -> Result<(), StromaError> {
+        self.inner.accept_queue_checkpoint(pin, certificate, capsule, previous).await
+    }
+    pub async fn reconcile_queue_checkpoint_pins(&self, storage: PreparedStorageHistory, pending: Option<[u8; 32]>, accepted: Option<[u8; 32]>) -> Result<(), StromaError> {
+        self.inner.reconcile_queue_checkpoint_pins(storage, pending, accepted).await
     }
 
     pub fn verify_admitted_storage_history(

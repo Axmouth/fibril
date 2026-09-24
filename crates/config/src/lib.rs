@@ -854,6 +854,9 @@ impl ServerConfig {
                 "storage.keratin.writer_buffer_factor must be in 1..=128",
             ));
         }
+        if self.runtime_seed.replication.agreed_checkpoint_interval_ms != 0 && !(1_000..=86_400_000).contains(&self.runtime_seed.replication.agreed_checkpoint_interval_ms) {
+            return Err(ConfigError::validation("runtime_seed.replication.agreed_checkpoint_interval_ms must be 0 or between 1000 and 86400000"));
+        }
         if !(100..=60_000).contains(&self.runtime_seed.replication.eager_failover_grace_ms) {
             return Err(ConfigError::validation(
                 "runtime_seed.replication.eager_failover_grace_ms must be between 100 and 60000",
@@ -1700,6 +1703,7 @@ pub struct ConsumerGroupSettings {
 #[serde(default)]
 pub struct ReplicationSettings {
     pub eager_failover: bool,
+    pub agreed_checkpoint_interval_ms: u64,
     pub eager_failover_grace_ms: u64,
     pub confirm_timeout_ms: u64,
     pub caught_up_poll_ms: u64,
@@ -1771,6 +1775,7 @@ impl Default for ReplicationSettings {
     fn default() -> Self {
         Self {
             eager_failover: false,
+            agreed_checkpoint_interval_ms: 0,
             eager_failover_grace_ms: 1_000,
             confirm_timeout_ms: 5_000,
             caught_up_poll_ms: 1_000,
@@ -1887,6 +1892,17 @@ pub struct InternalIdleQueueCleanup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkpoint_seed_matches_runtime_interval_bounds() {
+        for interval in [0, 1_000, 60_000, 86_400_000] {
+            let config = ServerConfig::from_toml_str(&format!("[runtime_seed.replication]\nagreed_checkpoint_interval_ms = {interval}")).unwrap();
+            assert_eq!(config.runtime_seed.replication.agreed_checkpoint_interval_ms, interval);
+        }
+        for interval in [1, 999, 86_400_001] {
+            assert!(ServerConfig::from_toml_str(&format!("[runtime_seed.replication]\nagreed_checkpoint_interval_ms = {interval}")).is_err());
+        }
+    }
 
     #[test]
     fn eager_failover_seed_accepts_valid_grace_and_rejects_unbounded_values() {

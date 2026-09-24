@@ -56,6 +56,31 @@ async fn serve_test_broker(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ordinary_queue_survives_repeated_broker_and_metadata_restarts() {
+    ordinary_queue_restarts(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agreed_checkpoints_replace_and_survive_repeated_broker_metadata_restarts() {
+    ordinary_queue_restarts(true).await;
+}
+
+async fn finish_checkpoint(provider: &GanglionCoordination, engine: &StromaEngine,
+    resource: &ganglion_core::ResourceIdentity) {
+    provider.queue_checkpoint_step(resource, engine, true).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Err(error) = provider.queue_checkpoint_step(resource, engine, false).await {
+                eprintln!("checkpoint retry: {error}");
+            }
+            let status = provider.queue_checkpoint_status(resource).unwrap();
+            assert!(status.failed.is_none(), "{status:?}");
+            if status.installed == status.admitted { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+}
+
+async fn ordinary_queue_restarts(checkpoints: bool) {
     use fibril_broker::coordination::{
         DeterministicPartitionPlacement, DeterministicStreamPlacement, NodeInfo, QueueIdentity,
         ReplicationDurabilityPolicy,
@@ -169,6 +194,14 @@ async fn ordinary_queue_survives_repeated_broker_and_metadata_restarts() {
         })
         .await
         .unwrap();
+        if checkpoints {
+            let epoch = provider.snapshot().assignment_for("q", Partition::new(0), None).unwrap().epoch;
+            engine.become_queue_owner_with_epoch("q", 0, None, epoch).await.unwrap();
+            for outcome in broker.apply_assignment_snapshot_transitions("a", &fibril_broker::coordination::CoordinationSnapshot::default(), &provider.snapshot()).await {
+                outcome.unwrap();
+            }
+            finish_checkpoint(&provider, &engine, &resource).await;
+        }
         let publisher = broker
             .get_publisher("q", Partition::new(0), &None)
             .await
@@ -192,6 +225,7 @@ async fn ordinary_queue_survives_repeated_broker_and_metadata_restarts() {
                 .unwrap(),
             cycle
         );
+        if checkpoints { finish_checkpoint(&provider, &engine, &resource).await; }
         drop(publisher);
         if cycle == 2 {
             let messages = engine
@@ -484,6 +518,20 @@ enum LearnerCase {
 }
 
 async fn three_node_owner_loss(recover: bool, learner: LearnerCase) {
+    three_node_owner_loss_with_checkpoints(recover, learner, false, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agreed_checkpoint_requires_three_receipts_then_recovers_confirmed_suffix() {
+    three_node_owner_loss_with_checkpoints(true, LearnerCase::None, true, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agreed_checkpoint_partial_installation_recovers_using_compatible_old_history() {
+    three_node_owner_loss_with_checkpoints(true, LearnerCase::None, true, true).await;
+}
+
+async fn three_node_owner_loss_with_checkpoints(recover: bool, learner: LearnerCase, checkpoints: bool, partial_checkpoint: bool) {
     use fibril_broker::coordination::{NodeInfo, QueueIdentity};
     let root = std::env::temp_dir().join(format!(
         "fibril-three-node-enrollment-{}",
@@ -984,6 +1032,87 @@ async fn three_node_owner_loss(recover: bool, learner: LearnerCase) {
         std::fs::remove_dir_all(root).unwrap();
         return;
     }
+    if checkpoints {
+        for i in 1..3 {
+            let decision = providers[i].local_initial_history_admissions().unwrap()[0].0.clone();
+            providers[i].admit_local_initial_history(&decision, &brokers[i].engine()).await.unwrap();
+        }
+        for i in 0..3 {
+            for result in brokers[i].apply_assignment_snapshot_transitions(["a", "b", "c"][i],
+                &fibril_broker::coordination::CoordinationSnapshot::default(), &providers[i].snapshot()).await {
+                result.unwrap();
+            }
+            if i == 0 { brokers[i].engine().become_queue_owner_with_epoch("q", 0, None, 1).await.unwrap(); }
+            else {
+                brokers[i].engine().become_queue_follower_with_epoch("q", 0, None, 1).await.unwrap();
+
+            }
+        }
+        let assignment = providers[0].snapshot().assignment_for("q", Partition::new(0), None).unwrap().clone();
+        let mut peers = Vec::new();
+        for id in ["b", "c"] {
+            peers.push(fibril_protocol::v1::replication::connect_protocol_owner_peer(config.nodes["a"].clone(),
+                config.auth.as_ref(), None, "checkpoint-test", "1").await.unwrap()
+                .with_reporter(id).with_history_session(assignment.history.as_ref().unwrap().session("q", Partition::new(0), None, false, id, "a").unwrap()));
+        }
+        let publisher = brokers[0].get_publisher("q", Partition::new(0), &None).await.unwrap();
+        for n in 0..16u64 {
+            let confirm = publisher.publish(n.to_le_bytes().to_vec(), unix_millis(), unix_millis(), None, Default::default(), None).await.unwrap();
+            for i in 1..3 {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        let from = brokers[i].engine().queue_replication_next_offsets("q", 0, None).await.unwrap();
+                        if from.0 >= n + 1 && from.1 >= n + 1 { break; }
+                        brokers[i].catch_up_replication_follower_from_owner(&peers[i-1], "q", Partition::new(0), None,
+                            fibril_broker::broker::ReplicationResourceKind::Queue,
+                            fibril_broker::broker::BrokerReplicationCatchUpOptions { message_from: from.0, event_from: from.1,
+                                max_messages_per_read: 4096, max_events_per_read: 4096, max_bytes_per_read: 16*1024*1024,
+                                max_iterations: 16, max_wait_ms: 0 }).await.unwrap();
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                }).await.unwrap();
+            }
+            assert_eq!(tokio::time::timeout(Duration::from_secs(10), confirm).await.unwrap().unwrap().unwrap(), n);
+        }
+        providers[0].queue_checkpoint_step(&resource, &brokers[0].engine(), true).await.unwrap();
+        // Two durable replicas suffice for publishes, but cannot issue the
+        // all-admitted checkpoint certificate while the third report is absent.
+        for _ in 0..6 {
+            for i in 0..2 { let _ = providers[i].queue_checkpoint_step(&resource, &brokers[i].engine(), false).await; }
+        }
+        assert!(providers[0].queue_checkpoint_status(&resource).unwrap().certificate.is_none());
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                for i in 0..3 {
+                    if partial_checkpoint && i == 2 && providers[0].queue_checkpoint_status(&resource).unwrap().certificate.is_some() { continue; }
+                    if let Err(error) = providers[i].queue_checkpoint_step(&resource, &brokers[i].engine(), false).await {
+                        eprintln!("checkpoint node {i}: {error}");
+                    }
+                }
+                let status = providers[0].queue_checkpoint_status(&resource).unwrap();
+                assert!(status.failed.is_none(), "{status:?}");
+                if status.installed == if partial_checkpoint { 2 } else { 3 } { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        let confirm = publisher.publish(16u64.to_le_bytes().to_vec(), unix_millis(), unix_millis(), None, Default::default(), None).await.unwrap();
+            for i in 1..3 {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        let from = brokers[i].engine().queue_replication_next_offsets("q", 0, None).await.unwrap();
+                        if from.0 >= 17 && from.1 >= 17 { break; }
+                        brokers[i].catch_up_replication_follower_from_owner(&peers[i-1], "q", Partition::new(0), None,
+                            fibril_broker::broker::ReplicationResourceKind::Queue,
+                            fibril_broker::broker::BrokerReplicationCatchUpOptions { message_from: from.0, event_from: from.1,
+                                max_messages_per_read: 4096, max_events_per_read: 4096, max_bytes_per_read: 16*1024*1024,
+                                max_iterations: 16, max_wait_ms: 0 }).await.unwrap();
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                }).await.unwrap();
+            }
+        assert_eq!(tokio::time::timeout(Duration::from_secs(10), confirm).await.unwrap().unwrap().unwrap(), 16);
+        drop(publisher);
+    }
     for i in 1..3 {
         let admissions = providers[i].local_initial_history_admissions().unwrap();
         assert_eq!(admissions[0].0.required_write_nodes, 2);
@@ -991,7 +1120,7 @@ async fn three_node_owner_loss(recover: bool, learner: LearnerCase) {
             brokers[i]
                 .engine()
                 .verify_admitted_storage_history(&admissions[0].1)
-                .is_err()
+                .is_err() != checkpoints
         );
     }
     owner_worker.abort();
@@ -1161,6 +1290,11 @@ async fn three_node_owner_loss(recover: bool, learner: LearnerCase) {
             assignment.durability,
             ReplicationDurabilityPolicy::MajorityDurable
         );
+        if checkpoints {
+            let deliveries = brokers[1].engine().poll_ready("q", 0, None, 32, unix_millis() + 60_000, u64::MAX).await.unwrap();
+            assert_eq!(deliveries.iter().map(|m| u64::from_le_bytes(m.payload.as_slice().try_into().unwrap())).collect::<Vec<_>>(), (0..17).collect::<Vec<_>>());
+        }
+
     }
     for w in workers {
         w.abort();

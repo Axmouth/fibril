@@ -38,10 +38,12 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
-- Checkpoint agreement evidence and validation tests bind exact admitted history,
-  exclusive applied cuts, payload/state identities and monotonic replacement.
-  This is a protocol foundation only: durable capsules, consensus publication,
-  compaction integration and bounded-suffix recovery remain pending.
+- Opt-in agreed queue checkpoints (`replication.agreed_checkpoint_interval_ms`):
+  durable replay bases and same-cut capsules, every admitted replica's locally
+  verified receipt, guarded consensus publication, and retained snapshot/suffix
+  recovery. Exact logical floors advance after durable acceptance; confirmed
+  suffixes, live payload validation, quorum thresholds and fencing are preserved.
+  The worker, startup seed and shared dashboard setting default to disabled.
 - Current project-status and roadmap reconciliation covers adopted recovery,
   client discovery, dynamic buffers and node-local settings; obsolete checkpoint
   blockers and planned Go/C# client entries are removed.

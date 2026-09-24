@@ -8,6 +8,15 @@ for further detail. Measurements describe the stated workload and hardware.
 Current capabilities are in [implemented surface](/implemented-surface/);
 remaining work is in the [roadmap](/roadmap/).
 
+## Agreed queue recovery checkpoints
+
+Opt-in background agreement creates durable same-cut queue snapshots across all
+admitted replicas and advances retention only after consensus publication. Recovery
+verifies the surviving snapshot and suffix while preserving live payload checks;
+large live backlogs still require payload reads. Crash, partial-installation and
+confirmed-suffix tests cover the publication and recovery boundaries.
+
+
 ## Adoption — September 2026
 
 ### Reusing compatible retained message segments

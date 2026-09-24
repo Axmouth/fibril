@@ -7,6 +7,7 @@ pub mod recovery_driver;
 mod recovery_timing;
 pub mod initial_history_driver;
 pub mod queue_learner_driver;
+mod queue_checkpoint_driver;
 
 use std::collections::BTreeMap;
 use std::num::ParseIntError;
@@ -99,6 +100,7 @@ pub fn runtime_seed_from_config(config: &ServerConfig) -> RuntimeSettings {
         },
         replication: ReplicationRuntimeSettings {
             eager_failover: config.runtime_seed.replication.eager_failover,
+            agreed_checkpoint_interval_ms: config.runtime_seed.replication.agreed_checkpoint_interval_ms,
             eager_failover_grace_ms: config.runtime_seed.replication.eager_failover_grace_ms,
             confirm_timeout_ms: config.runtime_seed.replication.confirm_timeout_ms,
             caught_up_poll_ms: config.runtime_seed.replication.caught_up_poll_ms,

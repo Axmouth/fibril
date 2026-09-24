@@ -91,6 +91,9 @@ pub struct ConsumerGroupRuntimeSettings {
 
 impl RuntimeSettings {
     pub fn validate(&self) -> Result<(), RuntimeSettingsError> {
+        if self.replication.agreed_checkpoint_interval_ms != 0 && !(1_000..=86_400_000).contains(&self.replication.agreed_checkpoint_interval_ms) {
+            return Err(RuntimeSettingsError::Invalid("replication.agreed_checkpoint_interval_ms must be 0 or between 1000 and 86400000".into()));
+        }
         if !(100..=60_000).contains(&self.replication.eager_failover_grace_ms) {
             return Err(RuntimeSettingsError::Invalid(
                 "replication.eager_failover_grace_ms must be between 100 and 60000".into(),
@@ -183,6 +186,8 @@ pub struct DeliveryRuntimeSettings {
 pub struct ReplicationRuntimeSettings {
     /// Opt-in controller suspicion from repeated explicit Raft transport errors.
     pub eager_failover: bool,
+    /// Background agreed checkpoints; zero disables new attempts.
+    pub agreed_checkpoint_interval_ms: u64,
     /// Minimum failed-reconnect grace; heartbeat expiry remains the fallback.
     pub eager_failover_grace_ms: u64,
     /// How long a publish confirm may wait for the assignment's replication
@@ -237,6 +242,7 @@ impl Default for ReplicationRuntimeSettings {
     fn default() -> Self {
         Self {
             eager_failover: false,
+            agreed_checkpoint_interval_ms: 0,
             eager_failover_grace_ms: 1_000,
             confirm_timeout_ms: 5_000,
             caught_up_poll_ms: 1_000,
@@ -702,6 +708,20 @@ fn decode_snapshot(value: GlobalValue) -> Result<RuntimeSettingsSnapshot, Runtim
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn checkpoint_interval_defaults_off_and_bounds_background_cadence() {
+        let old: super::ReplicationRuntimeSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.agreed_checkpoint_interval_ms, 0);
+        let mut settings = super::RuntimeSettings::default();
+        for interval in [0, 1000, 60_000, 86_400_000] {
+            settings.replication.agreed_checkpoint_interval_ms = interval;
+            assert!(settings.validate().is_ok());
+        }
+        for interval in [1, 999, 86_400_001, u64::MAX] {
+            settings.replication.agreed_checkpoint_interval_ms = interval;
+            assert!(settings.validate().is_err());
+        }
+    }
     #[test]
     fn eager_failover_defaults_off_and_requires_bounded_grace() {
         let old: super::ReplicationRuntimeSettings = serde_json::from_str("{}").unwrap();

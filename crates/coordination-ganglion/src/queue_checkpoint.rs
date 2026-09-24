@@ -1,9 +1,10 @@
-//! Agreement evidence for a future durable queue checkpoint protocol.
+//! Agreement evidence and consensus publication for durable queue checkpoints.
 //!
 //! These types validate identity and unanimous agreement only. They do not
 //! attest to disk persistence, grant serving, authorize compaction, or replace
 //! sealed recovery verification. Runtime publication must additionally verify
-//! durable local capsules and commit their receipts through fresh consensus.
+//! durable local capsules and commit their receipts through fresh consensus, as
+//! implemented by the background runtime in this module.
 use std::collections::BTreeMap;
 
 use fibril_broker::{
@@ -15,32 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::history_identity::ResourceIncarnation;
 
-/// Shared content at one exact, fully applied exclusive event boundary.
-///
-/// The complete retained payload digest includes pending/orphan payloads, not
-/// only messages currently visible in the queue. A later enqueue may refer to a
-/// payload below `message_next`. The eventual capsule/retention implementation
-/// must preserve those dependencies as well as older live messages.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct QueueCheckpointContents {
-    pub event_next: u64,
-    pub message_head: u64,
-    pub message_next: u64,
-    pub required_message_next: u64,
-    pub snapshot_digest: [u8; 32],
-    pub state_digest: [u8; 32],
-    pub message_digest: [u8; 32],
-    pub live_payload_digest: [u8; 32],
-}
-impl QueueCheckpointContents {
-    fn validate(&self) -> Result<(), String> {
-        if self.message_head > self.message_next || self.required_message_next > self.message_next {
-            return Err("checkpoint payload bounds do not cover state dependencies".into());
-        }
-        Ok(())
-    }
-}
+pub use fibril_broker::queue_engine::QueueCheckpointContents;
 
 /// Immutable agreement proposal. Deserialization conveys no authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,7 +34,7 @@ pub struct QueueCheckpointProposal {
 }
 
 /// An authenticated replica's claim that its immutable capsule is durable.
-/// The future receipt publisher must check that claim against local storage;
+/// The receipt publisher checks that claim against local storage;
 /// a peer-supplied hash or a deserialized record is not such a check.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -324,3 +300,6 @@ impl QueueCheckpointAgreement {
         Ok(evidence)
     }
 }
+
+mod runtime;
+pub use runtime::QueueCheckpointStatus;
