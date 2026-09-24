@@ -1533,6 +1533,8 @@ pub struct Broker<
     pending_settles: Arc<AtomicUsize>,
     settle_drained: Arc<Notify>,
     settings_changed: Arc<Notify>,
+    /// Local durable admission can finish after its assignment was observed.
+    history_admitted: Notify,
     settings_epoch: AtomicU64,
 
     /// Node-local cap on the payload bytes fetched per delivery `poll_ready`
@@ -1793,6 +1795,7 @@ impl<
             pending_settles: Arc::new(AtomicUsize::new(0)),
             settle_drained: Arc::new(Notify::new()),
             settings_changed: Arc::new(Notify::new()),
+            history_admitted: Notify::new(),
             settings_epoch: AtomicU64::new(1),
             task_group: Arc::new(TaskGroup::new()),
             metrics,
@@ -4572,6 +4575,14 @@ impl<
 }
 
 impl Broker<StromaEngine> {
+    /// Retry locally deferred role changes after storage admission. This grants
+    /// no authority: the watcher rechecks the current assignment and history.
+    pub fn notify_history_admitted(&self) {
+        // There is one assignment watcher per broker. Retain a permit when it
+        // is still applying the assignment, preventing an admission/wait race.
+        self.history_admitted.notify_one();
+    }
+
     pub fn spawn_assignment_watcher(self: &Arc<Self>, coordination: Arc<dyn Coordination>) {
         let broker = self.clone();
         self.task_group.spawn("assignment_watcher", async move {
@@ -4594,6 +4605,7 @@ impl Broker<StromaEngine> {
                             break;
                         }
                     }
+                    _ = broker.history_admitted.notified() => {}
                     _ = tokio::time::sleep(Duration::from_secs(1)),
                         if !broker.pending_follower_admissions.is_empty() => {}
                 }
@@ -4653,6 +4665,7 @@ impl Broker<StromaEngine> {
                             break;
                         }
                     }
+                    _ = broker.history_admitted.notified() => {}
                     _ = tokio::time::sleep(Duration::from_secs(1)),
                         if !broker.pending_follower_admissions.is_empty() => {}
                 }

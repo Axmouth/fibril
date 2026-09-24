@@ -4,9 +4,8 @@ use fibril_broker::{
     broker::{Broker, QueueOwnership},
     queue_engine::StromaEngine,
     recovery::{
-        inspection::RecoveryInspectionLimits,
         BrokerSealedReplica, RecoveryReadRequest, RecoveryReadSource, RecoverySealRequest,
-        SealedReplicaFrontiers,
+        SealedReplicaFrontiers, inspection::RecoveryInspectionLimits,
     },
     recovery_transfer::{
         QueueRecoveryCommand, QueueRecoveryOperation as Operation, QueueRecoveryReply as Reply,
@@ -22,6 +21,7 @@ use fibril_protocol::v1::{
     recovery_transfer::request_transfer,
     replication::{ProtocolOwnerPeerResolverConfig, request_recovery_read, request_recovery_seal},
 };
+use futures::{StreamExt, stream};
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
@@ -29,6 +29,8 @@ use std::{
 };
 const RPC: Duration = Duration::from_secs(10);
 const MAX_REPLICAS: usize = 16;
+// Each transfer can retain a 16 MiB page. Bound aggregate memory and disk pressure.
+const PARALLEL_REPLICAS: usize = 2;
 // Sequential inspection verifies each complete retained history. Use the wire limits
 // to amortize those scans, while keeping total inspection budgets unchanged.
 fn automatic_inspection_limits() -> RecoveryInspectionLimits {
@@ -145,15 +147,31 @@ async fn recover_queue_attempt(
             .cloned()
             .collect();
         let mut reports = vec![];
-        for node in &eligible {
-            match timing
-                .stage(
-                    "witness_seal",
-                    node,
-                    request_recovery_seal(config, node, &seal_command, RPC),
-                )
-                .await
-            {
+        let sealed = stream::iter(
+            eligible
+                .iter()
+                .map(|node| {
+                    let seal_command = &seal_command;
+                    async move {
+                        (
+                            node,
+                            timing
+                                .stage(
+                                    "witness_seal",
+                                    node,
+                                    request_recovery_seal(config, node, seal_command, RPC),
+                                )
+                                .await,
+                        )
+                    }
+                })
+                .collect::<Vec<_>>(),
+        )
+        .buffer_unordered(PARALLEL_REPLICAS)
+        .collect::<Vec<_>>()
+        .await;
+        for (node, result) in sealed {
+            match result {
                 Ok(report) => {
                     witnesses.record(
                         &provider.consensus_node().committed_snapshot(),
@@ -165,32 +183,48 @@ async fn recover_queue_attempt(
                 Err(e) => tracing::debug!(node,error=%e,"recovery witness unavailable"),
             }
         }
+        // Completion order must not alter deterministic source selection.
+        reports.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+        let inspected = stream::iter(
+            reports
+                .iter()
+                .map(|report| {
+                    let seal_command = &seal_command;
+                    async move {
+                        let result = timing
+                            .stage(
+                                "inspect_source",
+                                &report.node_id,
+                                inspect_recovery_source_artifact(
+                                    config,
+                                    &seal_command,
+                                    report,
+                                    automatic_inspection_limits(),
+                                    Default::default(),
+                                    16 * 1024 * 1024,
+                                    16 * 1024 * 1024,
+                                    RPC,
+                                ),
+                            )
+                            .await;
+                        (report, result)
+                    }
+                })
+                .collect::<Vec<_>>(),
+        )
+        .buffer_unordered(PARALLEL_REPLICAS)
+        .collect::<Vec<_>>()
+        .await;
         let mut artifacts = BTreeMap::new();
-        for report in &reports {
-            // A truncated source may fail replay while another witness supplies
-            // its payloads. Preserve that witness and compare its retained data.
-            match timing
-                .stage(
-                    "inspect_source",
-                    &report.node_id,
-                    inspect_recovery_source_artifact(
-                        config,
-                        &seal_command,
-                        report,
-                        automatic_inspection_limits(),
-                        Default::default(),
-                        16 * 1024 * 1024,
-                        16 * 1024 * 1024,
-                        RPC,
-                    ),
-                )
-                .await
-            {
+        for (report, result) in inspected {
+            match result {
                 Ok(artifact) => {
                     artifacts.insert(report.node_id.clone(), artifact);
                 }
                 Err(e) => {
-                    tracing::warn!(node=report.node_id,message_next=report.seal.message_next,event_next=report.seal.event_next,error=%e,"sealed replica cannot supply a complete recovery artifact")
+                    // Keep the witness: another replica may supply missing payloads.
+                    tracing::warn!(node=report.node_id,message_next=report.seal.message_next,event_next=report.seal.event_next,error=%e,
+                        "sealed replica cannot supply a complete recovery artifact");
                 }
             }
         }
@@ -278,44 +312,204 @@ async fn recover_queue_attempt(
         snapshot = Some(artifact.state_snapshot().to_vec());
     }
     let snapshot = snapshot.unwrap();
+    let mut errors = vec![];
+    let source_reads = tokio::sync::Mutex::new(());
+    let prepared = stream::iter(
+        members
+            .iter()
+            .filter(|node| completed_source.as_ref() != Some(*node))
+            .map(|node| {
+                let plan = &plan;
+                let snapshot = &snapshot;
+                let source = completed_source.as_deref();
+                let source_reads = &source_reads;
+                async move {
+                    (
+                        node,
+                        prepare_target(
+                            config,
+                            plan,
+                            pending,
+                            node,
+                            snapshot,
+                            source,
+                            source_reads,
+                            timing,
+                        )
+                        .await,
+                    )
+                }
+            })
+            .collect::<Vec<_>>(),
+    )
+    .buffer_unordered(PARALLEL_REPLICAS)
+    .collect::<Vec<_>>()
+    .await;
+    let mut ready = vec![];
+    for (node, result) in prepared {
+        match result {
+            Ok(()) => ready.push(node),
+            Err(e) => errors.push(format!("{node}: {e}")),
+        }
+    }
+    if let Some(source) = &completed_source {
+        match prepare_target(
+            config,
+            &plan,
+            pending,
+            source,
+            &snapshot,
+            Some(source),
+            &source_reads,
+            timing,
+        )
+        .await
+        {
+            Ok(()) => ready.push(source),
+            Err(e) => errors.push(format!("{source}: {e}")),
+        }
+    }
+    // If too few targets completed, preserve the old source for retry. With an
+    // exact completed quorum, failed targets are excluded by activation; all
+    // in-flight reads have finished before any source replacement starts.
+    if !errors.is_empty()
+        && (ready.len() < pending.proposed_write_nodes
+            || !ready.iter().any(|n| n.as_str() == local))
+    {
+        return Err(format!(
+            "recovery staging incomplete: {}",
+            errors.join("; ")
+        ));
+    }
+    let installations = stream::iter(
+        ready
+            .into_iter()
+            .map(|node| {
+                let plan = &plan;
+                async move {
+                    (
+                        node,
+                        timing
+                            .stage(
+                                "install_target",
+                                node,
+                                transfer(config, plan, node, Operation::Install),
+                            )
+                            .await,
+                    )
+                }
+            })
+            .collect::<Vec<_>>(),
+    )
+    .buffer_unordered(PARALLEL_REPLICAS)
+    .collect::<Vec<_>>()
+    .await;
     let mut installed = 0usize;
     let mut owner_ready = false;
-    let mut errors = vec![];
-    for node in &members {
-        let result = timing
-            .stage("prepare_target", node, async {
-                // Existing old storage must be durably fenced before replacement.
-                // Already installed targets reject this old seal and resume below.
-                if pending.previous.owner == *node || pending.previous.followers.contains(node) {
-                    let _ = timing
-                        .stage(
-                            "target_seal",
-                            node,
-                            request_recovery_seal(config, node, &seal_command, RPC),
-                        )
-                        .await;
-                }
-                let Reply::Progress(mut next) = timing
+    for (node, result) in installations {
+        match result {
+            Ok(Reply::Installed(_)) => {
+                installed += 1;
+                owner_ready |= node == local;
+            }
+            Ok(_) => errors.push(format!("{node}: invalid installed response")),
+            Err(e) => errors.push(format!("{node}: {e}")),
+        }
+    }
+    if !owner_ready || installed < pending.proposed_write_nodes {
+        return Err(format!(
+            "recovery has {installed}/{} installed replicas, owner_ready={owner_ready}: {}",
+            pending.proposed_write_nodes,
+            errors.join("; ")
+        ));
+    }
+    let activation = timing
+        .stage(
+            "activate",
+            local,
+            provider.activate_queue_recovery(&plan, &broker.engine()),
+        )
+        .await
+        .map_err(err)?;
+    for node in activation.reports().keys() {
+        if let Err(e) = timing
+            .stage(
+                "admit",
+                node,
+                transfer(config, &plan, node, Operation::Admit),
+            )
+            .await
+        {
+            tracing::warn!(node,error=%e,"recovery activated; exact local admission will retry");
+        }
+    }
+    tracing::info!(
+        topic = pending.proposed.resource.name,
+        partition = pending.proposed.resource.partition,
+        epoch = pending.proposed.epoch,
+        replicas = activation.reports().len(),
+        message_next = plan.message_next(),
+        event_next = plan.event_next(),
+        "queue recovery activated"
+    );
+    Ok(())
+}
+
+// Preparing a private stage does not replace the frozen source. All page reads
+// finish before any installation starts, so concurrent targets cannot invalidate
+// a source still needed by another target. A completed-stage source is left alone
+// until its readers finish because transfer RPCs share a per-broker stage lock.
+async fn prepare_target(
+    config: &ProtocolOwnerPeerResolverConfig,
+    plan: &QueueRecoveryPlan,
+    pending: &PendingRecovery,
+    node: &str,
+    snapshot: &[u8],
+    completed_source: Option<&str>,
+    source_reads: &tokio::sync::Mutex<()>,
+    timing: &crate::recovery_timing::RecoveryTiming,
+) -> Result<(), String> {
+    let seal_command = pending.seal_command()?;
+    timing
+        .stage("prepare_target", node, async {
+            // Existing old storage must be durably fenced before replacement.
+            // Already installed targets reject this old seal and resume below.
+            if pending.previous.owner == node
+                || pending.previous.followers.iter().any(|n| n == node)
+            {
+                let _ = timing
                     .stage(
-                        "begin_target",
+                        "target_seal",
                         node,
-                        transfer(
-                            config,
-                            &plan,
-                            node,
-                            Operation::Begin {
-                                snapshot: snapshot.clone(),
-                            },
-                        ),
+                        request_recovery_seal(config, node, &seal_command, RPC),
                     )
-                    .await?
-                else {
-                    return Err("invalid staging progress response".into());
-                };
-                timing
-                    .stage("copy_pages", node, async {
-                        while next < plan.message_next() {
-                            let page = if let Some(source) = &completed_source {
+                    .await;
+            }
+            let Reply::Progress(mut next) = timing
+                .stage(
+                    "begin_target",
+                    node,
+                    transfer(
+                        config,
+                        &plan,
+                        node,
+                        Operation::Begin {
+                            snapshot: snapshot.to_vec(),
+                        },
+                    ),
+                )
+                .await?
+            else {
+                return Err("invalid staging progress response".into());
+            };
+            timing
+                .stage("copy_pages", node, async {
+                    while next < plan.message_next() {
+                        let page = {
+                            // Completed-stage reads share one per-broker stage lock.
+                            // Serialize source reads while target appends still overlap.
+                            let _read = source_reads.lock().await;
+                            if let Some(source) = completed_source {
                                 let Reply::Page(page) = transfer(
                                     config,
                                     &plan,
@@ -367,98 +561,39 @@ async fn recover_queue_attempt(
                                         .collect(),
                                     snapshot_bytes: page.snapshot_bytes,
                                 }
-                            };
-                            if page.next <= next || page.next > plan.message_next() {
-                                return Err("recovery page made no valid progress".into());
                             }
-                            let Reply::Progress(progress) =
-                                transfer(config, &plan, node, Operation::Append { page }).await?
-                            else {
-                                return Err("invalid append response".into());
-                            };
-                            if progress <= next || progress > plan.message_next() {
-                                return Err("invalid staged progress".into());
-                            }
-                            next = progress;
+                        };
+                        if page.next <= next || page.next > plan.message_next() {
+                            return Err("recovery page made no valid progress".into());
                         }
-                        Ok::<_, String>(())
-                    })
-                    .await?;
-                if !matches!(
-                    timing
-                        .stage(
-                            "finish_target",
-                            node,
-                            transfer(config, &plan, node, Operation::Finish)
-                        )
-                        .await?,
-                    Reply::Complete(_)
-                ) {
-                    return Err("invalid completion response".into());
-                }
-                if !matches!(
-                    timing
-                        .stage(
-                            "install_target",
-                            node,
-                            transfer(config, &plan, node, Operation::Install)
-                        )
-                        .await?,
-                    Reply::Installed(_)
-                ) {
-                    return Err("invalid installed response".into());
-                }
-                Ok::<_, String>(())
-            })
-            .await;
-        match result {
-            Ok(()) => {
-                installed += 1;
-                owner_ready |= node == local;
-                if completed_source.is_none() {
-                    completed_source = Some(node.clone());
-                }
+                        let Reply::Progress(progress) =
+                            transfer(config, &plan, node, Operation::Append { page }).await?
+                        else {
+                            return Err("invalid append response".into());
+                        };
+                        if progress <= next || progress > plan.message_next() {
+                            return Err("invalid staged progress".into());
+                        }
+                        next = progress;
+                    }
+                    Ok::<_, String>(())
+                })
+                .await?;
+            if !matches!(
+                timing
+                    .stage(
+                        "finish_target",
+                        node,
+                        transfer(config, &plan, node, Operation::Finish)
+                    )
+                    .await?,
+                Reply::Complete(_)
+            ) {
+                return Err("invalid completion response".into());
             }
-            Err(e) => errors.push(format!("{node}: {e}")),
-        }
-    }
-    if !owner_ready || installed < pending.proposed_write_nodes {
-        return Err(format!(
-            "recovery has {installed}/{} installed replicas, owner_ready={owner_ready}: {}",
-            pending.proposed_write_nodes,
-            errors.join("; ")
-        ));
-    }
-    let activation = timing
-        .stage(
-            "activate",
-            local,
-            provider.activate_queue_recovery(&plan, &broker.engine()),
-        )
+            Ok(())
+        })
         .await
-        .map_err(err)?;
-    for node in activation.reports().keys() {
-        if let Err(e) = timing
-            .stage(
-                "admit",
-                node,
-                transfer(config, &plan, node, Operation::Admit),
-            )
-            .await
-        {
-            tracing::warn!(node,error=%e,"recovery activated; exact local admission will retry");
-        }
-    }
-    tracing::info!(
-        topic = pending.proposed.resource.name,
-        partition = pending.proposed.resource.partition,
-        epoch = pending.proposed.epoch,
-        replicas = activation.reports().len(),
-        message_next = plan.message_next(),
-        event_next = plan.event_next(),
-        "queue recovery activated"
-    );
-    Ok(())
 }
 
 /// Start bounded recovery and exact local readmission for enrolled histories.
@@ -468,16 +603,21 @@ pub fn spawn(
     mut config: ProtocolOwnerPeerResolverConfig,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut initial_failures: HashMap<ganglion_core::ResourceIdentity, (tokio::time::Instant, u64, String)> = HashMap::new();
+        let mut initial_failures: HashMap<
+            ganglion_core::ResourceIdentity,
+            (tokio::time::Instant, u64, String),
+        > = HashMap::new();
         let _checkpoints = crate::queue_checkpoint_driver::spawn(provider.clone(), broker.clone());
-        let _learners = crate::queue_learner_driver::spawn(provider.clone(), broker.clone(), config.clone());
+        let _learners =
+            crate::queue_learner_driver::spawn(provider.clone(), broker.clone(), config.clone());
         let mut failures: HashMap<[u8; 32], (tokio::time::Instant, u64, String)> = HashMap::new();
+        let mut wake =
+            crate::recovery_wake::RecoveryWake::new(provider.consensus_node().watch_committed());
         loop {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            let state = wake.next().await;
             if broker.is_shutting_down() {
                 break;
             }
-            let state = provider.consensus_node().committed_snapshot();
             config.nodes = state
                 .nodes
                 .iter()
@@ -486,12 +626,25 @@ pub fn spawn(
             // Activation can commit before the owner returns a reply. Every
             // exact prepared process retries its own admission independently.
             match provider.local_initial_history_admissions() {
-                Ok(admissions) => for (decision, prepared) in admissions {
-                    if broker.engine().verify_admitted_storage_history(&prepared).is_ok() { continue; }
-                    if let Err(e) = provider.admit_local_initial_history(&decision, &broker.engine()).await {
-                        tracing::debug!(error=%e, "initial history admission will retry");
+                Ok(admissions) => {
+                    for (decision, prepared) in admissions {
+                        if broker
+                            .engine()
+                            .verify_admitted_storage_history(&prepared)
+                            .is_ok()
+                        {
+                            continue;
+                        }
+                        if let Err(e) = provider
+                            .admit_local_initial_history(&decision, &broker.engine())
+                            .await
+                        {
+                            tracing::debug!(error=%e, "initial history admission will retry");
+                        } else {
+                            broker.notify_history_admitted();
+                        }
                     }
-                },
+                }
                 Err(e) => tracing::warn!(error=%e, "cannot inspect initial history admissions"),
             }
             match provider.initial_queue_work() {
@@ -499,12 +652,26 @@ pub fn spawn(
                     let active: std::collections::HashSet<_> = work.iter().collect();
                     initial_failures.retain(|resource, _| active.contains(resource));
                     for resource in work {
-                        if initial_failures.get(&resource).is_some_and(|(at, _, _)| *at > tokio::time::Instant::now()) { continue; }
-                        let outcome = tokio::time::timeout(Duration::from_secs(120),
-                            crate::initial_history_driver::prepare_queue_once(&provider, &broker, &config, &resource)
-                        ).await.unwrap_or_else(|_| Err("initial preparation exceeded work budget; retry".into()));
+                        if initial_failures
+                            .get(&resource)
+                            .is_some_and(|(at, _, _)| *at > tokio::time::Instant::now())
+                        {
+                            continue;
+                        }
+                        let outcome = tokio::time::timeout(
+                            Duration::from_secs(120),
+                            crate::initial_history_driver::prepare_queue_once(
+                                &provider, &broker, &config, &resource,
+                            ),
+                        )
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err("initial preparation exceeded work budget; retry".into())
+                        });
                         match outcome {
-                            Ok(()) => { initial_failures.remove(&resource); }
+                            Ok(()) => {
+                                initial_failures.remove(&resource);
+                            }
                             Err(e) => {
                                 let previous = initial_failures.get(&resource);
                                 let delay = previous.map_or(1, |(_, d, _)| (d * 2).min(30));
@@ -512,7 +679,14 @@ pub fn spawn(
                                     tracing::warn!(topic=resource.name, partition=resource.partition, retry_seconds=delay, error=%e,
                                         "queue remains fenced during initial preparation");
                                 }
-                                initial_failures.insert(resource, (tokio::time::Instant::now() + Duration::from_secs(delay), delay, e));
+                                initial_failures.insert(
+                                    resource,
+                                    (
+                                        tokio::time::Instant::now() + Duration::from_secs(delay),
+                                        delay,
+                                        e,
+                                    ),
+                                );
                             }
                         }
                     }
@@ -560,7 +734,8 @@ pub fn spawn(
                 // Let the original driver report malformed/stale authority via
                 // the existing bounded error path instead of silently skipping it.
                 // recover_queue_once always validates the candidate again.
-                let candidate = provider.queue_recovery_candidate(&pending)
+                let candidate = provider
+                    .queue_recovery_candidate(&pending)
                     .unwrap_or_else(|_| pending.proposed.clone());
                 if provider.replication_node_id() != Some(candidate.owner.as_str())
                     || pending.previous_activation.is_none()

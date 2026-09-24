@@ -16,6 +16,8 @@ const MAX_METADATA: usize = 1024 * 1024;
 struct State {
     active: Option<QueueCheckpointEvidence>,
     #[serde(default)]
+    accepted_ms: u64,
+    #[serde(default)]
     cleaned: BTreeSet<String>,
     attempt: Option<Attempt>,
 }
@@ -315,6 +317,7 @@ impl GanglionCoordination {
                 .filter(|a| a.validate_agreement(&snapshot).is_ok());
             let after = State {
                 active,
+                accepted_ms: before.accepted_ms,
                 cleaned: BTreeSet::new(),
                 attempt: Some(Attempt {
                     context,
@@ -363,6 +366,7 @@ impl GanglionCoordination {
         {
             let after = State {
                 active: before.active.clone(),
+                accepted_ms: before.accepted_ms,
                 attempt: None,
                 cleaned: BTreeSet::new(),
             };
@@ -455,6 +459,7 @@ impl GanglionCoordination {
             }) {
                 let idle = State {
                     active: before.active.clone(),
+                    accepted_ms: before.accepted_ms,
                     attempt: None,
                     cleaned: BTreeSet::new(),
                 };
@@ -526,6 +531,7 @@ impl GanglionCoordination {
                 agreement.record(&snapshot, node, receipt.clone())?;
             }
             after.active = Some(agreement.finish(&snapshot, before.active.as_ref())?);
+            after.accepted_ms = crate::unix_millis_now();
             next.committed = true;
         } else {
             return Ok(false);
@@ -563,6 +569,11 @@ impl GanglionCoordination {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct QueueCheckpointStatus {
+    pub accepted_ms: Option<u64>,
+    pub age_ms: Option<u64>,
+    pub attempt_age_ms: Option<u64>,
+    pub owner: String,
+    pub in_progress: bool,
     pub event_next: Option<u64>,
     pub certificate: Option<[u8; 32]>,
     pub pins: usize,
@@ -588,6 +599,11 @@ impl GanglionCoordination {
             .as_ref()
             .filter(|a| a.validate_agreement(&snapshot).is_ok());
         Ok(QueueCheckpointStatus {
+            accepted_ms: active.filter(|_| state.accepted_ms != 0).map(|_| state.accepted_ms),
+            age_ms: active.filter(|_| state.accepted_ms != 0).map(|_| crate::unix_millis_now().saturating_sub(state.accepted_ms)),
+            attempt_age_ms: attempt.map(|a| crate::unix_millis_now().saturating_sub(a.started_ms)),
+            owner: history.owner.clone(),
+            in_progress: attempt.is_some_and(|a| !a.committed || a.installed.len() != a.context.replicas.len()),
             event_next: active.map(|a| a.proposal.contents.event_next),
             certificate: active.map(QueueCheckpointEvidence::digest).transpose()?,
             pins: attempt.map_or(0, |a| a.pins.len()),

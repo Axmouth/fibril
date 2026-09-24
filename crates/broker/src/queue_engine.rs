@@ -661,6 +661,10 @@ impl StromaEngine {
             .await
     }
 
+    pub fn queue_checkpoint_activity(&self, topic: &str, part: u32, group: Option<&str>) -> Option<stroma_core::QueueCheckpointActivity> {
+        self.inner.queue_checkpoint_activity(topic, part, group)
+    }
+
     pub async fn begin_queue_checkpoint_pin(&self, storage: PreparedStorageHistory, attempt: [u8; 32]) -> Result<QueueCheckpointBase, StromaError> {
         self.inner.begin_queue_checkpoint_pin(storage, attempt).await
     }

@@ -9311,6 +9311,17 @@ async fn explicit_storage_history_binding_blocks_same_epoch_restart_admission() 
 #[cfg(unix)]
 #[tokio::test]
 async fn follower_admission_retries_without_a_new_metadata_snapshot() {
+    follower_admission_retry(false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn follower_admission_notification_retries_before_periodic_fallback() {
+    follower_admission_retry(true).await;
+}
+
+#[cfg(unix)]
+async fn follower_admission_retry(notify: bool) {
     use fibril_broker::queue_engine::{PartitionKind, StorageHistoryBinding};
     let (engine, _dir) = open_test_engine().await;
     let prepared = engine
@@ -9357,7 +9368,9 @@ async fn follower_admission_retries_without_a_new_metadata_snapshot() {
         .admit_prepared_storage_history(prepared)
         .await
         .unwrap();
-    let caught_up = tokio::time::timeout(Duration::from_secs(3), async {
+    if notify { broker.notify_history_admitted(); }
+    let deadline = if notify { Duration::from_millis(500) } else { Duration::from_secs(3) };
+    let caught_up = tokio::time::timeout(deadline, async {
         loop {
             let debug = broker.engine().debug_snapshot().await.unwrap();
             if debug

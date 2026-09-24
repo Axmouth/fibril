@@ -38,6 +38,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- Recovery wakes on committed metadata and local admission, and prepares up to two
+  replicas concurrently while preserving source availability and exact quorum checks.
+  Checkpoints support opt-in event/append-byte triggers and staggered cadence, with
+  age, retained-range and agreement progress diagnostics in the shared dashboard.
+
 - Opt-in agreed queue checkpoints (`replication.agreed_checkpoint_interval_ms`):
   durable replay bases and same-cut capsules, every admitted replica's locally
   verified receipt, guarded consensus publication, and retained snapshot/suffix

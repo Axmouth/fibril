@@ -188,6 +188,11 @@ pub struct ReplicationRuntimeSettings {
     pub eager_failover: bool,
     /// Background agreed checkpoints; zero disables new attempts.
     pub agreed_checkpoint_interval_ms: u64,
+    /// Start earlier after this many events beyond the agreed cut; 0 disables.
+    pub agreed_checkpoint_max_events: u64,
+    /// Approximate local append content bytes since observing the last certificate;
+    /// 0 disables. Resets on process/log replacement; interval remains the fallback.
+    pub agreed_checkpoint_max_bytes: u64,
     /// Minimum failed-reconnect grace; heartbeat expiry remains the fallback.
     pub eager_failover_grace_ms: u64,
     /// How long a publish confirm may wait for the assignment's replication
@@ -243,6 +248,8 @@ impl Default for ReplicationRuntimeSettings {
         Self {
             eager_failover: false,
             agreed_checkpoint_interval_ms: 0,
+            agreed_checkpoint_max_events: 0,
+            agreed_checkpoint_max_bytes: 0,
             eager_failover_grace_ms: 1_000,
             confirm_timeout_ms: 5_000,
             caught_up_poll_ms: 1_000,
@@ -712,6 +719,8 @@ mod tests {
     fn checkpoint_interval_defaults_off_and_bounds_background_cadence() {
         let old: super::ReplicationRuntimeSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(old.agreed_checkpoint_interval_ms, 0);
+        assert_eq!(old.agreed_checkpoint_max_events, 0);
+        assert_eq!(old.agreed_checkpoint_max_bytes, 0);
         let mut settings = super::RuntimeSettings::default();
         for interval in [0, 1000, 60_000, 86_400_000] {
             settings.replication.agreed_checkpoint_interval_ms = interval;

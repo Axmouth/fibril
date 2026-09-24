@@ -75,8 +75,35 @@ Keep payloads out of diagnostics and bound retained trace data.
 Exit criterion: account for the dominant elapsed time, including why an activation
 attempt can lack quorum receipts after installation calls returned. Distinguish
 replication lag in the local metadata view from missing receipts or failed work.
-The current one-second worker poll, serial RPCs, fresh connections and whole-attempt
-retries are investigation leads; their individual costs are not yet measured.
+Recovery and local admission now wake on committed metadata changes, with a
+one-second fallback and 25 ms burst coalescing. Replica seals, inspections, private
+stage preparation and installation use at most two concurrent operations. All
+stage reads finish before any installation can replace a source; completed-stage
+source reads serialize. Local storage admission also wakes deferred assignment
+transitions so follower reporting need not wait for the periodic retry.
+
+### Current recovery screen
+
+The 24 September release screen used three replicas on one host, SATA ext4,
+majority-durable confirmations, 1 KiB payloads and a one-second eager grace.
+Only the queue owner was killed; the metadata leader survived. With agreed
+checkpoints and 100k settled messages plus one outstanding message, a matched
+baseline delivered the first fresh-client message in 4.15 seconds; the wakeup,
+concurrency and admission changes measured 2.00 and 2.02 seconds. Owner readiness
+was sampled at 3.31 seconds before and 2.10–2.11 seconds after; polling can observe
+readiness after a client has already received its message.
+
+The 100k outstanding-message case measured 5.51 seconds ready / 6.45 seconds first
+fresh delivery. This workload still verifies live payloads. Every successful gate
+checked all expected confirmed IDs, new durable work and old-owner rejoin.
+
+Warm 500/s traffic passed age-, event- and byte-triggered checkpoint gates, with
+owner readiness at 1.71–1.91 seconds. The original subscriber received the new
+post-recovery probe at 4.94–4.96 seconds. A separate instrumented run spent
+3.93 seconds refreshing client topology and 19 ms resubscribing. Evaluate bounded
+discovery fallback and healthy-connection preference across all five SDKs, including
+silent endpoints, cancellation and stale topology; retain unknown-outcome publish
+semantics. These small screens establish useful leads, not a p95 latency bound.
 
 ### Initial transport result
 
@@ -167,20 +194,22 @@ placement and client concurrency explicit; process loss does not test power loss
 
 Evaluate changes individually against that baseline:
 
-- Wake recovery and admission on relevant committed metadata changes, with bounded
-  periodic retry as a fallback. Prevent lost wakeups and tight retry loops.
 - Extend inspection connection reuse to other recovery operations if measured costs
   justify it. Reconnect,
   cancellation, stale replies and per-operation deadlines must preserve identity
   checks and bounded resource use.
-- Overlap independent witness/inspection and target-installation work with bounded
-  concurrency. Keep dependent mutations ordered and preserve the required witness
-  set; an early reply alone cannot establish that source selection is complete.
+- Extend RPC overlap where inputs are already known: start inspection after each
+  seal, prefetch a bounded page during target append, or combine finish/install
+  with server-side ordering. Exact activation can be awaited by an admission
+  request; no request itself grants serving authority. Measure each extension.
 - Wait for the exact required committed receipts when local metadata visibility is
   behind, avoiding a repeat of successful installation. Preserve deadlines and
   retry behavior for genuinely missing evidence.
 - Resume completed stages and cache verified evidence within its exact immutable
   transition where safe, retaining all invalidation checks.
+- Reduce subscriber discovery delay with bounded endpoint attempts or staggered
+  requests to independent discovery peers. Preserve topology generation checks,
+  cancellation and connection cleanup, and validate equivalent behavior across SDKs.
 
 Adopt each change only after correctness checks and matched timing runs. Do not
 shorten safety deadlines or weaken confirmation thresholds to meet the target.
@@ -235,7 +264,7 @@ two minutes. Old live messages remain retained; a large live backlog still costs
 payload verification. Disabling the interval stops new attempts and allows an
 existing attempt to finish; the last accepted checkpoint and its suffix remain
 pinned. An unavailable admitted replica can delay replacement and increase retained
-disk. Retention limits, administrative abandonment and age/disk diagnostics need
+disk. Retention limits, administrative abandonment and physical disk accounting need
 further operational tuning before considering a default-on policy.
 
 Current tests cover unequal replay bases, zero, compaction, bounded physical reads,
@@ -343,3 +372,19 @@ end-to-end outage.
 
 Adoption requires preserved confirmed history and bounded recovery behavior in
 addition to faster crash detection. Default timing values follow measurements.
+
+
+### Checkpoint work policy and diagnostics
+
+Periodic attempts can also be triggered by accumulated event count or approximate
+local append bytes. The interval remains the opt-in switch. Thresholds default to
+zero, starts remain at least one second apart, and queue-specific jitter staggers
+periodic attempts. One local bounded build still runs at a time. Event counts use
+the accepted cut; byte counts rebase on observing a new certificate, epoch change
+or counter reset. Neither hint authorizes retention or recovery decisions.
+
+The Cluster page and topology API expose accepted checkpoint age, proof and install
+counts, failure reason, local event suffix and retained message ranges. The API
+returns at most 128 records and reports truncation. These logical ranges do not
+measure physical disk allocation. Byte/age scheduling is implemented; retained-disk
+limits, many-queue pressure tests and safe generation reclamation remain follow-ups.

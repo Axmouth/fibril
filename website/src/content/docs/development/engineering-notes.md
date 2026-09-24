@@ -408,3 +408,14 @@ Scheduled commits could exceed the inflight limit and block the writer while
 the fsync worker was blocked returning completions, producing a circular wait.
 Every fsync handoff now waits for capacity by draining completions first; the
 stress reproduction and fix are recorded in [keratin 3cb1218](https://github.com/Axmouth/keratin/commit/3cb121821e99aabdac35e73477b0b26a38789bd6).
+
+
+## Recovery wakeups, bounded concurrency and checkpoint cadence
+
+Recovery now wakes on committed metadata, and completed local admission wakes
+assignment retries so follower durability reporting can resume promptly. At most
+two replicas are prepared concurrently, with all source reads completed before
+installation; the settled-history SATA screen improved fresh delivery from 4.15 s
+to 2.00–2.02 s. Checkpoint event/append-byte triggers complement the periodic
+policy, with shared dashboard age and retention diagnostics; see the
+[current recovery screen](/development/failover-plan/#current-recovery-screen).

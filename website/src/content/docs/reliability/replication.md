@@ -57,7 +57,15 @@ one durable follower.
 
 Unix cluster queues can periodically agree on a durable recovery snapshot. Set
 `runtime_seed.replication.agreed_checkpoint_interval_ms` at startup, or change
-`replication.agreed_checkpoint_interval_ms` in the dashboard's cluster settings.
+`replication.agreed_checkpoint_interval_ms` in the dashboard's cluster settings. Optional
+`agreed_checkpoint_max_events` and `agreed_checkpoint_max_bytes` thresholds in the
+same replication settings start attempts earlier under load. The interval must
+remain enabled; zero thresholds preserve periodic-only behavior. Starts are
+limited to once per second per queue and periodic work is staggered across queues.
+Byte counts are scheduling hints that reset on reopen, not durability evidence.
+The Cluster page shows checkpoint age, event cut, local suffix and retained message
+counts, agreement/install progress and failures. Retained counts are logical
+ranges, not physical disk usage.
 The default is `0`; positive intervals range from 1,000 to 86,400,000 ms.
 
 Each admitted replica verifies and persists the same applied cut before consensus

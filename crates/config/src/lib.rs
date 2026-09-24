@@ -1704,6 +1704,11 @@ pub struct ConsumerGroupSettings {
 pub struct ReplicationSettings {
     pub eager_failover: bool,
     pub agreed_checkpoint_interval_ms: u64,
+    /// Start earlier after this many events beyond the agreed cut; 0 disables.
+    pub agreed_checkpoint_max_events: u64,
+    /// Approximate local append content bytes since observing the last certificate;
+    /// 0 disables. Resets on process/log replacement; interval remains the fallback.
+    pub agreed_checkpoint_max_bytes: u64,
     pub eager_failover_grace_ms: u64,
     pub confirm_timeout_ms: u64,
     pub caught_up_poll_ms: u64,
@@ -1776,6 +1781,8 @@ impl Default for ReplicationSettings {
         Self {
             eager_failover: false,
             agreed_checkpoint_interval_ms: 0,
+            agreed_checkpoint_max_events: 0,
+            agreed_checkpoint_max_bytes: 0,
             eager_failover_grace_ms: 1_000,
             confirm_timeout_ms: 5_000,
             caught_up_poll_ms: 1_000,
@@ -1895,6 +1902,10 @@ mod tests {
 
     #[test]
     fn checkpoint_seed_matches_runtime_interval_bounds() {
+        let thresholds = ServerConfig::from_toml_str("[runtime_seed.replication]\nagreed_checkpoint_max_events = 500\nagreed_checkpoint_max_bytes = 65536").unwrap();
+        assert_eq!(thresholds.runtime_seed.replication.agreed_checkpoint_interval_ms, 0);
+        assert_eq!(thresholds.runtime_seed.replication.agreed_checkpoint_max_events, 500);
+        assert_eq!(thresholds.runtime_seed.replication.agreed_checkpoint_max_bytes, 65536);
         for interval in [0, 1_000, 60_000, 86_400_000] {
             let config = ServerConfig::from_toml_str(&format!("[runtime_seed.replication]\nagreed_checkpoint_interval_ms = {interval}")).unwrap();
             assert_eq!(config.runtime_seed.replication.agreed_checkpoint_interval_ms, interval);

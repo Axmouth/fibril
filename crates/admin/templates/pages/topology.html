@@ -72,6 +72,14 @@
   </div>
 </section>
 
+<section class="overview-panel" aria-label="Recovery checkpoints">
+  <div class="overview-panel-heading">
+    <h5>Recovery checkpoints</h5>
+    <p>Agreed state boundaries shorten recovery history. Local retained ranges may include live payloads; disabling new checkpoints keeps accepted retention pinned.</p>
+  </div>
+  <div id="checkpoint-status" class="table-wrap"></div>
+</section>
+
 <section class="overview-panel" aria-label="Brokers">
   <div class="overview-panel-heading" style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px;">
     <div>
@@ -220,6 +228,27 @@ function renderSummary(data) {
       (learners ? `, learners [${learners}]` : ""));
   }
   document.getElementById("topology-summary").innerHTML = parts.join(" · ");
+  const checkpoints = raft?.queue_checkpoints;
+  const entries = checkpoints?.entries || [];
+  const target = document.getElementById("checkpoint-status");
+  if (!entries.length) {
+    target.textContent = "No agreed checkpoint records reported by this node.";
+  } else {
+    const rows = entries.map(entry => {
+      const r = entry.resource || {}, status = entry.status || {}, local = entry.local_activity;
+      const label = `${r.name || "?"} / ${r.partition ?? "?"}${r.group ? ` / ${r.group}` : ""}`;
+      const suffix = local && status.event_next != null ? Math.max(0, local.event_next - status.event_next) : "—";
+      const retained = local ? Math.max(0, local.message_next - local.message_head) : "—";
+      const age = status.age_ms == null ? "—" : `${(status.age_ms / 1000).toFixed(1)} s`;
+      const progress = entry.error || status.failed || (status.in_progress
+        ? `Building: ${status.receipts}/${status.admitted} proofs, ${status.installed}/${status.admitted} installed`
+        : status.certificate ? "Agreed" : "Waiting");
+      return `<tr>${[label, status.event_next ?? "—", age, suffix, retained, progress].map(v => `<td>${escapeHtml(v)}</td>`).join("")}</tr>`;
+    }).join("");
+    target.innerHTML = `<table><thead><tr><th>Queue / partition</th><th>Event cut</th><th>Age</th><th>Local suffix events</th><th>Local retained messages</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`
+      + (checkpoints.truncated ? `<p>Showing ${entries.length} of ${escapeHtml(checkpoints.total)} checkpoint records.</p>` : "");
+  }
+
 }
 
 // ---- the living diagram: ring sprites + procedural tendrils ----

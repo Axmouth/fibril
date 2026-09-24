@@ -95,6 +95,7 @@ impl Broker<StromaEngine> {
                 .admit_prepared_queue_recovery(prepared.clone())
                 .await
                 .map_err(error)?;
+            self.notify_history_admitted();
             return Ok(QueueRecoveryReply::Admitted(prepared));
         }
         let authority = tokio::time::timeout(

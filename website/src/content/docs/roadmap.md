@@ -20,10 +20,11 @@ separate rounds when their dependencies permit.
    controls. Show recovery stages and account for retained generations and staging
    data before adding automatic reclamation.
 2. **Checkpoint policy and recovery overhead.** Measure the opt-in agreed
-   checkpoint path under sustained traffic and many partitions. Tune cadence,
-   verification budgets and retention limits; expose checkpoint age, failed
-   attempts and retained bytes in admin diagnostics. Profile remaining metadata,
-   polling and live-payload verification costs. See the
+   checkpoint path under higher sustained rates and many partitions. Tune the
+   implemented event/byte/age triggers, verification budgets and retention limits;
+   extend diagnostics to physical retained bytes and per-stage costs. Evaluate
+   bounded RPC pipelining, subscriber discovery delay across SDKs and remaining
+   live-payload verification costs. See the
    [fast-recovery plan](/development/failover-plan/#fast-recovery).
 3. **Speculative delivery adoption.** Reconcile the retained local-queue prototype
    with current recovery and ordered application. Close ACK-before-durability,

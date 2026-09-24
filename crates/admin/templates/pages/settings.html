@@ -250,9 +250,21 @@
       </div>
       <label class="settings-field">
         <span class="settings-label">Agreed checkpoint interval (ms)</span>
-        <span class="settings-help">Opt-in background checkpoints on all admitted queue replicas. 0 disables new attempts; 1000–86400000 sets the minimum interval. Existing attempts finish. Snapshot and payload verification uses bounded background work.</span>
+        <span class="settings-help">Opt-in background checkpoints on all admitted queue replicas. 0 disables new attempts; 1000–86400000 sets the periodic interval. Work thresholds can start an attempt earlier, at most once per second. Existing attempts finish. Snapshot and payload verification uses bounded background work.</span>
         <input id="replication.agreed_checkpoint_interval_ms" data-runtime-setting type="number" min="0" max="86400000" step="1000">
       </label>
+      <div class="settings-grid settings-grid-two">
+        <label class="settings-field">
+          <span class="settings-label">Checkpoint event threshold</span>
+          <span class="settings-help">Start earlier after this many events beyond the agreed cut. 0 disables this trigger; the checkpoint interval must be enabled.</span>
+          <input id="replication.agreed_checkpoint_max_events" data-runtime-setting type="number" min="0" step="1">
+        </label>
+        <label class="settings-field">
+          <span class="settings-label">Checkpoint append-byte threshold</span>
+          <span class="settings-help">Approximate local append content bytes since observing the last certificate. 0 disables this trigger. Resets on reopen; periodic checkpoints remain the fallback.</span>
+          <input id="replication.agreed_checkpoint_max_bytes" data-runtime-setting type="number" min="0" step="1">
+        </label>
+      </div>
       <label class="checkbox-label">
         <input id="replication.eager_failover" data-runtime-setting type="checkbox">
         <span>

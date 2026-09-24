@@ -5,6 +5,7 @@
 
 pub mod recovery_driver;
 mod recovery_timing;
+mod recovery_wake;
 pub mod initial_history_driver;
 pub mod queue_learner_driver;
 mod queue_checkpoint_driver;
@@ -101,6 +102,8 @@ pub fn runtime_seed_from_config(config: &ServerConfig) -> RuntimeSettings {
         replication: ReplicationRuntimeSettings {
             eager_failover: config.runtime_seed.replication.eager_failover,
             agreed_checkpoint_interval_ms: config.runtime_seed.replication.agreed_checkpoint_interval_ms,
+            agreed_checkpoint_max_events: config.runtime_seed.replication.agreed_checkpoint_max_events,
+            agreed_checkpoint_max_bytes: config.runtime_seed.replication.agreed_checkpoint_max_bytes,
             eager_failover_grace_ms: config.runtime_seed.replication.eager_failover_grace_ms,
             confirm_timeout_ms: config.runtime_seed.replication.confirm_timeout_ms,
             caught_up_poll_ms: config.runtime_seed.replication.caught_up_poll_ms,
@@ -2230,6 +2233,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         Some(parts) => {
             _consensus_server = Some(parts.consensus_server.clone());
             let topology_source = parts.coordination.clone();
+            let checkpoint_engine = broker.engine();
             let consensus_server = parts.consensus_server;
             let controller_status = parts.controller_status;
             let liveness_source = parts.coordination.clone();
@@ -2323,6 +2327,18 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
                             "listener_serving".into(),
                             serde_json::Value::Bool(consensus_server.is_serving()),
                         );
+                        let work = topology_source.queue_checkpoint_work(false);
+                        let checkpoints = work.iter().take(128).map(|resource| {
+                            let activity = u32::try_from(resource.partition).ok().and_then(|p|
+                                checkpoint_engine.queue_checkpoint_activity(&resource.name, p, resource.group.as_deref()));
+                            match topology_source.queue_checkpoint_status(resource) {
+                                Ok(status) => serde_json::json!({"resource": resource, "status": status, "local_activity": activity}),
+                                Err(error) => serde_json::json!({"resource": resource, "error": error}),
+                            }
+                        }).collect::<Vec<_>>();
+                        object.insert("queue_checkpoints".into(), serde_json::json!({
+                            "entries": checkpoints, "total": work.len(), "truncated": work.len() > 128,
+                            "note": "Age and activity are diagnostic hints. Accepted retention remains pinned until safely replaced or explicitly reconciled."}));
                         if let Ok(status) = controller_status.read() {
                             object.insert(
                                 "controller".into(),

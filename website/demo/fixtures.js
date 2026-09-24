@@ -36,7 +36,7 @@
     delivery: { inflight_ttl_ms: 30000, expiry_poll_min_ms: 100, expiry_batch_max: 1024, delivery_poll_max_ms: 1000 },
     idle_queue_cleanup: { enabled: true, evict_after_ms: 60000, sweep_interval_ms: 10000, publisher_idle_timeout_ms: 30000 },
     connection: { reconnect_grace_ms: 10000, drain_handoff_timeout_ms: null, resume_session_restart_ttl_ms: 60000 },
-    replication: { agreed_checkpoint_interval_ms: 0, eager_failover: false, eager_failover_grace_ms: 1000, read_timeout_slack_ms: 1000, owner_connect_timeout_ms: 5000, confirm_timeout_ms: 10000, caught_up_poll_ms: 5, retry_poll_ms: 100,
+    replication: { agreed_checkpoint_interval_ms: 0, agreed_checkpoint_max_events: 0, agreed_checkpoint_max_bytes: 0, eager_failover: false, eager_failover_grace_ms: 1000, read_timeout_slack_ms: 1000, owner_connect_timeout_ms: 5000, confirm_timeout_ms: 10000, caught_up_poll_ms: 5, retry_poll_ms: 100,
       checkpoint_retry_poll_ms: 1000, max_messages_per_read: 4096, max_events_per_read: 8192,
       max_bytes_per_read: 4194304, max_iterations_per_tick: 16, min_in_sync_replicas: 2,
       isr_timeout_ms: 10000, stream_enabled: true, stream_apply_linger_us: 100,
@@ -69,7 +69,7 @@
     ] }] },
     topology: { coordination: { node_id: 'broker-1', generation: 12, nodes, assignments, stream_assignments: [
       { topic: 'orders.events', partition: 0, owner: 'broker-1', followers: ['broker-2', 'broker-3'], epoch: 12 },
-    ] }, consensus: { leader: 1, voters: [1, 2, 3], term: 4, last_applied_index: 246, current_term: 4 } },
+    ] }, consensus: { queue_checkpoints: { total: 1, truncated: false, entries: [{ resource: {name: "orders.created", partition: 0, group: null}, status: {event_next: 42000, age_ms: 3200, certificate: "demo", in_progress: false, receipts: 3, installed: 3, admitted: 3}, local_activity: {event_next: 42128, message_head: 16000, message_next: 16240} }] }, leader: 1, voters: [1, 2, 3], term: 4, last_applied_index: 246, current_term: 4 } },
     streams: { streams: [{ topic: 'orders.events', partition: 0, head: 1000, tail: 8500,
       durability: 'durable', max_age_ms: 86400000, max_bytes: 268435456,
       live_subscriptions: 2, lag_evictions: 0, cursors: [['billing-projection', 8500], ['analytics', 8120]] }] },
