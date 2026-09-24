@@ -432,6 +432,7 @@ See also: [admin dashboard](/admin-dashboard/).
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
+| Animated architecture stories | Implemented | Shared step/play/scrub diagrams for partition placement, failover/rejoin and delivery modes; reduced-motion stepping, text transcripts and self-contained SVG frame export. Experimental/proposed behavior is labelled separately |
 | Read-only dashboard demo | Implemented | Thirteen real dashboard views backed by synthetic fixtures at `/dashboard-demo/`; larger, fixed-view embeds throughout dashboard, streams, clustering and monitoring docs; built and checked with the website |
 | Overview metrics | Implemented | Dashboard and API |
 | Recovery worker timelines | Implemented | Cluster page and `consensus.recovery_timeline` in the topology API; 32 process-local attempts, at most 256 stages each, outcomes, peers and overlapping monotonic timings. Shared demo renderer; excludes failure detection and client reconnect, resets on restart |

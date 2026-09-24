@@ -38,6 +38,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- Animated documentation stories for partition placement, failover/rejoin and
+  delivery modes, using shared mascot sprites and scene definitions. Includes
+  explicit failure branches, playback controls, reduced-motion stepping,
+  transcripts and self-contained SVG frame exports.
+
 - Bounded recovery worker timelines in the Cluster dashboard and topology API:
   recent attempts, peer stages, overlapping durations and failure/cancellation
   outcomes. The docs demo reuses the production renderer; observations are local

@@ -177,6 +177,10 @@ The compatibility work follows this order:
 - Profile client scheduling, decoding and delivery costs in Python and TypeScript.
 - Track publish and delivery capacity, latency and memory across payload sizes,
   storage devices, partition counts and replication policies.
+- Test larger replica groups, starting with three and five replicas, then seven
+  where resources allow. Measure steady-rate and saturation latency, throughput,
+  CPU, memory and network use, plus owner-loss recovery with retained history.
+  Record quorum policy and shared-host limits alongside each result.
 - Improve memory use under large backlogs, high inflight load and many idle queues.
 - Improve bulk DLQ replay, message inspection and sparse-queue diagnostics.
 - Extend the shared benchmark harness with stream workloads, portable cluster/fault
@@ -193,16 +197,15 @@ Pin matching demo assets when archiving documentation versions. Extend inline
 examples to additional dashboard pages where they clarify operational behavior.
 Assess coherent moving scenarios for backlog growth, slow consumers and recovery.
 
-Add approachable topology and sequence diagrams directly to the relevant concept,
-replication and recovery pages. Cover partition placement and owners, metadata
-leadership and controller planning, ordinary versus early replication, polling
-versus push replication, local and replicated speculative delivery, and the full
-failover/checkpoint recovery sequence. Distinguish eager failure detection from
-early replication, and label implemented, experimental and proposed behavior.
+Extend the shared architecture stories with detailed checkpoint/suffix inspection,
+retry and divergence branches, polling versus push/wakeup replication, richer
+controller planning and multi-partition failures. Expand local and replicated
+speculation scenarios as their correctness contracts evolve. Distinguish eager
+failure detection from early replication, and label implemented, experimental and proposed behavior.
 Show delivery, consumer ACK, local/replica persistence and publisher-confirmation
 boundaries explicitly. Pair overview diagrams with detailed recovery steps and
 failure branches. Maintain shared diagram sources and visual conventions, with
-readable static fallbacks and vector exports suitable for presentations; version
+readable static fallbacks and vector exports suitable for presentations. Version
 diagrams alongside the behavior documented on each page.
 
 ## Longer-term options

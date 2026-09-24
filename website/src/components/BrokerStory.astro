@@ -1,0 +1,98 @@
+---
+import { scenes, failoverSteps, placementSteps, delivery } from './broker-story/scenarios.mjs';
+interface Props { scene: 'failover' | 'delivery' | 'placement'; }
+const { scene } = Astro.props;
+const config = scenes[scene];
+const outlines = scene === 'delivery'
+  ? delivery.variants.map(v => ({ title: `${v.label} · ${v.badge}`, steps: v.milestones.map(m => ({ title: m[1], text: m[2] })) }))
+  : [{ title: config.title, steps: scene === 'placement' ? placementSteps() : failoverSteps('recover') },
+    ...(scene === 'failover' ? [{ title: 'When evidence is unavailable', steps: failoverSteps('fenced').slice(-1) }] : [])];
+---
+<broker-story data-scene={scene} class="broker-story">
+  <div class="story-top"><span class="story-eyebrow">INSIDE FIBRIL / {scene === 'delivery' ? 'THE MESSAGE PATH' : scene === 'placement' ? 'PARTITION PLACEMENT' : 'FAILOVER & RETURN'}</span><span class="story-badge" data-badge>{config.badge || 'Current main'}</span></div>
+  <h3>{config.title}</h3>
+  {config.variants.length > 1 && <div class="story-variants" role="group" aria-label="Choose a story">
+    {config.variants.map((v, i) => <button type="button" data-variant={v.id} aria-pressed={i === 0}>{v.label}</button>)}
+  </div>}
+  <p class="story-contract" data-contract>{config.note}</p>
+  <div class="story-canvas" tabindex="0" role="region" aria-label="Animated broker diagram. Scroll horizontally on small screens">
+    <svg data-stage xmlns="http://www.w3.org/2000/svg" viewBox={`0 0 980 ${scene === 'delivery' ? 610 : 460}`} role="img" aria-label={config.title}></svg>
+  </div>
+  <div class="story-caption"><span data-chapter>01</span><div><h4 data-headline>Follow the story</h4><p data-narrative>{config.note}</p></div></div>
+  <span class="sr-only" data-announcement role="status"></span>
+  <div class="story-controls">
+    <button type="button" data-play aria-label="Pause animation">Pause</button>
+    <button type="button" data-prev aria-label="Previous step">← Back</button>
+    <button type="button" data-next aria-label="Next step">Next →</button>
+    <button type="button" data-replay>Replay</button>
+    <label class="story-scrub"><span class="sr-only">Story position</span><input type="range" min="0" max="30" step="0.01" value="0" data-position /></label>
+    <label class="story-speed"><span class="sr-only">Animation speed</span><select data-speed aria-label="Animation speed"><option value="0.5">½×</option><option value="1" selected>1×</option><option value="1.5">1½×</option></select></label>
+    <button type="button" data-export>Save frame ↗</button>
+  </div>
+  <p class="story-footnote">{config.note} <span data-motion-note></span><span data-export-status role="status"></span></p>
+  <noscript><p class="story-footnote">Read the complete story below. Enable JavaScript for playback.</p></noscript>
+  <details class="story-transcript"><summary>Read the story, step by step</summary>
+    {outlines.map(outline => <section><h4>{outline.title}</h4><ol>{outline.steps.map(s => <li><strong>{s.title}</strong><p>{s.text}</p></li>)}</ol></section>)}
+  </details>
+</broker-story>
+<script>
+  import { registerStories } from './broker-story/player.mjs';
+  registerStories();
+</script>
+<style is:global>
+  html:has(broker-story) { --sl-content-width: 64rem; }
+  .broker-story { --story-bg: var(--sl-color-black); --story-panel: var(--sl-color-gray-6); --story-line: var(--sl-color-gray-5); --story-text: var(--sl-color-white); --story-muted: var(--sl-color-gray-2); --story-data: #79adf5; --story-control: #b3a3ed; --story-ack: #67c9a1; --story-delivery: #e9b078; --story-failure: #ed7c8a; display: block; margin: 2rem 0; border: 1px solid var(--story-line); border-radius: 16px; background: var(--story-bg); overflow: hidden; color: var(--story-text); box-shadow: 0 12px 40px #00000012; }
+  :root[data-theme="light"] .broker-story { --story-data: #356bac; --story-control: #7962b1; --story-ack: #2e8564; --story-delivery: #a36627; --story-failure: #bb4154; }
+  broker-story:not([data-ready]) .story-canvas, broker-story:not([data-ready]) .story-controls, broker-story:not([data-ready]) .story-caption { display: none; }
+  .broker-story *, .broker-story *::before, .broker-story *::after { box-sizing: border-box; }
+  .broker-story .story-top { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; padding: 22px 24px 0; }
+  .broker-story .story-eyebrow { color: var(--story-muted); font: 10px var(--sl-font-mono); letter-spacing: .1em; }
+  .broker-story .story-badge { font: 10px var(--sl-font-mono); padding: 4px 8px; border: 1px solid var(--story-line); border-radius: 5px; color: var(--story-control); }
+  .broker-story > h3 { margin: 10px 24px 18px; font-size: clamp(20px, 3vw, 28px); font-weight: 550; letter-spacing: -.035em; line-height: 1.2; }
+  .broker-story .story-variants > *, .broker-story .story-controls > * { margin: 0; }
+  .broker-story .story-variants { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 24px 12px; }
+  .broker-story button, .broker-story select { color: var(--story-muted); background: var(--story-panel); border: 1px solid var(--story-line); border-radius: 6px; padding: 7px 11px; font: 12px var(--sl-font); cursor: pointer; }
+  .broker-story button:hover { color: var(--story-text); border-color: var(--story-control); }
+  .broker-story button[aria-pressed="true"] { color: var(--story-text); border-color: var(--story-control); background: color-mix(in srgb, var(--story-control) 12%, var(--story-bg)); }
+  .broker-story button:focus-visible, .broker-story input:focus-visible, .broker-story select:focus-visible { outline: 2px solid var(--story-data); outline-offset: 3px; }
+  .broker-story button:disabled { opacity: .45; cursor: default; }
+  .broker-story .story-contract { margin: 0 24px 4px; color: var(--story-muted); font-size: 12px; line-height: 1.6; min-height: 40px; }
+  .broker-story .story-canvas { overflow-x: auto; margin: 0; }
+  .broker-story svg[data-stage] { display: block; width: 100%; min-width: 760px; height: auto; font-family: var(--sl-font); }
+  .broker-story svg text { fill: var(--story-text); }
+  .broker-story .machine { fill: var(--story-panel); stroke: var(--story-line); stroke-width: 1.5; }
+  .broker-story .machine-screen { fill: var(--story-bg); stroke: var(--story-line); }
+  .broker-story .machine-label { font-size: 16px; font-weight: 550; }
+  .broker-story .machine-role { font-size: 12px; fill: var(--story-muted); }
+  .broker-story .machine-rule { stroke: var(--story-line); }
+  .broker-story .machine-led { fill: var(--story-ack); }
+  .broker-story .machine-dead .machine-led { fill: var(--story-failure); }
+  .broker-story .machine-dead .machine { stroke: var(--story-failure); stroke-dasharray: 4 5; }
+  .broker-story .machine-dead .machine-role { fill: var(--story-failure); }
+  .broker-story .machine-inactive { opacity: .35; }
+  .broker-story .sprite { image-rendering: pixelated; }
+  .broker-story .wire { fill: none; stroke-width: 2; }
+  .broker-story .wire-guide { opacity: .12; }
+  .broker-story .wire-drawn { stroke-width: 2.4; }
+  .broker-story .wire-label { font: 11px var(--sl-font-mono); paint-order: stroke; stroke: var(--story-bg); stroke-width: 5px; stroke-linejoin: round; }
+  .broker-story .diagram-note { font: 11px var(--sl-font-mono); fill: var(--story-muted); }
+  .broker-story .story-caption { display: flex; gap: 18px; padding: 20px 24px; border-top: 1px solid var(--story-line); min-height: 138px; background: var(--story-panel); }
+  .broker-story [data-chapter] { white-space: nowrap; flex: none; min-width: 48px; padding-top: 3px; font: 12px var(--sl-font-mono); color: var(--story-control); }
+  .broker-story .story-caption h4 { font-size: 16px; margin: 0 0 7px; line-height: 1.35; }
+  .broker-story .story-caption p { font-size: 13px; line-height: 1.6; margin: 0; color: var(--story-muted); }
+  .broker-story .story-caption[data-enter] h4 { animation: story-type .55s steps(18, end) both; }
+  @keyframes story-type { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0); } }
+  .broker-story .story-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; padding: 14px 24px; border-top: 1px solid var(--story-line); }
+  .broker-story .story-scrub { flex: 1 1 140px; min-width: 100px; display: flex; }
+  .broker-story input[type="range"] { width: 100%; accent-color: var(--story-control); cursor: pointer; }
+  .broker-story .story-footnote { margin: 0; padding: 0 24px 16px; font-size: 11px; line-height: 1.65; color: var(--story-muted); }
+  .broker-story .story-transcript { margin: 0; padding: 14px 24px; border-top: 1px solid var(--story-line); font-size: 12px; color: var(--story-muted); }
+  .broker-story .story-transcript summary { cursor: pointer; }
+  .broker-story .story-transcript h4 { margin: 20px 0 10px; }
+  .broker-story .story-transcript ol { padding-inline-start: 20px; }
+  .broker-story .story-transcript li { padding: 5px 0; }
+  .broker-story .story-transcript p { margin: 4px 0 10px; }
+  .broker-story .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+  @media (prefers-reduced-motion: reduce) { .broker-story .story-caption[data-enter] h4 { animation: none; } }
+  @media (max-width: 600px) { .broker-story .story-top { padding: 16px 16px 0; } .broker-story > h3 { margin-inline: 16px; } .broker-story .story-caption { padding: 16px; gap: 10px; } .broker-story .story-variants { margin-inline: 16px; } .broker-story .story-controls { padding: 12px; } .broker-story .story-contract { margin-inline: 16px; } }
+</style>

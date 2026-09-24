@@ -4,11 +4,11 @@ import { join } from "node:path";
 const root = new URL("../dist/", import.meta.url).pathname;
 
 const checks = [
-  { path: "reliability/replication/index.html", includes: ["/dashboard-demo/admin/topology/?embed=1&amp;panel=recovery", "Recovery stages and overlapping work", "#recovery-panel", "<table>", "<code>majority_durable</code>"] },
-  { path: "reliability/recovery-sealing/index.html", includes: ["panel=recovery", "Recovery observations"] },
+  { path: "reliability/replication/index.html", includes: ["/dashboard-demo/admin/topology/?embed=1&amp;panel=recovery", "Recovery stages and overlapping work", "#recovery-panel", "broker-story", "Early replication", "<table>", "<code>majority_durable</code>"] },
+  { path: "reliability/recovery-sealing/index.html", includes: ["panel=recovery", "Recovery observations", "Evidence unavailable", "Follow a failover"] },
   { path: "dashboard-demo/admin/topology/index.html", includes: ["recovery-timeline.js", 'id="recovery-panel"', "Recovery timeline"] },
   { path: "concepts/plexus-streams/index.html", includes: ["/dashboard-demo/admin/streams/?embed=1", "Stream retention and consumer positions"] },
-  { path: "concepts/clustering/index.html", includes: ["/dashboard-demo/admin/topology/?embed=1", "Owners, followers and cluster membership"] },
+  { path: "concepts/clustering/index.html", includes: ["/dashboard-demo/admin/topology/?embed=1", "Owners, followers and cluster membership", 'data-scene="placement"', "Read the story, step by step"] },
   { path: "deployment/monitoring/index.html", includes: ["/dashboard-demo/?embed=1", "Broker health and recent activity"] },
   { path: "dashboard-demo/index.html", includes: ["Read-only demo", "fixtures.js", "chart-throughput"] },
   { path: "dashboard-demo/admin/queue/index.html", includes: ["q-partitions", "transport.js"] },

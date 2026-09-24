@@ -3,6 +3,7 @@ title: Replication
 description: Replica-durable queues, follower catch-up, and failover in Fibril's experimental cluster mode.
 ---
 
+import BrokerStory from "../../../components/BrokerStory.astro";
 import DashboardDemo from "../../../components/DashboardDemo.astro";
 
 By default a queue partition lives on a single broker. That broker fsyncs every
@@ -57,6 +58,15 @@ is set per cluster through `coordination.ganglion.assignment_durability` (see
 
 `N` includes the owner, so `replica_durable` with `N = 2` means the owner plus
 one durable follower.
+
+## Watch the message path
+
+Follow a publish through the owner, persistence and the worker. Switch modes to
+see which waits overlap and which confirmation boundary remains. The badges
+separate current behavior, unmerged experiments and proposed work. Pause or scrub
+to inspect a frame; **Save frame** exports the current view for a presentation.
+
+<BrokerStory scene="delivery" />
 
 ## Agreed recovery checkpoints
 

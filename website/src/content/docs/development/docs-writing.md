@@ -34,7 +34,7 @@ The [roadmap](/roadmap/) and active planning documents contain remaining work,
 priorities, dependencies and acceptance criteria. Completed capabilities belong
 in [implemented surface](/implemented-surface/), with the interfaces that expose
 them and their operating conditions. [Project status](/status/) summarizes
-maturity; the changelog records change history.
+maturity. The changelog records change history.
 
 When a capability lands, update these together:
 
@@ -45,16 +45,18 @@ When a capability lands, update these together:
    gap as a specific task with acceptance criteria.
 4. Preserve useful design rationale and test evidence in development notes or
    an archived design record, linked from the active work where relevant.
-5. Record the change in the changelog; do not copy the completion history back
+5. Record the change in the changelog. Do not copy the completion history back
    into the roadmap.
 
 Write current behavior in the present tense and pending work as concrete tasks.
 Use direct statements about behavior, requirements and limits. Avoid rhetorical
 contrasts such as “not X, but Y” and slogans about milestones.
+Avoid semicolons in prose, including captions and interface text. Use a full stop
+or rephrase the sentence. This rule does not apply to code syntax.
 Each page should stand on its own without answering earlier wording or referring
 to a conversation. Release labels require verification that the release was
-published; version numbers, tags and documentation snapshots can exist before
-publication. Edit current unversioned docs when behavior changes; versioned
+published. Version numbers, tags and documentation snapshots can exist before
+publication. Edit current unversioned docs when behavior changes. Versioned
 snapshots retain their historical contents.
 
 ## Short engineering records
@@ -66,3 +68,22 @@ correctness effect, and a commit or detailed report link. Label unresolved
 findings and experiments that were not adopted. Include workload conditions
 when quoting measurements, and keep detailed traces and benchmark tables in
 the linked records.
+
+
+## Animated architecture stories
+
+`BrokerStory.astro` renders the shared server enclosures, controls and transcript.
+`broker-story/scenarios.mjs` owns the stage descriptions, assignments, message
+paths and illustrative persistence windows. `player.mjs` supplies playback and
+frame export. Embed `<BrokerStory scene="failover" />`, `scene="delivery"` or
+`scene="placement"` in the relevant MDX page. The branding build copies canonical
+mascot frames from the real dashboard. New sprite variants belong in that shared
+artwork source.
+
+Scene time explains ordering and overlap. Label it as illustrative, keep required
+confirmation/recovery barriers in the model, and identify current, experimental
+and proposed paths. The scene tests check those narrative boundaries. They do
+not prove broker correctness or benchmark latency. Next/Back and the position
+slider support close reading. Reduced motion disables autoplay and mascot motion.
+The transcript remains available without JavaScript. Save frame pauses playback
+and exports the current SVG with embedded artwork and explanatory text.

@@ -16,3 +16,10 @@ await writeFile(new URL('face.svg', output), `<svg xmlns="http://www.w3.org/2000
   <image width="32" height="32" href="data:image/png;base64,${face.toString('base64')}" style="image-rendering:pixelated"/>
   <rect x="0.75" y="0.75" width="30.5" height="30.5" rx="8" fill="none" stroke="#9bd5e9" stroke-opacity="0.8" stroke-width="1.5"/>
 </svg>\n`);
+
+// Living docs share the dashboard's canonical sprite frames.
+await mkdir(new URL('sprites/', output), { recursive: true });
+for (const frame of ['open-a', 'open-b', 'open', 'half', 'closed', 'dead']) {
+  const name = `ring-${frame}-128.png`;
+  await copyFile(new URL(`sprites/${name}`, source), new URL(`sprites/${name}`, output));
+}

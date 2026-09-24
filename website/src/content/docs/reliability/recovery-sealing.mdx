@@ -3,6 +3,7 @@ title: Recovery sealing
 description: Recovery authorization, verified staging, durable installation and exact quorum activation.
 ---
 
+import BrokerStory from "../../../components/BrokerStory.astro";
 import DashboardDemo from "../../../components/DashboardDemo.astro";
 
 Recovery sealing freezes a replica's retained records for inspection. Fresh Unix
@@ -11,6 +12,14 @@ a source, installs a new durable quorum and activates its exact process/storage
 instances. The previous assignment stays fenced until activation commits.
 Stream-state recovery remains a separate gate. Legacy migration is unsupported
 and is not planned.
+
+## Follow a failover
+
+This story follows one queue through owner loss, evidence collection, activation
+and background rejoin. Choose **Evidence unavailable** to see why a candidate may
+remain fenced. The metadata leader survives in this example.
+
+<BrokerStory scene="failover" />
 
 ## Recovery observations
 

@@ -4,12 +4,13 @@
   "type": "module",
   "scripts": {
     "dev": "npm run assets:build && npm run demo:build && astro dev",
-    "build": "npm run assets:build && npm run demo:build && npm run demo:test && astro check && astro build",
+    "build": "npm run assets:build && npm run demo:build && npm run demo:test && npm run story:test && astro check && astro build",
     "preview": "astro preview",
     "check": "astro check",
     "smoke:dist": "node scripts/smoke-dist.mjs",
     "smoke:server": "node scripts/smoke-server.mjs",
     "verify": "npm run build && npm run smoke:dist",
+    "story:test": "node scripts/broker-story.test.mjs",
     "demo:build": "node demo/build.mjs",
     "demo:test": "node demo/demo.test.mjs && node ../crates/admin/tests/settings-form.test.mjs && node ../crates/admin/tests/recovery-timeline.test.mjs",
     "assets:build": "node scripts/build-branding.mjs"

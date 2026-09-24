@@ -24,7 +24,7 @@ const src = `${path}?${params}`;
 </figure>
 <style>
   :global(html:has(.dashboard-example)) { --sl-content-width: 60rem; }
-  :global(.sl-markdown-content:has(.dashboard-example) > :not(.dashboard-example)) { max-width: 75ch; }
+  :global(.sl-markdown-content:has(.dashboard-example) > :not(.dashboard-example):not(broker-story)) { max-width: 75ch; }
   .dashboard-example { margin: 1.5rem 0; border: 1px solid var(--sl-color-gray-5); border-radius: 8px; overflow: hidden; }
   figcaption { display: flex; flex-wrap: wrap; gap: .5rem 1rem; padding: .75rem; font-size: .85rem; }
   figcaption a { margin-inline-start: auto; }
