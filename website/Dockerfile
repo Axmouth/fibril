@@ -8,7 +8,8 @@ COPY website ./
 COPY Cargo.toml /app/Cargo.toml
 COPY crates/admin/templates /app/crates/admin/templates
 COPY crates/admin/admin-ui /app/crates/admin/admin-ui
-RUN npm run build
+COPY crates/admin/tests /app/crates/admin/tests
+RUN npm run verify
 
 FROM nginx:1.28-alpine
 
