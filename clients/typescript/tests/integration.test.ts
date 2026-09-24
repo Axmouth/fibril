@@ -2578,3 +2578,21 @@ test("discovery endpoint survives bootstrap loss", async () => {
     assert.equal((await client.fetchTopology()).generation, 42n);
   } finally { await client.shutdown(); await survivor.stop(); }
 });
+
+test("peer EOF fails pending topology before heartbeat", { timeout: 1000 }, async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  let client: Client | undefined;
+  try {
+    broker.onFrame = (f, socket) => {
+      if (f.opcode === Op.Hello) broker.send(socket, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      if (f.opcode === Op.Topology) socket.end();
+    };
+    client = await Client.connect(`127.0.0.1:${broker.port}`,
+      new ClientOptions({ heartbeatIntervalSeconds: 3600 }).disableAutoReconnect());
+    await assert.rejects(client.fetchTopology(), err => err instanceof DisconnectionError);
+  } finally {
+    await client?.shutdown();
+    await broker.stop();
+  }
+});

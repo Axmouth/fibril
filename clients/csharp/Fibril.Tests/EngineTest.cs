@@ -26,6 +26,17 @@ public class EngineTest
     private static CancellationToken Timeout(int seconds = 5) => new CancellationTokenSource(TimeSpan.FromSeconds(seconds)).Token;
 
     [Fact]
+    public async Task PeerEofFailsPendingTopologyBeforeHeartbeat()
+    {
+        await using var broker = new FakeBroker { CloseOnTopology = true };
+        await using var engine = await Engine.ConnectAsync(broker.Address, Opts(), Timeout());
+        await Assert.ThrowsAsync<DisconnectionException>(async () =>
+            await engine.FetchTopologyAsync(new TopologyRequest(), CancellationToken.None)
+                .WaitAsync(TimeSpan.FromMilliseconds(500)));
+        Assert.True(engine.IsClosed);
+    }
+
+    [Fact]
     public async Task ConnectPerformsHandshake()
     {
         await using var broker = new FakeBroker();
@@ -195,6 +206,7 @@ internal sealed class FakeBroker : IAsyncDisposable
     public string Address { get; }
     public bool PushDeliveryOnSubscribe { get; init; }
     public bool PushCloseOnSubscribe { get; init; }
+    public bool CloseOnTopology { get; init; }
 
     /// <summary>The resume outcome returned in HELLO_OK. Set to Resumed to script a resumed reconnect.</summary>
     public ResumeOutcome ResumeOutcome { get; init; } = ResumeOutcome.New;
@@ -346,6 +358,7 @@ internal sealed class FakeBroker : IAsyncDisposable
                     await WriteAsync(stream, Op.AuthOk, f.RequestId, Array.Empty<byte>(), ct);
                     break;
                 case Op.Topology:
+                    if (CloseOnTopology) return;
                     await WriteAsync(stream, Op.TopologyOk, f.RequestId, WireOps.EncodeTopologyOk(BuildTopology(f)), ct);
                     break;
                 case Op.Publish:

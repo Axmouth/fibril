@@ -97,3 +97,36 @@ func TestEngineRequestAfterShutdownErrors(t *testing.T) {
 		t.Error("expected an error publishing after shutdown")
 	}
 }
+
+func TestPeerEOFFailsPendingTopologyBeforeHeartbeat(t *testing.T) {
+	client, server := net.Pipe()
+	defer server.Close()
+	go func() {
+		defer server.Close()
+		br := bufio.NewReader(server)
+		for {
+			f, err := readFrame(br)
+			if err != nil {
+				return
+			}
+			if f.Opcode == opHello {
+				ok := helloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, ServerName: "fake", Compliance: ComplianceString}
+				_, _ = server.Write(encodeFrame(buildFrame(opHelloOk, f.RequestID, encodeHelloOk(ok))))
+			}
+			if f.Opcode == opTopology {
+				return
+			}
+		}
+	}()
+	e, err := startEngine(context.Background(), client, EngineOptions{ClientName: "eof-test", HeartbeatInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Shutdown()
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	_, err = e.FetchTopology(ctx, TopologyRequest{})
+	if err == nil || !IsRetryable(err) || ctx.Err() != nil {
+		t.Fatalf("EOF should promptly fail as transport loss, got %v (context %v)", err, ctx.Err())
+	}
+}

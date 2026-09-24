@@ -4450,12 +4450,23 @@ where
                       flush_writes_or_die!(framed, fatal_error);
                   }
                 },
-                Some(frame) = framed.next() => {
+                frame = framed.next() => {
                     let frame = match frame {
-                        Ok(f) => f,
-                        Err(err) => {
+                        Some(Ok(f)) => f,
+                        None => {
+                            // EOF is ready even while heartbeat/command arms
+                            // remain enabled. A Some-pattern would disable this
+                            // arm and leave callers waiting on a dead socket.
+                            fatal_error = Some(FibrilError::Eof);
+                            break;
+                        }
+                        Some(Err(err)) => {
                             tracing::error!("Error receiving frame: {}", err);
-                            fatal_error = Some(FibrilError::DeserializationFailure { msg: err.to_string() });
+                            fatal_error = Some(if err.kind() == std::io::ErrorKind::InvalidData {
+                                FibrilError::DeserializationFailure { msg: err.to_string() }
+                            } else {
+                                FibrilError::Disconnection { msg: err.to_string() }
+                            });
                             break;
                         }
                     };
@@ -8011,6 +8022,27 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn peer_eof_closes_idle_engine_and_fails_pending_topology_promptly() {
+        for pending in [false, true] {
+            let (engine, mut server, _) = ack_test_engine().await;
+            let response = if pending {
+                let (reply, response) = oneshot::channel();
+                engine.tx.send(Command::Topology { reply }).await.unwrap();
+                assert_eq!(server.next().await.unwrap().unwrap().opcode, Op::Topology as u16);
+                Some(response)
+            } else { None };
+            // No further write, ping or explicit shutdown may be needed to
+            // notice peer EOF. Existing heartbeat is much longer than this bound.
+            drop(server);
+            tokio::time::timeout(Duration::from_millis(250), engine.tx.closed()).await.unwrap();
+            assert!(matches!(engine.close_reason(), Some(FibrilError::Eof)));
+            if let Some(response) = response {
+                assert!(matches!(response.await.unwrap(), Err(FibrilError::Eof)));
+            }
+        }
     }
     #[tokio::test]
     async fn pending_confirmation_retains_its_waker_and_can_be_polled_by_reference() {

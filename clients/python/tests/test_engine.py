@@ -237,6 +237,16 @@ async def test_topology_fetch(broker: FakeBroker) -> None:
         eng.shutdown()
 
 
+async def test_peer_eof_fails_pending_topology_before_heartbeat(broker: FakeBroker) -> None:
+    broker.close_on_topology = True
+    eng = await _connect(broker)
+    try:
+        with pytest.raises(DisconnectionError):
+            await asyncio.wait_for(eng.fetch_topology(), timeout=0.5)
+    finally:
+        eng.shutdown()
+
+
 async def test_redirect_surfaces_typed_error(broker: FakeBroker) -> None:
     broker.redirect_publish = wire.Redirect("jobs", 0, None, [wire.AdvertisedAddress("127.0.0.1", 7001)], 2)
     eng = await _connect(broker)

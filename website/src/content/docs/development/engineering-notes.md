@@ -419,3 +419,12 @@ installation; the settled-history SATA screen improved fresh delivery from 4.15 
 to 2.00–2.02 s. Checkpoint event/append-byte triggers complement the periodic
 policy, with shared dashboard age and retention diagnostics; see the
 [current recovery screen](/development/failover-plan/#current-recovery-screen).
+
+## Rust client EOF detection
+
+The receive loop matched only `Some(frame)`, disabling its read branch on EOF
+while heartbeat and command branches stayed live. Explicit EOF handling now closes
+the engine and fails pending requests immediately; read-side transport errors
+remain retryable, and all five SDKs pass a pending-topology EOF check. In the
+single-host SATA warm-traffic screen, the original subscriber's fresh delivery
+moved from roughly 5 s to 1.06 s with the same immediate-mode server.

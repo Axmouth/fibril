@@ -38,6 +38,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- Rust client receive loops now close promptly on peer EOF and classify read-side
+  transport failures as retryable. Pending topology requests no longer wait for
+  a later heartbeat write to discover the disconnect; EOF contract tests cover
+  Rust, Go, C#, Python and TypeScript.
+
 - Recovery wakes on committed metadata and local admission, and prepares up to two
   replicas concurrently while preserving source availability and exact quorum checks.
   Checkpoints support opt-in event/append-byte triggers and staggered cadence, with

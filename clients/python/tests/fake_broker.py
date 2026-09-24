@@ -29,6 +29,7 @@ class FakeBroker:
     resume_outcome: wire.ResumeOutcome = "new"
     auth_ok: bool = True
     topology: Optional[wire.TopologyOk] = None
+    close_on_topology: bool = False
     # When set, PUBLISH gets this response instead of PUBLISH_OK.
     redirect_publish: Optional[wire.Redirect] = None
     error_publish: Optional[tuple[int, str]] = None
@@ -248,6 +249,9 @@ class FakeBroker:
             return
 
         if op == Op.TOPOLOGY:
+            if self.close_on_topology:
+                writer.close()
+                return
             topology = self.topology or wire.TopologyOk(generation=0, queues=[])
             await self._send(writer, build_frame(Op.TOPOLOGY_OK, rid, encode_body(Op.TOPOLOGY_OK, topology)))
             return
