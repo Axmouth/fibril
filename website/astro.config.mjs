@@ -19,11 +19,11 @@ export default defineConfig({
       description: "A lightweight message broker with durable queues and explicit delivery semantics.",
       components: { SiteTitle: "./src/components/SiteTitle.astro" },
       customCss: ["./src/styles/starlight.css"],
-      favicon: "/brand/face-48.png",
+      favicon: "/brand/fibril-mark-48.png",
       head: [
-        { tag: "link", attrs: { rel: "icon", type: "image/png", sizes: "16x16", href: "/brand/face-16.png" } },
-        { tag: "link", attrs: { rel: "icon", type: "image/png", sizes: "32x32", href: "/brand/face-32.png" } },
-        { tag: "link", attrs: { rel: "icon", type: "image/svg+xml", sizes: "any", href: "/brand/face.svg" } },
+        { tag: "link", attrs: { rel: "icon", type: "image/png", sizes: "16x16", href: "/brand/fibril-mark-16.png" } },
+        { tag: "link", attrs: { rel: "icon", type: "image/png", sizes: "32x32", href: "/brand/fibril-mark-32.png" } },
+        { tag: "link", attrs: { rel: "icon", type: "image/svg+xml", sizes: "any", href: "/brand/fibril-mark.svg" } },
       ],
       social: [
         { icon: "github", label: "GitHub", href: "https://github.com/Axmouth/fibril" },

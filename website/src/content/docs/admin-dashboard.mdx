@@ -94,6 +94,23 @@ not a number. The settings page can enable desktop notifications for new
 attention conditions (critical only, or critical and warning), a per-browser
 choice.
 
+The **Storage retention** panel separates active data and snapshots, agreed
+checkpoint artifacts, retained or inactive generations, recovery staging and
+other files under the node’s Stroma root. Unix samples use allocated file blocks
+and count each hard-linked inode once. Shared bytes are attributed to active data
+first. Current logs can include segments pinned by an accepted checkpoint. On other hosts the panel labels file lengths, which can count links
+separately. Directory blocks, filesystem metadata, reflink sharing and files
+outside that root are excluded.
+
+A request starts a background sample when needed and immediately returns the last
+result. Samples refresh at most every 30 seconds while the view is in use. One
+blocking scan runs at a time per process, with a 100,000-entry and five-second
+traversal budget checked between filesystem calls. The panel shows sample age,
+skipped entries and errors. An unsuccessful scan retains the last completed
+sample. These approximate counters grant no permission to reclaim recovery data.
+The existing **Active logs** number and history chart still report message and
+event log file lengths, so they use a different basis from allocated blocks.
+
 The Activity page is the broker's own diary: operator actions (declares,
 deletes, drains, test publishes), attention conditions raised and resolved,
 cluster membership changes, and stream subscribers falling behind into lag
@@ -244,6 +261,11 @@ Replay does not remove or acknowledge the DLQ message. The result table reports
 which offsets were replayed and which were skipped.
 
 ## Runtime Settings
+
+The runtime form labels the saved document’s authority and revision. Each field
+also shows the startup seed from this node’s resolved configuration. These seeds
+initialize a missing settings document, and saved settings take precedence.
+Keep startup seeds consistent across cluster nodes.
 
 The settings page exposes delivery, connection lifecycle, replication, partitioning,
 consumer-group defaults, idle queue cleanup and Plexus stream settings. The startup

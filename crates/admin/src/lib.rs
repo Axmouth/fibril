@@ -7,6 +7,7 @@ mod metrics_route;
 pub mod prometheus;
 mod routes;
 mod server;
+mod storage_usage;
 pub mod setup;
 
 pub use server::{

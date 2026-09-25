@@ -105,6 +105,21 @@ function timeline(segments, t) {
     `<path d="M${left + (width * t) / 12} ${top - 8}v${42 * 4}" stroke="var(--story-text)" stroke-opacity=".35" stroke-dasharray="3 4"/><text x="930" y="582" text-anchor="end" class="diagram-note">Window length is choreography, not measured latency</text>`
   );
 }
+function checkpointHistory(h, progress) {
+  const base = h.accepted
+    ? "Accepted base · events before 120"
+    : "Proposed base · awaiting agreement";
+  return `<text x="70" y="76" class="diagram-note">A snapshot becomes a recovery base only after verified agreement</text>
+    <text x="70" y="444" class="diagram-note">EVENT HISTORY / EXCLUSIVE CUT 120</text>
+    <rect x="70" y="458" width="520" height="34" rx="5" fill="var(--story-control)" opacity="${h.accepted ? ".3" : ".1"}"/>
+    <text x="84" y="480" font-size="13">${base}</text>
+    <path d="M600 449v54" stroke="var(--story-control)" stroke-dasharray="3 3"/>
+    <rect x="610" y="458" width="${h.suffix ? 300 * progress : 0}" height="34" rx="5" fill="var(--story-data)" opacity=".25"/>
+    <text x="624" y="480" font-size="12">${h.suffix ? "Later suffix · events ≥ 120" : "New events will follow here"}</text>
+    <text x="70" y="532" class="diagram-note">LIVE PAYLOADS / INDEPENDENT OF THE EVENT CUT</text>
+    ${[0, 1, 2, 3, 4, 5, 6, 7].map((i) => `<rect x="${70 + i * 106}" y="548" width="90" height="30" rx="4" fill="var(--story-${h.verified ? "ack" : "delivery"})" opacity=".22"/><text x="${115 + i * 106}" y="568" text-anchor="middle" font-size="11">${h.verified ? "verified ✓" : "live body"}</text>`).join("")}
+    <text x="70" y="609" class="diagram-note">${h.verified ? "Required live bytes checked · activation barriers still remain" : "Unsettled messages retain their payloads even when their enqueue predates the cut"}</text>`;
+}
 export function registerStories() {
   if (customElements.get("broker-story")) return;
   customElements.define(
@@ -305,7 +320,7 @@ export function registerStories() {
               ? delivery.variants.find((v) => v.id === this.variant).text
               : this.scene === "failover"
                 ? "A owns the queue. B and C hold replicas. Follow the handoff—and the return."
-                : "Follow each partition’s owner and copies across the same four machines.";
+                : this.config.note;
           const caption = this.querySelector(".story-caption");
           caption.removeAttribute("data-enter");
           requestAnimationFrame(() => {
@@ -353,6 +368,12 @@ export function registerStories() {
           nodes,
           this.markerPrefix,
         );
+        if (this.scene === "checkpoint") {
+          const h = m.history;
+          const progress = this.playing && m.index === 3 ? m.stepProgress : 1;
+          this.svg.querySelector("[data-timeline]").innerHTML =
+            checkpointHistory(h, progress);
+        }
         if (this.scene === "delivery")
           this.svg.querySelector("[data-timeline]").innerHTML = timeline(
             m.segments,
@@ -433,7 +454,7 @@ export function registerStories() {
             });
             image.setAttribute("href", data);
           }
-          const h = this.scene === "delivery" ? 610 : 460,
+          const h = original.viewBox.baseVal.height,
             ns = "http://www.w3.org/2000/svg";
           const out = document.createElementNS(ns, "svg");
           out.setAttribute("xmlns", ns);

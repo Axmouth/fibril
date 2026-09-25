@@ -18,6 +18,9 @@
       <p>Live broker behavior such as delivery timing and idle queue cleanup.</p>
     </div>
 
+    <p id="runtime-authority" class="settings-note">Loading settings authority…</p>
+    <p class="settings-note">Inputs show the saved document. A saved revision does not report adoption by every worker. Startup seeds below come from this node’s resolved configuration and initialize a missing settings document. They do not override saved values.</p>
+
     <section class="settings-section">
       <div class="settings-section-heading">
         <h5>Delivery</h5>
@@ -34,6 +37,7 @@
             <option value="ms">milliseconds</option>
           </select>
         </span>
+      <span id="seed.delivery.inflight_ttl_ms" class="settings-help"></span>
       </label>
       <label class="settings-field">
         <span class="settings-label">Expiry poll minimum</span>
@@ -45,11 +49,13 @@
             <option value="ms">milliseconds</option>
           </select>
         </span>
+      <span id="seed.delivery.expiry_poll_min_ms" class="settings-help"></span>
       </label>
       <label class="settings-field">
         <span class="settings-label">Expiry batch max</span>
         <span class="settings-help">Maximum delayed or expired offsets processed in one pass.</span>
         <input id="delivery.expiry_batch_max" data-runtime-setting type="number" min="1" step="1">
+      <span id="seed.delivery.expiry_batch_max" class="settings-help"></span>
       </label>
       <label class="settings-field">
         <span class="settings-label">Delivery poll max</span>
@@ -61,6 +67,7 @@
             <option value="ms">milliseconds</option>
           </select>
         </span>
+      <span id="seed.delivery.delivery_poll_max_ms" class="settings-help"></span>
       </label>
       </div>
     </section>
@@ -81,10 +88,11 @@
             <option value="ms">milliseconds</option>
           </select>
         </span>
+      <span id="seed.connection.reconnect_grace_ms" class="settings-help"></span>
       </label>
       <label class="settings-field">
         <span class="settings-label">Drain handoff timeout</span>
-        <span class="settings-help">Maximum wait for partition ownership handoff during a coordinated drain. Blank uses 30 seconds; expiry leaves recovery running.</span>
+        <span class="settings-help">Maximum wait for partition ownership handoff during a coordinated drain. Blank uses 30 seconds. Expiry leaves recovery running.</span>
         <span class="settings-duration">
           <input id="connection.drain_handoff_timeout_ms" data-runtime-setting data-runtime-optional type="number" min="0" step="any" placeholder="default">
           <select class="duration-unit" id="connection.drain_handoff_timeout_ms.unit" data-for="connection.drain_handoff_timeout_ms">
@@ -92,10 +100,11 @@
             <option value="ms">milliseconds</option>
           </select>
         </span>
+      <span id="seed.connection.drain_handoff_timeout_ms" class="settings-help"></span>
       </label>
       <label class="settings-field">
         <span class="settings-label">Restart session TTL</span>
-        <span class="settings-help">Maximum age of persisted session metadata accepted when a client resumes after broker restart. Blank or zero disables restart resumption; live disconnects use reconnect grace.</span>
+        <span class="settings-help">Maximum age of persisted session metadata accepted when a client resumes after broker restart. Blank or zero disables restart resumption. Live disconnects use reconnect grace.</span>
         <span class="settings-duration">
           <input id="connection.resume_session_restart_ttl_ms" data-runtime-setting data-runtime-optional type="number" min="0" step="any" placeholder="disabled">
           <select class="duration-unit" id="connection.resume_session_restart_ttl_ms.unit" data-for="connection.resume_session_restart_ttl_ms">
@@ -103,6 +112,7 @@
             <option value="ms">milliseconds</option>
           </select>
         </span>
+      <span id="seed.connection.resume_session_restart_ttl_ms" class="settings-help"></span>
       </label>
       </div>
     </section>
@@ -123,7 +133,8 @@
               <option value="ms">milliseconds</option>
             </select>
           </span>
-        </label>
+        <span id="seed.replication.confirm_timeout_ms" class="settings-help"></span>
+      </label>
         <label class="settings-field">
           <span class="settings-label">Caught-up poll</span>
           <span class="settings-help">Follower pull interval while already caught up with the owner.</span>
@@ -134,7 +145,8 @@
               <option value="ms">milliseconds</option>
             </select>
           </span>
-        </label>
+        <span id="seed.replication.caught_up_poll_ms" class="settings-help"></span>
+      </label>
       </div>
       <div class="settings-grid settings-grid-two">
         <label class="settings-field">
@@ -147,7 +159,8 @@
               <option value="ms">milliseconds</option>
             </select>
           </span>
-        </label>
+        <span id="seed.replication.retry_poll_ms" class="settings-help"></span>
+      </label>
         <label class="settings-field">
           <span class="settings-label">Checkpoint retry poll</span>
           <span class="settings-help">Follower retry interval while it needs a checkpoint before it can continue.</span>
@@ -158,36 +171,42 @@
               <option value="ms">milliseconds</option>
             </select>
           </span>
-        </label>
+        <span id="seed.replication.checkpoint_retry_poll_ms" class="settings-help"></span>
+      </label>
       </div>
       <div class="settings-grid settings-grid-two">
         <label class="settings-field">
           <span class="settings-label">Messages per read</span>
           <span class="settings-help">Maximum message records a follower asks the owner for in one pull.</span>
           <input id="replication.max_messages_per_read" data-runtime-setting type="number" min="1" step="1">
-        </label>
+        <span id="seed.replication.max_messages_per_read" class="settings-help"></span>
+      </label>
         <label class="settings-field">
           <span class="settings-label">Events per read</span>
           <span class="settings-help">Maximum event records a follower asks the owner for in one pull.</span>
           <input id="replication.max_events_per_read" data-runtime-setting type="number" min="1" step="1">
-        </label>
+        <span id="seed.replication.max_events_per_read" class="settings-help"></span>
+      </label>
         <label class="settings-field">
           <span class="settings-label">Bytes per read</span>
           <span class="settings-help">Approximate byte budget for one owner replication response.</span>
           <input id="replication.max_bytes_per_read" data-runtime-setting type="number" min="1" step="1">
-        </label>
+        <span id="seed.replication.max_bytes_per_read" class="settings-help"></span>
+      </label>
       </div>
       <div class="settings-grid settings-grid-two">
         <label class="settings-field">
           <span class="settings-label">Iterations per tick</span>
           <span class="settings-help">Maximum pull/apply iterations before the follower yields.</span>
           <input id="replication.max_iterations_per_tick" data-runtime-setting type="number" min="1" step="1">
-        </label>
+        <span id="seed.replication.max_iterations_per_tick" class="settings-help"></span>
+      </label>
         <label class="settings-field">
           <span class="settings-label">Minimum in-sync replicas</span>
           <span class="settings-help">Fail replica-durable publishes quickly when fewer replicas are recently in sync. Use 1 to disable the floor.</span>
           <input id="replication.min_in_sync_replicas" data-runtime-setting type="number" min="1" step="1">
-        </label>
+        <span id="seed.replication.min_in_sync_replicas" class="settings-help"></span>
+      </label>
       </div>
       <label class="settings-field">
         <span class="settings-label">ISR timeout</span>
@@ -199,6 +218,7 @@
             <option value="ms">milliseconds</option>
           </select>
         </span>
+      <span id="seed.replication.isr_timeout_ms" class="settings-help"></span>
       </label>
       <div class="settings-grid settings-grid-two">
       <label class="settings-field">
@@ -211,6 +231,7 @@
             <option value="ms">milliseconds</option>
           </select>
         </span>
+      <span id="seed.replication.read_timeout_slack_ms" class="settings-help"></span>
       </label>
       <label class="settings-field">
         <span class="settings-label">Owner connect timeout</span>
@@ -222,6 +243,7 @@
             <option value="ms">milliseconds</option>
           </select>
         </span>
+      <span id="seed.replication.owner_connect_timeout_ms" class="settings-help"></span>
       </label>
       </div>
       <label class="checkbox-label">
@@ -229,53 +251,62 @@
         <span>
           <span class="settings-label">Streaming replication</span>
           <span class="settings-help">Use credit-based streaming on followers. When disabled, followers fall back to polling pulls.</span>
+          <span id="seed.replication.stream_enabled" class="settings-help"></span>
         </span>
       </label>
       <div class="settings-grid settings-grid-two">
         <label class="settings-field">
           <span class="settings-label">Stream apply linger</span>
-          <span class="settings-help">Microseconds a streaming follower spends gathering contiguous frames before one fsynced apply. Higher trades apply latency for fsync amortization; 0 = drain-only.</span>
+          <span class="settings-help">Microseconds a streaming follower spends gathering contiguous frames before one fsynced apply. Higher trades apply latency for fsync amortization. Zero drains only.</span>
           <input id="replication.stream_apply_linger_us" data-runtime-setting type="number" min="0" step="1">
-        </label>
+        <span id="seed.replication.stream_apply_linger_us" class="settings-help"></span>
+      </label>
         <label class="settings-field">
           <span class="settings-label">Stream apply max merge bytes</span>
           <span class="settings-help">Byte cap on a single coalesced streaming apply (peak memory vs fsync amortization).</span>
           <input id="replication.stream_apply_max_merge_bytes" data-runtime-setting type="number" min="1" step="1">
-        </label>
+        <span id="seed.replication.stream_apply_max_merge_bytes" class="settings-help"></span>
+      </label>
         <label class="settings-field">
           <span class="settings-label">Stream buffer batches</span>
           <span class="settings-help">In-flight batch buffer depth (credit window) for the streaming follower. Applied on the next stream.</span>
           <input id="replication.stream_buffer_batches" data-runtime-setting type="number" min="1" step="1">
-        </label>
+        <span id="seed.replication.stream_buffer_batches" class="settings-help"></span>
+      </label>
       </div>
       <label class="settings-field">
         <span class="settings-label">Agreed checkpoint interval (ms)</span>
-        <span class="settings-help">Opt-in background checkpoints on all admitted queue replicas. 0 disables new attempts; 1000–86400000 sets the periodic interval. Work thresholds can start an attempt earlier, at most once per second. Existing attempts finish. Snapshot and payload verification uses bounded background work.</span>
+        <span class="settings-help">Opt-in background checkpoints on all admitted queue replicas. 0 disables new attempts. 1000–86400000 sets the periodic interval. Work thresholds can start an attempt earlier, at most once per second. Existing attempts finish. Snapshot and payload verification uses bounded background work.</span>
         <input id="replication.agreed_checkpoint_interval_ms" data-runtime-setting type="number" min="0" max="86400000" step="1000">
+      <span id="seed.replication.agreed_checkpoint_interval_ms" class="settings-help"></span>
       </label>
       <div class="settings-grid settings-grid-two">
         <label class="settings-field">
           <span class="settings-label">Checkpoint event threshold</span>
-          <span class="settings-help">Start earlier after this many events beyond the agreed cut. 0 disables this trigger; the checkpoint interval must be enabled.</span>
+          <span class="settings-help">Start earlier after this many events beyond the agreed cut. 0 disables this trigger. The checkpoint interval must be enabled.</span>
           <input id="replication.agreed_checkpoint_max_events" data-runtime-setting type="number" min="0" step="1">
-        </label>
+        <span id="seed.replication.agreed_checkpoint_max_events" class="settings-help"></span>
+      </label>
         <label class="settings-field">
           <span class="settings-label">Checkpoint append-byte threshold</span>
-          <span class="settings-help">Approximate local append content bytes since observing the last certificate. 0 disables this trigger. Resets on reopen; periodic checkpoints remain the fallback.</span>
+          <span class="settings-help">Approximate local append content bytes since observing the last certificate. 0 disables this trigger. Resets on reopen. Periodic checkpoints remain the fallback.</span>
           <input id="replication.agreed_checkpoint_max_bytes" data-runtime-setting type="number" min="0" step="1">
-        </label>
+        <span id="seed.replication.agreed_checkpoint_max_bytes" class="settings-help"></span>
+      </label>
       </div>
       <label class="checkbox-label">
         <input id="replication.eager_failover" data-runtime-setting type="checkbox">
         <span>
           <span class="settings-label">Eager failover</span>
-          <span class="settings-help">Opt in to faster reassignment after repeated explicit peer connection failures. Safe recovery still runs; heartbeat expiry handles silent failures. Brief network interruptions can cause extra recovery work.</span>
+          <span class="settings-help">Opt in to faster reassignment after repeated explicit peer connection failures. Safe recovery still runs. Heartbeat expiry handles silent failures. Brief network interruptions can cause extra recovery work.</span>
+          <span id="seed.replication.eager_failover" class="settings-help"></span>
         </span>
       </label>
       <label class="settings-field">
         <span class="settings-label">Eager failover grace (ms)</span>
         <span class="settings-help">Require failed reconnects across this interval. Zero reacts after an immediate failed reconnect check. Changing the policy restarts pending suspicion; Raft timers stay unchanged.</span>
         <input id="replication.eager_failover_grace_ms" data-runtime-setting type="number" min="0" max="60000" step="1">
+      <span id="seed.replication.eager_failover_grace_ms" class="settings-help"></span>
       </label>
     </section>
 
@@ -289,12 +320,14 @@
           <span class="settings-label">Default partition count</span>
           <span class="settings-help">Partition count used when a new queue is declared without an explicit count.</span>
           <input id="partitioning.default_partition_count" data-runtime-setting type="number" min="1" step="1">
-        </label>
+        <span id="seed.partitioning.default_partition_count" class="settings-help"></span>
+      </label>
         <label class="settings-field">
           <span class="settings-label">Target partitions per consumer</span>
           <span class="settings-help">Blank disables the exclusive-consumer-group under-provisioned signal.</span>
           <input id="consumer_groups.default_target_per_consumer" data-runtime-setting data-runtime-optional type="number" min="1" step="1" placeholder="disabled">
-        </label>
+        <span id="seed.consumer_groups.default_target_per_consumer" class="settings-help"></span>
+      </label>
       </div>
     </section>
 
@@ -308,6 +341,7 @@
         <span>
           <span class="settings-label">Enabled</span>
           <span class="settings-help">When disabled, idle queues remain materialized after first use.</span>
+          <span id="seed.idle_queue_cleanup.enabled" class="settings-help"></span>
         </span>
       </label>
       <div class="settings-grid settings-grid-two">
@@ -321,6 +355,7 @@
             <option value="ms">milliseconds</option>
           </select>
         </span>
+      <span id="seed.idle_queue_cleanup.evict_after_ms" class="settings-help"></span>
       </label>
       <label class="settings-field">
         <span class="settings-label">Sweep interval</span>
@@ -332,6 +367,7 @@
             <option value="ms">milliseconds</option>
           </select>
         </span>
+      <span id="seed.idle_queue_cleanup.sweep_interval_ms" class="settings-help"></span>
       </label>
       <label class="settings-field">
         <span class="settings-label">Publisher idle timeout</span>
@@ -343,6 +379,7 @@
             <option value="ms">milliseconds</option>
           </select>
         </span>
+      <span id="seed.idle_queue_cleanup.publisher_idle_timeout_ms" class="settings-help"></span>
       </label>
 </div>
     </section>
@@ -350,18 +387,20 @@
     <section class="settings-section">
       <div class="settings-section-heading">
         <h5>Plexus Streams</h5>
-        <p>Cursor acknowledgment batching and idle channel eviction. Changes are adopted on the next commit batch or idle sweep; an active wait can finish using its previous interval.</p>
+        <p>Cursor acknowledgment batching and idle channel eviction. Changes are adopted on the next commit batch or idle sweep. An active wait can finish using its previous interval.</p>
       </div>
       <div class="settings-grid settings-grid-two">
       <label class="settings-field">
         <span class="settings-label">Cursor commit window (µs)</span>
         <span class="settings-help">Time to gather cursor acknowledgments into one durable batch. Zero flushes each drained batch immediately.</span>
         <input id="stream.cursor_commit_window_us" data-runtime-setting type="number" min="0" step="1">
+      <span id="seed.stream.cursor_commit_window_us" class="settings-help"></span>
       </label>
       <label class="settings-field">
         <span class="settings-label">Cursor commit batch size</span>
         <span class="settings-help">Maximum distinct cursors in one commit batch. Effective minimum: 1.</span>
         <input id="stream.cursor_commit_max_batch" data-runtime-setting type="number" min="1" step="1">
+      <span id="seed.stream.cursor_commit_max_batch" class="settings-help"></span>
       </label>
       </div>
       <label class="checkbox-label">
@@ -369,6 +408,7 @@
         <span>
           <span class="settings-label">Evict idle stream channels</span>
           <span class="settings-help">Release in-memory channels with no live subscriptions. Durable data remains and the channel is loaded again on use.</span>
+          <span id="seed.stream.idle_evict_enabled" class="settings-help"></span>
         </span>
       </label>
       <div class="settings-grid settings-grid-two">
@@ -382,6 +422,7 @@
             <option value="ms">milliseconds</option>
           </select>
         </span>
+      <span id="seed.stream.idle_evict_after_ms" class="settings-help"></span>
       </label>
       <label class="settings-field">
         <span class="settings-label">Stream sweep interval</span>
@@ -393,6 +434,7 @@
             <option value="ms">milliseconds</option>
           </select>
         </span>
+      <span id="seed.stream.idle_sweep_interval_ms" class="settings-help"></span>
       </label>
       </div>
     </section>
@@ -411,7 +453,7 @@
       <h5>Desktop Notifications</h5>
       <p>Notify this browser when a new attention condition appears - a
         quarantined partition, a backlog with no consumer, a certificate near
-        expiry. Stored in this browser only; the broker is not involved.</p>
+        expiry. Stored in this browser only. The broker is not involved.</p>
     </div>
     <div class="settings-inline-form">
       <label class="settings-label" for="notify.level">Notify on</label>
@@ -484,7 +526,7 @@
       <div>
         <dt>Batch linger</dt>
         <dd id="startup.keratin_batch_linger_ms"></dd>
-        <small>Startup-only; maximum time to gather writes before committing.</small>
+        <small>Startup-only. Maximum time to gather writes before committing.</small>
       </div>
       <div>
         <dt>Message tail cache</dt>
@@ -498,7 +540,7 @@
       <div>
         <dt>Writer buffer factor</dt>
         <dd id="startup.keratin_writer_buffer_factor"></dd>
-        <small>Range 1–128; default 128. Each log has writer and notification channels.</small>
+        <small>Range 1–128. Default 128. Each log has writer and notification channels.</small>
       </div>
       <div>
         <dt>Staging buffers</dt>
@@ -508,12 +550,12 @@
       <div>
         <dt>Staging decay interval</dt>
         <dd id="startup.keratin_staging_decay_secs"></dd>
-        <small>Default 10 s; must be positive. Only empty buffers shrink.</small>
+        <small>Default 10 s. Must be positive. Only empty buffers shrink.</small>
       </div>
       <div>
         <dt>Staging idle release</dt>
         <dd id="startup.keratin_staging_idle_release_secs"></dd>
-        <small>Default 60 s; must be at least the decay interval.</small>
+        <small>Default 60 s. Must be at least the decay interval.</small>
       </div>
       <div>
         <dt>Max in-flight fsyncs</dt>
@@ -555,7 +597,7 @@
       </label>
       <label class="settings-field">
         <span class="settings-label">Segment preallocation (bytes)</span>
-        <span class="settings-help">Zero disables preallocation. Applies to message, event and internal metadata logs when they next roll over or reopen. Existing segments keep their policy; no rollover is forced. Filesystem allocation failures fall back to extending writes and appear below.</span>
+        <span class="settings-help">Zero disables preallocation. Applies to message, event and internal metadata logs when they next roll over or reopen. Existing segments keep their policy. No rollover is forced. Filesystem allocation failures fall back to extending writes and appear below.</span>
         <input id="local-storage.bytes" type="number" min="0" max="9007199254740991" step="1" required>
       </label>
       <p id="local-storage.summary" class="settings-help"></p>
@@ -763,7 +805,7 @@ function updateQueueDlqPolicyWarning() {
   const shouldWarn = field("queue-dlq.policy").value === "global" && !currentGlobalDlqTarget;
   warning.hidden = !shouldWarn;
   warning.textContent = shouldWarn
-    ? "No global DLQ target is currently configured; exhausted messages will be discarded until one is set."
+    ? "No global DLQ target is currently configured. Exhausted messages will be discarded until one is set."
     : "";
 }
 
@@ -771,7 +813,7 @@ function runtimeSettingsStatusMessage(data, message) {
   if (data.load_issue) {
     return {
       kind: "warning",
-      text: `Persisted settings at version ${data.load_issue.version} could not be loaded. The broker is using the values shown from startup config; saving will replace the corrupted persisted settings.`,
+      text: `Persisted settings at version ${data.load_issue.version} could not be loaded. The broker is using the values shown from startup config. Saving will replace the corrupted persisted settings.`,
     };
   }
   return {
@@ -793,6 +835,8 @@ function renderSettings(data) {
   // The version check still protects the full replacement from concurrent edits.
   currentSettings = structuredClone(data.settings);
   field("version").value = data.version;
+  const scope = data.scope === "cluster" ? "Cluster-wide" : data.scope === "node" ? "This node" : "Scope unavailable from this broker";
+  field("runtime-authority").textContent = `${scope} · saved revision ${data.version}. Workers adopt changes at their supported boundaries.`;
   for (const input of document.querySelectorAll("[data-runtime-setting]")) {
     const [group, key] = input.id.split(".");
     const value = currentSettings[group]?.[key];
@@ -815,7 +859,23 @@ function formatBytes(bytes) {
   return `${bytes} bytes`;
 }
 
+function startupSeedText(id, value) {
+  if (value === undefined) return "Startup seed unavailable";
+  if (value === null) return "Startup seed: unset (see field behavior)";
+  if (typeof value === "boolean") return `Startup seed: ${value ? "enabled" : "disabled"}`;
+  const unit = id.endsWith("_ms") ? " ms" : id.endsWith("_us") ? " μs" : "";
+  return `Startup seed: ${value}${unit}`;
+}
+
+function renderStartupSeeds(seed) {
+  for (const input of document.querySelectorAll("[data-runtime-setting]")) {
+    const [group, key] = input.id.split(".");
+    field(`seed.${input.id}`).textContent = startupSeedText(input.id, seed?.[group]?.[key]);
+  }
+}
+
 function renderStartupConfig(data) {
+  renderStartupSeeds(data.runtime_seed);
   field("startup-config-section").hidden = false;
   field("startup.data_dir").textContent = data.data_dir;
   field("startup.broker_bind").textContent = data.broker_bind;

@@ -33,6 +33,7 @@ pub struct OverviewResponse {
     pub stroma: serde_json::Value,
     pub sys: SystemSnapshot,
     pub storage_used: u64,
+    pub storage_usage: crate::storage_usage::StorageUsageSnapshot,
     /// Per-queue disk footprint (largest first), the segments behind
     /// `storage_used`.
     pub storage_breakdown: Vec<fibril_broker::queue_engine::DiskUsedBreakdownEntry>,
@@ -40,6 +41,8 @@ pub struct OverviewResponse {
 
 #[derive(Serialize)]
 pub struct RuntimeSettingsResponse {
+    /// Authority that persists this document. Worker adoption can lag this revision.
+    pub scope: &'static str,
     pub version: u64,
     pub settings: RuntimeSettings,
     pub locks: RuntimeSettingsLocks,
@@ -268,11 +271,13 @@ fn parse_status_filter(
 
 impl RuntimeSettingsResponse {
     fn new(
+        cluster_authority: bool,
         snapshot: RuntimeSettingsSnapshot,
         locks: RuntimeSettingsLocks,
         load_issue: Option<RuntimeSettingsLoadIssue>,
     ) -> Self {
         Self {
+            scope: if cluster_authority { "cluster" } else { "node" },
             version: snapshot.version,
             settings: snapshot.settings,
             locks,
@@ -481,6 +486,7 @@ pub(crate) async fn overview_payload(server: &AdminServer) -> OverviewResponse {
         stroma: stroma_overview(server),
         sys: server.metrics.system().snapshot(),
         storage_used,
+        storage_usage: server.storage_usage.read(server.storage.clone()),
         storage_breakdown,
     }
 }
@@ -1149,6 +1155,7 @@ pub async fn runtime_settings(
     };
 
     Ok(Json(RuntimeSettingsResponse::new(
+        server.runtime_settings_cluster.is_some(),
         snapshot,
         runtime_settings.locks().clone(),
         runtime_settings.load_issue(),
@@ -1276,6 +1283,7 @@ pub async fn update_runtime_settings(
                 return Ok((
                     StatusCode::OK,
                     Json(RuntimeSettingsResponse::new(
+                        server.runtime_settings_cluster.is_some(),
                         snapshot,
                         locks,
                         runtime_settings.load_issue(),
@@ -1287,6 +1295,7 @@ pub async fn update_runtime_settings(
                 return Ok((
                     StatusCode::CONFLICT,
                     Json(RuntimeSettingsResponse::new(
+                        server.runtime_settings_cluster.is_some(),
                         snapshot,
                         locks,
                         runtime_settings.load_issue(),
@@ -1312,6 +1321,7 @@ pub async fn update_runtime_settings(
         Ok(RuntimeSettingsUpdateOutcome::Stored(snapshot)) => Ok((
             StatusCode::OK,
             Json(RuntimeSettingsResponse::new(
+                server.runtime_settings_cluster.is_some(),
                 snapshot,
                 locks,
                 runtime_settings.load_issue(),
@@ -1321,6 +1331,7 @@ pub async fn update_runtime_settings(
         Ok(RuntimeSettingsUpdateOutcome::Conflict(snapshot)) => Ok((
             StatusCode::CONFLICT,
             Json(RuntimeSettingsResponse::new(
+                server.runtime_settings_cluster.is_some(),
                 snapshot,
                 locks,
                 runtime_settings.load_issue(),

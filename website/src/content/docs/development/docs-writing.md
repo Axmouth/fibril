@@ -76,7 +76,7 @@ the linked records.
 `broker-story/scenarios.mjs` owns the stage descriptions, assignments, message
 paths and illustrative persistence windows. `player.mjs` supplies playback and
 frame export. Embed `<BrokerStory scene="failover" />`, `scene="delivery"` or
-`scene="placement"` in the relevant MDX page. The branding build copies canonical
+`scene="placement"` or `scene="checkpoint"` in the relevant MDX page. The branding build copies canonical
 mascot frames from the real dashboard. New sprite variants belong in that shared
 artwork source.
 
@@ -87,3 +87,15 @@ not prove broker correctness or benchmark latency. Next/Back and the position
 slider support close reading. Reduced motion disables autoplay and mascot motion.
 The transcript remains available without JavaScript. Save frame pauses playback
 and exports the current SVG with embedded artwork and explanatory text.
+
+The scene model uses checked JavaScript with contracts in `types.d.ts`. Run
+`npm run story:test` in `website` for strict type checks and narrative invariants.
+The normal website build runs both. Add new scene IDs, endpoints and frame data
+to the shared types before extending the model. The browser receives ordinary
+JavaScript with no type-checking runtime.
+
+The site favicon is `crates/admin/admin-ui/img/fibril-mark.svg`. The branding
+build copies that source and produces 16, 32 and 48 pixel PNGs with Sharp, already
+used by Astro and declared directly for this build step. Both the landing page
+and documentation reference these generated assets. The live dashboard retains
+its separate status faces.

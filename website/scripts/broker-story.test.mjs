@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import {
   model,
   failoverSteps,
+  checkpointSteps,
   assignments,
   delivery,
   scenes,
@@ -105,4 +106,20 @@ test("published sprite frames are exact build copies of the shared dashboard art
       ),
     );
   }
+});
+
+
+test("checkpoint agreement never skips live payload verification or grants ownership", () => {
+  const steps = checkpointSteps();
+  assert.equal(steps[0].history.accepted, false);
+  assert.equal(steps[1].history.accepted, false);
+  assert.equal(steps[2].history.accepted, true);
+  assert.equal(steps[3].history.suffix, true);
+  assert.equal(steps[4].history.verified, false);
+  assert.equal(steps[5].history.verified, true);
+  for (const step of steps.slice(4)) {
+    assert(step.dead.includes("a"));
+    assert(step.roles[1].includes("fenced"));
+  }
+  assert.match(steps[5].text, /large live backlog still requires reads/);
 });

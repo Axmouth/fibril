@@ -10,7 +10,7 @@ use stroma_core::{
 };
 pub use stroma_core::{
     AdaptiveStagingConfig, AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, DestroyOutcome,
-    DiskUsedBreakdownEntry, EmptyBufferResize, EnqueuedStreamAppend, EvictOutcome,
+    DiskUsedBreakdownEntry, RecoveryDiskUsage, EmptyBufferResize, EnqueuedStreamAppend, EvictOutcome,
     FollowerStateCheckpointInstall, FollowerStateCheckpointInstallOutcome, GlobalDLQ,
     GlobalDlqSnapshot, GlobalDlqUpdateOutcome, GlobalKey, GlobalStore, GlobalValue, InspectMode,
     IoError, KDurability, KeratinAppendCompletion, KeratinConfig, LogRuntimeConfig,
@@ -207,6 +207,12 @@ pub trait QueueEngine {
     async fn estimate_disk_used_breakdown(
         &self,
     ) -> Result<Vec<DiskUsedBreakdownEntry>, StromaError>;
+
+    /// Optional read-only node storage sample. Implementations keep filesystem
+    /// traversal off async workers. The admin surface caches these samples.
+    async fn recovery_disk_usage(&self) -> Result<Option<RecoveryDiskUsage>, StromaError> {
+        Ok(None)
+    }
 
     /// Every partition known on disk (topic, partition, group), materialized or
     /// not. Includes partitions indexed at open that no command has materialized,
@@ -1429,6 +1435,10 @@ impl QueueEngine for StromaEngine {
         self.inner.shutdown().await?;
 
         Ok(())
+    }
+
+    async fn recovery_disk_usage(&self) -> Result<Option<RecoveryDiskUsage>, StromaError> {
+        self.inner.recovery_disk_usage().await.map(Some)
     }
 
     async fn estimate_disk_used(&self) -> Result<u64, StromaError> {

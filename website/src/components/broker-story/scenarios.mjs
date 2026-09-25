@@ -1,6 +1,16 @@
+// @ts-check
 // Educational choreography, not measured time. Each scene explicitly states its
 // authority and confirmation boundary. The renderer only visualizes this model.
+/** @param {number} n */
 export const clamp = (n) => Math.max(0, Math.min(1, n));
+/**
+ * @param {string} title
+ * @param {string} text
+ * @param {string[]} roles
+ * @param {import('./types').Flow[]} flows
+ * @param {import('./types').StepExtras} extra
+ * @returns {import('./types').Step}
+ */
 const step = (title, text, roles, flows = [], extra = {}) => ({
   title,
   text,
@@ -8,8 +18,16 @@ const step = (title, text, roles, flows = [], extra = {}) => ({
   flows,
   ...extra,
 });
+/**
+ * @param {import('./types').Endpoint} from
+ * @param {import('./types').Endpoint} to
+ * @param {string} label
+ * @param {import('./types').Ink} kind
+ * @returns {import('./types').Flow}
+ */
 const flow = (from, to, label, kind = "data") => ({ from, to, label, kind });
 const stable = ["Owner · epoch 8", "Follower", "Follower · controller"];
+/** @type {import("./types").FailoverScene} */
 export const failover = {
   title: "An owner falls. The queue finds its way.",
   badge: "Implemented · experimental clustering",
@@ -21,6 +39,7 @@ export const failover = {
     { id: "fenced", label: "Evidence unavailable" },
   ],
 };
+/** @param {string} variant @returns {import("./types").Step[]} */
 export function failoverSteps(variant) {
   const prefix = [
     step(
@@ -132,6 +151,14 @@ const lanes = [
   "Delivery to worker",
   "Publisher confirmation",
 ];
+/**
+ * @param {import('./types').Segment['lane']} lane
+ * @param {number} start
+ * @param {number} end
+ * @param {string} label
+ * @param {import('./types').Ink} kind
+ * @returns {import('./types').Segment}
+ */
 const segment = (lane, start, end, label, kind = "data") => ({
   lane,
   start,
@@ -139,6 +166,7 @@ const segment = (lane, start, end, label, kind = "data") => ({
   label,
   kind,
 });
+/** @type {import("./types").DeliveryScene} */
 export const delivery = {
   title: "Follow one message. Watch the waits overlap.",
   badge: "Current main",
@@ -368,6 +396,7 @@ export const delivery = {
   ],
   lanes,
 };
+/** @type {import("./types").PlacementScene} */
 export const placement = {
   title: "One cluster. Many independent owners.",
   badge: "Implemented · partitioned queues",
@@ -376,17 +405,20 @@ export const placement = {
   nodes: ["Broker A", "Broker B", "Broker C", "Broker D"],
   variants: [{ id: "spread", label: "Partition placement" }],
 };
+/** @type {import("./types").Assignment[]} */
 export const assignments = [
   { name: "orders / 0", owner: "a", followers: ["b", "d"], color: "data" },
   { name: "orders / 1", owner: "b", followers: ["a", "c"], color: "delivery" },
   { name: "billing / 0", owner: "c", followers: ["b", "d"], color: "ack" },
 ];
+/** @type {import("./types").NodeId[]} */
+const nodeIds = ["a", "b", "c", "d"];
 export function placementSteps() {
   return assignments.map((q, i) =>
     step(
       `0${i + 1} / ${q.name}`,
-      `Broker ${q.owner.toUpperCase()} owns this partition; ${q.followers.map((x) => x.toUpperCase()).join(" and ")} hold follower copies. Another partition can have a different owner on the same machines. Ordering is per partition. It does not establish a global order across partitions.`,
-      ["a", "b", "c", "d"].map((id) =>
+      `Broker ${q.owner.toUpperCase()} owns this partition. ${q.followers.map((x) => x.toUpperCase()).join(" and ")} hold follower copies. Another partition can have a different owner on the same machines. Ordering is per partition. It does not establish a global order across partitions.`,
+      nodeIds.map((id) =>
         id === q.owner
           ? "Owner · " + q.name
           : q.followers.includes(id)
@@ -398,7 +430,94 @@ export function placementSteps() {
     ),
   );
 }
-export const scenes = { failover, delivery, placement };
+/** @type {import("./types").CheckpointScene} */
+export const checkpoint = {
+  title: "Agree on a base. Verify what comes next.",
+  badge: "Implemented · opt-in checkpoints",
+  layout: "cluster",
+  note: "One queue, three admitted replicas. Event cut 120 is an illustrative exclusive boundary. Event positions and message offsets are different coordinates. This story does not measure time or storage size.",
+  nodes: ["Broker A", "Broker B", "Broker C"],
+  variants: [{ id: "agreement", label: "Checkpoint agreement" }],
+};
+/** @returns {import("./types").Step[]} */
+export function checkpointSteps() {
+  return [
+    step(
+      "01 / Capture an exact applied cut",
+      "A captures queue state after applying events before 120. The snapshot describes ready, inflight, delayed and settled state at that exact boundary. A snapshot file alone is not an accepted recovery checkpoint.",
+      ["Owner · cut 120", "Follower", "Follower"],
+      [
+        flow("a", "b", "checkpoint proposal", "control"),
+        flow("a", "c", "checkpoint proposal", "control"),
+      ],
+      { history: { accepted: false, suffix: false, verified: false } },
+    ),
+    step(
+      "02 / Every admitted replica verifies",
+      "B and C reconstruct the same applied cut and verify the required evidence. Each persists its checkpoint and returns a bound receipt. A missing participant delays agreement while ordinary replication continues.",
+      ["Collect receipts", "Verify + persist", "Verify + persist"],
+      [
+        flow("b", "a", "durable receipt", "ack"),
+        flow("c", "a", "durable receipt", "ack"),
+      ],
+      { history: { accepted: false, suffix: false, verified: false } },
+    ),
+    step(
+      "03 / Consensus accepts the checkpoint",
+      "Acceptance binds the verified base to the queue history and assignment. The accepted checkpoint stays pinned until a replacement is accepted. The agreed cut covers events before 120.",
+      ["Owner · accepted base", "Pinned base", "Pinned base"],
+      [
+        flow("a", "b", "accepted checkpoint", "control"),
+        flow("a", "c", "accepted checkpoint", "control"),
+      ],
+      { history: { accepted: true, suffix: false, verified: false } },
+    ),
+    step(
+      "04 / New events form a suffix",
+      "Publishing, acknowledgements and timer transitions add events from 120 onward. Some messages created before the cut remain live. Their payloads are still needed, regardless of how old the checkpoint is.",
+      ["Owner · new traffic", "Replicate suffix", "Replicate suffix"],
+      [flow("a", "b", "new records"), flow("a", "c", "new records")],
+      { history: { accepted: true, suffix: true, verified: false } },
+    ),
+    step(
+      "05 / The owner disappears",
+      "The replacement remains fenced. Recovery obtains sealed evidence from the surviving replicas and checks that the accepted base is available and bound to the relevant history.",
+      ["Offline", "Candidate · fenced", "Sealed evidence"],
+      [flow("c", "b", "checkpoint evidence", "control")],
+      {
+        dead: ["a"],
+        history: { accepted: true, suffix: true, verified: false },
+      },
+    ),
+    step(
+      "06 / Replay the suffix and validate live payloads",
+      "Recovery verifies the snapshot, reconstructs the later event suffix and checks required live payload identities and bytes. A large settled history can become cheap. A large live backlog still requires reads. Missing or incompatible evidence keeps the queue fenced.",
+      ["Offline", "Verify · fenced", "Verify payloads"],
+      [flow("c", "b", "suffix + live payload proof", "control")],
+      {
+        dead: ["a"],
+        history: { accepted: true, suffix: true, verified: true },
+      },
+    ),
+    step(
+      "07 / Evidence feeds the normal recovery barriers",
+      "The verified base and suffix reduce reconstruction work. They do not grant ownership. Installation, exact quorum receipts, consensus activation and local admission still have to succeed before the replacement serves.",
+      ["Offline", "Install · fenced", "Required replica"],
+      [flow("b", "c", "prepare installation", "control")],
+      {
+        dead: ["a"],
+        history: { accepted: true, suffix: true, verified: true },
+      },
+    ),
+  ];
+}
+export const scenes = { failover, delivery, placement, checkpoint };
+/**
+ * @param {import('./types').SceneId} scene
+ * @param {string} variant
+ * @param {number} time
+ * @returns {import('./types').Frame}
+ */
 export function model(scene, variant, time) {
   if (scene === "delivery") {
     const v =
@@ -434,7 +553,11 @@ export function model(scene, variant, time) {
     };
   }
   const steps =
-    scene === "placement" ? placementSteps() : failoverSteps(variant);
+    scene === "placement"
+      ? placementSteps()
+      : scene === "checkpoint"
+        ? checkpointSteps()
+        : failoverSteps(variant);
   const i = Math.min(steps.length - 1, Math.floor(Math.max(0, time) / 3));
   return {
     ...steps[i],

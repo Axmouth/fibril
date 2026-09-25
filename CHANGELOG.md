@@ -38,6 +38,14 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- Admin settings show document authority, saved revision and configured startup
+  seeds. The Overview exposes cached node storage accounting for active data,
+  checkpoint artifacts, retained generations and recovery staging, with sample
+  age and errors. Unix samples deduplicate hard links and use allocated blocks.
+- Type-checked architecture stories include agreed checkpoints, event suffixes
+  and live payload validation. The website and docs use a shared pixel-ring
+  favicon with generated size variants.
+
 - Animated documentation stories for partition placement, failover/rejoin and
   delivery modes, using shared mascot sprites and scene definitions. Includes
   explicit failure branches, playback controls, reduced-motion stepping,

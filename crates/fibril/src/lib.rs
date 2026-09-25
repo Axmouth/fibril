@@ -2098,6 +2098,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
             metrics_per_channel: config.admin.metrics_per_channel,
         },
         Some(StartupConfigSummary {
+            runtime_seed: runtime_seed_from_config(&config),
             data_dir: config.server.data_dir.display().to_string(),
             tls_status,
             broker_bind: config.broker.listener.bind.to_string(),

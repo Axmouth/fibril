@@ -64,7 +64,7 @@ one durable follower.
 Follow a publish through the owner, persistence and the worker. Switch modes to
 see which waits overlap and which confirmation boundary remains. The badges
 separate current behavior, unmerged experiments and proposed work. Pause or scrub
-to inspect a frame; **Save frame** exports the current view for a presentation.
+to inspect a frame. **Save frame** exports the current view for a presentation.
 
 <BrokerStory scene="delivery" />
 
@@ -75,23 +75,25 @@ Unix cluster queues can periodically agree on a durable recovery snapshot. Set
 `replication.agreed_checkpoint_interval_ms` in the dashboard's cluster settings. Optional
 `agreed_checkpoint_max_events` and `agreed_checkpoint_max_bytes` thresholds in the
 same replication settings start attempts earlier under load. The interval must
-remain enabled; zero thresholds preserve periodic-only behavior. Starts are
+remain enabled. Zero thresholds preserve periodic-only behavior. Starts are
 limited to once per second per queue and periodic work is staggered across queues.
 Byte counts are scheduling hints that reset on reopen, not durability evidence.
 The Cluster page shows checkpoint age, event cut, local suffix and retained message
 counts, agreement/install progress and failures. Retained counts are logical
 ranges, not physical disk usage.
-The default is `0`; positive intervals range from 1,000 to 86,400,000 ms.
+The default is `0`. Positive intervals range from 1,000 to 86,400,000 ms.
 
 Each admitted replica verifies and persists the same applied cut before consensus
 accepts it. Recovery verifies the retained snapshot and later event suffix, plus
 all required payloads. Large live backlogs still require payload reads. A missing
 replica delays replacement while ordinary replication continues.
 
-Setting the interval to zero stops new attempts; existing attempts finish and the
+Setting the interval to zero stops new attempts. Existing attempts finish and the
 last accepted checkpoint remains pinned. Retained disk can grow while replacement
-is delayed. This policy is opt-in pending broader workload and retention tuning;
-see the [checkpoint plan](/development/failover-plan/#4-agreed-checkpoints-and-suffix-comparison).
+is delayed. This policy is opt-in pending broader workload and retention tuning.
+See the [checkpoint plan](/development/failover-plan/#4-agreed-checkpoints-and-suffix-comparison).
+
+<BrokerStory scene="checkpoint" />
 
 ## Eager failover
 

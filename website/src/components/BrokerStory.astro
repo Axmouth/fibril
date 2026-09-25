@@ -1,22 +1,22 @@
 ---
-import { scenes, failoverSteps, placementSteps, delivery } from './broker-story/scenarios.mjs';
-interface Props { scene: 'failover' | 'delivery' | 'placement'; }
+import { scenes, failoverSteps, placementSteps, checkpointSteps, delivery } from './broker-story/scenarios.mjs';
+interface Props { scene: import('./broker-story/types').SceneId; }
 const { scene } = Astro.props;
 const config = scenes[scene];
 const outlines = scene === 'delivery'
   ? delivery.variants.map(v => ({ title: `${v.label} · ${v.badge}`, steps: v.milestones.map(m => ({ title: m[1], text: m[2] })) }))
-  : [{ title: config.title, steps: scene === 'placement' ? placementSteps() : failoverSteps('recover') },
+  : [{ title: config.title, steps: scene === 'placement' ? placementSteps() : scene === 'checkpoint' ? checkpointSteps() : failoverSteps('recover') },
     ...(scene === 'failover' ? [{ title: 'When evidence is unavailable', steps: failoverSteps('fenced').slice(-1) }] : [])];
 ---
 <broker-story data-scene={scene} class="broker-story">
-  <div class="story-top"><span class="story-eyebrow">INSIDE FIBRIL / {scene === 'delivery' ? 'THE MESSAGE PATH' : scene === 'placement' ? 'PARTITION PLACEMENT' : 'FAILOVER & RETURN'}</span><span class="story-badge" data-badge>{config.badge || 'Current main'}</span></div>
+  <div class="story-top"><span class="story-eyebrow">INSIDE FIBRIL / {scene === 'delivery' ? 'THE MESSAGE PATH' : scene === 'placement' ? 'PARTITION PLACEMENT' : scene === 'checkpoint' ? 'AN AGREED BASE' : 'FAILOVER & RETURN'}</span><span class="story-badge" data-badge>{config.badge || 'Current main'}</span></div>
   <h3>{config.title}</h3>
   {config.variants.length > 1 && <div class="story-variants" role="group" aria-label="Choose a story">
     {config.variants.map((v, i) => <button type="button" data-variant={v.id} aria-pressed={i === 0}>{v.label}</button>)}
   </div>}
   <p class="story-contract" data-contract>{config.note}</p>
   <div class="story-canvas" tabindex="0" role="region" aria-label="Animated broker diagram. Scroll horizontally on small screens">
-    <svg data-stage xmlns="http://www.w3.org/2000/svg" viewBox={`0 0 980 ${scene === 'delivery' ? 610 : 460}`} role="img" aria-label={config.title}></svg>
+    <svg data-stage xmlns="http://www.w3.org/2000/svg" viewBox={`0 0 980 ${scene === 'checkpoint' ? 650 : scene === 'delivery' ? 610 : 460}`} role="img" aria-label={config.title}></svg>
   </div>
   <div class="story-caption"><span data-chapter>01</span><div><h4 data-headline>Follow the story</h4><p data-narrative>{config.note}</p></div></div>
   <span class="sr-only" data-announcement role="status"></span>

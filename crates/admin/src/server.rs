@@ -231,6 +231,8 @@ pub enum AdminServerError {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct StartupConfigSummary {
+    /// Configured seed used only when a persisted runtime document is absent.
+    pub runtime_seed: RuntimeSettings,
     pub data_dir: String,
     /// Human-readable TLS state: disabled (with the enable guide), or
     /// enabled with the material source and admin coverage.
@@ -256,6 +258,7 @@ pub struct StartupConfigSummary {
 }
 
 pub struct AdminServer {
+    pub(crate) storage_usage: Arc<crate::storage_usage::StorageUsageCache>,
     pub metrics: Metrics,
     pub stroma_metrics: Arc<StromaMetrics>,
     pub config: AdminConfig,
@@ -350,6 +353,7 @@ impl AdminServer {
         runtime_settings: Option<Arc<RuntimeSettingsManager>>,
     ) -> Self {
         Self {
+            storage_usage: Arc::new(crate::storage_usage::StorageUsageCache::default()),
             metrics,
             stroma_metrics,
             config,
@@ -1313,6 +1317,7 @@ mod tests {
                     metrics_per_channel: true,
                 },
                 Some(StartupConfigSummary {
+                    runtime_seed: RuntimeSettings::default(),
                     data_dir: root.display().to_string(),
                     tls_status: "disabled".to_string(),
                     broker_bind: "127.0.0.1:9876".into(),
@@ -3025,6 +3030,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
+        assert_eq!(body["scope"], "node");
         assert_eq!(body["version"], 1);
         assert_eq!(body["settings"]["delivery"]["inflight_ttl_ms"], 30_000);
         assert!(body["settings"]["connection"]["reconnect_grace_ms"].is_null());
@@ -3111,6 +3117,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn storage_retention_sample_is_background_and_reused() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let first = server.storage_usage.read(server.storage.clone());
+        assert!(first.refreshing);
+        assert!(first.sample.is_none());
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let snapshot = server.storage_usage.read(server.storage.clone());
+                if !snapshot.refreshing { break snapshot; }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        assert!(completed.error.is_none(), "{:?}", completed.error);
+        assert!(completed.sample.is_some());
+        let again = server.storage_usage.read(server.storage.clone());
+        assert!(!again.refreshing);
+        assert_eq!(again.sampled_at_ms, completed.sampled_at_ms);
+        server.storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn startup_config_get_returns_readonly_summary() {
         let server = test_server(RuntimeSettingsLocks::default()).await;
         let app = AdminServer::router(server);
@@ -3127,6 +3154,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
+        assert_eq!(body["runtime_seed"], serde_json::to_value(RuntimeSettings::default()).unwrap());
         assert_eq!(body["broker_bind"], "127.0.0.1:9876");
         assert_eq!(body["admin_auth_enabled"], false);
         assert_eq!(body["keratin_fsync_interval_ms"], 5);
@@ -3253,6 +3281,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
+        assert_eq!(body["scope"], "cluster");
         assert_eq!(body["version"], 1);
         assert_eq!(body["settings"]["delivery"]["inflight_ttl_ms"], 12_000);
         assert_eq!(

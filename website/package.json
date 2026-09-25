@@ -10,10 +10,11 @@
     "smoke:dist": "node scripts/smoke-dist.mjs",
     "smoke:server": "node scripts/smoke-server.mjs",
     "verify": "npm run build && npm run smoke:dist",
-    "story:test": "node scripts/broker-story.test.mjs",
+    "story:test": "npm run story:check && node scripts/broker-story.test.mjs",
     "demo:build": "node demo/build.mjs",
     "demo:test": "node demo/demo.test.mjs && node ../crates/admin/tests/settings-form.test.mjs && node ../crates/admin/tests/recovery-timeline.test.mjs",
-    "assets:build": "node scripts/build-branding.mjs"
+    "assets:build": "node scripts/build-branding.mjs",
+    "story:check": "tsc --project tsconfig.stories.json"
   },
   "dependencies": {
     "@astrojs/starlight": "^0.39.3",
@@ -24,6 +25,7 @@
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.9",
+    "sharp": "^0.34.5",
     "typescript": "^6.0.3"
   }
 }

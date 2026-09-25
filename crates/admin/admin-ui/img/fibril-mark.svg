@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" shape-rendering="crispEdges">
+  <title>Fibril pixel ring</title>
+  <!-- Canonical site mark. Integer geometry keeps the 16 px export legible. -->
+  <path fill="#a5dce8" fill-rule="evenodd" d="M12 0h10v2h4v2h2v4h2v6h2v8h-2v4h-2v4h-6v2H10v-2H6v-2H2v-4H0V12h2V6h4V2h6Z M16 8h4v4h2v8h-2v4h-4Z"/>
+  <path fill="#13252e" fill-rule="evenodd" d="M12 2h10v2h4v4h2v6h2v8h-2v4h-2v2h-6v2H10v-2H6v-2H2V12h2V6h4V4h4Z M16 8h4v4h2v8h-2v4h-4Z"/>
+  <path fill="#69a7bc" d="M16 6h6v2h2v6h2v8h-2v4h-6v-2h4v-4h2v-6h-2V8h-6Z"/>
+  <path fill="#b9f5e6" d="M4 12h2v6H4Zm6 0h2v6h-2ZM4 22h2v2h4v-2h2v4H4Z"/>
+</svg>

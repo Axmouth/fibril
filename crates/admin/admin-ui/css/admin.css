@@ -2364,6 +2364,9 @@ html[data-theme="light"][data-flavor="carotene"] {
   background: var(--line);
 }
 .storage-bar > span { display: block; min-width: 2px; }
+.storage-usage-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 16px; margin: 14px 0; }
+.storage-usage-grid span { display: block; color: var(--muted); font-size: 11px; margin-bottom: 6px; }
+.storage-usage-grid strong { font: 16px var(--mono); }
 .storage-bar-legend {
   display: flex;
   flex-wrap: wrap;

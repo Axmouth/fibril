@@ -44,15 +44,21 @@
     <span class="overview-help">Current process CPU usage</span>
   </article>
   <article class="overview-card">
-    <span class="overview-label">Disk</span>
+    <span class="overview-label">Active logs</span>
     <strong id="disk">--</strong>
-    <span class="overview-help">Approximate data directory usage, MB</span>
+    <span class="overview-help">Approximate active message + event log file lengths, MB</span>
     <details class="disk-details" id="disk-details" hidden>
       <summary>breakdown</summary>
       <div class="storage-bar" id="disk-bar"></div>
       <div class="storage-bar-legend" id="disk-legend"></div>
     </details>
   </article>
+</section>
+
+<section class="overview-panel" aria-label="Storage retention" style="margin-bottom: 1rem">
+  <div class="overview-panel-heading"><h5>Storage retention · this node</h5><p id="storage-usage-status">Waiting for a background sample…</p></div>
+  <div id="storage-usage-values" class="storage-usage-grid"></div>
+  <p class="overview-help">Approximate file accounting under this node’s Stroma root. Unix samples use allocated file blocks and count hard links once, preferring active data. Directory blocks, filesystem metadata, reflink sharing and files outside this root are excluded. Current logs can include segments pinned by a checkpoint. Retained bytes are not automatically safe to delete.</p>
 </section>
 
 <div class="overview-two">
@@ -259,6 +265,26 @@ function metric(value, digits = 1, suffix = "") {
 // Segmented view of what the disk number is made of: the largest queues get
 // their own segment, the rest fold into "other". Hidden under 1 MB total so
 // an empty broker does not render a sliver bar.
+function renderStorageUsage(data) {
+  const status = document.getElementById("storage-usage-status");
+  const values = document.getElementById("storage-usage-values");
+  values.replaceChildren();
+  if (!data) { status.textContent = "Storage retention accounting is unavailable from this broker."; return; }
+  const age = data.sampled_at_ms == null ? null : Math.max(0, Math.floor((Date.now() - data.sampled_at_ms) / 1000));
+  const basis = data.sample?.basis === "allocated_file_blocks" ? "Allocated file blocks" : "File lengths (links may count separately)";
+  status.textContent = [data.sample ? `${basis} · sampled ${age ?? "?"}s ago` : "No completed sample", data.refreshing ? "refreshing" : "refreshes on demand, at most every 30s", data.error ? `Last attempt: ${data.error}` : "", data.sample?.skipped_entries ? `${data.sample.skipped_entries} entries disappeared or were skipped` : ""].filter(Boolean).join(" · ");
+  if (!data.sample) return;
+  for (const [key, label] of [["active_bytes", "Active data + snapshots"], ["checkpoint_bytes", "Agreed checkpoint artifacts"], ["retained_bytes", "Retained / inactive generations"], ["staging_bytes", "Recovery staging"], ["other_bytes", "Other storage files"]]) {
+    const item = document.createElement("div");
+    const name = document.createElement("span");
+    name.textContent = label;
+    const amount = document.createElement("strong");
+    amount.textContent = `${metric(data.sample[key] / (1024 * 1024), 2)} MiB`;
+    item.append(name, amount);
+    values.append(item);
+  }
+}
+
 function renderStorageBar(breakdown, total) {
   const details = document.getElementById("disk-details");
   const bar = document.getElementById("disk-bar");
@@ -375,6 +401,7 @@ function render(bundle) {
   document.getElementById("rss_mb").textContent = metric(d.sys.rss_mb, 2);
   document.getElementById("cpu").textContent = metric(d.sys.cpu, 2);
   document.getElementById("disk").textContent = metric(d.storage_used / (1024 * 1024), 2);
+  renderStorageUsage(d.storage_usage);
   renderStorageBar(d.storage_breakdown || [], d.storage_used || 0);
   document.getElementById("stroma_event_append_ms").textContent = metric(stroma.log?.event_log?.avg_append_latency_ms, 2, " ms");
   document.getElementById("stroma_max_wait_ms").textContent = metric(maxLaneValue(stroma, "max_wait_ms"), 2, " ms");

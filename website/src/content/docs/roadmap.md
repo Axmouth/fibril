@@ -23,7 +23,7 @@ separate rounds when their dependencies permit.
 2. **Checkpoint policy and recovery overhead.** Measure the opt-in agreed
    checkpoint path under higher sustained rates and many partitions. Tune the
    implemented event/byte/age triggers, verification budgets and retention limits;
-   extend diagnostics to physical retained bytes and stage-level resource costs. Evaluate
+   extend node-level disk accounting to per-queue attribution and stage-level resource costs. Evaluate
    remaining live-payload verification costs and silent-endpoint discovery across
    SDKs; explicit Rust EOF handling and per-replica seal/inspection overlap are implemented. See the
    [fast-recovery plan](/development/failover-plan/#fast-recovery).
@@ -204,14 +204,23 @@ when reducing repeated reads or changing comparison scheduling.
   buffering and recovery rules for tentative suffixes.
 - Add OpenTelemetry export.
 
+## Frontend maintainability
+
+Audit the admin dashboard, demo, documentation components and landing page for
+ad hoc scripts, implicit types, globals and duplicated behavior. Define shared
+module boundaries and typed API/event contracts, and assess TypeScript or checked
+JavaScript with a reproducible build step. Keep canonical assets and production/demo
+behavior shared. Include accessibility, rendering safety, lifecycle cleanup and
+consistent styling. Plan incremental changes with behavior tests and clean Docker,
+CI and embedded-asset builds.
+
 ## Dashboard demo and interactive documentation
 
 Pin matching demo assets when archiving documentation versions. Extend inline
 examples to additional dashboard pages where they clarify operational behavior.
 Assess coherent moving scenarios for backlog growth, slow consumers and recovery.
 
-Extend the shared architecture stories with detailed checkpoint/suffix inspection,
-retry and divergence branches, polling versus push/wakeup replication, richer
+Extend the shared checkpoint story with retry and divergence branches, polling versus push/wakeup replication, richer
 controller planning and multi-partition failures. Expand local and replicated
 speculation scenarios as their correctness contracts evolve. Distinguish eager
 failure detection from early replication, and label implemented, experimental and proposed behavior.

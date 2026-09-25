@@ -12,14 +12,14 @@ const checks = [
   { path: "deployment/monitoring/index.html", includes: ["/dashboard-demo/?embed=1", "Broker health and recent activity"] },
   { path: "dashboard-demo/index.html", includes: ["Read-only demo", "fixtures.js", "chart-throughput"] },
   { path: "dashboard-demo/admin/queue/index.html", includes: ["q-partitions", "transport.js"] },
-  { path: "admin-dashboard/index.html", includes: ["/dashboard-demo/", "loading=\"lazy\"", 'Broker overview', 'brand-mascot', '/brand/face-32.png', 'embed=1', 'height="860"', 'style="height:860px"', 'sandbox="allow-scripts allow-same-origin"'] },
+  { path: "admin-dashboard/index.html", includes: ["/dashboard-demo/", "loading=\"lazy\"", 'Broker overview', 'brand-mascot', '/brand/fibril-mark-32.png', 'embed=1', 'height="860"', 'style="height:860px"', 'sandbox="allow-scripts allow-same-origin"'] },
   {
     path: "index.html",
     includes: [
       "<title>Fibril | Durable messaging without broker ceremony</title>",
       "Useful messaging without broker ceremony.",
       "brand-mascot",
-      "/brand/face.svg",
+      "/brand/fibril-mark.svg",
       "queue lifecycle",
       // The release badge renders a real version from the workspace manifest,
       // never the 0.x fallback.
@@ -94,22 +94,20 @@ for (const check of checks) {
 }
 
 
-// Generated favicon copies must match the dashboard's canonical artwork.
+// Every website icon derives from one vector mark. Dashboard status faces are separate.
+const canonicalMark = readFileSync(new URL('../../crates/admin/admin-ui/img/fibril-mark.svg', import.meta.url));
+const markSvg = join(root, 'brand', 'fibril-mark.svg');
+if (!existsSync(markSvg) || !readFileSync(markSvg).equals(canonicalMark)) {
+  console.error('missing or stale canonical site mark');
+  failures += 1;
+}
 for (const size of [16, 32, 48]) {
-  const name = `face-${size}.png`;
-  const output = join(root, 'brand', name);
-  const source = new URL(`../../crates/admin/admin-ui/img/${name}`, import.meta.url);
-  if (!existsSync(output) || !readFileSync(output).equals(readFileSync(source))) {
-    console.error(`missing or stale shared favicon: ${name}`);
+  const file = join(root, 'brand', `fibril-mark-${size}.png`);
+  const bytes = existsSync(file) ? readFileSync(file) : null;
+  if (!bytes || bytes.readUInt32BE(16) !== size || bytes.readUInt32BE(20) !== size) {
+    console.error(`missing or incorrectly sized site icon: ${size}`);
     failures += 1;
   }
-}
-
-const faceSvg = join(root, 'brand', 'face.svg');
-const canonicalFace = readFileSync(new URL('../../crates/admin/admin-ui/img/face-32.png', import.meta.url));
-if (!existsSync(faceSvg) || !readFileSync(faceSvg, 'utf8').includes(canonicalFace.toString('base64'))) {
-  console.error('missing or stale outlined favicon');
-  failures += 1;
 }
 
 if (failures > 0) {

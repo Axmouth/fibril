@@ -187,3 +187,21 @@ test('local storage renders pending and allocation fallback; conflict reloads on
     'Allocation fallback: <filesystem unavailable>');
   assert.match(f.controls.get('local-storage.message').textContent, /review before saving/);
 });
+
+
+test('settings scope and startup seed remain distinct from saved values', () => {
+  const f = form();
+  f.context.renderSettings(f.data);
+  assert.match(f.controls.get('runtime-authority').textContent, /Cluster-wide/);
+  f.context.renderStartupSeeds({ delivery: { inflight_ttl_ms: 0 }, connection: { reconnect_grace_ms: null } });
+  assert.equal(f.controls.get('seed.delivery.inflight_ttl_ms').textContent, 'Startup seed: 0 ms');
+  assert.equal(f.controls.get('seed.connection.reconnect_grace_ms').textContent, 'Startup seed: unset (see field behavior)');
+  assert.equal(f.controls.get('seed.replication.owner_connect_timeout_ms').textContent, 'Startup seed unavailable');
+  assert.deepEqual(f.collect(), f.data.settings);
+  f.data.scope = 'node';
+  f.context.renderSettings(f.data);
+  assert.match(f.controls.get('runtime-authority').textContent, /This node/);
+  delete f.data.scope;
+  f.context.renderSettings(f.data);
+  assert.match(f.controls.get('runtime-authority').textContent, /Scope unavailable/);
+});
