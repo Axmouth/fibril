@@ -38,6 +38,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- Documentation navigation groups current guides into collapsible topics and
+  links all four animated architecture stories from the overview. Failover and
+  recovery, the failover plan and the optimization log now appear in the sidebar.
+  Website builds check that every current guide has a navigation entry.
+
 - Admin settings show document authority, saved revision and configured startup
   seeds. The Overview exposes cached node storage accounting for active data,
   checkpoint artifacts, retained generations and recovery staging, with sample

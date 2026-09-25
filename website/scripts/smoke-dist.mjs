@@ -94,6 +94,16 @@ for (const check of checks) {
 }
 
 
+// Direct story links must resolve to a real heading, not just a valid page.
+const overview = readFileSync(join(root, "overview/index.html"), "utf8");
+for (const [, path, anchor] of overview.matchAll(/href="(\/[^"#]*)#([^"?]+)"/g)) {
+  const target = join(root, path, "index.html");
+  if (!existsSync(target) || !readFileSync(target, "utf8").includes(`id="${anchor}"`)) {
+    console.error(`broken overview heading link: ${path}#${anchor}`);
+    failures += 1;
+  }
+}
+
 // Every website icon derives from one vector mark. Dashboard status faces are separate.
 const canonicalMark = readFileSync(new URL('../../crates/admin/admin-ui/img/fibril-mark.svg', import.meta.url));
 const markSvg = join(root, 'brand', 'fibril-mark.svg');

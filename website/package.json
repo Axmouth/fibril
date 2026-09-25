@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "npm run assets:build && npm run demo:build && astro dev",
-    "build": "npm run assets:build && npm run demo:build && npm run demo:test && npm run story:test && astro check && astro build",
+    "build": "npm run assets:build && npm run demo:build && npm run demo:test && npm run story:test && npm run nav:check && astro check && astro build",
     "preview": "astro preview",
     "check": "astro check",
     "smoke:dist": "node scripts/smoke-dist.mjs",
@@ -14,7 +14,8 @@
     "demo:build": "node demo/build.mjs",
     "demo:test": "node demo/demo.test.mjs && node ../crates/admin/tests/settings-form.test.mjs && node ../crates/admin/tests/recovery-timeline.test.mjs",
     "assets:build": "node scripts/build-branding.mjs",
-    "story:check": "tsc --project tsconfig.stories.json"
+    "story:check": "tsc --project tsconfig.stories.json",
+    "nav:check": "node scripts/check-navigation.mjs"
   },
   "dependencies": {
     "@astrojs/starlight": "^0.39.3",

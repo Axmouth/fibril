@@ -28,6 +28,19 @@ Use the docs sections deliberately:
 - `development` is the right place for implementation mechanisms, tradeoff
   records, and future design policies.
 
+## Navigation and discoverability
+
+Add every current guide to `website/src/navigation.mjs` under its closest topic.
+Keep sidebar groups short and use collapsed subgroups for detailed development
+notes. Starlight opens the current page's ancestors automatically. Historical
+version sidebars remain unchanged.
+
+Link a new page from a related guide as well, using text that describes what the
+reader will learn. Animated stories belong in their subject's guide and in the
+[overview's story directory](/overview/#watch-the-architecture-in-motion), with a
+direct heading link. Run `npm run nav:check` in `website` to check current page
+coverage. The website build runs this check too.
+
 ## Keeping documentation current
 
 The [roadmap](/roadmap/) and active planning documents contain remaining work,

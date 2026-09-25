@@ -1,5 +1,5 @@
 ---
-title: Recovery sealing
+title: Failover and recovery
 description: Recovery authorization, verified staging, durable installation and exact quorum activation.
 ---
 
@@ -7,7 +7,7 @@ import BrokerStory from "../../../components/BrokerStory.astro";
 import DashboardDemo from "../../../components/DashboardDemo.astro";
 
 Recovery sealing freezes a replica's retained records for inspection. Fresh Unix
-cluster queues enroll automatically; a bounded worker collects witnesses, verifies
+cluster queues enroll automatically. A bounded worker collects witnesses, verifies
 a source, installs a new durable quorum and activates its exact process/storage
 instances. The previous assignment stays fenced until activation commits.
 Stream-state recovery remains a separate gate. Legacy migration is unsupported
@@ -20,6 +20,11 @@ and background rejoin. Choose **Evidence unavailable** to see why a candidate ma
 remain fenced. The metadata leader survives in this example.
 
 <BrokerStory scene="failover" />
+
+For the shared starting point used during recovery, follow
+[an agreed checkpoint](/reliability/replication/#agreed-recovery-checkpoints).
+The [architecture stories](/overview/#watch-the-architecture-in-motion) also cover
+partition placement and the message path.
 
 ## Recovery observations
 

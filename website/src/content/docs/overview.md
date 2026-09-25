@@ -8,23 +8,53 @@ Fibril is a lightweight message broker focused on durable delivery, explicit ack
 
 It is early-stage (0.x). The useful baseline works and is tested hard, but APIs, persistence formats, protocol details, and operational behavior can still change between minor versions. The clustering and replication paths are experimental and not yet production-ready high availability.
 
-## Where to start
+## Start using Fibril
 
-* Follow the [quickstart](/quickstart/) to run the broker from source.
-* Use the [client guide](/clients/) for Rust, TypeScript, Python, Go, and C# publishing and subscription examples.
-* Use the [admin dashboard guide](/admin-dashboard/) for queues, streams, settings, message inspection, and DLQ replay.
-* Read the [core model](/concepts/core-model/) for the queue lifecycle.
-* Read [retries and delays](/reliability/retries-delays/) and [dead lettering](/reliability/dead-lettering/) for reliability features and their current limits.
-* Read [consumer groups](/concepts/consumer-groups/) for ordered, scalable consumption across many consumer instances.
-* Read [Plexus streams](/concepts/plexus-streams/) for fan-out delivery where every subscriber sees every record, with per-stream durability tiers.
-* Read [clustering](/concepts/clustering/) and [replication](/reliability/replication/) for the experimental multi-broker ownership, replication, and failover path, or [try a cluster with Docker in under a minute](/concepts/clustering/#try-a-cluster-with-docker).
-* Read [many idle queues](/concepts/many-idle-queues/) if your workload defines many queues but only uses a few at once.
-* Check [project status](/status/) before depending on a feature.
-* Check [implemented surface](/implemented-surface/) when you need the detailed answer for whether a path is wired and under what conditions.
-* Secure a deployment with [TLS and users](/configuration/), or bring up a [secured cluster](/deployment/cluster/).
-* Check the [changelog](https://github.com/Axmouth/fibril/blob/main/CHANGELOG.md) for what each release contains and the [roadmap](/roadmap/) for near-term direction.
-* Use the [optimization log](/development/optimization-log/) for benchmark-first performance investigations.
+- Follow the [quickstart](/quickstart/) to run a broker, then use the
+  [client guide](/clients/) for Rust, TypeScript, Python, Go and C# examples.
+- Read the [core model](/concepts/core-model/) for queues,
+  [consumer groups](/concepts/consumer-groups/) for ordered parallel consumption
+  and [Plexus streams](/concepts/plexus-streams/) for fan-out.
+- Explore the [admin dashboard](/admin-dashboard/) and its embedded demos, or
+  [try a cluster with Docker](/concepts/clustering/#try-a-cluster-with-docker).
+
+## Watch the architecture in motion
+
+The animated stories explain decisions and ordering one step at a time. Each has
+playback controls, a transcript and **Save frame** for presentations. Their timing
+is illustrative.
+
+- [Explore partition placement](/concepts/clustering/#watch-partition-placement):
+  follow queue owners and replicas across brokers.
+- [Follow the message path](/reliability/replication/#watch-the-message-path):
+  compare delivery modes and the work that must finish before confirmation.
+- [Follow a failover](/reliability/recovery-sealing/#follow-a-failover):
+  watch owner loss, recovery, activation and rejoin, including a blocked attempt.
+- [Follow an agreed checkpoint](/reliability/replication/#agreed-recovery-checkpoints):
+  see how replicas establish a shared recovery starting point.
+
+## Operate and evaluate
+
+- Configure [TLS and users](/configuration/) or deploy a
+  [secured cluster](/deployment/cluster/), then set up [monitoring](/deployment/monitoring/).
+- Review [delivery guarantees](/reliability/semantics/),
+  [retries and delays](/reliability/retries-delays/) and
+  [dead lettering](/reliability/dead-lettering/) for behavior and limits.
+- Use [failure modes](/reliability/failure-modes/) and
+  [recovery quarantine](/reliability/recovery-quarantine/) when troubleshooting.
+- Consult [benchmarks](/benchmarks/), [backpressure](/concepts/backpressure/) and
+  [many idle queues](/concepts/many-idle-queues/) for workload planning.
+
+## Follow development
+
+[Project status](/status/) summarizes maturity. [Implemented surface](/implemented-surface/)
+details supported paths and conditions. The [roadmap](/roadmap/) and
+[failover plan](/development/failover-plan/) describe remaining work.
+[Engineering notes](/development/engineering-notes/) and the
+[optimization log](/development/optimization-log/) record fixes and investigations.
+The [changelog](https://github.com/Axmouth/fibril/blob/main/CHANGELOG.md) records changes.
 
 ## Versions
 
-These pages track the active pre-1.0 codebase. Frozen per-release snapshots live under their version slug (the picker in the sidebar lists them), starting with [/0.2/](/0.2/).
+These pages track the active pre-1.0 codebase. The version picker links to
+historical documentation snapshots, starting with [/0.2/](/0.2/).
