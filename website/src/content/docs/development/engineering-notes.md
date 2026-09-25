@@ -39,9 +39,15 @@ activation requirements.
 
 Boosted navigation releases page interaction listeners, timers, visibility
 callbacks and event streams. Disposed polling and queued stream callbacks cannot
-restart polling or restore an old page's scroll position. The intermittent
-MutationObserver exception remains under investigation because the embedded
-browser has not supplied an attributable source location.
+restart polling or restore an old page's scroll position.
+
+### Observer error isolated from the dashboard
+
+The intermittent `MutationObserver.observe` exception reproduces in the embedded
+browser on script-free iframe controls with both lazy and eager loading. Those
+controls contain no Fibril assets or application observer calls, isolating the
+failure from the shipped dashboard. Tracing also identified observer initialization
+in the browser automation layer, where further investigation belongs.
 
 ### Bounded recovery worker timelines
 
