@@ -21,9 +21,12 @@ installation, exact quorum activation and bounded recovery are documented in
 3. Extend transfer support beyond the current 16 MiB record/page and snapshot
    bounds. Measure full-history rescans, checkpoint/hash CPU, peak memory and
    recovery latency on representative storage and replication configurations.
-4. Add safe reclamation and separate disk accounting for retained generations and
-   stages. Establish durable metadata support before enabling the installation
-   protocol on non-Unix platforms.
+4. Add safe reclamation of retained generations and stages. Extend implemented
+   node-level disk accounting to per-queue attribution. Establish durable metadata
+   support before enabling the installation protocol on non-Unix platforms.
+5. Design [resumable recovery phases, storage-health policy and cooperative owner
+   handoff](/development/recovery-continuation/). Add actual write/fsync-failure
+   injection before adopting early replication or fault-triggered relinquishment.
 
 Fresh Unix cluster queues enroll automatically. The worker prepares their write
 quorum, activates exact instances and retries local admission independently on

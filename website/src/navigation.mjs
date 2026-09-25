@@ -207,6 +207,10 @@ export const sidebar = [
             label: "Failover plan",
             slug: "development/failover-plan",
           },
+          {
+            label: "Recovery continuation and handoff",
+            slug: "development/recovery-continuation",
+          },
         ],
       },
       {

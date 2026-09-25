@@ -17,8 +17,8 @@ separate rounds when their dependencies permit.
 1. **Admin settings and recovery visibility.** Unify defaults/validation metadata
    and extend requested-versus-applied reporting beyond node-local preallocation.
    Add explicit remote-node edit routing and classify additional live storage
-   controls. Account for retained generations and staging data before adding
-   automatic reclamation. Extend worker timelines with cross-node detection and
+   controls. Extend retained-generation and staging accounting to per-queue
+   attribution before adding automatic reclamation. Extend worker timelines with cross-node detection and
    client-reconnect correlation.
 2. **Checkpoint policy and recovery overhead.** Measure the opt-in agreed
    checkpoint path under higher sustained rates and many partitions. Tune the
@@ -136,6 +136,12 @@ The compatibility work follows this order:
 
 ## Cluster operations
 
+- Design [storage-health-driven relinquishment and cooperative owner handoff](/development/recovery-continuation/#cooperative-owner-handoff).
+  Let an owner propose a successor with evidence for a final durable boundary.
+  Preserve controller authority, writer fencing and the configured confirmation
+  requirement. Add safe fallback for interrupted handoffs and verified replacement
+  of persistently failing followers.
+
 - Unify configuration defaults and validation metadata across startup seeds, the
   runtime API and the dashboard. Report requested versus locally applied settings,
   node/cluster scope and application boundaries; complete safe startup visibility
@@ -182,6 +188,10 @@ quorum and activation requirements. Exercise the current byte, record, semantic
 operation and snapshot limits with boundary-crossing fault tests. Expose exhausted
 budgets and progress in recovery diagnostics.
 
+Implement [resumable phases](/development/recovery-continuation/#resumable-recovery-phases)
+with verified progress before source selection, phase-specific retries and bounded
+work windows. A preliminary work journal grants no installation or serving authority.
+
 Assess pairwise history comparison scaling separately. Preserve equivalent evidence
 when reducing repeated reads or changing comparison scheduling.
 
@@ -201,7 +211,9 @@ when reducing repeated reads or changing comparison scheduling.
 - Assess sending immutable staged batches to followers before owner fsync, after
   promotion can distinguish and preserve committed history. Keep local durability
   and complete replica dependencies as confirmation requirements, with bounded
-  buffering and recovery rules for tentative suffixes.
+  buffering and recovery rules for tentative suffixes. Validate [owner write/fsync
+  failures after follower persistence](/development/recovery-continuation/#early-replication-under-owner-io-failure),
+  including ambiguous client outcomes, ordinary delivery gates and old-owner restart.
 - Add OpenTelemetry export.
 
 ## Frontend maintainability

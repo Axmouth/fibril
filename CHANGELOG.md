@@ -38,6 +38,9 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- A linked design note records proposed resumable recovery phases, storage-health
+  policy, cooperative owner handoff and early-replication storage-failure gates.
+
 - Documentation navigation groups current guides into collapsible topics and
   links all four animated architecture stories from the overview. Failover and
   recovery, the failover plan and the optimization log now appear in the sidebar.
