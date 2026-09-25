@@ -73,6 +73,8 @@
 <script src="/static/js/api.js"></script>
 <script src="/static/js/admin.js"></script>
 <script>
+// Async completions belong to this visit, including errors and response bodies.
+const pageActive = window.__capturePage();
 function metric(value, digits = 2, suffix = "") {
   return Number.isFinite(value) ? `${value.toFixed(digits)}${suffix}` : "--";
 }
@@ -168,7 +170,9 @@ function renderRecovery(recovery) {
 }
 
 async function refresh() {
+  if (!pageActive()) return;
   const data = await api("/admin/api/overview");
+  if (!pageActive()) return;
   const stroma = data.stroma ?? {};
   renderCommandLanes(stroma.command?.per_lane);
   renderCommandKinds(stroma.command?.per_kind);

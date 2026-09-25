@@ -455,22 +455,25 @@ function liveData(families, onTick, fallbackRefresh) {
 // new names keeps working. `pick` maps a queues_debug entry to a suggestion.
 function wireCatalogDatalist(input, pick) {
   if (!input) return;
+  const pageActive = window.__capturePage();
   const id = `dl-${input.id.replace(/[^a-zA-Z0-9-]/g, "-")}`;
   let list = document.getElementById(id);
   if (!list) {
     list = document.createElement("datalist");
     list.id = id;
     document.body.appendChild(list);
+    window.__spaDisposers.add(() => list.remove());
     input.setAttribute("list", id);
   }
   // Refill on every focus so names declared after the page opened appear
   // without a reload. One light fetch per click-into-field, none while typing.
   let fetching = false;
   input.addEventListener("focus", async () => {
-    if (fetching) return;
+    if (fetching || !pageActive()) return;
     fetching = true;
     try {
       const data = await api('/admin/api/queues_debug');
+      if (!pageActive()) return;
       const values = new Set();
       for (const q of data.queues || []) {
         const value = pick(q);

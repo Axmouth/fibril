@@ -179,6 +179,8 @@
 <script src="/static/js/tendrils.js"></script>
 <script src="/static/js/recovery-timeline.js"></script>
 <script>
+// Async completions belong to this visit, including errors and response bodies.
+const pageActive = window.__capturePage();
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 // Selection and view state survive the periodic refresh. renderCtx holds the
@@ -1136,13 +1138,19 @@ function renderAssignments(data) {
 }
 
 async function refresh() {
+  if (!pageActive()) return;
   const data = await api("/admin/api/topology");
+  if (!pageActive()) return;
   // A lone broker's stub tendrils need the declared-queue count.
   if ((data.coordination?.nodes ?? []).length <= 1) {
     try {
       const q = await api("/admin/api/queues");
+      if (!pageActive()) return;
       data.__queueCount = Object.keys(q.queues ?? {}).length;
-    } catch (_err) { /* stubs simply stay absent */ }
+    } catch (_err) {
+      if (!pageActive()) return;
+      // Stubs simply stay absent.
+    }
   }
   renderSummary(data);
   renderDiagram(data);
@@ -1173,6 +1181,7 @@ function opError(data) {
 }
 
 async function submitRepartition() {
+  if (!pageActive()) return;
   const topic = document.getElementById("repartition.topic").value.trim();
   const group = document.getElementById("repartition.group").value.trim();
   const count = Number(document.getElementById("repartition.partition_count").value);
@@ -1182,6 +1191,7 @@ async function submitRepartition() {
   const { ok, data } = await postJson("/admin/api/repartition", {
     topic, group: group || null, partition_count: count,
   });
+  if (!pageActive()) return;
   setOpMessage("repartition-message",
     ok ? `Repartitioned "${topic}" to ${count} partition(s).` : `Failed: ${opError(data)}`,
     ok ? "info" : "warning");
@@ -1189,6 +1199,7 @@ async function submitRepartition() {
 }
 
 async function submitMembership(action) {
+  if (!pageActive()) return;
   const id = Number(document.getElementById("membership.id").value);
   const addr = document.getElementById("membership.addr").value.trim();
   if (!(id >= 1)) return setOpMessage("membership-message", "Enter a member id.", "warning");
@@ -1199,6 +1210,7 @@ async function submitMembership(action) {
     ? "/admin/api/coordination/membership/add-voting-member"
     : "/admin/api/coordination/membership/remove-voting-member";
   const { ok, data } = await postJson(url, adding ? { id, addr } : { id });
+  if (!pageActive()) return;
   setOpMessage("membership-message",
     ok ? `Voting member ${id} ${adding ? "added" : "removed"}.` : `Failed: ${opError(data)}`,
     ok ? "info" : "warning");
@@ -1234,6 +1246,7 @@ document.getElementById("topology-diagram").addEventListener("click", () => {
 applyViewMode();
 
 document.getElementById("drain-btn").addEventListener("click", async () => {
+  if (!pageActive()) return;
   if (!confirm("Drain this broker? Clients are told to move and, in a cluster, partition ownership hands off to followers. The process keeps running until you stop it.")) {
     return;
   }
@@ -1242,6 +1255,7 @@ document.getElementById("drain-btn").addEventListener("click", async () => {
   btn.disabled = true;
   out.textContent = "Draining - waiting for the handoff…";
   const { ok, data } = await apiPost("/admin/api/drain", {});
+  if (!pageActive()) return;
   btn.disabled = false;
   if (!ok) {
     out.textContent = `Drain failed: ${data?.message || data?.error || "request failed"}`;

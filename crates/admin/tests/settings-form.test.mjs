@@ -26,7 +26,8 @@ function form() {
       addEventListener() {},
     });
   }
-  const context = vm.createContext({ structuredClone, btoa, window: {},
+  let active = true;
+  const context = vm.createContext({ structuredClone, btoa, window: { __capturePage: () => () => active },
     document: { createElement: element, getElementById: id => controls.get(id),
       querySelectorAll: selector => selector === '[data-runtime-setting]'
         ? [...controls.values()].filter(el => el.runtime)
@@ -41,7 +42,7 @@ function form() {
     idle_evict_enabled: true, idle_evict_after_ms: 42000, idle_sweep_interval_ms: 1234 };
   const script = /<script>([\s\S]*?)<\/script>/.exec(template)[1];
   vm.runInContext(script.split('field("local-storage-form").addEventListener')[0], context);
-  return { context, data, controls, collect: () => JSON.parse(JSON.stringify(context.collectSettings())) };
+  return { context, data, controls, dispose: () => { active = false; }, collect: () => JSON.parse(JSON.stringify(context.collectSettings())) };
 }
 
 test('editing one setting preserves every other setting, including unrepresented fields', () => {
@@ -221,3 +222,39 @@ test('adoption uses installation observations and leaves missing observations un
   assert.match(lines(), /Installation not yet observed/);
   assert.doesNotMatch(lines(), /Installed values match/);
 });
+
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+test('an old settings response cannot overwrite controls on a later visit', async () => {
+  const f = form();
+  const pending = deferred();
+  f.context.api = () => pending.promise;
+  const load = f.context.loadSettings();
+  f.dispose();
+  f.controls.get('delivery.expiry_batch_max').value = '777';
+  pending.resolve(f.data);
+  await load;
+  assert.equal(f.controls.get('delivery.expiry_batch_max').value, '777');
+});
+
+for (const failure of [false, true]) {
+  test(`a disposed local save ignores delayed body ${failure ? 'failure' : 'success'}`, async () => {
+    const f = form();
+    const pending = deferred();
+    f.context.localStorageRequest = () => ({});
+    const reading = deferred();
+    f.context.fetch = async () => ({ ok: true, json: () => { reading.resolve(); return pending.promise; } });
+    const save = f.context.saveLocalStorage({ preventDefault() {} });
+    await reading.promise;
+    f.dispose();
+    f.controls.get('local-storage.message').textContent = 'New page';
+    if (failure) pending.reject(new Error('Old failure'));
+    else pending.resolve({});
+    await save;
+    assert.equal(f.controls.get('local-storage.message').textContent, 'New page');
+  });
+}

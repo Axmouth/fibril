@@ -729,6 +729,8 @@
 <script src="/static/js/api.js"></script>
 <script src="/static/js/admin.js"></script>
 <script>
+// Async completions belong to this visit, including errors and response bodies.
+const pageActive = window.__capturePage();
 let currentLocks = {};
 let currentSettings = null;
 let currentLocalStorage = null;
@@ -968,9 +970,12 @@ function renderLocalStorage(data) {
 }
 
 async function loadLocalStorage() {
+  if (!pageActive()) return;
   const response = await fetch("/admin/api/local-storage-settings");
+  if (!pageActive()) return;
   if (response.status === 404) { field("local-storage-form").hidden = true; return; }
   const data = await response.json();
+  if (!pageActive()) return;
   if (!response.ok) throw new Error(data.message || "Could not load node storage settings.");
   renderLocalStorage(data);
   field("local-storage.message").textContent = "Status loaded. Changes are local to the named node.";
@@ -988,12 +993,15 @@ function localStorageRequest() {
 }
 
 async function saveLocalStorage(event) {
+  if (!pageActive()) return;
   event.preventDefault();
   try {
     const response = await fetch("/admin/api/local-storage-settings", {
       method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(localStorageRequest()),
     });
+    if (!pageActive()) return;
     const data = await response.json();
+    if (!pageActive()) return;
     if (response.status === 409) {
       renderLocalStorage(data);
       field("local-storage.message").textContent = "Settings changed before this save. Current values reloaded; review before saving again.";
@@ -1003,6 +1011,7 @@ async function saveLocalStorage(event) {
     renderLocalStorage(data);
     field("local-storage.message").textContent = "Override persisted. Existing logs adopt it at their next rollover or reopen.";
   } catch (error) {
+    if (!pageActive()) return;
     field("local-storage.message").textContent = error.message;
   }
 }
@@ -1064,7 +1073,9 @@ for (const select of document.querySelectorAll(".duration-unit")) {
 }
 
 async function loadSettings(message = "Settings loaded.") {
+  if (!pageActive()) return;
   const data = await api("/admin/api/runtime-settings");
+  if (!pageActive()) return;
   renderSettings(data);
   const status = runtimeSettingsStatusMessage(data, message);
   setMessage(status.text, status.kind);
@@ -1106,9 +1117,13 @@ function renderUsers(users) {
 }
 
 async function loadUsers() {
+  if (!pageActive()) return;
   try {
-    renderUsers(await api("/admin/api/users"));
+    const users = await api("/admin/api/users");
+    if (!pageActive()) return;
+    renderUsers(users);
   } catch (_err) {
+    if (!pageActive()) return;
     // No user surface (should not happen on a normal broker); hide the section.
     field("users-section").hidden = true;
   }
@@ -1121,6 +1136,7 @@ function setUsersMessage(text, kind = "info") {
 }
 
 async function saveUser(event) {
+  if (!pageActive()) return;
   event.preventDefault();
   const username = field("user.name").value.trim();
   const password = field("user.password").value;
@@ -1129,6 +1145,7 @@ async function saveUser(event) {
     return;
   }
   const { ok, data } = await apiPost("/admin/api/users", { username, password });
+  if (!pageActive()) return;
   if (ok) {
     field("user.password").value = "";
     setUsersMessage(`Saved user "${username}".`, "success");
@@ -1139,28 +1156,41 @@ async function saveUser(event) {
 }
 
 async function removeUser(username) {
+  if (!pageActive()) return;
   const r = await fetch(`/admin/api/users/${encodeURIComponent(username)}`, { method: "DELETE" });
+  if (!pageActive()) return;
   if (r.ok) {
     setUsersMessage(`Removed user "${username}".`, "success");
     loadUsers();
   } else {
     let message = "Failed to remove user.";
-    try { const data = await r.json(); if (data && data.message) message = data.message; } catch {}
+    try {
+      const data = await r.json();
+      if (!pageActive()) return;
+      if (data && data.message) message = data.message;
+    } catch {
+      if (!pageActive()) return;
+    }
     setUsersMessage(message, "error");
   }
 }
 
 async function loadStartupConfig() {
+  if (!pageActive()) return;
   try {
     const data = await api("/admin/api/startup-config");
+    if (!pageActive()) return;
     renderStartupConfig(data);
   } catch (_err) {
+    if (!pageActive()) return;
     field("startup-config-section").hidden = true;
   }
 }
 
 async function loadGlobalDlq(message = "Global DLQ loaded.") {
+  if (!pageActive()) return;
   const data = await api("/admin/api/global-dlq");
+  if (!pageActive()) return;
   renderGlobalDlq(data);
   setGlobalDlqMessage(`${message} Current version: ${data.version}.`, "info");
 }
@@ -1169,6 +1199,7 @@ async function loadGlobalDlq(message = "Global DLQ loaded.") {
 // view) so an operator is not declaring blind. Materialized queues only; an
 // on-disk-but-unloaded queue reports that its declared values apply on next load.
 async function loadCurrentQueueDlq() {
+  if (!pageActive()) return;
   const tp = field("queue-dlq.topic").value.trim();
   const group = field("queue-dlq.group").value.trim();
   const el = field("queue-dlq-current");
@@ -1177,6 +1208,7 @@ async function loadCurrentQueueDlq() {
     return;
   }
   const data = await api("/admin/api/queues_debug");
+  if (!pageActive()) return;
   const match = (data.queues || []).find(
     (q) => q.topic === tp && (q.group || "") === group
   );
@@ -1194,6 +1226,7 @@ async function loadCurrentQueueDlq() {
 }
 
 async function saveSettings(event) {
+  if (!pageActive()) return;
   event.preventDefault();
   if (!currentSettings) {
     setMessage("Load settings before saving.", "error");
@@ -1207,8 +1240,10 @@ async function saveSettings(event) {
       settings: collectSettings(),
     }),
   });
+  if (!pageActive()) return;
 
   const data = await response.json().catch(() => ({}));
+  if (!pageActive()) return;
   if (response.status === 409) {
     renderSettings(data);
     setMessage(`Settings changed before this save. Reloaded version ${data.version}; review and submit again.`, "warning");
@@ -1224,6 +1259,7 @@ async function saveSettings(event) {
 }
 
 async function saveGlobalDlq(event) {
+  if (!pageActive()) return;
   event.preventDefault();
   const response = await fetch("/admin/api/global-dlq", {
     method: "PUT",
@@ -1233,8 +1269,10 @@ async function saveGlobalDlq(event) {
       target: collectGlobalDlqTarget(),
     }),
   });
+  if (!pageActive()) return;
 
   const data = await response.json().catch(() => ({}));
+  if (!pageActive()) return;
   if (response.status === 409) {
     renderGlobalDlq(data);
     setGlobalDlqMessage(`Global DLQ changed before this save. Reloaded version ${data.version}; review and submit again.`, "warning");
@@ -1250,14 +1288,17 @@ async function saveGlobalDlq(event) {
 }
 
 async function saveQueueDlq(event) {
+  if (!pageActive()) return;
   event.preventDefault();
   const response = await fetch("/admin/api/queue-dlq", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(collectQueueDlqRequest()),
   });
+  if (!pageActive()) return;
 
   const data = await response.json().catch(() => ({}));
+  if (!pageActive()) return;
   if (!response.ok) {
     setQueueDlqMessage(data.error || data.message || "Queue DLQ update failed.", "error");
     return;
@@ -1268,12 +1309,14 @@ async function saveQueueDlq(event) {
 
 field("local-storage-form").addEventListener("submit", saveLocalStorage);
 field("local-storage.reload").addEventListener("click", () => loadLocalStorage().catch(error => {
+  if (!pageActive()) return;
   field("local-storage.message").textContent = error.message;
 }));
 field("local-storage.override").addEventListener("change", () => {
   field("local-storage.bytes").disabled = !field("local-storage.override").checked;
 });
 loadLocalStorage().catch(error => {
+  if (!pageActive()) return;
   field("local-storage-form").hidden = false;
   field("local-storage.message").textContent = error.message;
 });
@@ -1303,6 +1346,7 @@ setQueueDlqTargetFieldsEnabled(field("queue-dlq.policy").value === "custom");
     status.textContent = "Permission missing - re-select a level to grant it.";
   }
   level.addEventListener("change", async () => {
+    if (!pageActive()) return;
     const choice = level.value;
     if (choice === "off") {
       window.localStorage.setItem("fibril-admin-notify", "off");
@@ -1315,6 +1359,7 @@ setQueueDlqTargetFieldsEnabled(field("queue-dlq.policy").value === "custom");
       return;
     }
     const permission = await Notification.requestPermission();
+    if (!pageActive()) return;
     if (permission !== "granted") {
       level.value = "off";
       window.localStorage.setItem("fibril-admin-notify", "off");

@@ -52,6 +52,8 @@
 <script src="/static/js/api.js"></script>
 <script src="/static/js/admin.js"></script>
 <script>
+// Async completions belong to this visit, including errors and response bodies.
+const pageActive = window.__capturePage();
 function inspectHref(item) {
   const params = new URLSearchParams();
   params.set("topic", item.topic);
@@ -442,10 +444,10 @@ function hideSparkPop() {
   sparkPop.hidden = true;
 }
 document.getElementById("spark-pop-close").addEventListener("click", hideSparkPop);
-document.addEventListener("keydown", (event) => {
+window.__pageListen(document, "keydown", (event) => {
   if (event.key === "Escape") hideSparkPop();
 });
-document.addEventListener("click", (event) => {
+window.__pageListen(document, "click", (event) => {
   if (!sparkPop.hidden && !sparkPop.contains(event.target) && !event.target.closest(".queue-spark")) {
     hideSparkPop();
   }
@@ -482,6 +484,7 @@ function openSparkPop(svg) {
 // popover opens, minimum across partitions. The token drops stale fills.
 let oldestToken = 0;
 async function fillOldest(key) {
+  if (!pageActive()) return;
   const el = document.getElementById("spark-pop-oldest");
   const token = ++oldestToken;
   const parts = (queuePartsByKey.get(key) || [])
@@ -495,6 +498,7 @@ async function fillOldest(key) {
   const topic = key.slice(0, sep);
   const group = key.slice(sep + 1);
   const stamps = await Promise.all(parts.slice(0, 16).map(async (p) => {
+    if (!pageActive()) return;
     const params = new URLSearchParams({
       topic, from: String(p.state.min_ready), limit: "1", status: "ready",
     });
@@ -502,11 +506,14 @@ async function fillOldest(key) {
     if (p.partition) params.set("partition", String(p.partition));
     try {
       const data = await api(`/admin/api/messages?${params}`);
+      if (!pageActive()) return;
       return data?.items?.[0]?.headers?.published ?? null;
     } catch {
+      if (!pageActive()) return;
       return null;
     }
   }));
+  if (!pageActive()) return;
   if (token !== oldestToken) return;
   const known = stamps.filter((v) => v != null);
   el.textContent = known.length
@@ -557,6 +564,7 @@ document.getElementById("create.dlq").addEventListener("change", (event) => {
 });
 
 async function submitCreateQueue() {
+  if (!pageActive()) return;
   const topic = document.getElementById("create.topic").value.trim();
   const group = document.getElementById("create.group").value.trim();
   const count = Number(document.getElementById("create.partitions").value) || 1;
@@ -578,6 +586,7 @@ async function submitCreateQueue() {
   if (maxRetriesRaw !== "") body.max_retries = Number(maxRetriesRaw);
 
   const { ok, data } = await apiPost("/admin/api/queues", body);
+  if (!pageActive()) return;
   if (ok) {
     setCreateMessage(`Created "${topic}" with ${data?.partition_count ?? count} partition(s).`, "info");
     document.getElementById("create.topic").value = "";
@@ -596,6 +605,7 @@ document.getElementById("create-toggle").addEventListener("click", () => {
 
 // ---- delete queue ----
 async function deleteQueue(btn) {
+  if (!pageActive()) return;
   const topic = btn.dataset.topic;
   const group = btn.dataset.group;
   const partitions = Number(btn.dataset.partitions) || 1;
@@ -609,6 +619,7 @@ async function deleteQueue(btn) {
     partition_count: partitions,
   };
   const { ok, data } = await apiPost("/admin/api/queues/delete", body);
+  if (!pageActive()) return;
   if (ok) {
     toast(`Deleted "${topic}" (${data?.partition_count ?? partitions} partition(s)).`);
     refresh();
@@ -620,10 +631,12 @@ async function deleteQueue(btn) {
 // Fetch-based refresh: re-renders on filter edits, refreshes after actions,
 // and is the polling fallback when the event stream is out.
 async function refresh() {
+  if (!pageActive()) return;
   const [queues_debug, history] = await Promise.all([
     api('/admin/api/queues_debug'),
     api('/admin/api/history').catch(() => ({ queues: [] })),
   ]);
+  if (!pageActive()) return;
   render({ queues_debug, history });
 }
 

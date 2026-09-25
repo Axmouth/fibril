@@ -52,6 +52,8 @@
 <script src="/static/js/api.js"></script>
 <script src="/static/js/admin.js"></script>
 <script>
+// Async completions belong to this visit, including errors and response bodies.
+const pageActive = window.__capturePage();
 function queueHref(topic, group) {
   const params = new URLSearchParams({ topic });
   if (group) params.set("group", group);
@@ -140,11 +142,13 @@ function render(bundle) {
 }
 // Fetch-based refresh: the polling fallback when the event stream is out.
 async function refresh() {
+  if (!pageActive()) return;
   const [global_dlq, queues_debug, history] = await Promise.all([
     api('/admin/api/global-dlq').catch(() => null),
     api('/admin/api/queues_debug'),
     api('/admin/api/history').catch(() => ({ queues: [] })),
   ]);
+  if (!pageActive()) return;
   render({ global_dlq, queues_debug, history });
 }
 liveData(["global_dlq", "queues_debug", "history"], render, refresh);

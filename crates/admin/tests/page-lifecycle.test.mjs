@@ -78,3 +78,14 @@ test('queued stream callbacks after navigation cannot repaint or restart polling
   assert.equal(polls, 0);
   assert.equal(f.timers.size, 0);
 });
+
+test('page lifetimes stay expired when the same page is revisited and listeners are removed', () => {
+  const f = setup();
+  const first = f.window.__capturePage();
+  f.window.__pageListen(f.ctx.document, 'keydown', () => {});
+  f.window.__disposePage();
+  const second = f.window.__capturePage();
+  assert.equal(first(), false);
+  assert.equal(second(), true);
+  assert.equal(f.listeners.get('keydown').size, 0);
+});

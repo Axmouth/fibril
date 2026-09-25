@@ -104,6 +104,8 @@
 <script src="/static/js/api.js"></script>
 <script src="/static/js/admin.js"></script>
 <script>
+// Async completions belong to this visit, including errors and response bodies.
+const pageActive = window.__capturePage();
 const form = document.getElementById("message-inspection-form");
 const results = document.getElementById("message-results");
 const message = document.getElementById("message-inspection-message");
@@ -333,11 +335,13 @@ function renderItems(data) {
 }
 
 async function loadMessages(fromOverride = null) {
+  if (!pageActive()) return;
   clearMessage();
   results.innerHTML = "";
   const query = buildQuery(fromOverride);
   if (!confirmLargeInspection(query)) return false;
   const data = await api(`/admin/api/messages?${query}`);
+  if (!pageActive()) return;
   currentFrom = Number(query.get("from") || "0");
   renderItems(data);
   setMessage("info", `Loaded ${data.items?.length ?? 0} message row(s).`);
@@ -361,6 +365,7 @@ function updateReplayButton() {
 }
 
 async function replaySelected() {
+  if (!pageActive()) return;
   const offsets = selectedOffsets();
   if (offsets.length === 0) return;
   if (!window.confirm(`Replay ${offsets.length} selected DLQ offset(s) back to their recorded source queues? The DLQ messages are not removed.`)) {
@@ -378,10 +383,12 @@ async function replaySelected() {
       offsets,
     }),
   });
+  if (!pageActive()) return;
   if (!response.ok) {
     throw new Error(await response.text() || `Replay failed: HTTP ${response.status}`);
   }
   const report = await response.json();
+  if (!pageActive()) return;
   const skipped = report.requested - report.replayed;
   setMessage("success", `Replay requested for ${report.requested} offset(s); ${report.replayed} copied back to source; ${skipped} skipped.`);
   renderReplayReport(report);
@@ -442,6 +449,7 @@ function fullPayloadText(item) {
 }
 
 async function openPayloadModal(offset) {
+  if (!pageActive()) return;
   const item = lastItems.get(String(offset));
   if (!item) return;
   field("payload-modal-offset").textContent = item.state?.offset ?? "";
@@ -454,6 +462,7 @@ async function openPayloadModal(offset) {
   payloadModal.hidden = false;
   try {
     const data = await api(`/admin/api/messages?${buildSingleMessageQuery(offset)}`);
+    if (!pageActive()) return;
     const full = (data.items || []).find(entry => String(entry.state?.offset) === String(offset));
     if (!full || !full.payload_base64) {
       field("payload-modal-body").textContent =
@@ -464,6 +473,7 @@ async function openPayloadModal(offset) {
     field("payload-modal-status").textContent = full.state?.status ?? "";
     field("payload-modal-body").textContent = fullPayloadText(full);
   } catch (err) {
+    if (!pageActive()) return;
     field("payload-modal-body").textContent = `could not load the payload: ${err.message || err}`;
   }
 }
@@ -473,25 +483,32 @@ function closePayloadModal() {
 }
 
 form.addEventListener("submit", async event => {
+  if (!pageActive()) return;
   event.preventDefault();
   try {
     previousOffsets = [];
     await loadMessages();
+    if (!pageActive()) return;
   } catch (err) {
+    if (!pageActive()) return;
     setMessage("error", err.message || String(err));
   }
 });
 
 previousButton.addEventListener("click", async () => {
+  if (!pageActive()) return;
   const previous = previousOffsets.pop();
   if (previous === undefined) return;
   field("message-from").value = String(previous);
   try {
-    if (!await loadMessages(previous)) {
+    const loaded = await loadMessages(previous);
+    if (!pageActive()) return;
+    if (!loaded) {
       previousOffsets.push(previous);
       previousButton.disabled = false;
     }
   } catch (err) {
+    if (!pageActive()) return;
     previousOffsets.push(previous);
     previousButton.disabled = false;
     setMessage("error", err.message || String(err));
@@ -499,23 +516,30 @@ previousButton.addEventListener("click", async () => {
 });
 
 nextButton.addEventListener("click", async () => {
+  if (!pageActive()) return;
   if (nextOffsetHint === null || nextOffsetHint === undefined) return;
   const previous = currentFrom;
   field("message-from").value = String(nextOffsetHint);
   try {
-    if (await loadMessages(nextOffsetHint)) {
+    const loaded = await loadMessages(nextOffsetHint);
+    if (!pageActive()) return;
+    if (loaded) {
       previousOffsets.push(previous);
       previousButton.disabled = false;
     }
   } catch (err) {
+    if (!pageActive()) return;
     setMessage("error", err.message || String(err));
   }
 });
 
 replayButton.addEventListener("click", async () => {
+  if (!pageActive()) return;
   try {
     await replaySelected();
+    if (!pageActive()) return;
   } catch (err) {
+    if (!pageActive()) return;
     setMessage("error", err.message || String(err));
   }
 });
@@ -548,7 +572,10 @@ function applyInitialQuery() {
 
 applyInitialQuery();
 if (field("message-topic").value.trim()) {
-  loadMessages().catch(err => setMessage("error", err.message || String(err)));
+  loadMessages().catch(err => {
+    if (!pageActive()) return;
+    setMessage("error", err.message || String(err));
+  });
 }
 
 // Existing topics and groups are one keystroke away; new names still type free.

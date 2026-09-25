@@ -11,7 +11,19 @@
   window.__spaVisibilityKicks = new Set();
   window.__spaDisposers = new Set();
 
+  let generation = 0;
+  // Capture once when a page starts. A later visit to the same URL is a new page.
+  window.__capturePage = () => {
+    const captured = generation;
+    return () => captured === generation;
+  };
+  window.__pageListen = (target, event, listener, options) => {
+    target.addEventListener(event, listener, options);
+    window.__spaDisposers.add(() => target.removeEventListener(event, listener, options));
+  };
   window.__disposePage = () => {
+    generation++;
+
     for (const dispose of window.__spaDisposers) dispose();
     window.__spaDisposers.clear();
     for (const id of window.__spaIntervals) window.__nativeClearInterval(id);

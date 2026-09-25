@@ -50,6 +50,8 @@
 <script src="/static/js/api.js"></script>
 <script src="/static/js/admin.js"></script>
 <script>
+// Async completions belong to this visit, including errors and response bodies.
+const pageActive = window.__capturePage();
 function fmtDay(ms) {
   if (!ms) return "-";
   return new Intl.DateTimeFormat(undefined, {
@@ -95,17 +97,22 @@ function renderTls(info) {
       <span id="tls-message" class="op-message"></span>
     </div>`;
   document.getElementById("tls-copy").addEventListener("click", async () => {
+    if (!pageActive()) return;
     try {
       await navigator.clipboard.writeText(info.fingerprint || "");
+      if (!pageActive()) return;
       document.getElementById("tls-message").textContent = "Fingerprint copied.";
     } catch {
+      if (!pageActive()) return;
       document.getElementById("tls-message").textContent = "Copy failed - select it manually.";
     }
   });
   document.getElementById("tls-reload").addEventListener("click", async () => {
+    if (!pageActive()) return;
     const el = document.getElementById("tls-message");
     el.textContent = "Reloading…";
     const { ok, data } = await apiPost("/admin/api/tls/reload", {});
+    if (!pageActive()) return;
     el.textContent = ok
       ? `Reloaded - new handshakes serve the new leaf.`
       : `Reload failed: ${data?.message || data?.error || "see broker log"}`;
@@ -114,10 +121,12 @@ function renderTls(info) {
 }
 
 async function refresh() {
+  if (!pageActive()) return;
   const [tls, users] = await Promise.all([
     api('/admin/api/tls').catch(() => null),
     api('/admin/api/users').catch(() => null),
   ]);
+  if (!pageActive()) return;
   renderTls(tls);
 
   const wrap = document.getElementById("users-wrap");
@@ -142,9 +151,11 @@ async function refresh() {
     </tr>`).join("");
   document.querySelectorAll(".user-del").forEach((btn) => {
     btn.addEventListener("click", async () => {
+      if (!pageActive()) return;
       const name = btn.dataset.user;
       if (!confirm(`Remove admin user "${name}"? Their sessions stop working immediately.`)) return;
       const response = await fetch(`/admin/api/users/${encodeURIComponent(name)}`, { method: "DELETE" });
+      if (!pageActive()) return;
       document.getElementById("user-message").textContent =
         response.ok ? `Removed ${name}.` : `Remove failed: HTTP ${response.status}`;
       refresh();
@@ -153,6 +164,7 @@ async function refresh() {
 }
 
 document.getElementById("user-save").addEventListener("click", async () => {
+  if (!pageActive()) return;
   const username = document.getElementById("user-name").value.trim();
   const password = document.getElementById("user-pass").value;
   const el = document.getElementById("user-message");
@@ -161,6 +173,7 @@ document.getElementById("user-save").addEventListener("click", async () => {
     return;
   }
   const { ok, data } = await apiPost("/admin/api/users", { username, password });
+  if (!pageActive()) return;
   el.textContent = ok
     ? `Saved ${username}.`
     : `Save failed: ${data?.message || data?.error || "request failed"}`;

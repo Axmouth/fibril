@@ -124,6 +124,8 @@
 <script src="/static/js/api.js"></script>
 <script src="/static/js/admin.js"></script>
 <script>
+// Async completions belong to this visit, including errors and response bodies.
+const pageActive = window.__capturePage();
 const params = new URLSearchParams(window.location.search);
 const topic = params.get("topic") || "";
 const group = params.get("group") || "";
@@ -291,11 +293,13 @@ function render(bundle) {
 // Publish one operator test message through the broker's real publish path.
 // It lands with a fibril.test header so consumers can recognize it.
 document.getElementById("q-test-send").addEventListener("click", async () => {
+  if (!pageActive()) return;
   const input = document.getElementById("q-test-text");
   const text = input.value.trim() || "test message from the dashboard";
   const btn = document.getElementById("q-test-send");
   btn.disabled = true;
   const { ok, data } = await apiPost("/admin/api/publish", { topic, group: group || null, text });
+  if (!pageActive()) return;
   btn.disabled = false;
   if (ok) {
     toast(`Test message confirmed durable on partition ${data?.partition ?? "?"}`);
@@ -309,12 +313,14 @@ document.getElementById("q-test-send").addEventListener("click", async () => {
 // Fetch-based refresh: refreshes after actions and is the polling fallback
 // when the event stream is out.
 async function refresh() {
+  if (!pageActive()) return;
   const [queues_debug, history, subscriptions, cohorts] = await Promise.all([
     api('/admin/api/queues_debug'),
     api('/admin/api/history').catch(() => ({ queues: [] })),
     api('/admin/api/subscriptions').catch(() => []),
     api('/admin/api/cohorts').catch(() => ({ cohorts: [] })),
   ]);
+  if (!pageActive()) return;
   render({ queues_debug, history, subscriptions, cohorts });
 }
 liveData(["queues_debug", "history", "subscriptions", "cohorts"], render, refresh);

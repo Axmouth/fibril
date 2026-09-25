@@ -53,6 +53,8 @@
 <script src="/static/js/admin.js"></script>
 <script src="/static/js/tendrils.js"></script>
 <script>
+// Async completions belong to this visit, including errors and response bodies.
+const pageActive = window.__capturePage();
 const { hashStr, rnd, spriteUrl, PULSE_CADENCE, fmtRate } = FibrilTendrils;
 const REDUCED_MOTION = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 let swayT = 0;
@@ -454,7 +456,10 @@ if (!REDUCED_MOTION) {
 // Fetch-based refresh: re-renders on filter edits and is the polling
 // fallback when the event stream is out.
 async function refresh() {
-  render({ connections: await api('/admin/api/connections') });
+  if (!pageActive()) return;
+  const connections = await api('/admin/api/connections');
+  if (!pageActive()) return;
+  render({ connections });
 }
 wireUrlFilter(document.getElementById("conn-search"), "q", refresh);
 liveData(["connections"], render, refresh);

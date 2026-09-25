@@ -38,6 +38,8 @@
 <script src="/static/js/api.js"></script>
 <script src="/static/js/admin.js"></script>
 <script>
+// Async completions belong to this visit, including errors and response bodies.
+const pageActive = window.__capturePage();
 // Append rates per stream topic, diffed between data ticks.
 const streamRates = new Map();
 // Durable cursor tracking: "topic|partition|name" -> read rate and the last
@@ -324,6 +326,7 @@ function setCreateMessage(text, kind) {
 }
 
 async function submitCreateStream() {
+  if (!pageActive()) return;
   const topic = document.getElementById("create.topic").value.trim();
   const count = Number(document.getElementById("create.partitions").value) || 1;
   const durability = document.getElementById("create.durability").value;
@@ -339,6 +342,7 @@ async function submitCreateStream() {
   if (age !== "") body.max_age_ms = Number(age);
 
   const { ok, data } = await apiPost("/admin/api/streams", body);
+  if (!pageActive()) return;
   if (ok) {
     setCreateMessage(`Created stream "${topic}" with ${count} partition(s).`, "info");
     document.getElementById("create.topic").value = "";
@@ -358,6 +362,7 @@ document.getElementById("create-toggle").addEventListener("click", () => {
 // path (delegated: the cards re-render every poll). Lands with a fibril.test
 // header so subscribers can recognize it.
 document.getElementById("streams").addEventListener("click", async (event) => {
+  if (!pageActive()) return;
   const btn = event.target.closest("[data-test-publish]");
   if (!btn) return;
   btn.disabled = true;
@@ -365,6 +370,7 @@ document.getElementById("streams").addEventListener("click", async (event) => {
     topic: btn.dataset.testPublish,
     text: "test record from the dashboard",
   });
+  if (!pageActive()) return;
   btn.disabled = false;
   if (ok) {
     toast(`Test record confirmed on partition ${data?.partition ?? "?"}`);
@@ -377,10 +383,12 @@ document.getElementById("streams").addEventListener("click", async (event) => {
 // Fetch-based refresh: re-renders on filter edits, refreshes after actions,
 // and is the polling fallback when the event stream is out.
 async function refresh() {
+  if (!pageActive()) return;
   const [streams, streams_debug] = await Promise.all([
     api('/admin/api/streams'),
     api('/admin/api/streams_debug'),
   ]);
+  if (!pageActive()) return;
   render({ streams, streams_debug });
 }
 wireUrlFilter(document.getElementById("stream-search"), "q", refresh);

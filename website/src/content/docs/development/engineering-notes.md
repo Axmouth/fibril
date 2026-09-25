@@ -41,6 +41,14 @@ Boosted navigation releases page interaction listeners, timers, visibility
 callbacks and event streams. Disposed polling and queued stream callbacks cannot
 restart polling or restore an old page's scroll position.
 
+### Dashboard request lifetimes
+
+Async page requests check their original page lifetime before updating controls,
+including delayed response bodies and error handlers. Boosted navigation accepts
+only the latest request and shares pending script loads, preventing older responses
+or initializers from replacing a newer page. Regression tests complete requests out
+of order and cover revisiting Settings while a save is pending.
+
 ### Observer error isolated from the dashboard
 
 The intermittent `MutationObserver.observe` exception reproduces in the embedded
