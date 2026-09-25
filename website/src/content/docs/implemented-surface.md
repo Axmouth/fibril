@@ -411,6 +411,8 @@ See also: [configuration](/configuration/),
 | Admin auth startup config | Implemented | TOML, env, CLI, server wiring |
 | Metrics exposition startup config | Implemented | `admin.metrics_per_channel` via TOML and env |
 | Keratin fsync and segment startup config | Implemented | Config crate and server wiring |
+| Local runtime installation visibility | Implemented | Admin API and Settings compare installed broker/connection values with the saved document. In-flight snapshots, controller policies and drain timing require separate observation |
+| Recovery budget diagnostics | Implemented | Numeric per-operation limits, accepted work and refused work reach bounded local timelines and logs. Unknown legacy errors stay unclassified. Recovery limits and authority are unchanged |
 | Runtime delivery settings | Implemented | Runtime settings manager and admin UI/API |
 | Runtime idle cleanup settings | Implemented | Runtime settings manager, admin UI/API, broker worker |
 | Runtime locks | Implemented | Locked groups reject admin edits |

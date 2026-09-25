@@ -1985,9 +1985,13 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         let broker = broker.clone();
         let connection_settings = connection_settings.clone();
         let mut runtime_updates = runtime_settings.subscribe();
+        let runtime_settings = Arc::downgrade(&runtime_settings);
         tokio::spawn(async move {
-            while runtime_updates.changed().await.is_ok() {
-                let snapshot = runtime_updates.borrow().clone();
+            // Install the latest subscribed snapshot first, including updates
+            // that raced startup. Mark seen before installation so a newer
+            // update arriving during installation remains pending.
+            loop {
+                let snapshot = runtime_updates.borrow_and_update().clone();
                 broker.update_config(BrokerConfig::from_runtime_settings(&snapshot.settings));
                 connection_settings.update_runtime(ProtocolConnectionRuntimeSettings {
                     publisher_cache_idle_timeout_ms: snapshot
@@ -2000,6 +2004,14 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
                         .connection
                         .resume_session_restart_ttl_ms,
                 });
+                if let Some(manager) = runtime_settings.upgrade() {
+                    manager.record_runtime_application(snapshot);
+                } else {
+                    break;
+                }
+                if runtime_updates.changed().await.is_err() {
+                    break;
+                }
             }
         });
     }

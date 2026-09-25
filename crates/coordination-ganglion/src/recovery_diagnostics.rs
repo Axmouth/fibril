@@ -1,4 +1,5 @@
 //! Bounded, process-local observations. These never participate in recovery authority.
+use fibril_broker::recovery::RecoveryBudgetExceeded;
 use serde::Serialize;
 use std::{
     collections::VecDeque,
@@ -26,6 +27,7 @@ pub struct Stage {
     pub start_us: u64,
     pub elapsed_us: u64,
     pub outcome: Outcome,
+    pub budget: Option<RecoveryBudgetExceeded>,
 }
 #[derive(Clone, Serialize)]
 pub struct Attempt {
@@ -39,6 +41,7 @@ pub struct Attempt {
     pub elapsed_us: u64,
     pub outcome: Outcome,
     pub stages: Vec<Stage>,
+    pub budget: Option<RecoveryBudgetExceeded>,
     pub omitted_stages: u64,
     pub labels_truncated: bool,
 }
@@ -109,6 +112,7 @@ impl RecoveryDiagnostics {
                 elapsed_us: 0,
                 outcome: Outcome::Running,
                 stages: Vec::new(),
+                budget: None,
                 omitted_stages: 0,
                 labels_truncated: [Some(topic), group, Some(transition)]
                     .into_iter()
@@ -135,7 +139,25 @@ impl RecoveryDiagnostics {
             start_us: micros(entry.started),
             elapsed_us: 0,
             outcome: Outcome::Running,
+            budget: None,
         });
+    }
+    pub fn attempt_budget(&self, id: u64, budget: RecoveryBudgetExceeded) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = state.entries.iter_mut().find(|e| e.view.id == id) {
+            entry.view.budget = Some(budget);
+        }
+    }
+    pub fn stage_budget(&self, id: u64, sequence: u64, budget: RecoveryBudgetExceeded) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(stage) = state
+            .entries
+            .iter_mut()
+            .find(|e| e.view.id == id)
+            .and_then(|e| e.view.stages.iter_mut().find(|s| s.sequence == sequence))
+        {
+            stage.budget = Some(budget);
+        }
     }
     pub fn finish_stage(&self, id: u64, sequence: u64, outcome: Outcome) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -204,10 +226,12 @@ mod tests {
         let snapshot = store.snapshot();
         assert_eq!(snapshot.attempts.len(), ATTEMPTS);
         assert_eq!(snapshot.evicted_attempts, 1);
-        assert!(snapshot
-            .attempts
-            .iter()
-            .all(|a| a.outcome == Outcome::Running));
+        assert!(
+            snapshot
+                .attempts
+                .iter()
+                .all(|a| a.outcome == Outcome::Running)
+        );
         let completed = snapshot.attempts[0].id;
         store.finish(completed, Outcome::Ok);
         store.begin("other", 0, None, 3, "next");

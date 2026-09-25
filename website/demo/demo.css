@@ -1,6 +1,6 @@
 /* Demo-only chrome; production dashboard assets remain shared. */
-.demo-banner { grid-column: 1 / -1; position: sticky; top: 0; z-index: 1000; min-height: 38px; box-sizing: border-box; display: flex; gap: 18px; flex-wrap: wrap; align-items: center; padding: 8px 20px; background: var(--surface, #19212b); color: var(--text, #e1e5eb); border-bottom: 1px solid var(--accent, #a8cca0); font: 12px/1.5 system-ui, sans-serif; }
-.demo-banner a { margin-left: auto; color: var(--accent); }
+.demo-banner { grid-column: 1 / -1; position: sticky; top: 0; z-index: 1000; min-height: 38px; box-sizing: border-box; display: flex; gap: 18px; flex-wrap: wrap; align-items: center; padding: 8px 20px; background: var(--panel); color: var(--text, #e1e5eb); border-bottom: 1px solid var(--accent, #a8cca0); font: 12px/1.5 system-ui, sans-serif; }
+body.admin-body .demo-banner a { margin-left: auto; color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
 body.admin-body { padding-top: 0; grid-template-rows: auto 1fr; }
 .side-nav { top: 39px; height: calc(100vh - 39px); }
 .main-container { min-height: calc(100vh - 39px); }

@@ -47,6 +47,7 @@ pub struct RuntimeSettingsResponse {
     pub settings: RuntimeSettings,
     pub locks: RuntimeSettingsLocks,
     pub load_issue: Option<RuntimeSettingsLoadIssue>,
+    pub local_application: Option<fibril_broker::runtime_settings::RuntimeSettingsApplication>,
 }
 
 /// Unknown fields in the ENVELOPE are rejected (a typo should be named, not
@@ -274,14 +275,16 @@ impl RuntimeSettingsResponse {
         cluster_authority: bool,
         snapshot: RuntimeSettingsSnapshot,
         locks: RuntimeSettingsLocks,
-        load_issue: Option<RuntimeSettingsLoadIssue>,
+        manager: &fibril_broker::runtime_settings::RuntimeSettingsManager,
     ) -> Self {
+        let local_application = manager.application_for(&snapshot.settings);
         Self {
             scope: if cluster_authority { "cluster" } else { "node" },
             version: snapshot.version,
             settings: snapshot.settings,
             locks,
-            load_issue,
+            load_issue: manager.load_issue(),
+            local_application,
         }
     }
 }
@@ -1158,7 +1161,7 @@ pub async fn runtime_settings(
         server.runtime_settings_cluster.is_some(),
         snapshot,
         runtime_settings.locks().clone(),
-        runtime_settings.load_issue(),
+        runtime_settings,
     )))
     .map(IntoResponse::into_response)
 }
@@ -1286,7 +1289,7 @@ pub async fn update_runtime_settings(
                         server.runtime_settings_cluster.is_some(),
                         snapshot,
                         locks,
-                        runtime_settings.load_issue(),
+                        runtime_settings,
                     )),
                 )
                     .into_response());
@@ -1298,7 +1301,7 @@ pub async fn update_runtime_settings(
                         server.runtime_settings_cluster.is_some(),
                         snapshot,
                         locks,
-                        runtime_settings.load_issue(),
+                        runtime_settings,
                     )),
                 )
                     .into_response());
@@ -1324,7 +1327,7 @@ pub async fn update_runtime_settings(
                 server.runtime_settings_cluster.is_some(),
                 snapshot,
                 locks,
-                runtime_settings.load_issue(),
+                runtime_settings,
             )),
         )
             .into_response()),
@@ -1334,7 +1337,7 @@ pub async fn update_runtime_settings(
                 server.runtime_settings_cluster.is_some(),
                 snapshot,
                 locks,
-                runtime_settings.load_issue(),
+                runtime_settings,
             )),
         )
             .into_response()),

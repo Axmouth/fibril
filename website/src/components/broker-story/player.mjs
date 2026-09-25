@@ -108,10 +108,15 @@ function timeline(segments, t) {
 function checkpointHistory(h, progress) {
   const base = h.accepted
     ? "Accepted base · events before 120"
-    : "Proposed base · awaiting agreement";
+    : h.status === "conflict"
+      ? "Proposal blocked · conflicting evidence"
+      : h.status === "waiting"
+        ? "Proposal waiting · missing replica"
+        : "Proposed base · awaiting agreement";
+  const baseColor = color(h.status === "conflict" ? "failure" : h.status === "waiting" ? "delivery" : "control");
   return `<text x="70" y="76" class="diagram-note">A snapshot becomes a recovery base only after verified agreement</text>
     <text x="70" y="444" class="diagram-note">EVENT HISTORY / EXCLUSIVE CUT 120</text>
-    <rect x="70" y="458" width="520" height="34" rx="5" fill="var(--story-control)" opacity="${h.accepted ? ".3" : ".1"}"/>
+    <rect x="70" y="458" width="520" height="34" rx="5" fill="${baseColor}" opacity="${h.accepted ? ".3" : ".1"}"/>
     <text x="84" y="480" font-size="13">${base}</text>
     <path d="M600 449v54" stroke="var(--story-control)" stroke-dasharray="3 3"/>
     <rect x="610" y="458" width="${h.suffix ? 300 * progress : 0}" height="34" rx="5" fill="var(--story-data)" opacity=".25"/>
@@ -370,7 +375,7 @@ export function registerStories() {
         );
         if (this.scene === "checkpoint") {
           const h = m.history;
-          const progress = this.playing && m.index === 3 ? m.stepProgress : 1;
+          const progress = this.playing && h.growing ? m.stepProgress : 1;
           this.svg.querySelector("[data-timeline]").innerHTML =
             checkpointHistory(h, progress);
         }

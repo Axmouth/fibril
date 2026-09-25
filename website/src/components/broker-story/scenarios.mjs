@@ -437,11 +437,16 @@ export const checkpoint = {
   layout: "cluster",
   note: "One queue, three admitted replicas. Event cut 120 is an illustrative exclusive boundary. Event positions and message offsets are different coordinates. This story does not measure time or storage size.",
   nodes: ["Broker A", "Broker B", "Broker C"],
-  variants: [{ id: "agreement", label: "Checkpoint agreement" }],
+  variants: [
+    { id: "agreement", label: "Checkpoint agreement" },
+    { id: "retry", label: "Missing replica and retry" },
+    { id: "conflict", label: "Conflicting evidence" },
+  ],
 };
-/** @returns {import("./types").Step[]} */
-export function checkpointSteps() {
-  return [
+/** @param {string} [variant]
+ * @returns {import("./types").Step[]} */
+export function checkpointSteps(variant = "agreement") {
+  const agreement = [
     step(
       "01 / Capture an exact applied cut",
       "A captures queue state after applying events before 120. The snapshot describes ready, inflight, delayed and settled state at that exact boundary. A snapshot file alone is not an accepted recovery checkpoint.",
@@ -477,7 +482,7 @@ export function checkpointSteps() {
       "Publishing, acknowledgements and timer transitions add events from 120 onward. Some messages created before the cut remain live. Their payloads are still needed, regardless of how old the checkpoint is.",
       ["Owner · new traffic", "Replicate suffix", "Replicate suffix"],
       [flow("a", "b", "new records"), flow("a", "c", "new records")],
-      { history: { accepted: true, suffix: true, verified: false } },
+      { history: { accepted: true, suffix: true, verified: false, growing: true } },
     ),
     step(
       "05 / The owner disappears",
@@ -510,6 +515,34 @@ export function checkpointSteps() {
       },
     ),
   ];
+  const pending = { accepted: false, suffix: false, verified: false };
+  if (variant === "conflict") return [
+    agreement[0],
+    step("02 / Evidence does not match",
+      "C returns evidence that does not match the proposed applied cut. The new checkpoint cannot be accepted. A receipt from B cannot substitute for C's required verification.",
+      ["Owner · proposal blocked", "Matching receipt", "Evidence mismatch"],
+      [flow("b", "a", "matching receipt", "ack"), flow("c", "a", "mismatched evidence", "failure")],
+      { blocked: true, history: { ...pending, status: "conflict" } }),
+    step("03 / Preserve the previous recovery base",
+      "The previous accepted checkpoint, if any, remains in force. Repeating the same contradictory evidence cannot make this proposal valid. Investigate the mismatch or repair the replica through an authorized path. This failed checkpoint attempt does not itself activate a replacement or imply that ordinary queue traffic has stopped.",
+      ["Do not accept proposal", "Preserve old base", "Investigate mismatch"], [],
+      { blocked: true, history: { ...pending, status: "conflict" } }),
+  ];
+  if (variant === "retry") return [
+    agreement[0],
+    step("02 / A required replica is unavailable",
+      "B has returned a durable receipt, but C is unavailable. The proposal waits without becoming the accepted base. Existing replication and queue traffic can continue when their own durability requirements are satisfied.",
+      ["Owner · awaiting C", "Receipt ready", "Unavailable"],
+      [flow("b", "a", "one receipt is insufficient", "ack")],
+      { dead: ["c"], history: { ...pending, status: "waiting" } }),
+    step("03 / Retry with fresh verification",
+      "C returns. A later attempt obtains verification for the exact proposed history, cut and current assignment. Old receipts are not assumed valid across changed identity or authority. Every required participant must pass before consensus can accept a checkpoint.",
+      ["Owner · retry proposal", "Verify current attempt", "Returned · verify"],
+      [flow("a", "b", "verify attempt", "control"), flow("a", "c", "verify attempt", "control")],
+      { history: pending }),
+    ...agreement.slice(1),
+  ].map((frame, i) => ({ ...frame, title: `${String(i + 1).padStart(2, "0")} / ${frame.title.split(" / ")[1]}` }));
+  return agreement;
 }
 export const scenes = { failover, delivery, placement, checkpoint };
 /**
@@ -556,7 +589,7 @@ export function model(scene, variant, time) {
     scene === "placement"
       ? placementSteps()
       : scene === "checkpoint"
-        ? checkpointSteps()
+        ? checkpointSteps(variant)
         : failoverSteps(variant);
   const i = Math.min(steps.length - 1, Math.floor(Math.max(0, time) / 3));
   return {

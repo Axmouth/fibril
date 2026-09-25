@@ -98,6 +98,10 @@ last accepted checkpoint remains pinned. Retained disk can grow while replacemen
 is delayed. This policy is opt-in pending broader workload and retention tuning.
 See the [checkpoint plan](/development/failover-plan/#4-agreed-checkpoints-and-suffix-comparison).
 
+Choose **Missing replica and retry** to follow delayed agreement, or
+**Conflicting evidence** to see why a new proposal must remain unaccepted.
+The previous accepted base stays in force until a valid replacement is accepted.
+
 <BrokerStory scene="checkpoint" />
 
 ## Eager failover

@@ -31,9 +31,11 @@ function interactionGuard(quietMs) {
   const mark = () => {
     lastInteraction = Date.now();
   };
-  for (const ev of ["pointerdown", "keydown", "wheel", "focusin"]) {
-    document.addEventListener(ev, mark, { passive: true });
-  }
+  const events = ["pointerdown", "keydown", "wheel", "focusin"];
+  for (const ev of events) document.addEventListener(ev, mark, { passive: true });
+  window.__spaDisposers?.add(() => {
+    for (const ev of events) document.removeEventListener(ev, mark);
+  });
   return () => {
     if (document.hidden) return true;
     if (Date.now() - lastInteraction < quietMs) return true;
@@ -46,9 +48,11 @@ function interactionGuard(quietMs) {
 }
 
 function autoRefresh(refreshFn, intervalMs) {
+  let active = true;
+  window.__spaDisposers?.add(() => { active = false; });
   let running = false;
   const guardBusy = interactionGuard(intervalMs);
-  const busy = () => running || guardBusy();
+  const busy = () => !active || running || guardBusy();
 
   const tick = async () => {
     if (busy()) return;
@@ -62,7 +66,7 @@ function autoRefresh(refreshFn, intervalMs) {
       // applies inside refreshFn.
     } finally {
       running = false;
-      if (window.scrollX !== x || window.scrollY !== y) {
+      if (active && (window.scrollX !== x || window.scrollY !== y)) {
         window.scrollTo(x, y);
       }
     }
@@ -361,7 +365,12 @@ function wireUrlFilter(input, param, onChange) {
 // old fetch-based refresh. Renders hold off while the user interacts, exactly
 // like autoRefresh, and the deferred bundle paints once the page is quiet.
 function liveData(families, onTick, fallbackRefresh) {
+  let active = true;
+  let polling = false;
+  window.__spaDisposers?.add(() => { active = false; });
   const fallBack = () => {
+    if (!active || polling) return;
+    polling = true;
     fallbackRefresh();
     autoRefresh(fallbackRefresh, 2000);
   };
@@ -374,6 +383,7 @@ function liveData(families, onTick, fallbackRefresh) {
   let pending = null;
   let flushTimer = null;
   const paint = (bundle) => {
+    if (!active) return;
     const x = window.scrollX;
     const y = window.scrollY;
     try {
@@ -386,6 +396,7 @@ function liveData(families, onTick, fallbackRefresh) {
     }
   };
   const render = (bundle) => {
+    if (!active) return;
     if (!busy()) {
       pending = null;
       paint(bundle);
@@ -406,12 +417,13 @@ function liveData(families, onTick, fallbackRefresh) {
   // indefinitely, if the tick pipeline hiccups. The tick then takes over.
   // Surfaced, not swallowed: a throw here is a real page bug.
   Promise.resolve()
-    .then(fallbackRefresh)
+    .then(() => { if (active) return fallbackRefresh(); })
     .catch((err) => console.error("initial page refresh failed:", err));
 
   const es = new EventSource(`/admin/api/events?families=${families.join(",")}`);
   window.__spaEventSources?.add(es);
   es.addEventListener("tick", (event) => {
+    if (!active) return;
     // The live pill reads this stamp: a healthy stream keeps it fresh, a
     // reconnecting one lets it age into stale, then dead.
     window.__fibrilLastOk = Date.now();
@@ -424,6 +436,7 @@ function liveData(families, onTick, fallbackRefresh) {
     render(bundle);
   });
   es.onerror = () => {
+    if (!active) return;
     // Record the failure: the live pill declares "unreachable" only on an
     // observed failure, never on polling merely being paused.
     window.__fibrilLastFail = Date.now();

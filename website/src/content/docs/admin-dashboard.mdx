@@ -283,8 +283,12 @@ shown as locked and cannot be edited through the dashboard.
 A successful save persists the requested settings. Workers adopt them at their
 supported boundaries: cursor batching reads the next batch's settings, replication
 buffer depth applies to the next replication stream, and an active drain keeps its original
-handoff timeout. Cluster propagation and worker adoption are asynchronous; the page
-does not yet report an applied version for every worker.
+handoff timeout. The page separately reports whether the broker and connection runtime values
+installed on this node match the saved document. This comparison uses values
+because the cluster and local cache have independent revision counters. It does
+not certify adoption by every in-flight operation. Controller checkpoint policy,
+eager failover policy and drain handoff timing are not tracked by this observation.
+Reload the form to refresh the status.
 
 The **Node-local Storage** section identifies the serving node and controls segment
 preallocation. Overrides survive restart; clearing the override restores the
@@ -339,6 +343,13 @@ amber striped bars, and phases without recorded stages are grey. Retries can reu
 work, so an unobserved phase does not imply a failure. Timing begins at worker entry;
 failure detection and client reconnect are outside that interval. A completed
 attempt has activated its assignment, but replica admission can still retry.
+
+Recognized recovery budget failures identify the limit, work accepted before the
+check and the additional work refused. These counts describe the failing operation,
+not complete recovery verification. An unchanged retry cannot clear the same
+fixed limit. A different available source, changed history or supported budget may
+allow progress. Legacy errors without numeric diagnostics retain an unknown cause.
+The demo includes an `archive.import` attempt that reaches the inspection record limit.
 
 The shared topology API exposes these observations under
 `consensus.recovery_timeline`. The store holds 32 attempts with at most 256 stages

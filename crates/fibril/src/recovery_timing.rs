@@ -59,6 +59,7 @@ impl RecoveryTiming {
     ) -> Result<T, E>
     where
         F: Future<Output = Result<T, E>>,
+        E: std::fmt::Display,
     {
         let mut guard = StageTiming {
             attempt: self,
@@ -71,8 +72,30 @@ impl RecoveryTiming {
         self.diagnostics
             .start_stage(self.observation, guard.sequence, stage, peer);
         let result = future.await;
+        if let Err(error) = &result {
+            if let Some(budget) =
+                fibril_broker::recovery::RecoveryBudgetExceeded::from_message(&error.to_string())
+            {
+                tracing::warn!(target: "fibril::recovery_timing", stage, peer,
+                    budget=?budget.budget, limit=budget.limit, completed=budget.completed,
+                    requested=budget.requested, unchanged_retry_can_help=false,
+                    "recovery work budget exhausted");
+                self.diagnostics
+                    .stage_budget(self.observation, guard.sequence, budget);
+            }
+        }
         guard.outcome = if result.is_ok() { "ok" } else { "error" };
         result
+    }
+    pub(crate) fn finish_result<T>(&mut self, result: &Result<T, String>) {
+        if let Err(error) = result {
+            if let Some(budget) =
+                fibril_broker::recovery::RecoveryBudgetExceeded::from_message(error)
+            {
+                self.diagnostics.attempt_budget(self.observation, budget);
+            }
+        }
+        self.finish(result.is_ok());
     }
     pub(crate) fn finish(&mut self, ok: bool) {
         self.outcome = if ok { "ok" } else { "error" };
@@ -158,6 +181,43 @@ mod tests {
         }
     }
     #[test]
+    fn budget_survives_stage_and_attempt_completion() {
+        tracing::subscriber::with_default(Capture::default(), || {
+            use fibril_broker::recovery::{RecoveryBudget, RecoveryBudgetExceeded};
+            let diagnostics = RecoveryDiagnostics::default();
+            let mut timing = RecoveryTiming {
+                topic: "q".into(),
+                partition: 0,
+                group: None,
+                epoch: 1,
+                transition: "cut".into(),
+                started: Instant::now(),
+                sequence: AtomicU64::new(0),
+                outcome: "cancelled",
+                observation: diagnostics.begin("q", 0, None, 1, "cut"),
+                diagnostics: diagnostics.clone(),
+            };
+            let error =
+                RecoveryBudgetExceeded::message(RecoveryBudget::InspectionRecords, 100, 98, 3);
+            let result = futures::executor::block_on(
+                timing.stage("inspect_source", "a", async { Err::<(), _>(error) }),
+            );
+            timing.finish_result(&result);
+            drop(timing);
+            let snapshot = diagnostics.snapshot();
+            let attempt = &snapshot.attempts[0];
+            assert_eq!(attempt.budget, attempt.stages[0].budget);
+            let budget = attempt.budget.as_ref().unwrap();
+            assert_eq!(
+                (budget.limit, budget.completed, budget.requested),
+                (100, 98, 3)
+            );
+            assert!(!budget.unchanged_retry_can_help);
+            assert_eq!(attempt.outcome, Outcome::Error);
+        });
+    }
+
+    #[test]
     fn stages_record_success_error_and_cancellation_with_one_identity() {
         let capture = Capture::default();
         tracing::subscriber::with_default(capture.clone(), || {
@@ -177,7 +237,9 @@ mod tests {
             let diagnostics = timing.diagnostics.clone();
             futures::executor::block_on(async {
                 assert_eq!(
-                    timing.stage("first", "a", async { Ok::<_, ()>(7) }).await,
+                    timing
+                        .stage("first", "a", async { Ok::<_, String>(7) })
+                        .await,
                     Ok(7)
                 );
                 assert_eq!(
@@ -187,7 +249,7 @@ mod tests {
                 let mut cancelled = Box::pin(timing.stage(
                     "third",
                     "c",
-                    futures::future::pending::<Result<(), ()>>(),
+                    futures::future::pending::<Result<(), String>>(),
                 ));
                 assert!(futures::poll!(cancelled.as_mut()).is_pending());
                 drop(cancelled);

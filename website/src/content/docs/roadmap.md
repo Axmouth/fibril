@@ -185,8 +185,8 @@ without fixed total-size ceilings. Keep bounded pages, memory and transfer windo
 and add verifiable continuation for inspection/replay and chunked snapshots.
 Progress must survive attempt deadlines and restart while retaining exact history,
 quorum and activation requirements. Exercise the current byte, record, semantic
-operation and snapshot limits with boundary-crossing fault tests. Expose exhausted
-budgets and progress in recovery diagnostics.
+operation and snapshot limits with boundary-crossing fault tests. Extend existing
+operation-level budget diagnostics with durable progress across continuation phases.
 
 Implement [resumable phases](/development/recovery-continuation/#resumable-recovery-phases)
 with verified progress before source selection, phase-specific retries and bounded
@@ -232,7 +232,7 @@ Pin matching demo assets when archiving documentation versions. Extend inline
 examples to additional dashboard pages where they clarify operational behavior.
 Assess coherent moving scenarios for backlog growth, slow consumers and recovery.
 
-Extend the shared checkpoint story with retry and divergence branches, polling versus push/wakeup replication, richer
+Extend the shared stories with polling versus push/wakeup replication, richer
 controller planning and multi-partition failures. Expand local and replicated
 speculation scenarios as their correctness contracts evolve. Distinguish eager
 failure detection from early replication, and label implemented, experimental and proposed behavior.

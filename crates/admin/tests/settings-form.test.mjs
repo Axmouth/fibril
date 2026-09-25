@@ -205,3 +205,19 @@ test('settings scope and startup seed remain distinct from saved values', () => 
   f.context.renderSettings(f.data);
   assert.match(f.controls.get('runtime-authority').textContent, /Scope unavailable/);
 });
+
+
+test('adoption uses installation observations and leaves missing observations unknown', () => {
+  const f = form();
+  const lines = () => f.controls.get('runtime-application').children.map(el => el.textContent).join(' ');
+  f.context.renderSettings(f.data);
+  assert.match(lines(), /Broker runtime: Installed values match/);
+  f.data.local_application.broker_matches_saved = false;
+  f.context.renderSettings(f.data);
+  assert.match(lines(), /Broker runtime: Installed values differ/);
+  assert.match(lines(), /Connection runtime: Installed values match/);
+  delete f.data.local_application;
+  f.context.renderSettings(f.data);
+  assert.match(lines(), /Installation not yet observed/);
+  assert.doesNotMatch(lines(), /Installed values match/);
+});

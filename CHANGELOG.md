@@ -38,6 +38,13 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- The checkpoint story includes delayed agreement, successful retry and conflicting
+  evidence branches, with shared animation and static transcripts.
+- Recovery timelines show numeric work-budget failures and whether an unchanged
+  retry can help. The demo includes a record-budget failure.
+- Settings reports whether installed broker and connection runtime values on the
+  serving node match the saved document, independently of revision counters.
+
 - A linked design note records proposed resumable recovery phases, storage-health
   policy, cooperative owner handoff and early-replication storage-failure gates.
 
@@ -629,6 +636,12 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   unchanged, matching their own language norms.
 
 ### Fixed
+
+- Dashboard navigation releases page interaction listeners and completed timers,
+  and prevents disposed polling/stream callbacks from restarting old refreshers.
+  The demo banner uses the active theme's panel and text colors.
+- The runtime updater installs its initial subscribed snapshot, covering changes
+  that arrive between startup configuration and watch subscription.
 
 - Automatic queue recovery retains the existing confirmation count when transient
   liveness loss would shrink a majority to one node. Admitted followers resume

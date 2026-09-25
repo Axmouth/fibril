@@ -3016,9 +3016,10 @@ mod tests {
     #[tokio::test]
     async fn runtime_settings_get_returns_current_settings() {
         let server = test_server(RuntimeSettingsLocks::default()).await;
+        let manager = server.runtime_settings.as_ref().unwrap().clone();
         let app = AdminServer::router(server);
 
-        let response = app
+        let response = app.clone()
             .oneshot(
                 Request::builder()
                     .uri("/admin/api/runtime-settings")
@@ -3038,6 +3039,17 @@ mod tests {
         assert_eq!(body["settings"]["replication"]["eager_failover_grace_ms"], 1000);
         assert_eq!(body["locks"]["idle_queue_cleanup"], false);
         assert!(body["load_issue"].is_null());
+        assert!(body["local_application"].is_null());
+        let mut installed = manager.current();
+        installed.version = 37;
+        manager.record_runtime_application(installed);
+        let response = app.oneshot(Request::builder().uri("/admin/api/runtime-settings")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        let body = response_json(response).await;
+        assert_eq!(body["version"], 1);
+        assert_eq!(body["local_application"]["local_cache_version"], 37);
+        assert_eq!(body["local_application"]["broker_matches_saved"], true);
+        assert_eq!(body["local_application"]["connections_match_saved"], true);
     }
 
     #[tokio::test]

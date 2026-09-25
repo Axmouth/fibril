@@ -83,7 +83,7 @@
       { at_ms: now - 180000, severity: 'info', kind: 'queue_declared', subject: 'orders.created', detail: 'Example: two queue partitions declared.' },
     ] },
     quarantine: { quarantined: [], policy: 'fail' },
-    'runtime-settings': { scope: 'cluster', version: 3, settings: runtime, locks: {}, load_issue: null },
+    'runtime-settings': { scope: 'cluster', version: 3, settings: runtime, locks: {}, load_issue: null, local_application: { local_cache_version: 11, broker_matches_saved: true, connections_match_saved: true } },
     'local-storage-settings': { node_id: 'broker-1', version: 2, startup_preallocate_bytes: 0,
       override_preallocate_bytes: 1048576, requested_preallocate_bytes: 1048576, pending_logs: 1, failed_logs: 0,
       logs: [{ path: 'messages/orders.created/0', applied_revision: 2, active_segment_base: 40000,
@@ -138,6 +138,16 @@
         stage(2, 'inspect_source', 'broker-2', 20000, 1580000, 'cancelled'),
       ] }],
   };
+  fixtures.topology.consensus.recovery_timeline.attempts.push({
+    id: 3, topic: 'archive.import', partition: 0, group: null, epoch: '8',
+    transition: 'demo-recovery-limit', started_at_ms: now - 260000, elapsed_us: 4200000,
+    outcome: 'error', omitted_stages: 0, labels_truncated: false, stages: [
+      stage(0, 'witness_seal', 'broker-2', 0, 20000),
+      { ...stage(1, 'inspect_source', 'broker-2', 20000, 4180000, 'error'),
+        budget: { budget: 'inspection_records', limit: 1000000, completed: 999900,
+          requested: 200, unchanged_retry_can_help: false } },
+    ],
+  });
   const latest = samples.at(-1);
   latest.backlog = queues.reduce((sum, q) => sum + q.state.ready_count, 0);
   latest.inflight = queues.reduce((sum, q) => sum + q.state.inflight_count, 0);

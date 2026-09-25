@@ -19,6 +19,30 @@ confirmed-suffix tests cover the publication and recovery boundaries.
 
 ## Adoption — September 2026
 
+### Runtime installation observations
+
+The Settings page compares saved values with the configurations installed by the
+local broker and connection updater. Independent cluster and cache revision
+counters are kept separate, and startup now installs the latest subscribed
+snapshot before waiting for changes. Existing operations can retain earlier
+snapshots, so installation does not imply adoption by every worker.
+
+### Recovery budget diagnostics
+
+Inspection, replay and staging failures now carry numeric limits, accepted work
+and refused work into the bounded recovery timeline. An unchanged retry is
+identified as insufficient for these fixed limits, while unknown errors remain
+unclassified. This adds observability without changing source proof, budgets or
+activation requirements.
+
+### Dashboard page cleanup
+
+Boosted navigation releases page interaction listeners, timers, visibility
+callbacks and event streams. Disposed polling and queued stream callbacks cannot
+restart polling or restore an old page's scroll position. The intermittent
+MutationObserver exception remains under investigation because the embedded
+browser has not supplied an attributable source location.
+
 ### Bounded recovery worker timelines
 
 The existing recovery stage guards now also populate the Cluster dashboard with

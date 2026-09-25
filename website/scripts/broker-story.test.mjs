@@ -123,3 +123,25 @@ test("checkpoint agreement never skips live payload verification or grants owner
   }
   assert.match(steps[5].text, /large live backlog still requires reads/);
 });
+
+
+test("a missing checkpoint participant delays agreement until all verify on retry", () => {
+  const steps = checkpointSteps("retry");
+  assert(steps[1].dead.includes("c"));
+  assert.equal(steps[1].history.status, "waiting");
+  const accepted = steps.findIndex(s => s.history.accepted);
+  assert(accepted > steps.findIndex(s => s.title.includes("Every admitted replica")));
+  assert(steps.slice(0, accepted).every(s => !s.history.accepted));
+  assert(!steps[2].dead?.includes("c"));
+  assert(steps.at(-1).history.verified);
+});
+
+test("conflicting checkpoint evidence cannot become an accepted base or authorize serving", () => {
+  const steps = checkpointSteps("conflict");
+  assert(steps.every(s => !s.history.accepted && !s.history.verified));
+  assert(steps.at(-1).blocked);
+  assert.equal(steps.at(-1).history.status, "conflict");
+  assert.match(steps.at(-1).text, /previous accepted checkpoint/);
+  assert.equal(model("checkpoint", "conflict", 1000).history.accepted, false);
+  assert.equal(model("checkpoint", "retry", 1000).history.accepted, true);
+});

@@ -375,7 +375,7 @@ impl PublisherHandle {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrokerConfig {
     pub inflight_ttl_ms: u64,
     pub expiry_poll_min_ms: u64,

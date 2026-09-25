@@ -14,7 +14,7 @@ export interface StepExtras {
   blocked?: boolean;
   checkpoint?: boolean;
   focus?: number;
-  history?: { accepted: boolean; suffix: boolean; verified: boolean };
+  history?: { accepted: boolean; suffix: boolean; verified: boolean; growing?: boolean; status?: "waiting" | "conflict" };
 }
 export interface Step extends StepExtras {
   title: string;
@@ -55,7 +55,7 @@ export interface Scene<V extends Variant, L extends string> {
   variants: V[];
 }
 export type FailoverScene = Scene<Variant<"recover" | "fenced">, "cluster">;
-export type CheckpointScene = Scene<Variant<"agreement">, "cluster">;
+export type CheckpointScene = Scene<Variant<"agreement" | "retry" | "conflict">, "cluster">;
 export type PlacementScene = Scene<Variant<"spread">, "placement">;
 export interface DeliveryScene extends Scene<DeliveryVariant, "delivery"> {
   lanes: string[];

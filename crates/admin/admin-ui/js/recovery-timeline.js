@@ -10,7 +10,7 @@
   const statuses = { running: 'Running', ok: 'Completed', error: 'Failed', cancelled: 'Cancelled' };
   const status = value => Object.hasOwn(statuses, value) ? value : 'cancelled';
   const labels = {
-    witness_seal: 'Seal witness', inspect_source: 'Inspect source', compare_sources: 'Compare histories',
+    witness_seal: 'Seal witness', inspect_source: 'Inspect source', compare_sources: 'Compare histories', compare_pair: 'Compare histories',
     commit_plan: 'Commit recovery plan', probe_snapshot: 'Probe snapshot', source_snapshot: 'Read snapshot',
     prepare_target: 'Prepare target', target_seal: 'Seal target', begin_target: 'Begin transfer',
     copy_pages: 'Copy suffix', finish_target: 'Finish transfer', install_target: 'Install state',
@@ -18,7 +18,7 @@
   };
   const phases = [
     ['Witnesses', ['witness_seal']],
-    ['Source', ['inspect_source', 'compare_sources', 'probe_snapshot', 'source_snapshot']],
+    ['Source', ['inspect_source', 'compare_sources', 'compare_pair', 'probe_snapshot', 'source_snapshot']],
     ['Plan', ['commit_plan']],
     ['Transfer', ['prepare_target', 'target_seal', 'begin_target', 'copy_pages', 'finish_target']],
     ['Install', ['install_target']],
@@ -37,12 +37,21 @@
     const date = new Date(Number(ms));
     return Number.isFinite(date.getTime()) ? date.toLocaleString() : 'Unknown time';
   };
+  function budgetDetails(b) {
+    if (!b) return '';
+    const names = { inspection_pages: 'Inspection pages', inspection_records: 'Inspection records',
+      inspection_bytes: 'Inspection bytes', snapshot_bytes: 'Snapshot bytes', replay_operations: 'Replay operations',
+      artifact_bytes: 'Recovery artifact bytes', stage_records: 'Staging records', stage_bytes: 'Staging bytes',
+      record_bytes: 'Record bytes per page', replica_count: 'Replica count' };
+    return `<p><strong>${escape(names[b.budget] || b.budget)} limit reached.</strong> Limit ${escape(b.limit)} · accepted before this check ${escape(b.completed)} · next work refused ${escape(b.requested)}.</p>`
+      + `<p>${b.unchanged_retry_can_help === false ? 'An unchanged retry cannot clear this limit. The history, available source or supported budget must change.' : 'Whether a retry can help is unknown.'} Counts describe this operation and do not certify complete recovery verification.</p>`;
+  }
   function issues(a, stages) {
     const interrupted = stages.filter(s => ['error', 'cancelled'].includes(s.outcome));
-    const rows = interrupted.map(s => `<p><strong class="recovery-${status(s.outcome)}">${statuses[status(s.outcome)]}:</strong> ${escape(labels[s.name] || s.name)}${s.peer ? ` on ${escape(s.peer)}` : ''} at +${duration(number(s.start_us) + number(s.elapsed_us))}.</p>`).join('');
+    const rows = interrupted.map(s => `<p><strong class="recovery-${status(s.outcome)}">${statuses[status(s.outcome)]}:</strong> ${escape(labels[s.name] || s.name)}${s.peer ? ` on ${escape(s.peer)}` : ''} at +${duration(number(s.start_us) + number(s.elapsed_us))}.</p>${budgetDetails(s.budget)}`).join('');
     const terminal = ['error', 'cancelled'].includes(a.outcome);
     if (!rows && !terminal) return '';
-    return `<div class="recovery-issues" role="note">${rows || `<p>Attempt ${statuses[status(a.outcome)].toLowerCase()}; no corresponding failed or cancelled stage was recorded.</p>`}<p>Use the attempt identity to find detailed recovery logs.</p></div>`;
+    return `<div class="recovery-issues" role="note">${rows || `<p>Attempt ${statuses[status(a.outcome)].toLowerCase()}. No corresponding failed or cancelled stage was recorded.</p>`}${stages.some(s => s.budget) ? '' : budgetDetails(a.budget)}<p>Use the attempt identity to find detailed recovery logs.</p></div>`;
   }
   function detail(a) {
     const stages = Array.isArray(a.stages) ? a.stages : [];

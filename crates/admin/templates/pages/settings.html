@@ -19,6 +19,8 @@
     </div>
 
     <p id="runtime-authority" class="settings-note">Loading settings authority…</p>
+    <div id="runtime-application" class="settings-note" aria-live="polite"></div>
+    <p class="settings-help">Installation is observed on this node at the time of loading. Existing operations can retain an older snapshot. Replication stream buffer changes apply to the next stream. Controller checkpoint and eager failover settings, and drain handoff timing, are not tracked here. Reload to refresh adoption status.</p>
     <p class="settings-note">Inputs show the saved document. A saved revision does not report adoption by every worker. Startup seeds below come from this node’s resolved configuration and initialize a missing settings document. They do not override saved values.</p>
 
     <section class="settings-section">
@@ -830,10 +832,24 @@ function setDisabledForLockedGroups() {
   }
 }
 
+function renderRuntimeApplication(application) {
+  const target = field("runtime-application");
+  target.replaceChildren();
+  const status = value => value === true ? "Installed values match the saved document"
+    : value === false ? "Installed values differ from the saved document" : "Installation not yet observed";
+  for (const [label, value] of [["Broker runtime", application?.broker_matches_saved],
+    ["Connection runtime", application?.connections_match_saved]]) {
+    const line = document.createElement("p");
+    line.textContent = `${label}: ${status(value)}.`;
+    target.append(line);
+  }
+}
+
 function renderSettings(data) {
   // Preserve the complete document, including fields this UI does not expose.
   // The version check still protects the full replacement from concurrent edits.
   currentSettings = structuredClone(data.settings);
+  renderRuntimeApplication(data.local_application);
   field("version").value = data.version;
   const scope = data.scope === "cluster" ? "Cluster-wide" : data.scope === "node" ? "This node" : "Scope unavailable from this broker";
   field("runtime-authority").textContent = `${scope} · saved revision ${data.version}. Workers adopt changes at their supported boundaries.`;

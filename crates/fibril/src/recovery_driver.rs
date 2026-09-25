@@ -104,7 +104,7 @@ pub async fn recover_queue_once(
         provider.recovery_diagnostics().clone(),
     )?;
     let result = recover_queue_attempt(provider, broker, config, pending, &timing).await;
-    timing.finish(result.is_ok());
+    timing.finish_result(&result);
     result
 }
 
@@ -133,7 +133,10 @@ async fn recover_queue_attempt(
     if pending.previous.replica_set_size() > MAX_REPLICAS
         || pending.proposed.replica_set_size() > MAX_REPLICAS
     {
-        return Err("automatic recovery exceeds the 16-replica work budget".into());
+        return Err(fibril_broker::recovery::RecoveryBudgetExceeded::message(
+            fibril_broker::recovery::RecoveryBudget::ReplicaCount, MAX_REPLICAS as u64, 0,
+            pending.previous.replica_set_size().max(pending.proposed.replica_set_size()) as u64,
+        ));
     }
     let seal_command = pending.seal_command()?;
     // Attempt-local only: a resumed persisted plan reconstructs its source as

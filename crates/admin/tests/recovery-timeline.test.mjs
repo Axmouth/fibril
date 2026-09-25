@@ -92,7 +92,23 @@ test('failed and cancelled attempts distinguish observed failures from absent ph
 
 test('failure outside a recorded stage stays explicit without inventing a failed step', () => {
   const html = detail({ ...snapshot.attempts[1], stages: [] });
-  assert(html.includes('Attempt failed; no corresponding failed or cancelled stage was recorded.'));
+  assert(html.includes('Attempt failed. No corresponding failed or cancelled stage was recorded.'));
   assert(html.includes('No stages recorded for this attempt.'));
   assert(!html.includes('Waiting for the first stage.'));
+});
+
+
+test('budget failures show exact work and unchanged retry guidance without guessing for legacy errors', () => {
+  const attempt = structuredClone(snapshot.attempts[1]);
+  attempt.stages[0].outcome = 'error';
+  attempt.stages[0].budget = { budget: 'inspection_records', limit: 1000, completed: 900, requested: 200, unchanged_retry_can_help: false };
+  const html = detail(attempt);
+  assert(html.includes('Inspection records limit reached'));
+  assert(html.includes('Limit 1000 · accepted before this check 900 · next work refused 200'));
+  assert(html.includes('An unchanged retry cannot clear this limit'));
+  delete attempt.stages[0].budget;
+  assert(!detail(attempt).includes('An unchanged retry cannot'));
+  attempt.stages[0].budget = { budget: '<script>', limit: '<img>', completed: 0, requested: 1 };
+  assert(!detail(attempt).includes('<script>'));
+  assert(detail(attempt).includes('Whether a retry can help is unknown'));
 });

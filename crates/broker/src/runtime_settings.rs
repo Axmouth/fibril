@@ -347,11 +347,21 @@ pub struct RuntimeSettingsLoadIssue {
     pub message: String,
 }
 
+/// Observations of configuration installed by this process. Local revisions are
+/// cache identifiers and must never be compared with cluster revisions.
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimeSettingsApplication {
+    pub local_cache_version: u64,
+    pub broker_matches_saved: bool,
+    pub connections_match_saved: bool,
+}
+
 /// Loads, validates, and exposes the effective runtime settings document.
 #[derive(Debug)]
 pub struct RuntimeSettingsManager {
     store: Arc<GlobalStore>,
     current: watch::Sender<RuntimeSettingsSnapshot>,
+    installed: Mutex<Option<RuntimeSettingsSnapshot>>,
     seed: RuntimeSettings,
     locks: RuntimeSettingsLocks,
     load_issue: Arc<Mutex<Option<RuntimeSettingsLoadIssue>>>,
@@ -386,6 +396,7 @@ impl RuntimeSettingsManager {
         Ok(Self {
             store,
             current,
+            installed: Mutex::new(None),
             seed,
             locks,
             load_issue: Arc::new(Mutex::new(loaded.issue)),
@@ -394,6 +405,22 @@ impl RuntimeSettingsManager {
 
     pub fn current(&self) -> RuntimeSettingsSnapshot {
         self.current.borrow().clone()
+    }
+
+    /// Called by the single runtime updater only after both configurations have
+    /// been installed. In-flight operations may still retain an older snapshot.
+    pub fn record_runtime_application(&self, snapshot: RuntimeSettingsSnapshot) {
+        *self.installed.lock().unwrap_or_else(|e| e.into_inner()) = Some(snapshot);
+    }
+
+    pub fn application_for(&self, saved: &RuntimeSettings) -> Option<RuntimeSettingsApplication> {
+        let installed = self.installed.lock().unwrap_or_else(|e| e.into_inner());
+        installed.as_ref().map(|snapshot| RuntimeSettingsApplication {
+            local_cache_version: snapshot.version,
+            broker_matches_saved: BrokerConfig::from_runtime_settings(&snapshot.settings)
+                == BrokerConfig::from_runtime_settings(saved),
+            connections_match_saved: connection_values(&snapshot.settings) == connection_values(saved),
+        })
     }
 
     pub fn subscribe(&self) -> watch::Receiver<RuntimeSettingsSnapshot> {
@@ -513,6 +540,14 @@ impl RuntimeSettingsManager {
             "cluster runtime settings raced local cache updates repeatedly".into(),
         ))
     }
+}
+
+fn connection_values(settings: &RuntimeSettings) -> (Option<u64>, Option<u64>, Option<u64>) {
+    (
+        settings.idle_queue_cleanup.publisher_idle_timeout_ms,
+        settings.connection.reconnect_grace_ms,
+        settings.connection.resume_session_restart_ttl_ms,
+    )
 }
 
 impl BrokerConfig {
@@ -911,6 +946,24 @@ mod tests {
         .unwrap();
         assert_eq!(manager.current().version, 1);
         assert_eq!(manager.current().settings, first);
+        // Persistence alone is not an installation observation.
+        assert!(manager.application_for(&first).is_none());
+        let mut installed = manager.current();
+        installed.version = 99; // Local and cluster revision counters differ.
+        manager.record_runtime_application(installed);
+        let applied = manager.application_for(&first).unwrap();
+        assert_eq!(applied.local_cache_version, 99);
+        assert!(applied.broker_matches_saved && applied.connections_match_saved);
+        let mut requested = first.clone();
+        requested.delivery.expiry_batch_max += 1;
+        let pending = manager.application_for(&requested).unwrap();
+        assert!(!pending.broker_matches_saved);
+        assert!(pending.connections_match_saved);
+        requested.connection.reconnect_grace_ms = Some(123);
+        assert!(!manager.application_for(&requested).unwrap().connections_match_saved);
+        let mut controller_only = first.clone();
+        controller_only.replication.eager_failover = !controller_only.replication.eager_failover;
+        assert!(manager.application_for(&controller_only).unwrap().broker_matches_saved);
 
         let second = RuntimeSettings {
             delivery: DeliveryRuntimeSettings {

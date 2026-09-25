@@ -14,44 +14,7 @@
       if (flavor) document.documentElement.dataset.flavor = flavor;
     })();
   </script>
-  <script>
-    // Boosted navigation swaps the page body without a full reload, which means
-    // a page's timers would otherwise keep running after we leave it. Track
-    // timers started by page scripts so navigation can clear them. Layout-owned
-    // timers (below) use the stashed native functions and are left running.
-    (() => {
-      window.__nativeSetInterval = window.setInterval.bind(window);
-      window.__nativeClearInterval = window.clearInterval.bind(window);
-      window.__nativeSetTimeout = window.setTimeout.bind(window);
-      window.__nativeClearTimeout = window.clearTimeout.bind(window);
-      window.__spaIntervals = new Set();
-      window.__spaTimeouts = new Set();
-      // EventSources opened by page scripts (liveData) register here so
-      // navigation can close them - a leaked stream per swap would pile
-      // connections onto the broker.
-      window.__spaEventSources = new Set();
-      // Page refreshers register here to be kicked when the tab becomes
-      // visible again: browsers throttle hidden-tab timers and the refresh
-      // guard skips hidden ticks, so without a kick the first seconds after
-      // a return show stale data. One layout-owned listener, page entries
-      // cleared on navigation like the timers above.
-      window.__spaVisibilityKicks = new Set();
-      document.addEventListener("visibilitychange", () => {
-        if (document.hidden) return;
-        for (const kick of window.__spaVisibilityKicks) kick();
-      });
-      window.setInterval = (fn, ms, ...rest) => {
-        const id = window.__nativeSetInterval(fn, ms, ...rest);
-        window.__spaIntervals.add(id);
-        return id;
-      };
-      window.setTimeout = (fn, ms, ...rest) => {
-        const id = window.__nativeSetTimeout(fn, ms, ...rest);
-        window.__spaTimeouts.add(id);
-        return id;
-      };
-    })();
-  </script>
+  <script src="/static/js/page-lifecycle.js"></script>
   <style>
     #page-root { transition: opacity 0.12s ease; }
     #page-root.swapping { opacity: 0.35; }
@@ -771,15 +734,6 @@
         [...document.querySelectorAll("script[src]")].map((s) => s.src),
       );
 
-      function clearPageTimers() {
-        for (const id of window.__spaIntervals) window.__nativeClearInterval(id);
-        window.__spaIntervals.clear();
-        for (const id of window.__spaTimeouts) window.__nativeClearTimeout(id);
-        window.__spaTimeouts.clear();
-        for (const es of window.__spaEventSources) es.close();
-        window.__spaEventSources.clear();
-        window.__spaVisibilityKicks.clear();
-      }
 
       function setActiveNav(pathname) {
         document.querySelectorAll(".nav-link").forEach((link) => {
@@ -839,7 +793,7 @@
           window.location.href = url;
           return;
         }
-        clearPageTimers();
+        window.__disposePage();
         const title = doc.querySelector("title");
         if (title) {
           document.title = title.textContent;
