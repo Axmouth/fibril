@@ -165,19 +165,29 @@ outcomes for an unconfirmed suffix. Recovery must preserve all previously confir
 records, validate lineage and dependencies, and prevent conflicting offset reuse.
 Client errors remain potentially ambiguous, so retries can produce duplicates.
 
-Before adoption, inject write and fsync failures into each log independently,
-including partial writes, at offset zero and after a confirmed prefix. Cover both
-orders of payload/event completion and failure before and after follower durable
-progress. Verify confirmations, delivery visibility, tentative-cache behavior,
-retry cursors, old-owner restart and recovery source selection. Repeat with owner
-relinquishment, unhealthy successors, lost replies and missing metadata quorum.
-Existing failed-completion-channel tests do not establish these storage-failure
-outcomes. Process-crash tests also do not establish power-loss persistence.
+A native experimental screen covers 48 schedules across segment write errors,
+partial writes, fsync errors and abrupt process exit. It exercises offset zero and
+one confirmed record, both log completion orders, and follower persistence before
+or after an owner error. Failed publishes did not produce success receipts or
+become owner-deliverable, partial records stayed out of the tentative cache, and
+confirmed prefixes survived reopen. Hooks inject file-operation errors through
+real writer paths and remain outside ordinary builds.
+
+Complete unconfirmed bytes can become ready after an event-log fsync error and
+reopen. The payload-error path appends a compensating cancellation. These outcomes
+require callers to treat an error receipt as ambiguous.
+
+Before adoption, extend this screen through admitted multi-node recovery and
+old-owner rejoin under majority and all-copy confirmation. Verify retry cursors,
+recovery source selection and divergent unconfirmed suffixes. Add index, manifest,
+rollover and directory-sync failures. Owner relinquishment, unhealthy successors,
+lost replies and missing metadata quorum need their own schedules. The native
+screen does not establish these cluster outcomes or power-loss persistence.
 
 ## Implementation order and open decisions
 
-1. Add storage-failure injection and document the current outcomes for both logs,
-   confirmation policies and early-replication schedules.
+1. Extend the native storage-failure screen to broker confirmation policies,
+   recovery source selection and old-owner rejoin.
 2. Define typed failure/progress states and expose them through recovery diagnostics.
 3. Implement resumable inspection and replay incrementally, then comparison and
    chunked snapshots. Validate restart at every durable boundary.

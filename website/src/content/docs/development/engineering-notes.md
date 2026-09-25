@@ -41,6 +41,14 @@ Boosted navigation releases page interaction listeners, timers, visibility
 callbacks and event streams. Disposed polling and queued stream callbacks cannot
 restart polling or restore an old page's scroll position.
 
+### Owner storage-error acceptance screen
+
+An isolated early-replication experiment passes 48 schedules covering both logs,
+partial writes, fsync errors, follower timing and abrupt process exit. No failed
+publish produced a success receipt or became owner-deliverable, and confirmed
+prefixes survived reopen. Multi-node recovery and acknowledgement-policy coverage
+remain adoption gates in the [recovery continuation plan](/development/recovery-continuation/#early-replication-under-owner-io-failure).
+
 ### Dashboard request lifetimes
 
 Async page requests check their original page lifetime before updating controls,
