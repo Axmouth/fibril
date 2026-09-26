@@ -99,9 +99,68 @@ impl Ids {
     }
 }
 
+// Every message in a burst keeps the first message's intended timestamp.
+pub fn burst_bounds(id: u64, pattern: &[u64]) -> (u64, u64) {
+    if pattern.is_empty() { return (id, 1); }
+    let cycle: u64 = pattern.iter().sum();
+    let mut first = (id / cycle) * cycle;
+    for &size in pattern {
+        if id - first < size { return (first, size); }
+        first += size;
+    }
+    unreachable!("validated positive burst pattern covers its cycle")
+}
+
+#[derive(Default)]
+pub struct BurstTracker {
+    pending: std::collections::HashMap<u64, (u64, u64)>,
+}
+impl BurstTracker {
+    // Caller has rejected duplicate IDs. Supports reordered arrivals across
+    // connections and completes only after every record in a burst arrived.
+    pub fn observe(&mut self, first: u64, size: u64, received: u64) -> Result<Option<u64>> {
+        let entry = self.pending.entry(first).or_default();
+        entry.0 += 1;
+        entry.1 = entry.1.max(received);
+        ensure!(entry.0 <= size, "burst received too many records");
+        if entry.0 == size {
+            let last = entry.1;
+            self.pending.remove(&first);
+            Ok(Some(last))
+        } else { Ok(None) }
+    }
+    pub fn finish(&self) -> Result<()> {
+        ensure!(self.pending.is_empty(), "incomplete measured bursts at drain");
+        Ok(())
+    }
+}
+
 // Deadline is computed from the original start, including after a missed deadline.
 pub fn scheduled_ns(id: u64, rate: u64) -> u64 {
     ((id as u128 * 1_000_000_000) / rate as u128) as u64
+}
+
+#[cfg(test)]
+mod burst_tests {
+    use super::*;
+    #[test]
+    fn burst_schedule_preserves_average_and_original_deadlines() {
+        for (id, first, size) in [(0,0,200),(199,0,200),(200,200,100),(299,200,100),(300,300,200),(599,500,100)] {
+            assert_eq!(burst_bounds(id, &[200,100]), (first,size));
+        }
+        assert_eq!(scheduled_ns(burst_bounds(299, &[200,100]).0, 100), 2_000_000_000);
+        assert_eq!(scheduled_ns(burst_bounds(300, &[200,100]).0, 100), 3_000_000_000);
+        assert_eq!(burst_bounds(299, &[]), (299,1));
+    }
+    #[test]
+    fn burst_completion_waits_for_all_records_across_reordered_bursts() {
+        let mut b = BurstTracker::default();
+        assert_eq!(b.observe(0, 2, 30).unwrap(), None);
+        assert_eq!(b.observe(2, 1, 40).unwrap(), Some(40));
+        assert!(b.finish().is_err());
+        assert_eq!(b.observe(0, 2, 25).unwrap(), Some(30));
+        b.finish().unwrap();
+    }
 }
 
 #[derive(Default, Serialize)]

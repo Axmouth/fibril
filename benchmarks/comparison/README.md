@@ -113,6 +113,37 @@ The native `scripts/bench-e2e-history.py` runner exposes these settings through
 `--compare-delivery-window` and `--compare-unconfirmed`. Its comparison mode
 defaults to one connection pair. Historical mode retains ten connections.
 
+## Bursty arrivals
+
+Use `--rate 100 --burst-pattern 200,100 --warmup-secs 6 --duration-secs 60`
+to repeat 200-message and 100-message bursts at an average of 100 messages/s.
+The first burst is intended at time zero, the next at two seconds, and the next
+cycle begins at three seconds. All messages in a burst share its intended time.
+Admission remains bounded by the existing credit windows. Missed deadlines keep
+the original timestamp, so client waiting remains visible in intended-to-delivery
+and intended-to-confirmation latency.
+
+The pattern accepts up to 32 positive sizes, with at most one million messages
+per cycle. Warmup and measurement durations must each contain whole cycles at
+the requested average rate. This prevents partial bursts from changing the
+measurement cohort's intended rate. The mode supports ordinary paced queue
+workloads across adapters and excludes RPC, fault and setup-only modes.
+
+`delivery.burst_delivery_complete_from_schedule` measures when every message in
+a measured burst has arrived, including reordered arrivals across connections.
+Its sample count counts bursts. This metric does not claim durable consumer ACK
+completion. Normal per-message latency, identity and settlement checks still apply.
+Final publisher barriers remain outside the measured cohort.
+
+The Docker runner accepts the same `--burst-pattern 200,100` option with
+`--rate`. Its generated table labels the arrival pattern and reports whole-burst
+completion latency separately.
+
+The native runner accepts the same `--burst-pattern 200,100` option with
+`--compare-bin` and `--rate-per-sec`. Omitting the pattern retains evenly spaced
+arrivals. Keep smooth and burst results separate even when their average rates
+match.
+
 ## Existing-server RPC and clustered workloads
 
 The Rust executable supports three stored copies (`--copies 3`), plus five or seven for externally provisioned Fibril clusters, multiple connection pairs (`--connections N`), and a two-queue request/reply workload (`--rpc`). These modes target deployments provisioned separately. The automated Python runner and its table remain single-node queue tools. `--copies` configures NATS/Rabbit declarations; Fibril placement and confirmation policy must be configured and checked separately. A successful client run does not verify replica placement, disk-sync settings, server settlement or cluster recovery.

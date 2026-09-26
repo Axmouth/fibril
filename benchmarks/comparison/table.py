@@ -22,18 +22,28 @@ def render(root):
     lines = ['# Queue benchmark results', '']
     for (filesystem, mount, warmup, duration), names in contexts.items():
         label = 'All runs' if len(contexts) == 1 else ', '.join(names)
-        lines.append(f'**{label}: {filesystem} at `{mount}`; {warmup}s warmup + {duration}s measurement**, followed by drain.')
+        lines.append(f'**{label}: {filesystem} at `{mount}`, {warmup}s warmup + {duration}s measurement**, followed by drain.')
         if filesystem == 'tmpfs':
             lines.append('Storage is RAM-backed: sync calls do not measure persistent-device flush latency.')
         lines.append('')
     lines += [
-        'One row per run; no pooled percentiles. Rates count the measurement cohort through its final confirmation and delivery, including drain. Latencies exclude warmup by intended send time. Confirm and delivery columns start at admission; intended→delivery also includes pacing and credit waiting. See README for the full method and limits.', '',
-        '| Run | Contract | Bytes | Offered/s | Completed/s | Confirm p99 ms | Delivery p99 ms | Intended→delivery p99 ms |',
-        '|---|---|---:|---:|---:|---:|---:|---:|']
+        'One row per run. Percentiles are never pooled. Rates count the measurement cohort through its final confirmation and delivery, including drain. Latencies exclude warmup by intended send time. Confirm and delivery columns start at admission. Intended→delivery also includes pacing and credit waiting. See README for the full method and limits.', '',
+        '| Run | Contract | Bytes | Arrivals | Offered/s | Completed/s | Confirm p99 ms | Delivery p99 ms | Intended→delivery p99 ms |',
+        '|---|---|---:|---|---:|---:|---:|---:|---:|']
     for name, r in rows:
         cfg = r['config']
-        lines.append(f"| {name} | {r['contract']['sync_policy']} | {cfg['payload_bytes']} | {cfg['rate'] or 'saturation'} | {r['cohort_completed_per_sec']:,.0f} | {r['confirm']['from_admission']['p99_ms']:.3f} | {r['delivery']['from_admission']['p99_ms']:.3f} | {r['delivery']['from_schedule']['p99_ms']:.3f} |")
-    lines += ['', 'Container memory includes charged file cache and kernel memory; anonymous memory is shown separately. All peaks are sampled. Broker CPU covers client setup through final settlement. Client RSS includes SDKs and benchmark bookkeeping.', '',
+        pattern = cfg.get('burst_pattern', [])
+        arrivals = 'bursts ' + ','.join(map(str, pattern)) if pattern else ('evenly spaced' if cfg['rate'] else 'saturation')
+        lines.append(f"| {name} | {r['contract']['sync_policy']} | {cfg['payload_bytes']} | {arrivals} | {cfg['rate'] or 'saturation'} | {r['cohort_completed_per_sec']:,.0f} | {r['confirm']['from_admission']['p99_ms']:.3f} | {r['delivery']['from_admission']['p99_ms']:.3f} | {r['delivery']['from_schedule']['p99_ms']:.3f} |")
+    burst_rows = [(name, r) for name, r in rows if r['config'].get('burst_pattern')]
+    if burst_rows:
+        lines += ['', 'Burst completion starts at the intended burst time and ends when every message in that burst is delivered. Samples count complete measured bursts. Consumer ACK durability is checked separately by final settlement.', '',
+                  '| Run | Measured bursts | Burst completion p50 ms | p95 ms | p99 ms |',
+                  '|---|---:|---:|---:|---:|']
+        for name, r in burst_rows:
+            h = r['delivery']['burst_delivery_complete_from_schedule']
+            lines.append(f"| {name} | {h['samples']} | {h['p50_ms']:.3f} | {h['p95_ms']:.3f} | {h['p99_ms']:.3f} |")
+    lines += ['', 'Container memory includes charged file cache and kernel memory. Anonymous memory is shown separately. All peaks are sampled. Broker CPU covers client setup through final settlement. Client RSS includes SDKs and benchmark bookkeeping.', '',
               '| Run | Broker peak total MiB | Broker peak anonymous MiB | Broker CPU s | Client peak RSS MiB | Client CPU s |',
               '|---|---:|---:|---:|---:|---:|']
     tick_hz = json.loads((root/'provenance.json').read_text())['clock_ticks_per_second']

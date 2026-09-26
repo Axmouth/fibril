@@ -75,6 +75,20 @@ only those final barriers as confirmed. This isolates publish modes within the
 same harness and admission bounds. Historical mode retains ten connections for
 reproducing the older workload.
 
+### Bursty arrivals
+
+The shared Rust harness supports repeating bursts with `--burst-pattern 200,100`.
+For example, `--rate 100 --warmup-secs 6 --duration-secs 60` offers an average of
+100 messages/s through alternating 200-message and 100-message bursts. All
+messages in a burst share their intended arrival time, preserving any client
+waiting in the intended-to-delivery latency. Credit limits still apply.
+
+Warmup and measurement must each contain whole burst cycles. Results include
+per-message latency and the time until every message in each measured burst has
+been delivered. This burst metric counts bursts rather than messages. The native
+runner passes through `--burst-pattern` alongside `--rate-per-sec` and
+`--compare-bin`. Keep burst and evenly spaced results separately labelled.
+
 ## Interpretation
 
 These numbers are useful mostly as a sanity check:
