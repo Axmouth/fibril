@@ -95,6 +95,21 @@ impl PartitionAssignment {
                 .all(|(id, instance)| now.replicas.get(id) == Some(instance))
     }
 
+    /// Transport proof is narrower than the queue's unchanged write contract.
+    /// Repair invalidates only the repaired replica's sessions and progress.
+    pub fn preserves_replication_session(&self, previous: &Self, follower: &str) -> bool {
+        self.preserves_replication_contract(previous)
+            && self.is_followed_by(follower)
+            && match (&self.history, &previous.history) {
+                (Some(now), Some(old)) => {
+                    now.replica_generations.get(follower) == old.replica_generations.get(follower)
+                        && now.replica_generations.get(&now.owner) == old.replica_generations.get(&old.owner)
+                }
+                (None, None) => true,
+                _ => false,
+            }
+    }
+
     pub fn is_followed_by(&self, node_id: &str) -> bool {
         self.followers.iter().any(|follower| follower == node_id)
             && self.history.as_ref().is_none_or(|history| history.permits_role(node_id))

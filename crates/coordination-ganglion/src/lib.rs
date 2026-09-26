@@ -37,6 +37,7 @@ pub mod recovery_activation;
 mod eager_failover;
 mod recovery_candidate;
 pub mod queue_learner;
+pub mod queue_reseed;
 pub mod queue_checkpoint;
 
 /// Namespace tag used for fibril queues inside ganglion resource identities.
@@ -3077,7 +3078,37 @@ impl Drop for GanglionCoordination {
 /// Queue-ownership gate view: in cluster mode brokers serve only queues the
 /// committed snapshot assigns to them.
 impl fibril_broker::broker::QueueOwnership for GanglionCoordination {
-    fn replication_node_id(&self) -> Option<&str> { Some(&self.node_id) }
+    fn request_queue_reseed<'a>(
+        &'a self,
+        topic: &'a str,
+        partition: Partition,
+        group: Option<&'a str>,
+        epoch: u64,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            let resource = ganglion_core::ResourceIdentity::new(
+                QUEUE_NAMESPACE,
+                topic,
+                u64::from(partition.id()),
+                group.map(str::to_owned),
+            );
+            if self
+                .node
+                .committed_snapshot()
+                .assignments
+                .get(&resource)
+                .is_none_or(|a| a.epoch != epoch)
+            {
+                return Err("reseed assignment epoch changed".into());
+            }
+            self.request_queue_reseed(&resource, &self.node_id)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+    fn replication_node_id(&self) -> Option<&str> {
+        Some(&self.node_id)
+    }
 
     fn permits_legacy_replication(&self, topic: &str, partition: Partition, group: Option<&str>) -> bool {
         let group = group.filter(|group| !group.is_empty() && *group != "default");
@@ -3093,6 +3124,7 @@ impl fibril_broker::broker::QueueOwnership for GanglionCoordination {
         owner_is_receiver: bool) -> Result<(), String> {
         self.validate_history_replication(session, owner_is_receiver)
             .or_else(|_| self.validate_learner_read(session, owner_is_receiver))
+            .or_else(|_| self.validate_reseed_read(session, owner_is_receiver))
     }
 
     fn authorize_initial_history<'a>(

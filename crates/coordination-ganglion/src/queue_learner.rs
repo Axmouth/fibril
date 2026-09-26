@@ -1,5 +1,5 @@
 //! Non-voting catch-up and additive admission within an unchanged queue history.
-use crate::{history_activation, promotion::pending_recovery_key, GanglionCoordination};
+use crate::{GanglionCoordination, history_activation, promotion::pending_recovery_key};
 use fibril_broker::{
     history_replication::{AcceptedHistory, HistoryReplicationSession, ReplicaHistoryInstance},
     queue_engine::{PreparedStorageHistory, StromaEngine},
@@ -512,6 +512,8 @@ mod tests {
             owner: "a".into(),
             replicas: BTreeMap::from([("a".into(), instance.clone()), ("b".into(), instance)]),
             blocked_local_replica: None,
+            suspended_replicas: Default::default(),
+            replica_generations: Default::default(),
         };
         let intent = QueueLearner {
             version: 1,

@@ -8,6 +8,15 @@ for further detail. Measurements describe the stated workload and hardware.
 Current capabilities are in [implemented surface](/implemented-surface/);
 remaining work is in the [roadmap](/roadmap/).
 
+## Follower retention and non-destructive repair
+
+Snapshot compaction could overtake admitted followers during sustained publishing,
+and the legacy checkpoint fallback correctly refused to replace their accepted
+history. Owner compaction now protects live follower cursors, and exhausted history
+starts consensus-authorized repair in a separate generation while preserving the
+original recovery evidence. Storage crash-boundary tests and a three-node repair
+test cover the switch, continued majority confirms and stale-session rejection.
+
 ## Agreed queue recovery checkpoints
 
 Opt-in background agreement creates durable same-cut queue snapshots across all

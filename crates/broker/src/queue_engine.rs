@@ -76,6 +76,11 @@ pub enum ReplayDeadLetterOutcome {
 
 #[async_trait]
 pub trait QueueEngine {
+    fn set_queue_replication_retention(
+        &self,
+        _source: Arc<dyn stroma_core::QueueReplicationRetention>,
+    ) {
+    }
     /// Lease up to `max` ready messages with offset strictly below `upper`. For a
     /// replica-durable queue `upper` is the committed-replicated watermark, so a
     /// consumer never sees an offset that is not yet durable on enough replicas.
@@ -626,6 +631,41 @@ impl StromaEngine {
     ) -> Result<FollowerStateCheckpointInstallOutcome, StromaError> {
         self.inner
             .install_queue_learner_checkpoint(receipt, install)
+            .await
+    }
+
+    pub fn installed_queue_reseed_cut(
+        &self,
+        receipt: &PreparedStorageHistory,
+        intent: [u8; 32],
+    ) -> Result<Option<(u64, u64, u64)>, StromaError> {
+        self.inner.installed_queue_reseed_cut(receipt, intent)
+    }
+
+    pub async fn prepare_queue_reseed_storage(
+        &self,
+        receipt: PreparedStorageHistory,
+        intent: [u8; 32],
+    ) -> Result<Self, StromaError> {
+        Ok(Self {
+            inner: Arc::new(
+                self.inner
+                    .prepare_queue_reseed_storage(receipt, intent)
+                    .await?,
+            ),
+        })
+    }
+
+    pub async fn install_queue_reseed_storage(
+        &self,
+        receipt: PreparedStorageHistory,
+        intent: [u8; 32],
+        epoch: u64,
+        messages: u64,
+        events: u64,
+    ) -> Result<(), StromaError> {
+        self.inner
+            .install_queue_reseed_storage(receipt, intent, epoch, messages, events)
             .await
     }
 
@@ -1231,6 +1271,12 @@ fn skipped_replay(offset: Offset, reason: impl Into<String>) -> ReplayDeadLetter
 
 #[async_trait]
 impl QueueEngine for StromaEngine {
+    fn set_queue_replication_retention(
+        &self,
+        source: Arc<dyn stroma_core::QueueReplicationRetention>,
+    ) {
+        self.inner.set_queue_replication_retention(source);
+    }
     async fn poll_ready(
         &self,
         tp: &str,

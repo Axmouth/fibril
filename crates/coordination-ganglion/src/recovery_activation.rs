@@ -121,6 +121,8 @@ impl QueueRecoveryActivation {
             binding: self.plan.binding().clone(),
             owner: self.assignment.owner.clone(),
             blocked_local_replica: None,
+            suspended_replicas: Default::default(),
+            replica_generations: Default::default(),
             replicas: self
                 .reports
                 .iter()

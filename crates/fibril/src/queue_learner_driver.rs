@@ -1,4 +1,5 @@
 //! Background catch-up never changes the serving assignment or counts learner ACKs.
+use fibril_broker::coordination::Coordination;
 use fibril_broker::{
     Partition,
     broker::{
@@ -118,6 +119,90 @@ impl BrokerOwnerReplicationPeer for CutPeer<'_> {
     }
 }
 
+enum CatchUpAuthority {
+    Learner(fibril_coordination_ganglion::queue_learner::QueueLearner),
+    Reseed(fibril_coordination_ganglion::queue_reseed::QueueReseed),
+}
+impl CatchUpAuthority {
+    fn assignment(&self) -> &ganglion_core::PartitionAssignment {
+        match self {
+            Self::Learner(i) => &i.assignment,
+            Self::Reseed(i) => &i.assignment,
+        }
+    }
+    fn node(&self) -> &str {
+        match self {
+            Self::Learner(i) => &i.node,
+            Self::Reseed(i) => &i.node,
+        }
+    }
+    fn session(
+        &self,
+        snapshot: &ganglion_core::CoordinationSnapshot,
+    ) -> Result<fibril_broker::history_replication::HistoryReplicationSession, String> {
+        match self {
+            Self::Learner(i) => i.session(snapshot),
+            Self::Reseed(i) => i.session(snapshot),
+        }
+    }
+    async fn authorize(&self, provider: &GanglionCoordination) -> Result<(), String> {
+        match self {
+            Self::Learner(i) => provider.authorize_queue_learner(i).await,
+            Self::Reseed(i) => provider.authorize_queue_reseed(i).await,
+        }
+        .map_err(|e| e.to_string())
+    }
+    async fn prepare(
+        &self,
+        provider: &GanglionCoordination,
+        engine: &StromaEngine,
+    ) -> Result<
+        (
+            StromaEngine,
+            fibril_broker::queue_engine::PreparedStorageHistory,
+        ),
+        String,
+    > {
+        match self {
+            Self::Learner(i) => Ok((
+                engine.clone(),
+                provider
+                    .prepare_queue_learner(i, engine)
+                    .await
+                    .map_err(|e| e.to_string())?,
+            )),
+            Self::Reseed(i) => Ok((
+                provider
+                    .prepare_queue_reseed(i, engine)
+                    .await
+                    .map_err(|e| e.to_string())?,
+                i.receipt(),
+            )),
+        }
+    }
+    async fn admit(
+        &self,
+        provider: &GanglionCoordination,
+        engine: &StromaEngine,
+        messages: u64,
+        events: u64,
+    ) -> Result<(), String> {
+        match self {
+            Self::Learner(i) => {
+                provider
+                    .admit_queue_learner(i, engine, messages, events)
+                    .await
+            }
+            Self::Reseed(i) => {
+                provider
+                    .admit_queue_reseed(i, engine, messages, events)
+                    .await
+            }
+        }
+        .map_err(|e| e.to_string())
+    }
+}
+
 pub async fn learn_queue_once(
     provider: &GanglionCoordination,
     broker: &Broker<StromaEngine>,
@@ -127,21 +212,57 @@ pub async fn learn_queue_once(
     if broker.is_shutting_down() {
         return Err("broker is shutting down".into());
     }
-    let intent = provider
-        .begin_queue_learner(resource)
-        .await
-        .map_err(|e| e.to_string())?;
-    let engine = broker.engine();
-    let receipt = provider
-        .prepare_queue_learner(&intent, &engine)
-        .await
-        .map_err(|e| e.to_string())?;
+    let intent = if let Some(reseed) = provider
+        .queue_reseed_work()?
+        .into_iter()
+        .find(|i| i.assignment.resource == *resource && i.node == provider.node_id())
+    {
+        CatchUpAuthority::Reseed(reseed)
+    } else {
+        CatchUpAuthority::Learner(
+            provider
+                .begin_queue_learner(resource)
+                .await
+                .map_err(|e| e.to_string())?,
+        )
+    };
+    if let CatchUpAuthority::Reseed(reseed) = &intent {
+        if !broker.queue_reseed_revocation_applied(
+            &resource.name,
+            resource.partition as u32,
+            resource.group.as_deref(),
+            &reseed.node,
+            reseed.digest()?,
+        ) {
+            return Err("local broker has not applied reseed revocation".into());
+        }
+        broker
+            .stop_queue_replication_for_reseed(
+                &resource.name,
+                resource.partition as u32,
+                resource.group.as_deref(),
+            )
+            .await;
+    }
+    let live_engine = broker.engine();
+    if let CatchUpAuthority::Reseed(reseed) = &intent {
+        if let Some((epoch, messages, events)) = live_engine
+            .installed_queue_reseed_cut(&reseed.receipt(), reseed.digest()?)
+            .map_err(|e| e.to_string())?
+        {
+            if epoch != reseed.assignment.epoch {
+                return Err("installed reseed epoch differs".into());
+            }
+            return intent.admit(provider, &live_engine, messages, events).await;
+        }
+    }
+    let (engine, receipt) = intent.prepare(provider, &live_engine).await?;
     // No reporter is configured: learner reads cannot produce write-quorum ACKs.
     let session = intent.session(&provider.consensus_node().committed_snapshot())?;
     let peer = connect_protocol_owner_peer(
         config
             .nodes
-            .get(&intent.assignment.owner)
+            .get(&intent.assignment().owner)
             .ok_or("learner owner address absent")?
             .clone(),
         config.auth.as_ref(),
@@ -157,13 +278,12 @@ pub async fn learn_queue_once(
         .export_owner_state_checkpoint(&resource.name, part, resource.group.as_deref())
         .await
         .map_err(|e| e.to_string())?;
-    if cut.message_epoch != intent.assignment.epoch || cut.event_epoch != intent.assignment.epoch {
+    if cut.message_epoch != intent.assignment().epoch
+        || cut.event_epoch != intent.assignment().epoch
+    {
         return Err("learner checkpoint has another epoch".into());
     }
-    provider
-        .authorize_queue_learner(&intent)
-        .await
-        .map_err(|e| e.to_string())?;
+    intent.authorize(provider).await?;
     engine
         .verify_admitted_storage_history(&receipt)
         .map_err(|e| e.to_string())?;
@@ -172,7 +292,7 @@ pub async fn learn_queue_once(
             &resource.name,
             part.id(),
             resource.group.as_deref(),
-            intent.assignment.epoch,
+            intent.assignment().epoch,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -183,7 +303,7 @@ pub async fn learn_queue_once(
             &resource.name,
             part.id(),
             resource.group.as_deref(),
-            intent.assignment.epoch,
+            intent.assignment().epoch,
             0,
             0,
         )
@@ -215,19 +335,18 @@ pub async fn learn_queue_once(
         }
         // The cut is fixed at the start; publishing does not need an idle gap.
         if from.0 >= cut.message_next_offset && from.1 >= cut.event_next_offset {
-            provider
-                .admit_queue_learner(
-                    &intent,
-                    &engine,
+            intent
+                .admit(
+                    provider,
+                    &live_engine,
                     cut.message_next_offset,
                     cut.event_next_offset,
                 )
-                .await
-                .map_err(|e| e.to_string())?;
+                .await?;
             tracing::info!(
                 topic = resource.name,
                 partition = resource.partition,
-                node = intent.node,
+                node = intent.node(),
                 message_next = from.0,
                 event_next = from.1,
                 "background queue learner admitted without fencing the owner"
@@ -240,7 +359,8 @@ pub async fn learn_queue_once(
             events: cut.event_next_offset,
         };
         let outcome = broker
-            .catch_up_replication_follower_from_owner(
+            .catch_up_replication_follower_using_engine(
+                &engine,
                 &cut_peer,
                 &resource.name,
                 part,
@@ -264,16 +384,13 @@ pub async fn learn_queue_once(
             BrokerReplicationCatchUp::CheckpointRequired { .. } => {
                 // Compaction can overtake the read cursor while the owner
                 // continues serving. Only fresh non-voting authority permits reset.
-                provider
-                    .authorize_queue_learner(&intent)
-                    .await
-                    .map_err(|e| e.to_string())?;
+                intent.authorize(provider).await?;
                 let checkpoint = peer
                     .export_owner_state_checkpoint(&resource.name, part, resource.group.as_deref())
                     .await
                     .map_err(|e| e.to_string())?;
-                if checkpoint.message_epoch != intent.assignment.epoch
-                    || checkpoint.event_epoch != intent.assignment.epoch
+                if checkpoint.message_epoch != intent.assignment().epoch
+                    || checkpoint.event_epoch != intent.assignment().epoch
                 {
                     return Err("learner checkpoint epoch changed".into());
                 }
@@ -340,8 +457,26 @@ pub(crate) fn spawn(
                 .iter()
                 .map(|(id, n)| (id.clone(), n.endpoint.clone()))
                 .collect();
+            let reseeds = match provider.queue_reseed_work() {
+                Ok(work) => work,
+                Err(error) => {
+                    tracing::warn!(%error,"cannot inspect queue re-seeding");
+                    Vec::new()
+                }
+            };
+            for intent in &reseeds {
+                if intent.assignment.owner == provider.node_id()
+                    && intent.phase
+                        == fibril_coordination_ganglion::queue_reseed::ReseedPhase::Revoking
+                {
+                    if let Err(error) = provider.acknowledge_queue_reseed(intent, &broker).await {
+                        tracing::debug!(%error,"queue reseed revocation not ready");
+                    }
+                }
+            }
             match provider.queue_learner_work() {
-                Ok(work) => {
+                Ok(mut work) => {
+                    work.extend(reseeds.iter().filter(|i| i.node==provider.node_id() && i.phase==fibril_coordination_ganglion::queue_reseed::ReseedPhase::Ready).map(|i|i.assignment.resource.clone()));
                     learner_failures.retain(|r, _| work.contains(r));
                     for resource in work {
                         if learner_failures

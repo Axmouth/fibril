@@ -637,6 +637,12 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- Protect active follower cursors during owner compaction. An admitted follower
+  whose history is already missing now requests coordinated repair instead of
+  repeatedly attempting a forbidden legacy checkpoint reset. Repair preserves its
+  original recovery evidence, builds a complete replacement and invalidates old
+  sessions without reducing the configured confirmation requirement.
+
 - Dashboard navigation releases page interaction listeners and completed timers,
   and prevents disposed polling/stream callbacks from restarting old refreshers.
   The demo banner uses the active theme's panel and text colors.

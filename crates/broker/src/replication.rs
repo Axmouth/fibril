@@ -26,6 +26,163 @@ use crate::queue_engine::{
     ReplicatedEventBatch, ReplicatedMessageBatch, ReplicatedQueueApplyOutcome, StromaEngine,
 };
 
+// Protect transient lag, while allowing an offline/stuck replica to fall back
+// to non-destructive reseeding rather than retaining an unbounded suffix.
+const FOLLOWER_RETENTION_GRACE: Duration = Duration::from_secs(60);
+const RESEED_RETENTION_GRACE: Duration = Duration::from_secs(120);
+
+#[derive(Debug)]
+struct RetentionObservation {
+    assignment: PartitionAssignment,
+    since: Instant,
+    followers: std::collections::HashMap<String, ((u64, u64), Instant)>,
+}
+impl RetentionObservation {
+    fn floor(
+        &mut self,
+        progress: &std::collections::HashMap<String, FollowerProgress>,
+        now: Instant,
+    ) -> (u64, u64) {
+        self.assignment
+            .followers
+            .iter()
+            .fold((u64::MAX, u64::MAX), |floor, node| {
+                if self
+                    .assignment
+                    .history
+                    .as_ref()
+                    .is_some_and(|h| h.suspended_replicas.contains(node))
+                {
+                    // Give an active repair a bounded interval to copy its fixed
+                    // checkpoint without source compaction continually overtaking it.
+                    return if now.duration_since(self.since) < RESEED_RETENTION_GRACE {
+                        (0, 0)
+                    } else {
+                        floor
+                    };
+                }
+                if !self.assignment.is_followed_by(node) {
+                    return floor;
+                }
+                let pair = progress
+                    .get(node)
+                    .map(|p| (p.message_next, p.event_next))
+                    .unwrap_or((0, 0));
+                let observed = self.followers.entry(node.clone()).or_insert((pair, now));
+                if observed.0 != pair {
+                    *observed = (pair, now);
+                }
+                // Idle but connected replicas refresh their report without
+                // moving offsets. They still need protection when traffic resumes.
+                let last_active = progress.get(node).map_or(observed.1, |p| p.last_report.max(observed.1));
+                if now.saturating_duration_since(last_active) >= FOLLOWER_RETENTION_GRACE {
+                    return floor;
+                }
+                (floor.0.min(pair.0), floor.1.min(pair.1))
+            })
+    }
+}
+
+struct RetentionBook {
+    queues: std::collections::HashMap<QueueKey, RetentionObservation>,
+    last_sweep: Instant,
+}
+
+pub(crate) struct BrokerRetention<
+    E: QueueEngine + crate::queue_engine::StreamStore + std::fmt::Debug + Send + Sync + 'static,
+> {
+    broker: std::sync::Weak<Broker<E>>,
+    observations: std::sync::Mutex<RetentionBook>,
+}
+impl<E: QueueEngine + crate::queue_engine::StreamStore + std::fmt::Debug + Send + Sync + 'static>
+    BrokerRetention<E>
+{
+    pub(crate) fn new(broker: std::sync::Weak<Broker<E>>) -> Self {
+        Self {
+            broker,
+            observations: std::sync::Mutex::new(RetentionBook {queues:Default::default(),last_sweep:Instant::now()}),
+        }
+    }
+}
+impl<E: QueueEngine + crate::queue_engine::StreamStore + std::fmt::Debug + Send + Sync + 'static>
+    std::fmt::Debug for BrokerRetention<E>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BrokerRetention")
+    }
+}
+impl<E> stroma_core::QueueReplicationRetention for BrokerRetention<E>
+where
+    E: QueueEngine
+        + crate::queue_engine::StreamStore
+        + std::fmt::Debug
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+{
+    fn retained_from(
+        &self,
+        topic: &str,
+        partition: u32,
+        group: Option<&str>,
+        binding: Option<&stroma_core::StorageHistoryBinding>,
+    ) -> stroma_core::Result<(u64, u64)> {
+        let Some(broker) = self.broker.upgrade() else {
+            return Ok((0, 0));
+        };
+        let key = QueueKey {
+            tp: topic.into(),
+            part: partition.into(),
+            group: group.map(str::to_owned),
+        };
+        let Some(assignment) = broker.assignment_cache.get(&key).map(|a| a.clone()) else {
+            return Ok(if binding.is_some() {
+                (0, 0)
+            } else {
+                (u64::MAX, u64::MAX)
+            });
+        };
+        if binding.is_some_and(|binding| {
+            assignment
+                .history
+                .as_ref()
+                .is_none_or(|h| &h.binding != binding)
+        }) || !broker.owns_queue_partition(topic, Partition::new(partition), group)
+        {
+            return Ok((0, 0));
+        }
+        let now = Instant::now();
+        let mut observations = self
+            .observations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if now.duration_since(observations.last_sweep) >= FOLLOWER_RETENTION_GRACE {
+            observations.queues.retain(|key, _| broker.assignment_cache.contains_key(key));
+            observations.last_sweep=now;
+        }
+        let observed = observations.queues
+            .entry(key.clone())
+            .or_insert_with(|| RetentionObservation {
+                assignment: assignment.clone(),
+                since: now,
+                followers: Default::default(),
+            });
+        if observed.assignment != assignment {
+            *observed = RetentionObservation {
+                assignment,
+                since: now,
+                followers: Default::default(),
+            };
+        }
+        let cell = broker.replication_progress.get(&key).map(|c| c.clone());
+        Ok(match cell {
+            Some(cell) => observed.floor(&cell.lock_followers(), now),
+            None => observed.floor(&Default::default(), now),
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct BrokerOwnerReplicationRecords {
     pub messages: OwnerReplicationRead<Message>,
@@ -1346,6 +1503,7 @@ impl QueueDependencies {
         let mut nexts: Vec<_> = assignment
             .followers
             .iter()
+            .filter(|node| assignment.is_followed_by(node))
             .map(|node| {
                 followers
                     .get(node)
@@ -1511,12 +1669,17 @@ impl ReplicationConfirmGate {
         // by the owner alone, so skip the work entirely.
         if min_in_sync > 1 {
             let in_sync = {
+                let current = self.assignments.get(key).ok_or_else(|| BrokerError::Unknown("assignment disappeared before ISR check".into()))?;
+                if !current.preserves_replication_contract(&assignment) {return Err(BrokerError::Unknown("assignment changed before ISR check".into()));}
                 let followers = cell.lock_followers();
                 let now = std::time::Instant::now();
-                let fresh = assignment
+                let fresh = current
                     .followers
                     .iter()
                     .filter(|follower| {
+                        if !current.is_followed_by(follower) {
+                            return false;
+                        }
                         followers.get(*follower).is_some_and(|progress| {
                             now.duration_since(progress.last_report) <= isr_timeout
                         })
@@ -1540,11 +1703,14 @@ impl ReplicationConfirmGate {
         // offset. Unlike the ISR floor, this IS a wait — the acks are in flight
         // and just need replication to catch up to the offset.
         wait_for_replication_progress(&cell.changed, deadline, || {
+            let Some(current) = self.assignments.get(key) else {return false;};
+            if !current.preserves_replication_contract(&assignment) {return false;}
             let followers = cell.lock_followers();
-            assignment
+            current
                 .followers
                 .iter()
                 .filter(|follower| {
+                    if !current.is_followed_by(follower) { return false; }
                     followers
                         .get(*follower)
                         .is_some_and(|progress| progress.message_next > offset
@@ -1993,6 +2159,25 @@ impl Broker<StromaEngine> {
         kind: ReplicationResourceKind,
         records: BrokerOwnerReplicationRecords,
     ) -> Result<BrokerFollowerReplicationApply, BrokerError> {
+        Self::apply_follower_records_using_engine(
+            &self.engine,
+            topic,
+            partition,
+            group,
+            kind,
+            records,
+        )
+        .await
+    }
+
+    async fn apply_follower_records_using_engine(
+        engine: &StromaEngine,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        kind: ReplicationResourceKind,
+        records: BrokerOwnerReplicationRecords,
+    ) -> Result<BrokerFollowerReplicationApply, BrokerError> {
         let messages = match records.messages {
             OwnerReplicationRead::Batch(batch) if !batch.records.is_empty() => {
                 Some(ReplicatedMessageBatch {
@@ -2081,12 +2266,12 @@ impl Broker<StromaEngine> {
         // the append (and carries no consumer group).
         let outcome = match kind {
             ReplicationResourceKind::Queue => {
-                self.engine
+                engine
                     .apply_replicated_queue_batch(topic, partition.id(), group, messages, events)
                     .await?
             }
             ReplicationResourceKind::Stream => {
-                self.engine
+                engine
                     .apply_replicated_stream_batch(topic, partition.id(), messages, events)
                     .await?
             }
@@ -2277,6 +2462,29 @@ impl Broker<StromaEngine> {
         kind: ReplicationResourceKind,
         options: BrokerReplicationCatchUpOptions,
     ) -> Result<BrokerReplicationCatchUp, BrokerError> {
+        self.catch_up_replication_follower_using_engine(
+            &self.engine,
+            owner,
+            topic,
+            partition,
+            group,
+            kind,
+            options,
+        )
+        .await
+    }
+
+    /// Copy into an explicitly authorized non-voting storage generation.
+    pub async fn catch_up_replication_follower_using_engine(
+        &self,
+        engine: &StromaEngine,
+        owner: &dyn BrokerOwnerReplicationPeer,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        kind: ReplicationResourceKind,
+        options: BrokerReplicationCatchUpOptions,
+    ) -> Result<BrokerReplicationCatchUp, BrokerError> {
         if options.max_messages_per_read == 0
             || options.max_events_per_read == 0
             || options.max_bytes_per_read == 0
@@ -2328,8 +2536,8 @@ impl Broker<StromaEngine> {
                 _ => {
                     let apply = {
                         let _follower_apply_timer = self.replication_timing.follower_apply.timer();
-                        self.apply_follower_replication_records(
-                            topic, partition, group, kind, records,
+                        Self::apply_follower_records_using_engine(
+                            engine, topic, partition, group, kind, records,
                         )
                         .await?
                     };
@@ -2358,8 +2566,10 @@ impl Broker<StromaEngine> {
 
             let apply = {
                 let _follower_apply_timer = self.replication_timing.follower_apply.timer();
-                self.apply_follower_replication_records(topic, partition, group, kind, records)
-                    .await?
+                Self::apply_follower_records_using_engine(
+                    engine, topic, partition, group, kind, records,
+                )
+                .await?
             };
 
             match apply {
@@ -2462,6 +2672,23 @@ impl Broker<StromaEngine> {
                 });
             }
 
+            let assignment = self
+                .assignment_cache
+                .get(&QueueKey {
+                    tp: topic.into(),
+                    part: partition,
+                    group: group.map(str::to_owned),
+                })
+                .map(|a| a.clone());
+            if let Some(assignment) = assignment.filter(|a| a.history.is_some()) {
+                self.ownership
+                    .request_queue_reseed(topic, partition, group, assignment.epoch)
+                    .await
+                    .map_err(BrokerError::Unknown)?;
+                return Err(BrokerError::Unknown(
+                    "retained history exhausted; coordinated queue re-seeding requested".into(),
+                ));
+            }
             let checkpoint = owner
                 .export_owner_state_checkpoint(topic, partition, group)
                 .await?;
@@ -2612,13 +2839,27 @@ impl Broker<StromaEngine> {
                 return Ok(FollowerReplicationWorkerLoopExit::Cancelled { ticks });
             }
 
-            let history = assignment.history.as_ref().map(|history| {
-                let receiver = self.ownership.replication_node_id().ok_or_else(||
-                    BrokerError::InvalidArgument("history replication requires local replica identity".into()))?;
-                history.session(&assignment.queue.topic, assignment.queue.partition,
-                    assignment.queue.group.as_deref(), kind == ReplicationResourceKind::Stream,
-                    &assignment.owner, receiver).map_err(BrokerError::InvalidArgument)
-            }).transpose()?;
+            let history = assignment
+                .history
+                .as_ref()
+                .map(|history| {
+                    let receiver = self.ownership.replication_node_id().ok_or_else(|| {
+                        BrokerError::InvalidArgument(
+                            "history replication requires local replica identity".into(),
+                        )
+                    })?;
+                    history
+                        .session(
+                            &assignment.queue.topic,
+                            assignment.queue.partition,
+                            assignment.queue.group.as_deref(),
+                            kind == ReplicationResourceKind::Stream,
+                            &assignment.owner,
+                            receiver,
+                        )
+                        .map_err(BrokerError::InvalidArgument)
+                })
+                .transpose()?;
             let scoped_owner = AssignmentReplicationPeer {
                 peer: owner.as_ref(),
                 epoch: assignment.epoch,
@@ -3136,7 +3377,7 @@ impl<
         let Some(assignment_guard) = self.assignment_cache.get(&session.key) else {
             return;
         };
-        if !assignment_guard.preserves_replication_contract(&session.assignment)
+        if !assignment_guard.preserves_replication_session(&session.assignment, &session.follower)
             || self
                 .replication_progress
                 .get(&session.key)
@@ -3403,6 +3644,154 @@ mod queue_dependency_tests {
             event_epoch: 1,
         }
     }
+    fn accepted_assignment() -> PartitionAssignment {
+        use crate::history_replication::{AcceptedHistory, ReplicaHistoryInstance};
+        let mut a = PartitionAssignment::new(
+            crate::coordination::QueueIdentity::new("q", 0.into(), None),
+            "a",
+            vec!["b".into(), "c".into()],
+            1,
+        );
+        a.history = Some(Arc::new(AcceptedHistory {
+            activation: [1; 32],
+            binding: stroma_core::StorageHistoryBinding {
+                resource_incarnation: [1; 16],
+                accepted_history: [2; 16],
+                writer_session: [3; 16],
+            },
+            owner: "a".into(),
+            replicas: ["a", "b", "c"]
+                .into_iter()
+                .map(|n| {
+                    (
+                        n.into(),
+                        ReplicaHistoryInstance {
+                            process: [1; 16],
+                            storage: [2; 16],
+                        },
+                    )
+                })
+                .collect(),
+            blocked_local_replica: None,
+            suspended_replicas: Default::default(),
+            replica_generations: Default::default(),
+        }));
+        a
+    }
+
+    #[test]
+    fn retention_protects_unknown_and_advancing_followers_but_expires_stalled_pins() {
+        let now = Instant::now();
+        let mut observation = RetentionObservation {
+            assignment: accepted_assignment(),
+            since: now,
+            followers: Default::default(),
+        };
+        let mut followers = std::collections::HashMap::new();
+        assert_eq!(observation.floor(&followers, now), (0, 0));
+        followers.insert("b".into(), progress(10, 20));
+        followers.insert("c".into(), progress(8, 16));
+        assert_eq!(
+            observation.floor(&followers, now + Duration::from_secs(1)),
+            (8, 16)
+        );
+        assert_eq!(
+            observation.floor(&followers, now + Duration::from_secs(60)),
+            (8, 16)
+        );
+        assert_eq!(
+            observation.floor(&followers, now + Duration::from_secs(61)),
+            (u64::MAX, u64::MAX)
+        );
+        followers.insert("b".into(), progress(11, 21));
+        assert_eq!(
+            observation.floor(&followers, now + Duration::from_secs(62)),
+            (11, 21)
+        );
+        Arc::make_mut(observation.assignment.history.as_mut().unwrap())
+            .suspended_replicas
+            .insert("c".into());
+        assert_eq!(
+            observation.floor(&followers, now + Duration::from_secs(63)),
+            (0, 0)
+        );
+        assert_eq!(
+            observation.floor(&followers, now + Duration::from_secs(121)),
+            (11, 21)
+        );
+    }
+
+    #[test]
+    fn idle_connected_follower_keeps_retention_when_traffic_resumes() {
+        let now=Instant::now();
+        let mut observation=RetentionObservation {assignment:accepted_assignment(),since:now,followers:Default::default()};
+        let mut followers=std::collections::HashMap::from([("b".into(),progress(9,9)),("c".into(),progress(9,9))]);
+        assert_eq!(observation.floor(&followers,now),(9,9));
+        for progress in followers.values_mut() {progress.last_report=now+Duration::from_secs(300);}
+        assert_eq!(observation.floor(&followers,now+Duration::from_secs(301)),(9,9));
+    }
+
+    #[tokio::test]
+    async fn reseed_suspension_keeps_all_copy_requirement_and_rejects_stale_progress() {
+        let dir = stroma_core::test_dir!("reseed_confirmation_requirement");
+        let engine = StromaEngine::open(
+            &dir.root,
+            stroma_core::StromaKeratinConfig::from_message_log(
+                stroma_core::KeratinConfig::test_default(),
+            ),
+            stroma_core::SnapshotConfig::default(),
+        )
+        .await
+        .unwrap();
+        let broker = Broker::new(engine, BrokerConfig::default(), None);
+        let mut assignment = accepted_assignment();
+        assignment.durability =
+            crate::coordination::ReplicationDurabilityPolicy::ReplicaDurable { nodes: 3 };
+        broker.cache_queue_assignment(&assignment);
+        let before=assignment.clone();
+        let b = broker.begin_replication_progress_session("q",0.into(),None,"b",1).unwrap();
+        let old = broker
+            .begin_replication_progress_session("q", 0.into(), None, "c", 1)
+            .unwrap();
+        Arc::make_mut(assignment.history.as_mut().unwrap())
+            .suspended_replicas
+            .insert("c".into());
+        Arc::make_mut(assignment.history.as_mut().unwrap()).replica_generations.insert("c".into(),[8;32]);
+        broker.cache_queue_assignment(&assignment);
+        broker.record_replication_session_progress(&old, 10, 10);
+        assert_eq!(broker.follower_replication_progress("q",0.into(),None),vec![("b".into(),(0,0))]);
+        broker.record_replication_session_progress(&b, 10, 10);
+        let key = QueueKey {
+            tp: "q".into(),
+            part: 0.into(),
+            group: None,
+        };
+        let gate = broker.replication_confirm_gate();
+        let wait = gate.await_dependency(&key, 0, Some(commit(1, 1)), Some(before.clone()));
+        tokio::pin!(wait);
+        assert!(
+            futures::poll!(&mut wait).is_pending(),
+            "one follower cannot meet the two-follower requirement"
+        );
+        let mut deps = QueueDependencies::default();
+        deps.record(commit(1, 1));
+        let followers = std::collections::HashMap::from([
+            ("b".into(), progress(10, 10)),
+            ("c".into(), progress(10, 10)),
+        ]);
+        assert_eq!(deps.visibility(&assignment, &followers, 2), 0);
+        assert_eq!(deps.visibility(&assignment, &followers, 1), 1);
+        Arc::make_mut(assignment.history.as_mut().unwrap()).suspended_replicas.remove("c");
+        broker.cache_queue_assignment(&assignment);
+        broker.record_replication_session_progress(&old,10,10);
+        assert!(futures::poll!(&mut wait).is_pending(),"old c session cannot satisfy a waiting confirm after re-admission");
+        let c=broker.begin_replication_progress_session("q",0.into(),None,"c",1).unwrap();
+        broker.record_replication_session_progress(&c,10,10);
+        tokio::time::timeout(Duration::from_secs(1),wait).await.unwrap().unwrap();
+        assert_eq!(broker.follower_replication_progress("q",0.into(),None).len(),2);
+        broker.shutdown().await;
+    }
+
     #[test]
     fn visibility_uses_same_replica_and_reclaims_committed_boundaries() {
         let a = PartitionAssignment::new(
@@ -3485,6 +3874,8 @@ mod queue_dependency_tests {
                 ("b".into(), instance.clone()),
             ]),
             blocked_local_replica: None,
+            suspended_replicas: Default::default(),
+            replica_generations: Default::default(),
         }));
         broker.cache_queue_assignment(&before);
         assert!(
@@ -3563,5 +3954,47 @@ mod queue_dependency_tests {
                 .await
                 .is_err()
         );
+    }
+}
+
+impl Broker<StromaEngine> {
+    pub fn queue_reseed_revocation_applied(
+        &self,
+        topic: &str,
+        partition: u32,
+        group: Option<&str>,
+        node: &str,
+        generation: [u8; 32],
+    ) -> bool {
+        let key = QueueKey {
+            tp: topic.into(),
+            part: partition.into(),
+            group: group.map(str::to_owned),
+        };
+        let Some(a) = self.assignment_cache.get(&key) else {
+            return false;
+        };
+        if !a.history.as_ref().is_some_and(|h| {
+            h.suspended_replicas.contains(node)
+                && h.replica_generations.get(node) == Some(&generation)
+        }) {
+            return false;
+        }
+        self.replication_progress
+            .get(&key)
+            .is_none_or(|p| !p.lock_followers().contains_key(node))
+    }
+    pub async fn stop_queue_replication_for_reseed(
+        &self,
+        topic: &str,
+        partition: u32,
+        group: Option<&str>,
+    ) {
+        self.stop_follower_replication_worker(&crate::coordination::QueueIdentity::new(
+            topic,
+            partition.into(),
+            group,
+        ))
+        .await;
     }
 }
