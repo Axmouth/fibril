@@ -1232,6 +1232,7 @@ dependencies = [
  "futures",
  "ganglion",
  "ganglion-core",
+ "keratin-log",
  "mimalloc",
  "opentelemetry",
  "opentelemetry_sdk",
