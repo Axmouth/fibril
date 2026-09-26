@@ -43,6 +43,47 @@ The project still needs:
 - restart/replay timing
 - multi-consumer fairness and backpressure scenarios
 
+## Historical two-process workload reproduction
+
+`scripts/bench-e2e-history.py` preserves the original `e2e_c` writer and reader
+as separate processes, with configurable connection count and prefetch. Build
+the release binaries first, then select persistent result and storage directories:
+
+```sh
+cargo build --release --bin fibril-server --bin e2e_c
+python3 scripts/bench-e2e-history.py --output ./benchmark-results/history-01 --storage /path/to/benchmark-data
+```
+
+The default runs solo and three-copy majority sequentially, with 500,000 messages
+per connection, ten connections and 1 KiB payloads. This is five million messages
+in total. The older commands used five million **per connection**. For an equal
+total with one connection, add `--clients 1 --messages 5000000`. The runner uses
+fresh directories, checks replica readiness, keeps logs and resource samples,
+and verifies final settlement. Data remains available after failures and success.
+It currently requires Linux for process memory and CPU sampling.
+
+A 26 September 2026 SATA ext4 pass found the following with one connection and
+five million messages per row. All three replicated nodes shared the same drive
+and host. These are single saturation runs on current main, with default storage
+settings and no speculative delivery or early replication.
+
+| Copies | Active delivery | Publish-to-delivery p50 / p99 | Sampled broker RSS peak |
+| --- | --- | --- | --- |
+| Solo | 232,428/s | 79 / 139 ms | 570 MiB |
+| Three, majority durable | 90,752/s | 219 / 303 ms | 1,390 MiB total |
+
+Both runs received the expected count with no observed retries, then reached zero
+ready/inflight and a settled frontier of five million on every copy. The writer
+uses unconfirmed submission, so its send rate is not durable-confirm throughput.
+Constant payloads and final counts do not establish unique delivery identity.
+
+The original ten-connection workload failed in both modes with a client heartbeat
+timeout followed by `BrokenPipe`. Reducing solo prefetch from 16,384 to 1,024 did
+not resolve it. Those failed runs have no reported throughput result. Connection
+progress under saturation remains an investigation item, and the failing setup
+is retained as a regression workload. Historical SATA results were also reported
+above 250k/s, but the older OS and client prevent a controlled regression claim.
+
 ## Current TCP benchmark
 
 The current TCP-layer benchmark helper is `e2e_c`. It is still an early

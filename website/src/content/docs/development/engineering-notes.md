@@ -46,8 +46,9 @@ restart polling or restore an old page's scroll position.
 An isolated early-replication experiment passes 48 schedules covering both logs,
 partial writes, fsync errors, follower timing and abrupt process exit. No failed
 publish produced a success receipt or became owner-deliverable, and confirmed
-prefixes survived reopen. Multi-node recovery and acknowledgement-policy coverage
-remain adoption gates in the [recovery continuation plan](/development/recovery-continuation/#early-replication-under-owner-io-failure).
+prefixes survived reopen. Eight additional TCP cluster cases preserve majority
+and three-copy requirements through owner failure, recovery and readmission,
+with the remaining adoption gates tracked in the [recovery continuation plan](/development/recovery-continuation/#early-replication-under-owner-io-failure).
 
 ### Dashboard request lifetimes
 
