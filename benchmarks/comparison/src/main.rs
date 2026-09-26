@@ -91,6 +91,12 @@ struct Args {
     confirm_window: usize,
     #[arg(long, default_value_t = 1024)]
     prefetch: u32,
+    /// Fibril queue experiment: common issue-to-ACK-submission window for both publish modes.
+    #[arg(long, default_value_t = 0)]
+    delivery_window: usize,
+    /// Fibril-only unconfirmed data publishes, with confirmed final barriers outside measurement.
+    #[arg(long)]
+    fibril_unconfirmed: bool,
     /// JetStream transport pull batch, bounded by prefetch; not application ACK batching.
     #[arg(long, default_value_t = 1024)]
     pull_batch: usize,
@@ -146,6 +152,13 @@ impl Args {
             self.confirm_window > 0 && self.confirm_window <= 1_000_000,
             "invalid confirmation window"
         );
+        ensure!(self.delivery_window <= 1_000_000, "invalid delivery window");
+        ensure!(!self.fibril_unconfirmed || self.delivery_window > 0,
+            "unconfirmed comparison requires a shared delivery window");
+        ensure!(self.delivery_window == 0 || (matches!(self.broker, Broker::Fibril)
+            && !self.rpc && self.fault_role.is_none() && !self.setup_only),
+            "delivery-window comparison supports ordinary Fibril queue workloads only");
+        ensure!(self.max_messages > self.final_barriers(), "message limit must leave room for final barriers");
         ensure!(
             self.prefetch > 0 && self.prefetch <= 2000,
             "common profile prefetch must be 1..2000 (Rabbit quorum limit)"
@@ -175,11 +188,17 @@ impl Args {
                 .checked_mul(self.warmup_secs + self.duration_secs)
                 .context("offered count overflow")?;
             ensure!(
-                count <= self.max_messages,
+                count.checked_add(self.final_barriers()).is_some_and(|n| n <= self.max_messages),
                 "planned offered count exceeds --max-messages"
             );
         }
         Ok(())
+    }
+    fn final_barriers(&self) -> u64 {
+        if self.delivery_window > 0 { self.connections as u64 } else { 0 }
+    }
+    fn expected_confirmations(&self, issued: u64) -> u64 {
+        if self.fibril_unconfirmed { self.final_barriers() } else { issued }
     }
     fn measured(&self, intended: u64) -> bool {
         intended >= self.warmup_secs * 1_000_000_000
@@ -260,7 +279,7 @@ async fn issue(
             break;
         }
         ensure!(
-            id < a.max_messages,
+            id < a.max_messages - a.final_barriers(),
             "message safety limit reached during saturation; increase --max-messages"
         );
         let intended = a
@@ -271,13 +290,17 @@ async fn issue(
         if deadline > Instant::now() {
             sleep_until(deadline).await;
         }
-        if let Some(request_credits) = &request_credits {
-            request_credits.clone().acquire_owned().await?.forget();
-        }
+        let request_permit = match &request_credits {
+            Some(window) => Some(window.clone().acquire_owned().await?),
+            None => None,
+        };
         let permit = credits.clone().acquire_owned().await?;
         if count.is_none() && Instant::now() >= finish {
+            // Return both permits if the deadline passed while waiting. Final
+            // barriers must still progress with a delivery window of just one.
             break;
         }
+        if let Some(request_permit) = request_permit { request_permit.forget(); }
         let stamp = Stamp {
             id,
             intended,
@@ -285,14 +308,14 @@ async fn issue(
         };
         // Allocation/encoding and client admission are included in latency.
         let payload = stamp.encode(a.payload_bytes);
-        let confirm = publisher.send(payload, id).await?;
-        tx.send(Pending {
-            stamp,
-            confirm,
-            permit,
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("confirmation collector closed"))?;
+        if a.fibril_unconfirmed {
+            publisher.send_unconfirmed(payload).await?;
+            drop(permit);
+        } else {
+            let confirm = publisher.send(payload, id).await?;
+            tx.send(Pending { stamp, confirm, permit }).await
+                .map_err(|_| anyhow::anyhow!("confirmation collector closed"))?;
+        }
         stats.total += 1;
         stats.last_ns = ns(start);
         if a.measured(stats.last_ns) {
@@ -307,6 +330,23 @@ async fn issue(
     // Complete fixed-rate nominal duration even when final issue was early.
     if a.rate.is_some() {
         sleep_until(finish).await;
+    }
+    // A round-robin pool visits every publisher exactly once. These real records
+    // follow all earlier data on each direct FIFO connection and use the same
+    // queue partition. They are identity-checked and settled, but outside the cohort.
+    for _ in 0..a.final_barriers() {
+        sleep_until(finish).await;
+        if let Some(window) = &request_credits {
+            window.clone().acquire_owned().await?.forget();
+        }
+        let permit = credits.clone().acquire_owned().await?;
+        let stamp = Stamp { id: stats.total, intended: ns(start), admitted: ns(start) };
+        let confirm = publisher.send(stamp.encode(a.payload_bytes), stamp.id).await?;
+        tx.send(Pending { stamp, confirm, permit }).await
+            .map_err(|_| anyhow::anyhow!("confirmation collector closed during final barriers"))?;
+        stats.total += 1;
+        stats.last_ns = ns(start);
+        p.issued.store(stats.total, Ordering::Relaxed);
     }
     done_tx.send(Some(stats.total))?;
     Ok::<_, anyhow::Error>(stats)
@@ -377,8 +417,10 @@ async fn workload(args: Arc<Args>, progress: Arc<Progress>, origin: Instant) -> 
 
     let a = args.clone();
     let p = progress.clone();
+    let delivery_credits = (args.delivery_window > 0)
+        .then(|| Arc::new(Semaphore::new(args.delivery_window)));
     let producer = tokio::spawn(issue(
-        a, p, publisher, start, finish, tx, done_tx, credits, None,
+        a, p, publisher, start, finish, tx, done_tx, credits, delivery_credits.clone(),
     ));
 
     let a = args.clone();
@@ -418,6 +460,7 @@ async fn workload(args: Arc<Args>, progress: Arc<Progress>, origin: Instant) -> 
                     p.delivered.store(stats.total, Ordering::Relaxed);
                     message.ack().await?;
                     p.ack_sent.store(stats.total, Ordering::Relaxed);
+                    if let Some(window) = &delivery_credits { window.add_permits(1); }
                 }
                 changed = done_rx.changed(), if expected.is_none() => {
                     changed.context("publisher exited without final count")?;
@@ -445,12 +488,12 @@ async fn workload(args: Arc<Args>, progress: Arc<Progress>, origin: Instant) -> 
         .await
         .context("workload exceeded duration + drain timeout")??;
     ensure!(
-        producer.total == confirmer.total && producer.total == consumer.total,
+        args.expected_confirmations(producer.total) == confirmer.total && producer.total == consumer.total,
         "total count mismatch"
     );
     ensure!(
         producer.measured > 0
-            && producer.measured == confirmer.measured
+            && (if args.fibril_unconfirmed { confirmer.measured == 0 } else { producer.measured == confirmer.measured })
             && producer.measured == consumer.measured,
         "measurement cohort mismatch or empty measurement"
     );
@@ -469,7 +512,10 @@ async fn workload(args: Arc<Args>, progress: Arc<Progress>, origin: Instant) -> 
             "strict_order_checked":matches!(args.broker,Broker::Fibril) && args.connections == 1},
         "workload_start_since_setup_secs":start.duration_since(origin).as_secs_f64(),
         "observed_delivery_per_sec":consumer.completed_in_window as f64 / args.duration_secs as f64,
-        "observed_confirm_per_sec":confirmer.completed_in_window as f64 / args.duration_secs as f64,
+        "observed_confirm_per_sec":(!args.fibril_unconfirmed).then_some(confirmer.completed_in_window as f64 / args.duration_secs as f64),
+        "confirmation_mode":if args.fibril_unconfirmed { "final_barriers_only" } else { "per_message" },
+        "final_barrier_records":args.final_barriers(),
+        "data_issued":producer.total - args.final_barriers(),
         "counts":progress.snapshot(),"cohort_completed_per_sec":producer.measured as f64/elapsed,
         "cohort_elapsed_including_drain_secs":elapsed,"workload_done_ns":workload_done_ns,
         "settlement":settlement, "measurement_clock":"one process, monotonic Instant",
@@ -580,6 +626,34 @@ mod tests {
             a.copies = 5;
             assert!(a.validate().is_err());
         }
+    }
+    #[test]
+    fn unconfirmed_profile_requires_bounded_fibril_queue_and_barrier_budget() {
+        let mut a = args();
+        a.fibril_unconfirmed = true;
+        assert!(a.validate().is_err());
+        a.delivery_window = 32_768;
+        a.connections = 4;
+        a.validate().unwrap();
+        assert_eq!(a.expected_confirmations(1004), 4);
+        a.max_messages = 35_000;
+        assert!(a.validate().is_err());
+        a.max_messages = 35_004;
+        a.validate().unwrap();
+        for broker in [Broker::Nats, Broker::Rabbitmq] {
+            a.broker = broker;
+            assert!(a.validate().is_err());
+        }
+        a.broker = Broker::Fibril;
+        a.rpc = true;
+        assert!(a.validate().is_err());
+        a.rpc = false;
+        a.fault_role = Some("publisher".into());
+        assert!(a.validate().is_err());
+        a.fault_role = None;
+        a.fibril_unconfirmed = false;
+        a.validate().unwrap();
+        assert_eq!(a.expected_confirmations(1004), 1004);
     }
     #[test]
     fn warmup_cohort_has_exact_boundaries() {

@@ -47,7 +47,7 @@ cargo build --release --locked --manifest-path benchmarks/comparison/Cargo.toml
 python3 scripts/bench-e2e-history.py \
   --compare-bin benchmarks/comparison/target/release/broker-compare \
   --output ./benchmark-results/confirmed-01 --storage /path/to/benchmark-data \
-  --copies 1 3 --clients 10 --prefetch 2000 --confirm-window 4096 \
+  --copies 1 3 --clients 1 --prefetch 2000 --confirm-window 4096 \
   --size 1024 --warmup-secs 5 --duration-secs 30
 ```
 
@@ -60,6 +60,20 @@ rates and cohort throughput including drain. Resource boundary samples cover
 workload launch through final settlement. The three-copy configuration uses
 `majority_durable`. All copies share the selected filesystem unless
 `--copies 3 --node-storage ROOT0 ROOT1 ROOT2` selects their individual locations.
+
+Comparison mode defaults to one connection pair. For a matched Fibril-only
+confirmed/unconfirmed experiment, set `--compare-delivery-window 32768` and
+`--confirm-window 32768` in both runs, then add `--compare-unconfirmed` to the
+second run with a fresh output directory. Keep other settings identical. The
+common delivery window bounds issued records until consumer ACK submission.
+Confirmed mode also retains bounded outstanding confirmation credit.
+
+Both modes finish with one confirmed barrier record per publisher connection,
+outside the timed cohort. All data and barrier records must be delivered uniquely
+and settled. The unconfirmed result reports a null confirmation rate and counts
+only those final barriers as confirmed. This isolates publish modes within the
+same harness and admission bounds. Historical mode retains ten connections for
+reproducing the older workload.
 
 ## Interpretation
 

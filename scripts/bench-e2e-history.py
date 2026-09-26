@@ -202,6 +202,10 @@ def run(args, copies):
                 "--workers", str(args.compare_workers),
                 "--warmup-secs", str(args.warmup_secs), "--duration-secs", str(args.duration_secs),
                 "--drain-secs", "120", "--output", str(case / "confirmed.json")]
+            if args.compare_delivery_window:
+                command += ["--delivery-window", str(args.compare_delivery_window)]
+            if args.compare_unconfirmed:
+                command += ["--fibril-unconfirmed"]
             command += ["--rate", str(args.rate_per_sec)] if args.rate_per_sec else ["--saturation"]
             reader = writer = launch(command, "confirmed")
             client_names = ("confirmed",)
@@ -244,8 +248,11 @@ def run(args, copies):
             result = json.loads((case / "confirmed.json").read_text())
             counts = result["counts"]
             expected = counts["issued"]
-            if (result["status"] != "client_validated" or expected <= 0
-                    or expected != counts["confirmed"] or expected != counts["delivered"]
+            barrier_count = args.clients if args.compare_delivery_window else 0
+            expected_confirms = barrier_count if args.compare_unconfirmed else expected
+            if (result["status"] != "client_validated" or expected <= barrier_count
+                    or result.get("final_barrier_records", 0) != barrier_count
+                    or expected_confirms != counts["confirmed"] or expected != counts["delivered"]
                     or expected != counts["ack_sent"]):
                 raise RuntimeError("Confirmed workload failed identity/count validation")
         elif args.rate_per_sec:
@@ -269,8 +276,10 @@ def run(args, copies):
         save(case / "result.json", {"status": "passed", "copies": copies, "messages": expected,
             "payload_bytes": args.size, "clients": args.clients, "prefetch": args.prefetch, "data": str(data),
             "node_data": [str(p) for p in node_data],
-            "writer_confirms": bool(args.compare_bin), "final_publish_confirmed": not bool(args.rate_per_sec) and not bool(args.compare_bin),
+            "writer_confirms": bool(args.compare_bin) and not args.compare_unconfirmed, "final_publish_confirmed": not bool(args.rate_per_sec) and not bool(args.compare_bin),
             "confirmation_window": args.confirm_window if args.compare_bin else None,
+            "delivery_window": args.compare_delivery_window if args.compare_bin else None,
+            "final_barrier_records": result.get("final_barrier_records", 0) if args.compare_bin else 0,
             "warmup": bool((args.rate_per_sec or args.compare_bin) and args.warmup_secs),
             "offered_rate": args.rate_per_sec,
             "sampled_peak_broker_rss_kib": max(sum(p.get("rss_kib", 0) for p in s["servers"]) for s in samples)})
@@ -312,9 +321,14 @@ def main():
                         help="Total outstanding confirmations with --compare-bin")
     parser.add_argument("--compare-workers", type=int, default=4,
                         help="Client runtime workers with --compare-bin")
+    parser.add_argument("--compare-delivery-window", type=int, default=0,
+                        help="Shared issue-to-ACK-submission window for matched Fibril workloads")
+    parser.add_argument("--compare-unconfirmed", action="store_true",
+                        help="Unconfirmed data with final per-connection confirmed barriers")
     parser.add_argument("--copies", type=int, choices=[1, 3], nargs="+", default=[1, 3])
     parser.add_argument("--messages", type=int, default=500_000, help="Messages per connection")
-    parser.add_argument("--clients", type=int, default=10, help="Writer/reader connection pairs")
+    parser.add_argument("--clients", type=int,
+                        help="Connection pairs, default 1 with --compare-bin or 10 for history")
     parser.add_argument("--size", type=int, default=1024)
     parser.add_argument("--prefetch", type=int, default=16384,
                         help="Per-reader credit, or total shared credit with --compare-bin")
@@ -327,6 +341,14 @@ def main():
                         help="Extra TOML sections for three-copy node configs")
     parser.add_argument("--rust-log", default="warn", help="Broker/client tracing filter")
     args = parser.parse_args()
+    if args.clients is None:
+        args.clients = 1 if args.compare_bin else 10
+    if args.compare_unconfirmed and (not args.compare_bin or not args.compare_delivery_window):
+        parser.error("--compare-unconfirmed requires --compare-bin and --compare-delivery-window")
+    if not 0 <= args.compare_delivery_window <= 1_000_000:
+        parser.error("--compare-delivery-window must be 0..1000000")
+    if args.compare_delivery_window and not args.compare_bin:
+        parser.error("--compare-delivery-window requires --compare-bin")
     if args.compare_bin:
         args.compare_bin = args.compare_bin.resolve()
         if not 1 <= args.prefetch <= 2000:
