@@ -6,6 +6,9 @@ Include --bin steady_c when using --rate-per-sec.
 Earlier publishes use the historical unconfirmed writer and latency-tracking
 reader. The final message on each writer is confirmed before exit to drain finite
 runs safely. --rate-per-sec selects the steady_c paced workload on the same setup.
+--compare-bin /path/to/broker-compare selects the shared pipelined confirmation
+workload instead, with --confirm-window total publisher credit and --prefetch
+(1..2000) total consumer credit. Duration/warmup apply in saturation too.
 Results and data remain under explicit persistent directories, including failures.
 For split-drive checks, --copies 3 --node-storage ROOT0 ROOT1 ROOT2 selects each
 node's storage root. Recorded topology identifies which node became the owner.
@@ -29,10 +32,10 @@ def save(path, value):
     path.write_text(json.dumps(value, indent=2) + "\n")
 
 
-def provenance(bin_dir, steady=False):
+def provenance(bin_dir, steady=False, compare_bin=None):
     binaries = {}
-    for name in ("fibril-server", "steady_c" if steady else "e2e_c"):
-        path = bin_dir / name
+    for name in ("fibril-server", "broker-compare" if compare_bin else "steady_c" if steady else "e2e_c"):
+        path = compare_bin if name == "broker-compare" else bin_dir / name
         with path.open("rb") as binary:
             binaries[name] = {"path": str(path.resolve()),
                               "sha256": hashlib.file_digest(binary, "sha256").hexdigest()}
@@ -124,7 +127,8 @@ def run(args, copies):
     samples = []
     env = {key: value for key, value in os.environ.items()
            if not key.startswith("FIBRIL_")}
-    env.update(RUST_LOG=args.rust_log, FIBRIL_AUTH_USERNAME="fibril", FIBRIL_AUTH_PASSWORD="fibril")
+    credential = "bench" if args.compare_bin else "fibril"
+    env.update(RUST_LOG=args.rust_log, FIBRIL_AUTH_USERNAME=credential, FIBRIL_AUTH_PASSWORD=credential)
 
     def launch(command, name, environment=env, cwd=case):
         log = (case / f"{name}.log").open("w")
@@ -188,7 +192,20 @@ def run(args, copies):
             wait_for(lambda: all(len(http(base, "/admin/api/topology")["coordination"]["nodes"]) == 3 for base in endpoints))
         save(case / "declare.json", http(endpoints[0], "/admin/api/queues", {"topic": "topic1", "partition_count": 1}))
         save(case / "before.json", wait_for(topology))
-        if args.rate_per_sec:
+        resource_started = time.monotonic()
+        boundaries = {"before_work": {"elapsed_s": 0, "servers": [process_sample(p) for p in servers]}}
+        if args.compare_bin:
+            command = [str(args.compare_bin), "--broker", "fibril", "--queue", "topic1",
+                "--endpoint", f"127.0.0.1:{allocated[0]}", "--copies", str(copies),
+                "--connections", str(args.clients), "--payload-bytes", str(args.size),
+                "--prefetch", str(args.prefetch), "--confirm-window", str(args.confirm_window),
+                "--workers", str(args.compare_workers),
+                "--warmup-secs", str(args.warmup_secs), "--duration-secs", str(args.duration_secs),
+                "--drain-secs", "120", "--output", str(case / "confirmed.json")]
+            command += ["--rate", str(args.rate_per_sec)] if args.rate_per_sec else ["--saturation"]
+            reader = writer = launch(command, "confirmed")
+            client_names = ("confirmed",)
+        elif args.rate_per_sec:
             reader = writer = launch([str(args.bin_dir / "steady_c"),
                 "--broker-addr", f"127.0.0.1:{allocated[0]}",
                 "--writers", str(args.clients), "--readers", str(args.clients),
@@ -223,7 +240,15 @@ def run(args, copies):
             time.sleep(1)
         if reader.returncode or writer.returncode:
             raise RuntimeError(f"Client failed: reader={reader.returncode}, writer={writer.returncode}")
-        if args.rate_per_sec:
+        if args.compare_bin:
+            result = json.loads((case / "confirmed.json").read_text())
+            counts = result["counts"]
+            expected = counts["issued"]
+            if (result["status"] != "client_validated" or expected <= 0
+                    or expected != counts["confirmed"] or expected != counts["delivered"]
+                    or expected != counts["ack_sent"]):
+                raise RuntimeError("Confirmed workload failed identity/count validation")
+        elif args.rate_per_sec:
             text = (case / "steady.log").read_text()
             expected = int(re.search(r"^Sent total: (\d+)$", text, re.M)[1])
             received = int(re.search(r"^Received total: (\d+)$", text, re.M)[1])
@@ -238,11 +263,15 @@ def run(args, copies):
                 raise RuntimeError("Writer did not report the expected send count")
         # Delivery counts alone cannot establish settlement or catch duplicates.
         save(case / "settled.json", wait_for(lambda: topology(expected), 120))
+        boundaries["after_settlement"] = {"elapsed_s": time.monotonic() - resource_started,
+            "servers": [process_sample(p) for p in servers]}
+        save(case / "resource-boundaries.json", boundaries)
         save(case / "result.json", {"status": "passed", "copies": copies, "messages": expected,
             "payload_bytes": args.size, "clients": args.clients, "prefetch": args.prefetch, "data": str(data),
             "node_data": [str(p) for p in node_data],
-            "writer_confirms": False, "final_publish_confirmed": not bool(args.rate_per_sec),
-            "warmup": bool(args.rate_per_sec and args.warmup_secs),
+            "writer_confirms": bool(args.compare_bin), "final_publish_confirmed": not bool(args.rate_per_sec) and not bool(args.compare_bin),
+            "confirmation_window": args.confirm_window if args.compare_bin else None,
+            "warmup": bool((args.rate_per_sec or args.compare_bin) and args.warmup_secs),
             "offered_rate": args.rate_per_sec,
             "sampled_peak_broker_rss_kib": max(sum(p.get("rss_kib", 0) for p in s["servers"]) for s in samples)})
         print(f"copies={copies}: complete, results={case}", flush=True)
@@ -277,23 +306,38 @@ def main():
     parser.add_argument("--storage", type=Path, required=True)
     parser.add_argument("--node-storage", type=Path, nargs=3,
                         help="Per-node storage roots for a three-copy run, in node order")
+    parser.add_argument("--compare-bin", type=Path,
+                        help="Use the shared identity-validated, pipelined confirmation workload")
+    parser.add_argument("--confirm-window", type=int, default=4096,
+                        help="Total outstanding confirmations with --compare-bin")
+    parser.add_argument("--compare-workers", type=int, default=4,
+                        help="Client runtime workers with --compare-bin")
     parser.add_argument("--copies", type=int, choices=[1, 3], nargs="+", default=[1, 3])
     parser.add_argument("--messages", type=int, default=500_000, help="Messages per connection")
-    parser.add_argument("--clients", type=int, default=10)
+    parser.add_argument("--clients", type=int, default=10, help="Writer/reader connection pairs")
     parser.add_argument("--size", type=int, default=1024)
-    parser.add_argument("--prefetch", type=int, default=16384)
+    parser.add_argument("--prefetch", type=int, default=16384,
+                        help="Per-reader credit, or total shared credit with --compare-bin")
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--rate-per-sec", type=int, default=0,
-                        help="Use steady_c at this offered rate instead of historical saturation")
+                        help="Fixed offered rate for steady_c or --compare-bin, otherwise saturation")
     parser.add_argument("--warmup-secs", type=int, default=5)
     parser.add_argument("--duration-secs", type=int, default=30)
     parser.add_argument("--config-overlay", type=Path,
                         help="Extra TOML sections for three-copy node configs")
     parser.add_argument("--rust-log", default="warn", help="Broker/client tracing filter")
     args = parser.parse_args()
+    if args.compare_bin:
+        args.compare_bin = args.compare_bin.resolve()
+        if not 1 <= args.prefetch <= 2000:
+            parser.error("--compare-bin supports total --prefetch from 1 to 2000")
+        if not 1 <= args.clients <= 16 or args.prefetch % args.clients:
+            parser.error("--compare-bin requires 1..16 clients dividing total prefetch")
+        if not 32 <= args.size <= 1048576:
+            parser.error("--compare-bin supports payloads from 32 bytes to 1 MiB")
     if args.node_storage and args.copies != [3]:
         parser.error("--node-storage requires --copies 3")
-    for name in ("messages", "clients", "size", "prefetch", "timeout"):
+    for name in ("messages", "clients", "size", "prefetch", "timeout", "confirm_window", "compare_workers"):
         if getattr(args, name) < 1:
             parser.error(f"{name} must be positive")
     if args.rate_per_sec < 0 or args.warmup_secs < 0 or args.duration_secs < 1:
@@ -312,7 +356,7 @@ def main():
     argv["node_storage"] = [str(p) for p in args.node_storage] if args.node_storage else None
     save(args.output / "environment.json", {"platform": platform.platform(),
         "argv": argv,
-        "provenance": provenance(args.bin_dir, bool(args.rate_per_sec)),
+        "provenance": provenance(args.bin_dir, bool(args.rate_per_sec), args.compare_bin),
         "storage_filesystem": json.loads(subprocess.check_output(
             ["findmnt", "--json", "--target", str(args.storage)], text=True)),
         "node_storage_filesystems": [json.loads(subprocess.check_output(

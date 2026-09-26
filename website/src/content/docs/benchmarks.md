@@ -38,6 +38,29 @@ publish, so those figures are not a measurement of individual publish-confirmati
 throughput. A confirmed-publish rate needs a run that measures completed
 confirmations with a documented outstanding-confirmation window.
 
+The historical runner can provision fresh solo or three-copy brokers for the
+shared Rust confirmation workload as well:
+
+```sh
+cargo build --release --bin fibril-server
+cargo build --release --locked --manifest-path benchmarks/comparison/Cargo.toml
+python3 scripts/bench-e2e-history.py \
+  --compare-bin benchmarks/comparison/target/release/broker-compare \
+  --output ./benchmark-results/confirmed-01 --storage /path/to/benchmark-data \
+  --copies 1 3 --clients 10 --prefetch 2000 --confirm-window 4096 \
+  --size 1024 --warmup-secs 5 --duration-secs 30
+```
+
+This measures pipelined confirmations under saturation. Add `--rate-per-sec`
+for a fixed offered rate. Confirmation credit and consumer prefetch are totals
+shared across the connections in this mode. The client checks payload identity
+and every confirmation, then the runner verifies final settlement on every copy.
+`confirmed.json` retains confirmation and delivery latency, observed completion
+rates and cohort throughput including drain. Resource boundary samples cover
+workload launch through final settlement. The three-copy configuration uses
+`majority_durable`. All copies share the selected filesystem unless
+`--copies 3 --node-storage ROOT0 ROOT1 ROOT2` selects their individual locations.
+
 ## Interpretation
 
 These numbers are useful mostly as a sanity check:

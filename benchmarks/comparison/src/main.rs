@@ -466,7 +466,7 @@ async fn workload(args: Arc<Args>, progress: Arc<Progress>, origin: Instant) -> 
         "publish":producer.json(),"confirm":confirmer.json(),"delivery":consumer.json(),
         "delivery_path":{"early_total":consumer.early_total,"early_measured":consumer.early_measured,
             "ordinary_measured":consumer.measured-consumer.early_measured,
-            "strict_order_checked":matches!(args.broker,Broker::Fibril)},
+            "strict_order_checked":matches!(args.broker,Broker::Fibril) && args.connections == 1},
         "workload_start_since_setup_secs":start.duration_since(origin).as_secs_f64(),
         "observed_delivery_per_sec":consumer.completed_in_window as f64 / args.duration_secs as f64,
         "observed_confirm_per_sec":confirmer.completed_in_window as f64 / args.duration_secs as f64,
