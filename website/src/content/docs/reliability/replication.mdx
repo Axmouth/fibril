@@ -173,6 +173,33 @@ The follower read budget and poll intervals
 (`runtime_seed.replication.*`) tune catch-up throughput versus idle confirm
 latency. See the [configuration](/configuration/) replication settings.
 
+## Follower retention and repair
+
+Owner compaction respects each active follower's reported durable message and event
+positions. An unknown cursor starts at zero. A follower without fresh progress
+reports has a 60-second retention grace, so a disconnected follower does not pin
+that prefix indefinitely. Idle followers with fresh reports remain protected. These are catch-up protections and do not change confirmation counts.
+
+If a follower needs records the owner has already compacted, consensus suspends
+its acknowledgement role and the owner invalidates its old replication sessions.
+The follower builds a replacement in a separate storage generation. Its original
+copy remains available as recovery evidence throughout copying. The owner gives
+repair a bounded 120-second retention grace while the replacement catches up.
+
+The switch requires durable payloads, completely applied events and coverage of
+both original log tails. It publishes a durable route only after these checks.
+Re-admission uses a fresh transport identity. A lost admission reply resumes from
+the installed completion receipt without resetting the replacement. A recovery
+seal prevents a concurrent repair switch.
+
+A healthy majority can continue serving during repair. A policy requiring every
+replica continues waiting for every required replica. Repair does not lower that
+threshold. A slow copy can exceed its retention grace and retry from a newer
+checkpoint. Retained original generations consume disk space, and automatic
+reclamation and byte-based retention budgets remain future work. This path applies
+to enrolled queues with matching broker revisions, with directory durability support
+on Unix. Stream recovery remains separate.
+
 ## Activation and conditions
 
 - Internal reads, writes, checkpoint operations and streaming controls require

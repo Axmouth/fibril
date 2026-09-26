@@ -476,7 +476,18 @@ impl Default for BrokerConfig {
 }
 
 pub trait QueueOwnership: std::fmt::Debug + Send + Sync {
-    fn replication_node_id(&self) -> Option<&str> { None }
+    fn request_queue_reseed<'a>(
+        &'a self,
+        _topic: &'a str,
+        _partition: Partition,
+        _group: Option<&'a str>,
+        _epoch: u64,
+    ) -> futures::future::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async { Err("coordinated queue re-seeding is unavailable".into()) })
+    }
+    fn replication_node_id(&self) -> Option<&str> {
+        None
+    }
 
     fn permits_legacy_replication(&self, _topic: &str, _partition: Partition, _group: Option<&str>) -> bool { true }
 
@@ -1806,6 +1817,10 @@ impl<
             stream_ownership,
         });
 
+        this.engine.set_queue_replication_retention(Arc::new(
+            crate::replication::BrokerRetention::new(Arc::downgrade(&this)),
+        ));
+
         // expiry worker: keeps Stroma turning inflight -> ready again
         Self::spawn_expiry_worker(this.clone());
         Self::spawn_queue_eviction_worker(this.clone());
@@ -2062,6 +2077,15 @@ impl<
                 Entry::Vacant(_) => false,
             };
             if changed {
+                if preserves {
+                    if let Entry::Occupied(previous) = &entry {
+                        if let Some(progress) = self.replication_progress.get(&key) {
+                            progress.lock_followers().retain(|node,_|
+                                assignment.preserves_replication_session(previous.get(),node));
+                            progress.changed.notify_waiters();
+                        }
+                    }
+                }
                 if !preserves {
                     if let Some((_, old)) = self.replication_progress.remove(&key) {
                         old.changed.notify_waiters();

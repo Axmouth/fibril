@@ -20,6 +20,16 @@ impl Publisher {
     pub async fn send(&self, payload: Vec<u8>, id: u64) -> Result<Confirmation> {
         self.send_checked(payload, Some(id)).await
     }
+    pub async fn send_unconfirmed(&self, payload: Vec<u8>) -> Result<()> {
+        let leaf = match self {
+            Self::Pool(items, next) => &items[next.fetch_add(1, Ordering::Relaxed) % items.len()],
+            _ => self,
+        };
+        match leaf {
+            Self::Fibril(p) => p.publish(fibril_client::NewMessage::raw(payload)).await.map_err(Into::into),
+            _ => anyhow::bail!("unconfirmed comparison is Fibril-only"),
+        }
+    }
     pub async fn send_response(&self, payload: Vec<u8>) -> Result<Confirmation> {
         self.send_checked(payload, None).await
     }

@@ -630,6 +630,16 @@ struct BrokerOwnerStreamSource {
 
 #[async_trait::async_trait]
 impl replication_stream::OwnerStreamSource for BrokerOwnerStreamSource {
+    fn stream_config(&self) -> Option<replication_stream::OwnerStreamConfig> {
+        let cfg = self.broker.config_snapshot();
+        Some(replication_stream::OwnerStreamConfig {
+            max_messages: cfg.replication_max_messages_per_read,
+            max_events: cfg.replication_max_events_per_read,
+            max_batch_bytes: cfg.replication_max_bytes_per_read,
+            long_poll_ms: cfg.replication_caught_up_poll_ms,
+        })
+    }
+
     async fn read(
         &self,
         topic: &str,

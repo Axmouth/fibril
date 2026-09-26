@@ -87,6 +87,32 @@ python3 -m unittest discover -s benchmarks/comparison -p 'test_*.py'
 python3 benchmarks/comparison/table.py /path/to/result-directory
 ```
 
+## Matched Fibril publisher modes
+
+For a Fibril-only confirmation-cost experiment, use `--delivery-window 32768`
+and `--confirm-window 32768` in both runs, then add `--fibril-unconfirmed` to
+the second run. Keep connection count, total prefetch, payload, runtime workers,
+offered rate and duration identical. The delivery window bounds records from
+issuance through consumer ACK submission. Confirmed publishing additionally
+holds its bounded confirmation credit until each response arrives.
+
+Both modes append one confirmed barrier record per publisher connection after
+the nominal measurement interval. These records pass through the same single
+queue partition, carry normal benchmark identities, and are delivered and ACKed.
+They are excluded from the measured cohort and included in final settlement.
+`data_issued` and `final_barrier_records` distinguish them in the result. This is
+a benchmark drain mechanism for these direct connections and one partition.
+
+Unconfirmed mode sends actual unconfirmed SDK publishes. Its confirmation count
+contains only the final barriers and `observed_confirm_per_sec` is null. It still
+requires complete, unique, uncorrupted delivery and final server settlement.
+This mode is separate from the cross-broker profile, which retains per-message
+confirmations. It cannot be combined with RPC or failure-probe modes.
+
+The native `scripts/bench-e2e-history.py` runner exposes these settings through
+`--compare-delivery-window` and `--compare-unconfirmed`. Its comparison mode
+defaults to one connection pair. Historical mode retains ten connections.
+
 ## Existing-server RPC and clustered workloads
 
 The Rust executable supports three stored copies (`--copies 3`), plus five or seven for externally provisioned Fibril clusters, multiple connection pairs (`--connections N`), and a two-queue request/reply workload (`--rpc`). These modes target deployments provisioned separately. The automated Python runner and its table remain single-node queue tools. `--copies` configures NATS/Rabbit declarations; Fibril placement and confirmation policy must be configured and checked separately. A successful client run does not verify replica placement, disk-sync settings, server settlement or cluster recovery.

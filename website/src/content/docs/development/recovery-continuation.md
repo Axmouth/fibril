@@ -174,20 +174,34 @@ confirmed prefixes survived reopen. Hooks inject file-operation errors through
 real writer paths and remain outside ordinary builds.
 
 Complete unconfirmed bytes can become ready after an event-log fsync error and
-reopen. The payload-error path appends a compensating cancellation. These outcomes
-require callers to treat an error receipt as ambiguous.
+reopen. The native payload-error schedule persisted a compensating cancellation. A
+broker-level fault can fence ordered application before that cancellation is
+appended. Followers can then retain the unconfirmed enqueue, which recovery may
+select. Both outcomes require callers to treat an error receipt as ambiguous.
 
-Before adoption, extend this screen through admitted multi-node recovery and
-old-owner rejoin under majority and all-copy confirmation. Verify retry cursors,
+An additional eight-case experiment exercises three admitted brokers and durable
+metadata over authenticated TCP. It covers errors before and after the actual
+fsync of either log, under majority and three-copy confirmation. Both followers
+persist the tentative record before the owner reports failure. The broker never
+confirms that publish, ordinary owner reads keep the durable frontier, and the
+confirmed prefix survives recovery and old-owner readmission. Majority recovery
+activates with two copies. Three-copy recovery remains pending through a failed
+attempt until the third copy returns, preserving its configured requirement.
+
+This fixture requests the controller's recovery transition explicitly and stops
+the broker gracefully. It does not measure failure detection or model whole-node
+power loss. Abrupt process exit remains covered separately by the native screen.
+
+Before adoption, verify retry cursors,
 recovery source selection and divergent unconfirmed suffixes. Add index, manifest,
 rollover and directory-sync failures. Owner relinquishment, unhealthy successors,
-lost replies and missing metadata quorum need their own schedules. The native
-screen does not establish these cluster outcomes or power-loss persistence.
+lost replies and missing metadata quorum need their own schedules. These
+screens do not establish those outcomes or power-loss persistence.
 
 ## Implementation order and open decisions
 
-1. Extend the native storage-failure screen to broker confirmation policies,
-   recovery source selection and old-owner rejoin.
+1. Extend the passing storage and admitted-cluster screens to divergent suffixes,
+   persistent follower faults and the remaining failure schedules below.
 2. Define typed failure/progress states and expose them through recovery diagnostics.
 3. Implement resumable inspection and replay incrementally, then comparison and
    chunked snapshots. Validate restart at every durable boundary.

@@ -8,6 +8,33 @@ for further detail. Measurements describe the stated workload and hardware.
 Current capabilities are in [implemented surface](/implemented-surface/);
 remaining work is in the [roadmap](/roadmap/).
 
+## Bounded replication reads and preserved progress
+
+Owner replication reads now stop after the useful byte-bounded prefix and one
+lookahead record, preserving snapshot deferral and ordered event gating.
+Follower progress keeps a pending owner read alive, avoiding discarded blocking
+scans, while reset and stop still cancel it. A three-node tmpfs comparison at
+4 KiB measured lower CPU use and higher throughput, with cache, disk, oversized
+record and snapshot-boundary regression coverage.
+
+## Streaming settings and oversized credit
+
+Owner streams now adopt runtime read limits at the next batch, and oversized
+batches retain credit debt until durable application returns those bytes.
+Previously, saturating subtraction could let repeated oversized records grow the
+window. Tests cover live settings adoption and repeated oversized records, while
+the [configuration reference](/configuration/#replication) separates queued frame
+count from outstanding byte credit.
+
+## Follower retention and non-destructive repair
+
+Snapshot compaction could overtake admitted followers during sustained publishing,
+and the legacy checkpoint fallback correctly refused to replace their accepted
+history. Owner compaction now protects live follower cursors, and exhausted history
+starts consensus-authorized repair in a separate generation while preserving the
+original recovery evidence. Storage crash-boundary tests and a three-node repair
+test cover the switch, continued majority confirms and stale-session rejection.
+
 ## Agreed queue recovery checkpoints
 
 Opt-in background agreement creates durable same-cut queue snapshots across all
@@ -41,13 +68,22 @@ Boosted navigation releases page interaction listeners, timers, visibility
 callbacks and event streams. Disposed polling and queued stream callbacks cannot
 restart polling or restore an old page's scroll position.
 
+### Ordered application wake-up contention
+
+Normal ordered-application progress now wakes only eligible offset ranges,
+while reset and failure still wake invalidated operations. This removes the
+wake-up storm reproduced by the historical ten-connection workload, with
+[benchmark results](/benchmarks/#historical-two-process-workload-reproduction)
+and storage, checkpoint and recovery regressions covering the change.
+
 ### Owner storage-error acceptance screen
 
 An isolated early-replication experiment passes 48 schedules covering both logs,
 partial writes, fsync errors, follower timing and abrupt process exit. No failed
 publish produced a success receipt or became owner-deliverable, and confirmed
-prefixes survived reopen. Multi-node recovery and acknowledgement-policy coverage
-remain adoption gates in the [recovery continuation plan](/development/recovery-continuation/#early-replication-under-owner-io-failure).
+prefixes survived reopen. Eight additional TCP cluster cases preserve majority
+and three-copy requirements through owner failure, recovery and readmission,
+with the remaining adoption gates tracked in the [recovery continuation plan](/development/recovery-continuation/#early-replication-under-owner-io-failure).
 
 ### Dashboard request lifetimes
 

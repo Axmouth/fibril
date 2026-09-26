@@ -95,8 +95,8 @@ confirm_timeout_ms = 5000
 caught_up_poll_ms = 1000
 retry_poll_ms = 100
 checkpoint_retry_poll_ms = 5000
-max_messages_per_read = 256
-max_events_per_read = 256
+max_messages_per_read = 2048
+max_events_per_read = 2048
 max_bytes_per_read = 8388608
 max_iterations_per_tick = 8
 min_in_sync_replicas = 1
@@ -440,12 +440,12 @@ These settings apply to the experimental cluster replication path.
 | `runtime_seed.replication.agreed_checkpoint_max_bytes` | `0` | Start earlier after approximately this many local append content bytes since observing the last certificate; 0 disables. The counter resets on reopen and excludes record framing; the periodic interval remains the fallback. |
 | `runtime_seed.replication.eager_failover` | `false` | Opt-in explicit peer-connection failure detection on the active metadata controller. Recovery proof is still required; see [eager failover](/reliability/replication/#eager-failover). |
 | `runtime_seed.replication.eager_failover_grace_ms` | `1000` | Failed-reconnect grace, 0–60000 ms. Zero enables idle-disconnect monitoring and immediate reconnect verification on the active controller. Positive values require failed contact across the interval; heartbeat expiry handles silent failures. |
-| `runtime_seed.replication.caught_up_poll_ms` | `1000` | Follower pull interval while already caught up with the owner. Lower values can reduce idle replica-durable confirm latency at the cost of more wakeups. |
+| `runtime_seed.replication.caught_up_poll_ms` | `1000` | Caught-up pull interval and streaming owner long-poll timeout. Streaming reads wake when new work arrives, without waiting for the timeout. |
 | `runtime_seed.replication.retry_poll_ms` | `100` | Follower retry interval after a partial pull or transient replication error. |
 | `runtime_seed.replication.checkpoint_retry_poll_ms` | `5000` | Follower retry interval while it needs an owner checkpoint before it can continue. |
-| `runtime_seed.replication.max_messages_per_read` | `256` | Maximum message records a follower asks the owner for in one pull. |
-| `runtime_seed.replication.max_events_per_read` | `256` | Maximum event records a follower asks the owner for in one pull. |
-| `runtime_seed.replication.max_bytes_per_read` | `8388608` | Approximate byte budget for one owner replication response. One oversized message can exceed it so replication still makes progress. |
+| `runtime_seed.replication.max_messages_per_read` | `2048` | Maximum message records per owner read, for pull and streaming. |
+| `runtime_seed.replication.max_events_per_read` | `2048` | Maximum event records per owner read, for pull and streaming. |
+| `runtime_seed.replication.max_bytes_per_read` | `8388608` | Approximate byte budget per owner log scan and initial byte credit for a new follower stream. An oversized record and accompanying events can make the response exceed this budget. |
 | `runtime_seed.replication.max_iterations_per_tick` | `8` | Maximum pull/apply iterations a follower performs before yielding. |
 | `runtime_seed.replication.min_in_sync_replicas` | `1` | Minimum recently in-sync replicas required before accepting replica-durable publishes. `1` disables the floor. |
 | `runtime_seed.replication.isr_timeout_ms` | `10000` | How recently a follower must report durable progress to count as in sync. |
@@ -453,12 +453,16 @@ These settings apply to the experimental cluster replication path.
 | `runtime_seed.replication.owner_connect_timeout_ms` | `5000` | Upper bound on a follower establishing a connection to an owner (TCP connect plus the handshake) before it is abandoned and retried. |
 | `runtime_seed.replication.stream_enabled` | `true` | Use credit-based streaming replication on followers. When disabled, followers fall back to polling pulls. |
 | `runtime_seed.replication.stream_apply_linger_us` | `2000` | Microseconds a streaming follower gathers contiguous frames before one fsynced apply. Higher trades apply latency for fsync amortization. `0` is drain-only. |
-| `runtime_seed.replication.stream_apply_max_merge_bytes` | `16777216` | Byte cap on a single coalesced streaming apply (peak memory versus fsync amortization). |
-| `runtime_seed.replication.stream_buffer_batches` | `8` | In-flight batch buffer depth (credit window) for the streaming follower. Applied on the next stream. |
+| `runtime_seed.replication.stream_apply_max_merge_bytes` | `16777216` | Byte threshold for a coalesced streaming apply. Whole frames can cross it. Trades peak memory and overlap against fsync amortization. |
+| `runtime_seed.replication.stream_buffer_batches` | `8` | Queued frame count for the streaming follower, separate from byte credit. Applied on the next stream. |
 
-The read-budget settings are useful when tuning replica-durable throughput.
-Small values reduce per-tick work, while larger values let a follower catch up
-faster when the owner is receiving sustained traffic.
+Streaming owner reads adopt updated record and byte limits at the next batch.
+The initial credit window changes when a new follower stream starts. Oversized
+batches consume that window and retain any excess as debt until the follower
+returns credit after durable application.
+
+Read budgets trade batch size and memory use against throughput. Measure both
+throughput and latency under the intended workload before increasing them.
 
 ### Partitioning and Consumer Groups
 

@@ -538,6 +538,7 @@ enum LearnerCase {
     None,
     Join,
     Restart,
+    Reseed,
 }
 
 async fn three_node_owner_loss(recover: bool, learner: LearnerCase) {
@@ -682,7 +683,7 @@ async fn three_node_owner_loss_with_checkpoints(
     })
     .await
     .unwrap();
-    if learner != LearnerCase::None {
+    if matches!(learner, LearnerCase::Join | LearnerCase::Restart) {
         listeners[2].abort();
         let _ = (&mut listeners[2]).await;
     }
@@ -691,7 +692,7 @@ async fn three_node_owner_loss_with_checkpoints(
         fibril::recovery_driver::spawn(providers[0].clone(), brokers[0].clone(), config.clone());
     tokio::time::timeout(Duration::from_secs(40), async {
         loop {
-            if providers.iter().take(if learner != LearnerCase::None { 2 } else { 3 }).all(|p| {
+            if providers.iter().take(if matches!(learner, LearnerCase::Join | LearnerCase::Restart) { 2 } else { 3 }).all(|p| {
                 p.local_initial_history_admissions()
                     .is_ok_and(|a| a.len() == 1)
             }) && providers[0]
@@ -712,7 +713,7 @@ async fn three_node_owner_loss_with_checkpoints(
     })
     .await
     .unwrap();
-    if learner != LearnerCase::None {
+    if matches!(learner, LearnerCase::Join | LearnerCase::Restart) {
         use fibril_broker::broker::{
             BrokerOwnerReplicationPeer, BrokerReplicationCatchUpOptions, ReplicationResourceKind,
         };
@@ -1054,6 +1055,24 @@ async fn three_node_owner_loss_with_checkpoints(
         owner_worker.abort();
         drop(peer);
         drop(publisher);
+        for listener in listeners {
+            listener.abort();
+        }
+        for broker in &brokers {
+            broker.shutdown().await;
+        }
+        for provider in &providers {
+            provider.consensus_node().shutdown().await.unwrap();
+        }
+        for server in servers {
+            server.shutdown();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+        return;
+    }
+    if learner == LearnerCase::Reseed {
+        admitted_replica_reseed(&providers, &brokers, &config, &resource).await;
+        owner_worker.abort();
         for listener in listeners {
             listener.abort();
         }
@@ -1468,4 +1487,420 @@ async fn three_node_owner_loss_with_checkpoints(
     drop(brokers);
     drop(providers);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn admitted_replica_reseeds_without_erasing_old_copy_or_weakening_confirms() {
+    three_node_owner_loss(false, LearnerCase::Reseed).await;
+}
+
+async fn admitted_replica_reseed(
+    providers: &[Arc<GanglionCoordination>],
+    brokers: &[Arc<Broker<StromaEngine>>],
+    config: &ProtocolOwnerPeerResolverConfig,
+    resource: &ganglion_core::ResourceIdentity,
+) {
+    use fibril_broker::{
+        broker::{
+            BrokerOwnerReplicationPeer, BrokerReplicationCatchUpOptions, ReplicationResourceKind,
+        },
+        coordination::CoordinationSnapshot,
+    };
+    use fibril_protocol::v1::replication::connect_protocol_owner_peer;
+    for i in 1..3 {
+        let decision = providers[i].local_initial_history_admissions().unwrap()[0]
+            .0
+            .clone();
+        providers[i]
+            .admit_local_initial_history(&decision, &brokers[i].engine())
+            .await
+            .unwrap();
+    }
+    for i in 0..3 {
+        for result in brokers[i]
+            .apply_assignment_snapshot_transitions(
+                ["a", "b", "c"][i],
+                &CoordinationSnapshot::default(),
+                &providers[i].snapshot(),
+            )
+            .await
+        {
+            result.unwrap();
+        }
+    }
+    let original = providers[0]
+        .snapshot()
+        .assignment_for("q", Partition::new(0), None)
+        .unwrap()
+        .clone();
+    let old_session = original
+        .history
+        .as_ref()
+        .unwrap()
+        .session("q", Partition::new(0), None, false, "c", "a")
+        .unwrap();
+    let publisher = brokers[0]
+        .get_publisher("q", Partition::new(0), &None)
+        .await
+        .unwrap();
+    let catch_up = |i: usize| async move {
+        let assignment = providers[0]
+            .snapshot()
+            .assignment_for("q", Partition::new(0), None)
+            .unwrap()
+            .clone();
+        let id = ["a", "b", "c"][i];
+        let peer = connect_protocol_owner_peer(
+            config.nodes["a"].clone(),
+            config.auth.as_ref(),
+            None,
+            "reseed-test",
+            "1",
+        )
+        .await
+        .unwrap()
+        .with_reporter(id)
+        .with_history_session(
+            assignment
+                .history
+                .as_ref()
+                .unwrap()
+                .session("q", Partition::new(0), None, false, id, "a")
+                .unwrap(),
+        );
+        let from = brokers[i]
+            .engine()
+            .queue_replication_next_offsets("q", 0, None)
+            .await
+            .unwrap();
+        brokers[i]
+            .catch_up_replication_follower_from_owner(
+                &peer,
+                "q",
+                Partition::new(0),
+                None,
+                ReplicationResourceKind::Queue,
+                BrokerReplicationCatchUpOptions {
+                    message_from: from.0,
+                    event_from: from.1,
+                    max_messages_per_read: 4096,
+                    max_events_per_read: 4096,
+                    max_bytes_per_read: 16 * 1024 * 1024,
+                    max_iterations: 16,
+                    max_wait_ms: 0,
+                },
+            )
+            .await
+            .unwrap();
+        peer
+    };
+    let mut healthy_peer = None;
+    for n in 0..4u64 {
+        let confirm = publisher
+            .publish(
+                n.to_le_bytes().to_vec(),
+                unix_millis(),
+                unix_millis(),
+                None,
+                Default::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        let b = catch_up(1).await;
+        let c = catch_up(2).await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), confirm)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            n
+        );
+        healthy_peer = Some(b);
+        drop(c);
+    }
+    // Exercise the production exhausted-retention branch. It must request
+    // coordinated repair and must never invoke legacy destructive installation.
+    struct ExpiredHistory;
+    impl BrokerOwnerReplicationPeer for ExpiredHistory {
+        fn read_owner_replication_records<'a>(
+            &'a self,
+            _: &'a str,
+            _: Partition,
+            _: Option<&'a str>,
+            message: u64,
+            event: u64,
+            _: usize,
+            _: usize,
+            _: usize,
+            _: u64,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<
+                fibril_broker::broker::BrokerOwnerReplicationRecords,
+                fibril_broker::broker::BrokerError,
+            >,
+        > {
+            Box::pin(async move {
+                Ok(fibril_broker::broker::BrokerOwnerReplicationRecords {
+                    messages:
+                        fibril_broker::queue_engine::OwnerReplicationRead::CheckpointRequired {
+                            epoch: 1,
+                            requested_offset: message,
+                            head_offset: 5,
+                            next_offset: 5,
+                        },
+                    events: fibril_broker::queue_engine::OwnerReplicationRead::CheckpointRequired {
+                        epoch: 1,
+                        requested_offset: event,
+                        head_offset: 5,
+                        next_offset: 5,
+                    },
+                })
+            })
+        }
+        fn export_owner_state_checkpoint<'a>(
+            &'a self,
+            _: &'a str,
+            _: Partition,
+            _: Option<&'a str>,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<
+                fibril_broker::queue_engine::OwnerStateCheckpoint,
+                fibril_broker::broker::BrokerError,
+            >,
+        > {
+            Box::pin(async { panic!("admitted replica must not use legacy checkpoint reset") })
+        }
+    }
+    let exhausted = brokers[2]
+        .catch_up_replication_follower_from_owner_with_checkpoint(
+            &ExpiredHistory,
+            "q",
+            Partition::new(0),
+            None,
+            ReplicationResourceKind::Queue,
+            BrokerReplicationCatchUpOptions {
+                message_from: 4,
+                event_from: 4,
+                max_messages_per_read: 16,
+                max_events_per_read: 16,
+                max_bytes_per_read: 65536,
+                max_iterations: 1,
+                max_wait_ms: 0,
+            },
+        )
+        .await;
+    assert!(
+        exhausted
+            .unwrap_err()
+            .to_string()
+            .contains("coordinated queue re-seeding requested")
+    );
+    let intent = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            for i in 0..3 {
+                for result in brokers[i]
+                    .apply_assignment_snapshot_transitions(
+                        ["a", "b", "c"][i],
+                        &CoordinationSnapshot::default(),
+                        &providers[i].snapshot(),
+                    )
+                    .await
+                {
+                    result.unwrap();
+                }
+            }
+            if let Some(intent) = providers[0].queue_reseed_work().unwrap().first().cloned() {
+                if intent.phase == fibril_coordination_ganglion::queue_reseed::ReseedPhase::Revoking
+                {
+                    let _ = providers[0]
+                        .acknowledge_queue_reseed(&intent, &brokers[0])
+                        .await;
+                }
+            }
+            if let Some(intent) = providers[2]
+                .queue_reseed_work()
+                .unwrap()
+                .into_iter()
+                .find(|i| i.phase == fibril_coordination_ganglion::queue_reseed::ReseedPhase::Ready)
+            {
+                break intent;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        brokers[0]
+            .authorize_history_replication(&old_session, true)
+            .is_err()
+    );
+    let view = providers[2]
+        .prepare_queue_reseed(&intent, &brokers[2].engine())
+        .await
+        .unwrap();
+    let peer = connect_protocol_owner_peer(
+        config.nodes["a"].clone(),
+        config.auth.as_ref(),
+        None,
+        "reseed-test",
+        "1",
+    )
+    .await
+    .unwrap()
+    .with_history_session(
+        intent
+            .session(&providers[2].consensus_node().committed_snapshot())
+            .unwrap(),
+    );
+    let cut = peer
+        .export_owner_state_checkpoint("q", Partition::new(0), None)
+        .await
+        .unwrap();
+    view.become_queue_follower_with_epoch("q", 0, None, 1)
+        .await
+        .unwrap();
+    view.install_queue_learner_checkpoint(
+        intent.receipt(),
+        fibril_broker::queue_engine::FollowerStateCheckpointInstall {
+            message_epoch: 1,
+            event_epoch: 1,
+            message_next_offset: cut.message_checkpoint_offset,
+            event_next_offset: cut.event_next_offset,
+            applied_event_offset: cut.applied_event_offset,
+            state_snapshot: cut.state_snapshot,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        view.verify_queue_learner_caught_up("q", 0, None, 1, 4, 4)
+            .await
+            .is_err(),
+        "checkpoint is incomplete until payload backfill finishes"
+    );
+    assert!(
+        brokers[2]
+            .engine()
+            .queue_replication_next_offsets("q", 0, None)
+            .await
+            .is_err(),
+        "original replica stays frozen throughout repair"
+    );
+    let confirm = publisher
+        .publish(
+            4u64.to_le_bytes().to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    let b = healthy_peer.take().unwrap();
+    let from = brokers[1].engine().queue_replication_next_offsets("q",0,None).await.unwrap();
+    brokers[1].catch_up_replication_follower_from_owner(&b,"q",Partition::new(0),None,ReplicationResourceKind::Queue,BrokerReplicationCatchUpOptions {
+        message_from:from.0,event_from:from.1,max_messages_per_read:4096,max_events_per_read:4096,max_bytes_per_read:16*1024*1024,max_iterations:16,max_wait_ms:0,
+    }).await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), confirm)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        4,
+        "the healthy majority still confirms while c is repairing"
+    );
+    drop(b);
+    assert_eq!(intent.assignment.resource,*resource);
+    let repair_worker=fibril::recovery_driver::spawn(providers[2].clone(),brokers[2].clone(),config.clone());
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if providers[0]
+                .snapshot()
+                .assignment_for("q", Partition::new(0), None)
+                .is_some_and(|a| a.is_followed_by("c"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    repair_worker.abort();
+    for i in 0..3 {
+        for result in brokers[i]
+            .apply_assignment_snapshot_transitions(
+                ["a", "b", "c"][i],
+                &CoordinationSnapshot::default(),
+                &providers[i].snapshot(),
+            )
+            .await
+        {
+            result.unwrap();
+        }
+    }
+    assert!(
+        brokers[0]
+            .authorize_history_replication(&old_session, true)
+            .is_err(),
+        "old transport remains invalid after readmission"
+    );
+    brokers[2]
+        .engine()
+        .verify_queue_learner_caught_up("q", 0, None, 1, 5, 5)
+        .await
+        .unwrap();
+    let confirm = publisher
+        .publish(
+            5u64.to_le_bytes().to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    let c = catch_up(2).await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), confirm)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        5,
+        "re-admitted c can confirm with owner without b"
+    );
+    drop(c);
+    // Both followers can lose the owner's retained prefix. Repeating c's repair
+    // also exercises replacement of a previously installed generation.
+    for node in ["b","c"] {
+        tokio::time::timeout(Duration::from_secs(10),async {
+            loop {
+                if providers[0].request_queue_reseed(resource,node).await.is_ok() {break;}
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+    }
+    let workers:Vec<_>=(1..3).map(|i|fibril::recovery_driver::spawn(providers[i].clone(),brokers[i].clone(),config.clone())).collect();
+    tokio::time::timeout(Duration::from_secs(15),async {
+        loop {
+            for i in 0..3 {
+                for result in brokers[i].apply_assignment_snapshot_transitions(["a","b","c"][i],&CoordinationSnapshot::default(),&providers[i].snapshot()).await {result.unwrap();}
+            }
+            if providers[0].queue_reseed_work().unwrap().is_empty() && providers[0].snapshot().assignment_for("q",Partition::new(0),None).is_some_and(|a|a.is_followed_by("b") && a.is_followed_by("c")) {break;}
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    for worker in workers {worker.abort();}
+    for i in 1..3 {
+        brokers[i].engine().verify_queue_learner_caught_up("q",0,None,1,6,6).await.unwrap();
+    }
 }

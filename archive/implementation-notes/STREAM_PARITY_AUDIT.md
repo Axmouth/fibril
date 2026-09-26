@@ -1,5 +1,7 @@
 # Stream Operational Parity Audit (2026-07-03)
 
+Historical implementation record. Current contracts live in the [documentation site](../../website/src/content/docs/implemented-surface.md).
+
 Plexus streams landed feature-first, so this audit sweeps the operational
 machinery queues accumulated (eviction, metrics, lifecycle, recovery) and
 checks what streams share, what they miss, and what does not apply to them by

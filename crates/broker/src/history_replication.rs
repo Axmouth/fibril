@@ -6,7 +6,7 @@ use crate::{
     queue_engine::{PreparedStorageHistory, StorageHistoryBinding, StromaEngine},
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplicaHistoryInstance {
@@ -20,6 +20,12 @@ pub struct AcceptedHistory {
     pub binding: StorageHistoryBinding,
     pub owner: String,
     pub replicas: BTreeMap<String, ReplicaHistoryInstance>,
+    /// Retained in the historical electorate, but unable to serve, acknowledge
+    /// while a replacement is built. Their original copy remains a recovery witness.
+    pub suspended_replicas: BTreeSet<String>,
+    /// Changes the authenticated transport identity after each re-seed without
+    /// changing the original history certificate or its recovery threshold.
+    pub replica_generations: BTreeMap<String, [u8; 32]>,
     /// Local serving projection only; never part of the persisted certificate.
     /// Keep remote routing visible while withholding this process's role.
     pub blocked_local_replica: Option<String>,
@@ -41,7 +47,9 @@ pub struct HistoryReplicationSession {
 
 impl AcceptedHistory {
     pub fn permits_role(&self, node: &str) -> bool {
-        self.blocked_local_replica.as_deref() != Some(node) && self.replicas.contains_key(node)
+        self.blocked_local_replica.as_deref() != Some(node)
+            && !self.suspended_replicas.contains(node)
+            && self.replicas.contains_key(node)
     }
 
     pub fn session(
@@ -56,12 +64,26 @@ impl AcceptedHistory {
         if !self.permits_role(sender) || !self.permits_role(receiver) {
             return Err("replica is outside the admitted history projection".into());
         }
+        let mut activation = self.activation;
+        if self.replica_generations.contains_key(sender)
+            || self.replica_generations.contains_key(receiver)
+        {
+            let mut hash = blake3::Hasher::new();
+            hash.update(b"fibril-reseed-session-v1\0");
+            hash.update(&self.activation);
+            for node in [sender, receiver] {
+                hash.update(&(node.len() as u64).to_be_bytes());
+                hash.update(node.as_bytes());
+                hash.update(self.replica_generations.get(node).unwrap_or(&[0; 32]));
+            }
+            activation = *hash.finalize().as_bytes();
+        }
         Ok(HistoryReplicationSession {
             topic: topic.into(),
             partition,
             group: group.map(str::to_owned),
             stream,
-            activation: self.activation,
+            activation,
             binding: self.binding.clone(),
             sender: sender.into(),
             receiver: receiver.into(),

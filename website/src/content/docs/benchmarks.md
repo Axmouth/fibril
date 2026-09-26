@@ -24,6 +24,57 @@ Internal measurements with the current TCP transport and durable path on a singl
 
 Memory usage during these runs ranged from a few hundred MB at lower load to roughly 1-2GB near peak throughput, depending on queue depth, batching, and inflight state.
 
+### What the durability claim means
+
+Default queue publish confirmations wait for both the message and its enqueue
+state to cross the persistence boundary through fsync. Replicated durable
+policies additionally wait for persistence on the required replicas. The
+[confirmation policy](/reliability/replication/#durability-levels) determines that
+requirement.
+
+The front-page throughput figures describe the durable queue path on one node.
+The historical writer submits messages without awaiting a confirmation for each
+publish, so those figures are not a measurement of individual publish-confirmation
+throughput. A confirmed-publish rate needs a run that measures completed
+confirmations with a documented outstanding-confirmation window.
+
+The historical runner can provision fresh solo or three-copy brokers for the
+shared Rust confirmation workload as well:
+
+```sh
+cargo build --release --bin fibril-server
+cargo build --release --locked --manifest-path benchmarks/comparison/Cargo.toml
+python3 scripts/bench-e2e-history.py \
+  --compare-bin benchmarks/comparison/target/release/broker-compare \
+  --output ./benchmark-results/confirmed-01 --storage /path/to/benchmark-data \
+  --copies 1 3 --clients 1 --prefetch 2000 --confirm-window 4096 \
+  --size 1024 --warmup-secs 5 --duration-secs 30
+```
+
+This measures pipelined confirmations under saturation. Add `--rate-per-sec`
+for a fixed offered rate. Confirmation credit and consumer prefetch are totals
+shared across the connections in this mode. The client checks payload identity
+and every confirmation, then the runner verifies final settlement on every copy.
+`confirmed.json` retains confirmation and delivery latency, observed completion
+rates and cohort throughput including drain. Resource boundary samples cover
+workload launch through final settlement. The three-copy configuration uses
+`majority_durable`. All copies share the selected filesystem unless
+`--copies 3 --node-storage ROOT0 ROOT1 ROOT2` selects their individual locations.
+
+Comparison mode defaults to one connection pair. For a matched Fibril-only
+confirmed/unconfirmed experiment, set `--compare-delivery-window 32768` and
+`--confirm-window 32768` in both runs, then add `--compare-unconfirmed` to the
+second run with a fresh output directory. Keep other settings identical. The
+common delivery window bounds issued records until consumer ACK submission.
+Confirmed mode also retains bounded outstanding confirmation credit.
+
+Both modes finish with one confirmed barrier record per publisher connection,
+outside the timed cohort. All data and barrier records must be delivered uniquely
+and settled. The unconfirmed result reports a null confirmation rate and counts
+only those final barriers as confirmed. This isolates publish modes within the
+same harness and admission bounds. Historical mode retains ten connections for
+reproducing the older workload.
+
 ## Interpretation
 
 These numbers are useful mostly as a sanity check:
@@ -42,6 +93,67 @@ The project still needs:
 - longer repeated runs using the shared harness and client-headroom sweeps
 - restart/replay timing
 - multi-consumer fairness and backpressure scenarios
+
+## Historical two-process workload reproduction
+
+`scripts/bench-e2e-history.py` preserves the original `e2e_c` writer and reader
+as separate processes, with configurable connection count and prefetch. Build
+the release binaries first, then select persistent result and storage directories:
+
+```sh
+cargo build --release --bin fibril-server --bin e2e_c
+python3 scripts/bench-e2e-history.py --output ./benchmark-results/history-01 --storage /path/to/benchmark-data
+```
+
+The default runs solo and three-copy majority sequentially, with 500,000 messages
+per connection, ten connections and 1 KiB payloads. This is five million messages
+in total. The older commands used five million **per connection**. For an equal
+total with one connection, add `--clients 1 --messages 5000000`. The runner uses
+fresh directories, checks replica readiness, keeps logs and resource samples,
+and verifies final settlement. Data remains available after failures and success.
+It requires Linux and Python 3.11 or newer for resource sampling and binary hashes.
+Repository revisions and working-tree status are captured alongside binary hashes.
+
+A 26 September 2026 SATA ext4 pass found the following with one connection and
+five million messages per row. All three replicated nodes shared the same drive
+and host. These are the initial single saturation runs, before the targeted wake-up fix,
+with default storage
+settings and no speculative delivery or early replication.
+
+| Copies | Active delivery | Publish-to-delivery p50 / p99 | Sampled broker RSS peak |
+| --- | --- | --- | --- |
+| Solo | 232,428/s | 79 / 139 ms | 570 MiB |
+| Three, majority durable | 90,752/s | 219 / 303 ms | 1,390 MiB total |
+
+Both runs received the expected count with no observed retries, then reached zero
+ready/inflight and a settled frontier of five million on every copy. The writer
+uses unconfirmed submission, so its send rate is not durable-confirm throughput.
+Constant payloads and final counts do not establish unique delivery identity.
+
+The initial ten-connection workload failed in both modes with a client heartbeat
+timeout followed by `BrokenPipe`. Reducing solo prefetch to 1,024 did not resolve
+it. Debugger stacks identified contention in ordered application, which woke all
+pending operations on every completed range. Keratin now wakes only eligible
+ranges during normal progress. Reset and failure still invalidate all waiters.
+
+The unchanged ten-connection workload then passed with five million messages,
+no observed retries, and complete settlement on every copy:
+
+| Copies | Active delivery | Publish-to-delivery p50 / p99 | Sampled broker RSS peak |
+| --- | --- | --- | --- |
+| Solo | 359,816/s | 620 / 1,009 ms | 650 MiB |
+| Three, majority durable | 93,077/s | 2,125 / 2,599 ms | 1,137 MiB total |
+
+The deeper saturation backlog raises latency. Single-connection solo repeats
+ranged from 223–232k/s before the fix and 209–244k/s afterward. These short runs do
+not establish a small performance difference. Historical SATA results were also
+reported above 250k/s, but the older OS and client prevent a controlled historical
+regression claim. The original ten-connection setup remains a regression workload.
+
+This harness differs from the shared comparison harness, whose defaults include
+a 4,096 outstanding-confirmation window, 1,024 prefetch, timed warmup and
+measurement, and message-identity validation. Align those controls before
+comparing throughput across the harnesses.
 
 ## Current TCP benchmark
 

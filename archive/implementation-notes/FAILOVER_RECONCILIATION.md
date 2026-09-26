@@ -1,5 +1,7 @@
 # Remaining-follower failover regression
 
+Historical implementation record. Current contracts live in the [documentation site](../../website/src/content/docs/implemented-surface.md).
+
 With an owner and two data followers, losing the owner promotes one follower while
 the other remains a follower. The remaining node must replace its replication
 worker's source even though its local role has not changed.

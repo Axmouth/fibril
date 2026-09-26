@@ -1,5 +1,7 @@
 # Queue declaration and replica history
 
+Historical implementation record. Current contracts live in the [documentation site](../../website/src/content/docs/implemented-surface.md).
+
 A clustered queue declaration must reach the assigned owner before that owner
 accepts publications using the declared settings. The broker receiving the
 request may be an owner, a follower, or neither.

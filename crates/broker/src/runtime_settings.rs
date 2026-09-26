@@ -205,13 +205,14 @@ pub struct ReplicationRuntimeSettings {
     pub retry_poll_ms: u64,
     /// Follower retry interval while a checkpoint install is required.
     pub checkpoint_retry_poll_ms: u64,
-    /// Maximum message records read from the owner in one follower pull.
+    /// Maximum message records in one owner read, for pull and streaming.
     pub max_messages_per_read: usize,
-    /// Maximum event records read from the owner in one follower pull.
+    /// Maximum event records in one owner read, for pull and streaming.
     pub max_events_per_read: usize,
-    /// Approximate byte budget for records read from the owner in one follower
-    /// pull. One oversized message is still allowed so replication can
-    /// progress.
+    /// Approximate byte budget for each owner log scan. An oversized record
+    /// and accompanying events can make the response exceed this budget.
+    /// Also sets the initial byte credit when a follower starts a stream. Owner
+    /// read limits update per batch, while initial credit requires a new stream.
     pub max_bytes_per_read: usize,
     /// Maximum pull/apply iterations a follower performs before yielding.
     pub max_iterations_per_tick: usize,

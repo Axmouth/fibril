@@ -209,7 +209,11 @@ pub(crate) fn accepted_history(
     snapshot: &CoordinationSnapshot,
     resource: &ganglion_core::ResourceIdentity,
 ) -> Result<fibril_broker::history_replication::AcceptedHistory, String> {
-    crate::queue_learner::extend(snapshot, resource, base_history(snapshot, resource)?)
+    crate::queue_reseed::project(
+        snapshot,
+        resource,
+        crate::queue_learner::extend(snapshot, resource, base_history(snapshot, resource)?)?,
+    )
 }
 
 pub(crate) fn base_history(
@@ -244,6 +248,8 @@ pub(crate) fn base_history(
         activation: *digest.finalize().as_bytes(),
         binding: decision.binding,
         blocked_local_replica: None,
+        suspended_replicas: Default::default(),
+        replica_generations: Default::default(),
         owner: decision.assignment.owner,
         replicas: quorum
             .reports

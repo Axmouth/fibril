@@ -47,6 +47,12 @@ pub enum OwnerStreamControl {
 /// unit-testable without a live engine.
 #[async_trait]
 pub trait OwnerStreamSource: Send + Sync + 'static {
+    /// Snapshot live read limits once per batch. Test sources may use the
+    /// configuration supplied when the stream starts.
+    fn stream_config(&self) -> Option<OwnerStreamConfig> {
+        None
+    }
+
     /// Read the next offset-ordered batch from the owner log. `max_wait_ms`
     /// long-polls so a caught-up stream wakes on the next publish.
     async fn read(
@@ -79,7 +85,8 @@ pub trait OwnerStreamSource: Send + Sync + 'static {
 pub struct OwnerStreamConfig {
     pub max_messages: usize,
     pub max_events: usize,
-    /// Per-batch byte cap, independent of credit (bounds one read's size).
+    /// Approximate per-read byte budget, independent of credit. Oversized
+    /// records and accompanying events can exceed it to preserve progress.
     pub max_batch_bytes: usize,
     /// Long-poll budget for a caught-up read.
     pub long_poll_ms: u64,
@@ -93,6 +100,31 @@ impl Default for OwnerStreamConfig {
             max_batch_bytes: 8 * 1024 * 1024,
             long_poll_ms: 1_000,
         }
+    }
+}
+
+/// A read may exceed its budget to make progress on an oversized record.
+/// Keep that excess as debt so returning the batch cannot grow the window.
+struct StreamCredit {
+    available: u64,
+    debt: u64,
+}
+
+impl StreamCredit {
+    fn new(available: u64) -> Self {
+        Self { available, debt: 0 }
+    }
+
+    fn consume(&mut self, bytes: u64) {
+        let paid = bytes.min(self.available);
+        self.available -= paid;
+        self.debt = self.debt.saturating_add(bytes - paid);
+    }
+
+    fn replenish(&mut self, bytes: u64) {
+        let paid = bytes.min(self.debt);
+        self.debt -= paid;
+        self.available = self.available.saturating_add(bytes - paid);
     }
 }
 
@@ -236,7 +268,7 @@ fn apply_control<S: OwnerStreamSource>(
     partition: Partition,
     group: Option<&str>,
     reporter: Option<&str>,
-    credit: &mut u64,
+    credit: &mut StreamCredit,
     message_from: &mut u64,
     event_from: &mut u64,
 ) -> bool {
@@ -246,7 +278,7 @@ fn apply_control<S: OwnerStreamSource>(
             durable_event_next,
             credit_add_bytes,
         } => {
-            *credit = credit.saturating_add(credit_add_bytes);
+            credit.replenish(credit_add_bytes);
             if let Some(reporter) = reporter {
                 source.record_progress(
                     topic,
@@ -511,10 +543,17 @@ mod tests {
     struct MockSource {
         total: u64,
         progress: Mutex<Vec<(u64, u64)>>,
+        config: Mutex<Option<OwnerStreamConfig>>,
+        reads: Mutex<Vec<(usize, usize, usize, u64)>>,
+        read_gate: Option<Arc<tokio::sync::Semaphore>>,
     }
 
     #[async_trait]
     impl OwnerStreamSource for MockSource {
+        fn stream_config(&self) -> Option<OwnerStreamConfig> {
+            *self.config.lock().unwrap()
+        }
+
         async fn read(
             &self,
             _topic: &str,
@@ -522,15 +561,25 @@ mod tests {
             _group: Option<&str>,
             message_from: u64,
             event_from: u64,
-            _max_messages: usize,
-            _max_events: usize,
+            max_messages: usize,
+            max_events: usize,
             max_bytes: usize,
             max_wait_ms: u64,
         ) -> Result<ReplicationReadOk, String> {
+            self.reads
+                .lock()
+                .unwrap()
+                .push((max_messages, max_events, max_bytes, max_wait_ms));
+            if let Some(gate) = &self.read_gate {
+                gate.acquire().await.unwrap().forget();
+            }
             let mut records = Vec::new();
             let mut off = message_from;
             let mut bytes = 0u64;
-            while off < self.total && bytes + REC_BYTES <= max_bytes as u64 {
+            while off < self.total
+                && records.len() < max_messages
+                && (records.is_empty() || bytes + REC_BYTES <= max_bytes as u64)
+            {
                 records.push(ReplicationMessageRecord {
                     offset: off,
                     flags: 0,
@@ -619,6 +668,9 @@ mod tests {
         let source = Arc::new(MockSource {
             total: 5,
             progress: Mutex::new(Vec::new()),
+            config: Mutex::new(None),
+            reads: Mutex::new(Vec::new()),
+            read_gate: None,
         });
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
         let (control_tx, control_rx) = mpsc::channel(8);
@@ -666,6 +718,9 @@ mod tests {
         let source = Arc::new(MockSource {
             total: 10,
             progress: Mutex::new(Vec::new()),
+            config: Mutex::new(None),
+            reads: Mutex::new(Vec::new()),
+            read_gate: None,
         });
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
         let (control_tx, control_rx) = mpsc::channel(8);
@@ -703,6 +758,182 @@ mod tests {
 
         control_tx.send(OwnerStreamControl::Stop).await.unwrap();
         let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
+    }
+
+    #[tokio::test]
+    async fn oversized_records_repay_debt_without_inflating_the_window() {
+        let source = Arc::new(MockSource {
+            total: 10,
+            progress: Mutex::new(Vec::new()),
+            config: Mutex::new(None),
+            reads: Mutex::new(Vec::new()),
+            read_gate: None,
+        });
+        let (frame_tx, mut frame_rx) = mpsc::channel(64);
+        let (control_tx, control_rx) = mpsc::channel(8);
+        // One-and-a-half records of credit permits two records, then owes half.
+        let task = tokio::spawn(run_owner_replication_stream(
+            source.clone(),
+            frame_tx,
+            1,
+            start(150),
+            control_rx,
+            cfg(),
+        ));
+        assert_eq!(recv_offsets(&mut frame_rx, 2).await, vec![0, 1]);
+        for offset in 2..6 {
+            control_tx
+                .send(OwnerStreamControl::Progress {
+                    durable_message_next: offset,
+                    durable_event_next: 0,
+                    credit_add_bytes: REC_BYTES,
+                })
+                .await
+                .unwrap();
+            assert_eq!(recv_offsets(&mut frame_rx, 1).await, vec![offset]);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(30), frame_rx.recv())
+                    .await
+                    .is_err()
+            );
+        }
+        // Every returned record restores only half a record of available credit.
+        let budgets: Vec<_> = source.reads.lock().unwrap().iter().map(|r| r.2).collect();
+        assert_eq!(budgets, vec![100, 50, 50, 50, 50, 50]);
+        control_tx.send(OwnerStreamControl::Stop).await.unwrap();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn live_read_limits_apply_to_the_next_batch_on_an_existing_stream() {
+        let source = Arc::new(MockSource {
+            total: 10,
+            progress: Mutex::new(Vec::new()),
+            config: Mutex::new(Some(OwnerStreamConfig {
+                max_messages: 2,
+                max_events: 3,
+                max_batch_bytes: 200,
+                long_poll_ms: 17,
+            })),
+            reads: Mutex::new(Vec::new()),
+            read_gate: None,
+        });
+        let (frame_tx, mut frame_rx) = mpsc::channel(64);
+        let (control_tx, control_rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_owner_replication_stream(
+            source.clone(),
+            frame_tx,
+            1,
+            start(200),
+            control_rx,
+            cfg(),
+        ));
+        assert_eq!(recv_offsets(&mut frame_rx, 1).await, vec![0, 1]);
+        *source.config.lock().unwrap() = Some(OwnerStreamConfig {
+            max_messages: 1,
+            max_events: 7,
+            max_batch_bytes: 100,
+            long_poll_ms: 23,
+        });
+        control_tx
+            .send(OwnerStreamControl::Progress {
+                durable_message_next: 2,
+                durable_event_next: 0,
+                credit_add_bytes: 200,
+            })
+            .await
+            .unwrap();
+        assert_eq!(recv_offsets(&mut frame_rx, 2).await, vec![2, 3]);
+        assert_eq!(
+            *source.reads.lock().unwrap(),
+            vec![(2, 3, 200, 17), (1, 7, 100, 23), (1, 7, 100, 23)]
+        );
+        control_tx.send(OwnerStreamControl::Stop).await.unwrap();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn progress_preserves_a_pending_read_but_reset_and_stop_cancel_it() {
+        async fn until(check: impl Fn() -> bool) {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !check() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("control was not processed");
+        }
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let source = Arc::new(MockSource {
+            total: 10,
+            progress: Mutex::new(Vec::new()),
+            config: Mutex::new(None),
+            reads: Mutex::new(Vec::new()),
+            read_gate: Some(gate.clone()),
+        });
+        let (frame_tx, mut frame_rx) = mpsc::channel(64);
+        let (control_tx, control_rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_owner_replication_stream(
+            source.clone(),
+            frame_tx,
+            1,
+            start(REC_BYTES),
+            control_rx,
+            cfg(),
+        ));
+        until(|| source.reads.lock().unwrap().len() == 1).await;
+        for count in 1..=3 {
+            control_tx
+                .send(OwnerStreamControl::Progress {
+                    durable_message_next: 0,
+                    durable_event_next: 0,
+                    credit_add_bytes: 0,
+                })
+                .await
+                .unwrap();
+            until(|| source.progress.lock().unwrap().len() == count).await;
+        }
+        gate.add_permits(1);
+        assert_eq!(recv_offsets(&mut frame_rx, 1).await, vec![0]);
+        assert_eq!(
+            source.reads.lock().unwrap().len(),
+            1,
+            "progress must not restart a scan"
+        );
+        control_tx
+            .send(OwnerStreamControl::Progress {
+                durable_message_next: 1,
+                durable_event_next: 0,
+                credit_add_bytes: REC_BYTES,
+            })
+            .await
+            .unwrap();
+        until(|| source.reads.lock().unwrap().len() == 2).await;
+        control_tx
+            .send(OwnerStreamControl::Reset {
+                message_from: 4,
+                event_from: 0,
+            })
+            .await
+            .unwrap();
+        until(|| source.reads.lock().unwrap().len() == 3).await;
+        gate.add_permits(1);
+        assert_eq!(recv_offsets(&mut frame_rx, 1).await, vec![4]);
+        control_tx
+            .send(OwnerStreamControl::Progress {
+                durable_message_next: 5,
+                durable_event_next: 0,
+                credit_add_bytes: REC_BYTES,
+            })
+            .await
+            .unwrap();
+        until(|| source.reads.lock().unwrap().len() == 4).await;
+        control_tx.send(OwnerStreamControl::Stop).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(frame_rx.recv().await.is_none());
     }
 
     // ---- follower applier ----
@@ -1075,11 +1306,11 @@ pub async fn run_owner_replication_stream<S: OwnerStreamSource>(
     let reporter = start.reporter_node_id;
     let mut message_from = start.message_from;
     let mut event_from = start.event_from;
-    let mut credit = start.credit_bytes;
+    let mut credit = StreamCredit::new(start.credit_bytes);
 
-    loop {
+    'stream: loop {
         // Out of budget: park until the follower refills (or stops / drops).
-        if credit == 0 {
+        if credit.available == 0 {
             match control_rx.recv().await {
                 Some(control) => {
                     if !apply_control(
@@ -1093,15 +1324,16 @@ pub async fn run_owner_replication_stream<S: OwnerStreamSource>(
                         &mut message_from,
                         &mut event_from,
                     ) {
-                        break;
+                        break 'stream;
                     }
-                    continue;
+                    continue 'stream;
                 }
-                None => break,
+                None => break 'stream,
             }
         }
 
-        let max_bytes = credit.min(cfg.max_batch_bytes as u64) as usize;
+        let cfg = source.stream_config().unwrap_or(cfg);
+        let max_bytes = credit.available.min(cfg.max_batch_bytes as u64) as usize;
         let read = source.read(
             &topic,
             partition,
@@ -1114,62 +1346,71 @@ pub async fn run_owner_replication_stream<S: OwnerStreamSource>(
             cfg.long_poll_ms,
         );
 
-        tokio::select! {
-            // React to control even while the long-poll read is parked. The read
-            // future is a pure scan (no lease), so dropping it is safe.
-            control = control_rx.recv() => {
-                match control {
-                    Some(control) => {
-                        if !apply_control(
-                            control,
-                            source.as_ref(),
-                            &topic,
-                            partition,
-                            group.as_deref(),
-                            reporter.as_deref(),
-                            &mut credit,
-                            &mut message_from,
-                            &mut event_from,
-                        ) {
-                            break;
-                        }
-                    }
-                    None => break,
-                }
-            }
-            result = read => {
-                match result {
-                    Ok(batch) => match classify(&batch) {
-                        BatchOutcome::Empty => continue,
-                        BatchOutcome::CheckpointRequired => {
-                            send_stream_end(
-                                &frame_tx,
-                                stream_id,
-                                STREAM_END_CHECKPOINT_REQUIRED,
-                                "checkpoint required",
-                            )
-                            .await;
-                            break;
-                        }
-                        BatchOutcome::Records { bytes, message_next, event_next } => {
-                            let frame = match wire::encode_replication_stream_batch(stream_id, &batch) {
-                                Ok(frame) => frame,
-                                Err(err) => {
-                                    send_stream_end(&frame_tx, stream_id, STREAM_END_ERROR, &err.to_string()).await;
-                                    break;
-                                }
-                            };
-                            if frame_tx.send(frame).await.is_err() {
-                                break;
+        tokio::pin!(read);
+        loop {
+            tokio::select! {
+                // Progress only updates credit and durable acknowledgements. Keep
+                // the scan alive across progress so its blocking storage work is not
+                // discarded and restarted. Reset and stop still cancel promptly.
+                control = control_rx.recv() => {
+                    match control {
+                        Some(control) => {
+                            let reset = matches!(control, OwnerStreamControl::Reset { .. });
+                            if !apply_control(
+                                control,
+                                source.as_ref(),
+                                &topic,
+                                partition,
+                                group.as_deref(),
+                                reporter.as_deref(),
+                                &mut credit,
+                                &mut message_from,
+                                &mut event_from,
+                            ) {
+                                break 'stream;
                             }
-                            message_from = message_next;
-                            event_from = event_next;
-                            credit = credit.saturating_sub(bytes);
+                            if reset {
+                                continue 'stream;
+                            }
                         }
-                    },
-                    Err(err) => {
-                        send_stream_end(&frame_tx, stream_id, STREAM_END_ERROR, &err).await;
-                        break;
+                        None => break 'stream,
+                    }
+                }
+                result = &mut read => {
+                    match result {
+                        Ok(batch) => match classify(&batch) {
+                            BatchOutcome::Empty => continue 'stream,
+                            BatchOutcome::CheckpointRequired => {
+                                send_stream_end(
+                                    &frame_tx,
+                                    stream_id,
+                                    STREAM_END_CHECKPOINT_REQUIRED,
+                                    "checkpoint required",
+                                )
+                                .await;
+                                break 'stream;
+                            }
+                            BatchOutcome::Records { bytes, message_next, event_next } => {
+                                let frame = match wire::encode_replication_stream_batch(stream_id, &batch) {
+                                    Ok(frame) => frame,
+                                    Err(err) => {
+                                        send_stream_end(&frame_tx, stream_id, STREAM_END_ERROR, &err.to_string()).await;
+                                        break 'stream;
+                                    }
+                                };
+                                if frame_tx.send(frame).await.is_err() {
+                                    break 'stream;
+                                }
+                                message_from = message_next;
+                                event_from = event_next;
+                                credit.consume(bytes);
+                                continue 'stream;
+                            }
+                        },
+                        Err(err) => {
+                            send_stream_end(&frame_tx, stream_id, STREAM_END_ERROR, &err).await;
+                            break 'stream;
+                        }
                     }
                 }
             }
