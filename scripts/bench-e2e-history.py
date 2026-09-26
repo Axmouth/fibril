@@ -7,6 +7,8 @@ Earlier publishes use the historical unconfirmed writer and latency-tracking
 reader. The final message on each writer is confirmed before exit to drain finite
 runs safely. --rate-per-sec selects the steady_c paced workload on the same setup.
 Results and data remain under explicit persistent directories, including failures.
+For split-drive checks, --copies 3 --node-storage ROOT0 ROOT1 ROOT2 selects each
+node's storage root. Recorded topology identifies which node became the owner.
 """
 import argparse
 import hashlib
@@ -106,6 +108,15 @@ def run(args, copies):
     data = args.storage / f"{args.output.name}-copies-{copies}"
     case.mkdir(parents=True, exist_ok=False)
     data.mkdir(parents=True, exist_ok=False)
+    node_data = []
+    created_parents = {data}
+    for i in range(copies):
+        base = args.node_storage[i] if args.node_storage else args.storage
+        parent = base / data.name
+        if parent not in created_parents:
+            parent.mkdir(parents=True, exist_ok=False)
+            created_parents.add(parent)
+        node_data.append(parent / f"node-{i}")
     allocated = ports(copies * 3)
     endpoints = [f"http://127.0.0.1:{allocated[i * 3 + 1]}" for i in range(copies)]
     processes, logs, servers = [], [], []
@@ -153,7 +164,7 @@ def run(args, copies):
 
     try:
         for i in range(copies):
-            node_dir = data / f"node-{i}"
+            node_dir = node_data[i]
             node_dir.mkdir()
             node_env = env.copy()
             command = [str(args.bin_dir / "fibril-server"), "--data-dir", str(node_dir / "data"),
@@ -229,13 +240,15 @@ def run(args, copies):
         save(case / "settled.json", wait_for(lambda: topology(expected), 120))
         save(case / "result.json", {"status": "passed", "copies": copies, "messages": expected,
             "payload_bytes": args.size, "clients": args.clients, "prefetch": args.prefetch, "data": str(data),
+            "node_data": [str(p) for p in node_data],
             "writer_confirms": False, "final_publish_confirmed": not bool(args.rate_per_sec),
             "warmup": bool(args.rate_per_sec and args.warmup_secs),
             "offered_rate": args.rate_per_sec,
             "sampled_peak_broker_rss_kib": max(sum(p.get("rss_kib", 0) for p in s["servers"]) for s in samples)})
         print(f"copies={copies}: complete, results={case}", flush=True)
     except BaseException as error:
-        save(case / "result.json", {"status": "failed", "error": str(error), "data": str(data)})
+        save(case / "result.json", {"status": "failed", "error": str(error), "data": str(data),
+            "node_data": [str(p) for p in node_data]})
         for i, endpoint in enumerate(endpoints):
             try:
                 save(case / f"node-{i}-failure-state.json", http(endpoint, "/admin/api/queues_debug"))
@@ -262,6 +275,8 @@ def main():
     parser.add_argument("--bin-dir", type=Path, default=Path("target/release"))
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--storage", type=Path, required=True)
+    parser.add_argument("--node-storage", type=Path, nargs=3,
+                        help="Per-node storage roots for a three-copy run, in node order")
     parser.add_argument("--copies", type=int, choices=[1, 3], nargs="+", default=[1, 3])
     parser.add_argument("--messages", type=int, default=500_000, help="Messages per connection")
     parser.add_argument("--clients", type=int, default=10)
@@ -276,6 +291,8 @@ def main():
                         help="Extra TOML sections for three-copy node configs")
     parser.add_argument("--rust-log", default="warn", help="Broker/client tracing filter")
     args = parser.parse_args()
+    if args.node_storage and args.copies != [3]:
+        parser.error("--node-storage requires --copies 3")
     for name in ("messages", "clients", "size", "prefetch", "timeout"):
         if getattr(args, name) < 1:
             parser.error(f"{name} must be positive")
@@ -287,11 +304,20 @@ def main():
         setattr(args, name, getattr(args, name).resolve())
     args.output.mkdir(parents=True, exist_ok=False)
     args.storage.mkdir(parents=True, exist_ok=True)
+    if args.node_storage:
+        args.node_storage = [p.resolve() for p in args.node_storage]
+        for path in args.node_storage:
+            path.mkdir(parents=True, exist_ok=True)
+    argv = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
+    argv["node_storage"] = [str(p) for p in args.node_storage] if args.node_storage else None
     save(args.output / "environment.json", {"platform": platform.platform(),
-        "argv": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
+        "argv": argv,
         "provenance": provenance(args.bin_dir, bool(args.rate_per_sec)),
         "storage_filesystem": json.loads(subprocess.check_output(
             ["findmnt", "--json", "--target", str(args.storage)], text=True)),
+        "node_storage_filesystems": [json.loads(subprocess.check_output(
+            ["findmnt", "--json", "--target", str(path)], text=True))
+            for path in (args.node_storage or [])],
         "thp": Path("/sys/kernel/mm/transparent_hugepage/enabled").read_text().strip()})
     for copies in args.copies:
         run(args, copies)
