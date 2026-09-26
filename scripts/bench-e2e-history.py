@@ -6,6 +6,7 @@ This preserves the historical unconfirmed writer and latency-tracking reader.
 Results and data remain under explicit persistent directories, including failures.
 """
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -21,6 +22,28 @@ import urllib.request
 
 def save(path, value):
     path.write_text(json.dumps(value, indent=2) + "\n")
+
+
+def provenance(bin_dir):
+    binaries = {}
+    for name in ("fibril-server", "e2e_c"):
+        path = bin_dir / name
+        with path.open("rb") as binary:
+            binaries[name] = {"path": str(path.resolve()),
+                              "sha256": hashlib.file_digest(binary, "sha256").hexdigest()}
+    source = Path(__file__).resolve().parents[1]
+    repositories = {}
+    for name, path in (("fibril", source), ("keratin", source.parent / "keratin"),
+                       ("ganglion", source.parent / "ganglion")):
+        try:
+            repositories[name] = {
+                "revision": subprocess.check_output(["git", "-C", str(path), "rev-parse", "HEAD"], text=True).strip(),
+                "status": subprocess.check_output(["git", "-C", str(path), "status", "--porcelain"], text=True),
+            }
+        except subprocess.CalledProcessError:
+            repositories[name] = {"unavailable": True}
+    return {"binaries": binaries, "repositories_at_run_time": repositories,
+            "note": "Repository state does not prove the build provenance of prebuilt binaries."}
 
 
 def http(base, path, body=None):
@@ -231,7 +254,7 @@ def main():
     args.storage.mkdir(parents=True, exist_ok=True)
     save(args.output / "environment.json", {"platform": platform.platform(),
         "argv": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
-        "revision": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+        "provenance": provenance(args.bin_dir),
         "thp": Path("/sys/kernel/mm/transparent_hugepage/enabled").read_text().strip()})
     for copies in args.copies:
         run(args, copies)

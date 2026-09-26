@@ -6,7 +6,9 @@ Promotion requires the message coverage referenced by the installed state.
 
 The original reproductions below used Fibril `59d47be` and Keratin `11ef6a9`.
 Payload-coverage promotion guards and recoverable local checkpoint installation
-are now implemented. Full coordinated failover proof remains pending.
+are implemented. Coordinated queue recovery now adds certified source selection,
+new-quorum activation and exact-process admission. Current protocol details are
+in [recovery sealing](website/src/content/docs/reliability/recovery-sealing.mdx).
 
 ## Original reproductions
 
@@ -76,9 +78,9 @@ Queue-state references retain the required message coverage across restart.
 Owner activation and promotion wait for that coverage, including ready,
 inflight, delayed, pending-DLQ and settled history. This requirement does not
 prove the old owner's complete confirmed history or replace source validation.
-The current install request carries the backfill start rather than a certified
-owner tail; coordinated recovery still needs a validated history/dependency
-manifest.
+The local install request carries the backfill start. Coordinated recovery
+validates the history and dependency evidence in its retained plan before
+activation. Local payload coverage alone remains insufficient for promotion.
 
 Linux validation covers each installation boundary through injected errors,
 caller cancellation, restart and child-process SIGKILL. Other cases cover
@@ -93,12 +95,11 @@ an implementation and platform validation before enabling this installation path
 
 ## Remaining acceptance gates
 
-- Authenticated checkpoint source selection bound to the committed transition,
-  retained data-history identity and compatible authoritative evidence.
-- New-write-quorum installation and activation, preserving the old confirmation
-  requirement through repeated failures and membership changes.
-- Broker-level failover during checkpoint catch-up, including controller and
-  candidate restart, old-owner isolation and unavailable witnesses returning.
+- Resumable recovery beyond current history and snapshot budgets.
+- Persistent replica storage failures, cooperative relinquishment and the
+  remaining early-replication failure schedules.
+- Broader network-partition and unavailable-witness scenarios, with the exact
+  tested scope maintained in the failover plan.
 - Windows durable metadata support and platform-specific crash testing.
 - Power-loss testing of filesystem/device persistence ordering.
 

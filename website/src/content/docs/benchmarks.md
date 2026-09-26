@@ -60,11 +60,13 @@ in total. The older commands used five million **per connection**. For an equal
 total with one connection, add `--clients 1 --messages 5000000`. The runner uses
 fresh directories, checks replica readiness, keeps logs and resource samples,
 and verifies final settlement. Data remains available after failures and success.
-It currently requires Linux for process memory and CPU sampling.
+It requires Linux and Python 3.11 or newer for resource sampling and binary hashes.
+Repository revisions and working-tree status are captured alongside binary hashes.
 
 A 26 September 2026 SATA ext4 pass found the following with one connection and
 five million messages per row. All three replicated nodes shared the same drive
-and host. These are single saturation runs on current main, with default storage
+and host. These are the initial single saturation runs, before the targeted wake-up fix,
+with default storage
 settings and no speculative delivery or early replication.
 
 | Copies | Active delivery | Publish-to-delivery p50 / p99 | Sampled broker RSS peak |
@@ -77,12 +79,30 @@ ready/inflight and a settled frontier of five million on every copy. The writer
 uses unconfirmed submission, so its send rate is not durable-confirm throughput.
 Constant payloads and final counts do not establish unique delivery identity.
 
-The original ten-connection workload failed in both modes with a client heartbeat
-timeout followed by `BrokenPipe`. Reducing solo prefetch from 16,384 to 1,024 did
-not resolve it. Those failed runs have no reported throughput result. Connection
-progress under saturation remains an investigation item, and the failing setup
-is retained as a regression workload. Historical SATA results were also reported
-above 250k/s, but the older OS and client prevent a controlled regression claim.
+The initial ten-connection workload failed in both modes with a client heartbeat
+timeout followed by `BrokenPipe`. Reducing solo prefetch to 1,024 did not resolve
+it. Debugger stacks identified contention in ordered application, which woke all
+pending operations on every completed range. Keratin now wakes only eligible
+ranges during normal progress. Reset and failure still invalidate all waiters.
+
+The unchanged ten-connection workload then passed with five million messages,
+no observed retries, and complete settlement on every copy:
+
+| Copies | Active delivery | Publish-to-delivery p50 / p99 | Sampled broker RSS peak |
+| --- | --- | --- | --- |
+| Solo | 359,816/s | 620 / 1,009 ms | 650 MiB |
+| Three, majority durable | 93,077/s | 2,125 / 2,599 ms | 1,137 MiB total |
+
+The deeper saturation backlog raises latency. Single-connection solo repeats
+ranged from 223–232k/s before the fix and 209–244k/s afterward. These short runs do
+not establish a small performance difference. Historical SATA results were also
+reported above 250k/s, but the older OS and client prevent a controlled historical
+regression claim. The original ten-connection setup remains a regression workload.
+
+This harness differs from the shared comparison harness, whose defaults include
+a 4,096 outstanding-confirmation window, 1,024 prefetch, timed warmup and
+measurement, and message-identity validation. Align those controls before
+comparing throughput across the harnesses.
 
 ## Current TCP benchmark
 

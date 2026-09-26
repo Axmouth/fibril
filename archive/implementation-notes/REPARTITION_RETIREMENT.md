@@ -1,5 +1,7 @@
 # Repartition retirement and late cleanup
 
+Historical implementation record. Current contracts live in the [documentation site](../../website/src/content/docs/implemented-surface.md).
+
 Native live grow/shrink testing exposed two independent races after a drained
 partition was removed. Both reproduced with full-topology and targeted routing.
 

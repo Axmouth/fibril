@@ -451,3 +451,5 @@ Performance characteristics are expected to evolve significantly as the system m
 * **Exchanges and bindings**
 
   Implementing concepts like exchanges and bindings to provide more flexible routing options.
+
+Historical design records are indexed in the [archive](archive/README.md).

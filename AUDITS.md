@@ -39,7 +39,7 @@ worth a fresh pass.
     the concurrent-declare race in the task tracker.
 - [x] Stream operational parity with queues
   - Status: Addressed
-  - Detail: [STREAM_PARITY_AUDIT.md](STREAM_PARITY_AUDIT.md). All five gaps
+  - Detail: [STREAM_PARITY_AUDIT.md](archive/implementation-notes/STREAM_PARITY_AUDIT.md). All five gaps
     closed: lag gap-skip contiguity fix, idle eviction with an ephemeral
     flush dirty-gate, stream traffic in BrokerStats, shutdown cursor flush,
     and lag observability on the admin streams page.

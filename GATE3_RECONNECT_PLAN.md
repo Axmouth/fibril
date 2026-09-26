@@ -55,4 +55,4 @@ semantics and are outside this completion pass.
 
 Historical protocol decisions and validation records are in
 [Reconnect design](archive/implementation-notes/RECONNECT_DESIGN.md) and
-[stale-delivery settlement](STALE_TAG_104_PLAN.md).
+[stale-delivery settlement](archive/implementation-notes/STALE_TAG_104_PLAN.md).

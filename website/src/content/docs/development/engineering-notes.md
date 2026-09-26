@@ -41,6 +41,14 @@ Boosted navigation releases page interaction listeners, timers, visibility
 callbacks and event streams. Disposed polling and queued stream callbacks cannot
 restart polling or restore an old page's scroll position.
 
+### Ordered application wake-up contention
+
+Normal ordered-application progress now wakes only eligible offset ranges,
+while reset and failure still wake invalidated operations. This removes the
+wake-up storm reproduced by the historical ten-connection workload, with
+[benchmark results](/benchmarks/#historical-two-process-workload-reproduction)
+and storage, checkpoint and recovery regressions covering the change.
+
 ### Owner storage-error acceptance screen
 
 An isolated early-replication experiment passes 48 schedules covering both logs,

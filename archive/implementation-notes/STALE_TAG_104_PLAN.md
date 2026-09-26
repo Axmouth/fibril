@@ -1,5 +1,7 @@
 # Stale-delivery settlement design
 
+Historical implementation record. Current contracts live in the [documentation site](../../website/src/content/docs/implemented-surface.md).
+
 Manual deliveries retain their topic, group, partition, tag and connection
 incarnation. Settlement resolves the current connection binding atomically:
 a matching incarnation routes the operation to the live engine; a stale one
@@ -7,9 +9,9 @@ returns a typed error without sending a frame. This design is implemented in
 Rust, TypeScript, Python, Go and C#.
 
 The user-facing contract is documented in
-[implemented surface](website/src/content/docs/implemented-surface.md#reconnects).
+[implemented surface](../../website/src/content/docs/implemented-surface.md#reconnects).
 Remaining stream settlement work is in
-[GATE3_RECONNECT_PLAN.md](GATE3_RECONNECT_PLAN.md).
+[GATE3_RECONNECT_PLAN.md](../../GATE3_RECONNECT_PLAN.md).
 
 ## Design (as built for the Rust reference)
 
