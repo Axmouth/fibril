@@ -48,6 +48,7 @@ async fn run_load_test(
     ready_dir: Option<PathBuf>,
     idle_timeout_ms: u64,
     confirmed: bool,
+    confirm_final: bool,
     firehose: bool,
     nack_every: u64,
     topic: std::sync::Arc<str>,
@@ -175,7 +176,7 @@ async fn run_load_test(
                 let publisher = client_pub.publisher(topic_pub.as_ref()).unwrap();
 
                 for i in 1..=msgs_per_client {
-                    if confirmed {
+                    if confirmed || (confirm_final && i == msgs_per_client) {
                         publisher
                             .publish_confirmed(NewMessage::raw(payload.clone()))
                             .await
@@ -356,6 +357,13 @@ struct Args {
     #[arg(long, default_value_t = false)]
     confirmed: bool,
 
+    /// Confirm the final message on each writer connection before finishing.
+    /// Earlier writes remain unconfirmed. Useful for finite benchmark runs whose
+    /// queued socket tail can outlive the legacy two-second process grace period.
+    /// Use with one partition. This is not a general multi-owner drain operation.
+    #[arg(long, default_value_t = false)]
+    confirm_final: bool,
+
     /// Reader firehose mode: drain and ack only, skipping per-message latency
     /// tracking (the unbounded latency Vecs, clock reads, and header lookup) so
     /// the client stops being the bottleneck when isolating broker delivery.
@@ -401,6 +409,7 @@ async fn main() {
             args.ready_dir,
             args.idle_timeout_ms,
             args.confirmed,
+            args.confirm_final,
             args.firehose,
             args.nack_every,
             args.topic.into(),
