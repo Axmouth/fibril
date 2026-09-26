@@ -77,7 +77,7 @@ const version = versionMatch ? `v${versionMatch[1]}` : "0.x";
     <CodePanel />
 
     <section class="feature-grid" aria-label="Core capabilities">
-      <FeatureCard number="01" title="Durable by default">Append-only logs, snapshot, and replay are part of the model.</FeatureCard>
+      <FeatureCard number="01" title="Durable by default">Queue publish confirmations wait for the message and the state needed to recover it to cross the persistence boundary.</FeatureCard>
       <FeatureCard number="02" title="Clients that read like intent">Complete, retry, delay, or fail work without building broker rituals into your app.</FeatureCard>
       <FeatureCard number="03" title="Lease under load">Pull-based delivery and bounded prefetch make pressure visible.</FeatureCard>
       <FeatureCard number="04" title="Fan-out streams">Plexus streams broadcast each record to every subscriber, alongside the work queues, with durability tiers you opt into.</FeatureCard>
@@ -95,13 +95,15 @@ const version = versionMatch ? `v${versionMatch[1]}` : "0.x";
 
     <section class="section-split benchmark" id="benchmarks">
       <div class="section-intro">
-        <p class="eyebrow">early observation</p>
-        <h2>A durable path with room to sharpen.</h2>
+        <p class="eyebrow">durable queue throughput</p>
+        <h2>Persisted. Confirmed. Still fast.</h2>
+        <p>By default, a queue publish confirmation means the message and its enqueue state have crossed the persistence boundary through fsync. Replicated durable policies also wait for the required replicas to persist them.</p>
+        <a class="inline-link" href="/reliability/replication/">Explore confirmation guarantees <span>→</span></a>
       </div>
       <div class="benchmark-panel">
         <div><strong>250k+</strong><span>messages/sec ingress</span></div>
         <div><strong>250k+</strong><span>messages/sec egress</span></div>
-        <p>Informal internal measurements with 1KB payloads on a Ryzen 5950X. These are architectural sanity checks, not a polished benchmark suite.</p>
+        <p>Observed on a single node with 1 KiB payloads on a Ryzen 5950X, using the durable queue path. These figures measure ingress and delivery throughput. The historical workload does not await a confirmation for every publish. <a href="/benchmarks/#historical-two-process-workload-reproduction">Workload, results and measurement details →</a></p>
       </div>
     </section>
   </main>

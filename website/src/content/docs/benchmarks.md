@@ -24,6 +24,20 @@ Internal measurements with the current TCP transport and durable path on a singl
 
 Memory usage during these runs ranged from a few hundred MB at lower load to roughly 1-2GB near peak throughput, depending on queue depth, batching, and inflight state.
 
+### What the durability claim means
+
+Default queue publish confirmations wait for both the message and its enqueue
+state to cross the persistence boundary through fsync. Replicated durable
+policies additionally wait for persistence on the required replicas. The
+[confirmation policy](/reliability/replication/#durability-levels) determines that
+requirement.
+
+The front-page throughput figures describe the durable queue path on one node.
+The historical writer submits messages without awaiting a confirmation for each
+publish, so those figures are not a measurement of individual publish-confirmation
+throughput. A confirmed-publish rate needs a run that measures completed
+confirmations with a documented outstanding-confirmation window.
+
 ## Interpretation
 
 These numbers are useful mostly as a sanity check:
