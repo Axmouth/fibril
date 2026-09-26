@@ -862,6 +862,20 @@ impl StromaEngine {
             .await
     }
 
+    pub async fn read_owner_message_records_with_byte_budget(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        from: Offset,
+        max: usize,
+        max_bytes: usize,
+    ) -> Result<OwnerReplicationRead<Message>, StromaError> {
+        self.inner
+            .read_owner_message_records_with_byte_budget(tp, part, group, from, max, max_bytes)
+            .await
+    }
+
     pub async fn read_owner_event_records(
         &self,
         tp: &str,
@@ -872,6 +886,20 @@ impl StromaEngine {
     ) -> Result<OwnerReplicationRead<StromaEvent>, StromaError> {
         self.inner
             .read_owner_event_records(tp, part, group, from, max)
+            .await
+    }
+
+    pub async fn read_owner_event_records_with_byte_budget(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        from: Offset,
+        max: usize,
+        max_bytes: usize,
+    ) -> Result<OwnerReplicationRead<StromaEvent>, StromaError> {
+        self.inner
+            .read_owner_event_records_with_byte_budget(tp, part, group, from, max, max_bytes)
             .await
     }
 

@@ -1920,6 +1920,37 @@ mod replication_byte_limit_tests {
     }
 
     #[test]
+    fn byte_cap_lookahead_preserves_snapshot_deferral() {
+        let records = BrokerOwnerReplicationRecords {
+            // One accepted record and one lookahead from a bounded storage scan.
+            messages: message_batch(10, 12, vec![(10, message(16)), (11, message(16))]),
+            events: event_batch(
+                20,
+                21,
+                vec![(
+                    20,
+                    StromaEvent::Snapshot {
+                        tp: "q".into(),
+                        part: 0,
+                        group: None,
+                        blob: vec![],
+                    },
+                )],
+            ),
+        };
+        let capped = cap_owner_replication_records(records, 48);
+        let OwnerReplicationRead::Batch(messages) = capped.messages else {
+            panic!("message batch");
+        };
+        let OwnerReplicationRead::Batch(events) = capped.events else {
+            panic!("event batch");
+        };
+        assert_eq!(messages.next_offset, 11);
+        assert!(events.records.is_empty());
+        assert_eq!(events.next_offset, 20);
+    }
+
+    #[test]
     fn byte_cap_stops_events_before_unreturned_message_payloads() {
         let records = BrokerOwnerReplicationRecords {
             messages: message_batch(
@@ -2071,11 +2102,25 @@ impl Broker<StromaEngine> {
         let _owner_read_timer = self.replication_timing.owner_read.timer();
         let messages = self
             .engine
-            .read_owner_message_records(topic, partition.id(), group, message_from, max_messages)
+            .read_owner_message_records_with_byte_budget(
+                topic,
+                partition.id(),
+                group,
+                message_from,
+                max_messages,
+                max_bytes,
+            )
             .await?;
         let events = self
             .engine
-            .read_owner_event_records(topic, partition.id(), group, event_from, max_events)
+            .read_owner_event_records_with_byte_budget(
+                topic,
+                partition.id(),
+                group,
+                event_from,
+                max_events,
+                max_bytes,
+            )
             .await?;
 
         Ok(cap_owner_replication_records(

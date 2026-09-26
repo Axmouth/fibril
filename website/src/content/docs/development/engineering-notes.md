@@ -8,6 +8,24 @@ for further detail. Measurements describe the stated workload and hardware.
 Current capabilities are in [implemented surface](/implemented-surface/);
 remaining work is in the [roadmap](/roadmap/).
 
+## Bounded replication reads and preserved progress
+
+Owner replication reads now stop after the useful byte-bounded prefix and one
+lookahead record, preserving snapshot deferral and ordered event gating.
+Follower progress keeps a pending owner read alive, avoiding discarded blocking
+scans, while reset and stop still cancel it. A three-node tmpfs comparison at
+4 KiB measured lower CPU use and higher throughput, with cache, disk, oversized
+record and snapshot-boundary regression coverage.
+
+## Streaming settings and oversized credit
+
+Owner streams now adopt runtime read limits at the next batch, and oversized
+batches retain credit debt until durable application returns those bytes.
+Previously, saturating subtraction could let repeated oversized records grow the
+window. Tests cover live settings adoption and repeated oversized records, while
+the [configuration reference](/configuration/#replication) separates queued frame
+count from outstanding byte credit.
+
 ## Follower retention and non-destructive repair
 
 Snapshot compaction could overtake admitted followers during sustained publishing,
