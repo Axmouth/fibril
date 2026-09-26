@@ -37,6 +37,8 @@ tracing = { version = "0.1", features = ["release_max_level_info"] }
 uuid = { version = "1.19", features = ["serde", "v4", "v7"] }
 
 [features]
+# Isolated measurement candidate. Keep disabled in normal builds.
+replication-backlog-linger-experiment = []
 # Build the broker net path against turmoil's simulated TCP (via the fibril-util
 # net seam) for deterministic cluster failure-path tests.
 simulation = ["fibril-util/simulation"]

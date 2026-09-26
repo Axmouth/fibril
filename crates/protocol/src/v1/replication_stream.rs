@@ -455,11 +455,19 @@ pub async fn run_follower_stream_applier<S: FollowerStreamSink>(
         // Fold as many contiguous frames as are ready (plus a one-shot linger).
         let mut merged = first;
         let mut lingered = false;
-        while batch_bytes(&merged) < max_merge_bytes {
+        let mut merged_queued_frame = false;
+        loop {
+            let merged_bytes = batch_bytes(&merged);
+            if merged_bytes >= max_merge_bytes {
+                break;
+            }
             let next = match batch_rx.try_recv() {
                 Ok(batch) => Some(batch),
                 Err(mpsc::error::TryRecvError::Empty) => {
-                    if lingered || apply_linger.is_zero() {
+                    let ready_backlog = cfg!(feature = "replication-backlog-linger-experiment")
+                        && merged_queued_frame
+                        && merged_bytes >= 1024 * 1024;
+                    if lingered || apply_linger.is_zero() || ready_backlog {
                         None
                     } else {
                         lingered = true;
@@ -475,7 +483,10 @@ pub async fn run_follower_stream_applier<S: FollowerStreamSink>(
             };
             match next {
                 Some(batch) => match try_fold_streamed(&mut merged, batch) {
-                    Ok(()) => continue,
+                    Ok(()) => {
+                        merged_queued_frame = true;
+                        continue;
+                    }
                     Err(unmerged) => {
                         carry = Some(unmerged);
                         break;
@@ -1036,6 +1047,76 @@ mod tests {
             .expect("applier did not stop")
             .unwrap();
         assert_eq!(exit, ApplierExit::ReaderClosed);
+    }
+
+    #[cfg(feature = "replication-backlog-linger-experiment")]
+    #[tokio::test(start_paused = true)]
+    async fn backlog_linger_requires_multiple_frames_and_a_substantial_batch() {
+        for (first_count, second_count, skips_linger) in
+            [(6000, 6000, true), (1, 1, false), (12000, 0, false)]
+        {
+            let total = first_count + second_count;
+            let sink = Arc::new(MockSink {
+                outcomes: Mutex::new(
+                    [FollowerApplyOutcome::Applied {
+                        durable_message_next: total,
+                        durable_event_next: 0,
+                        bytes: total * REC_BYTES,
+                    }]
+                    .into(),
+                ),
+                applied: Mutex::new(Vec::new()),
+            });
+            let (batch_tx, batch_rx) = mpsc::channel(8);
+            let (control_tx, mut control_rx) = mpsc::channel(8);
+            batch_tx.send(batch_from(0, first_count)).await.unwrap();
+            if second_count > 0 {
+                batch_tx
+                    .send(batch_from(first_count, second_count))
+                    .await
+                    .unwrap();
+            }
+            let started = tokio::time::Instant::now();
+            let task = tokio::spawn(run_follower_stream_applier(
+                sink.clone(),
+                batch_rx,
+                control_tx,
+                0,
+                0,
+                fixed_tunables(0, 10_000_000, 16 * 1024 * 1024),
+            ));
+            tokio::task::yield_now().await;
+            if !skips_linger {
+                assert!(matches!(
+                    control_rx.try_recv(),
+                    Err(mpsc::error::TryRecvError::Empty)
+                ));
+                assert!(sink.applied.lock().unwrap().is_empty());
+                tokio::time::advance(Duration::from_secs(9)).await;
+                tokio::task::yield_now().await;
+                assert!(matches!(
+                    control_rx.try_recv(),
+                    Err(mpsc::error::TryRecvError::Empty)
+                ));
+                tokio::time::advance(Duration::from_secs(1)).await;
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                control_rx.try_recv().unwrap(),
+                FollowerStreamControl::Progress {
+                    durable_message_next: total,
+                    durable_event_next: 0,
+                    credit_add_bytes: total * REC_BYTES,
+                }
+            );
+            assert_eq!(sink.applied.lock().unwrap().as_slice(), &[0]);
+            assert_eq!(
+                started.elapsed(),
+                Duration::from_secs(if skips_linger { 0 } else { 10 })
+            );
+            drop(batch_tx);
+            assert_eq!(task.await.unwrap(), ApplierExit::ReaderClosed);
+        }
     }
 
     // The applier reads the tunables LIVE once per apply iteration (not captured
