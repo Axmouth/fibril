@@ -1702,6 +1702,8 @@ fn put_replication_state_checkpoint(
     out: &mut BytesMut,
     checkpoint: &ReplicationStateCheckpoint,
 ) -> WireResult<()> {
+    out.put_u8(u8::from(checkpoint.combined_log));
+    out.put_u64(checkpoint.event_start_offset);
     out.put_u64(checkpoint.message_epoch);
     out.put_u64(checkpoint.event_epoch);
     out.put_u64(checkpoint.message_checkpoint_offset);
@@ -2169,6 +2171,8 @@ impl<'a> Reader<'a> {
 
     fn replication_state_checkpoint(&mut self) -> WireResult<ReplicationStateCheckpoint> {
         Ok(ReplicationStateCheckpoint {
+            combined_log: self.bool()?,
+            event_start_offset: self.u64()?,
             message_epoch: self.u64()?,
             event_epoch: self.u64()?,
             message_checkpoint_offset: self.u64()?,

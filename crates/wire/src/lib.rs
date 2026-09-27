@@ -840,6 +840,10 @@ pub struct ReplicationCheckpointExport {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReplicationStateCheckpoint {
+    /// Whether payloads share the queue event log.
+    pub combined_log: bool,
+    /// First physical event record to backfill. State replay starts at event_next_offset.
+    pub event_start_offset: u64,
     pub message_epoch: u64,
     pub event_epoch: u64,
     pub message_checkpoint_offset: u64,

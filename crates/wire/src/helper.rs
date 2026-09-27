@@ -972,6 +972,8 @@ mod tests {
     fn replication_checkpoint_export_ok_roundtrips() {
         let msg = ReplicationCheckpointExportOk {
             checkpoint: ReplicationStateCheckpoint {
+                combined_log: false,
+                event_start_offset: 30,
                 message_epoch: 2,
                 event_epoch: 3,
                 message_checkpoint_offset: 10,
@@ -997,10 +999,12 @@ mod tests {
             group: Some("workers".into()),
             partition: Partition::new(3),
             checkpoint: ReplicationStateCheckpoint {
-                message_epoch: 2,
+                combined_log: true,
+                event_start_offset: 10,
+                message_epoch: 3,
                 event_epoch: 3,
-                message_checkpoint_offset: 10,
-                message_next_offset: 20,
+                message_checkpoint_offset: 0,
+                message_next_offset: 0,
                 event_next_offset: 30,
                 applied_event_offset: 29,
                 state_snapshot: b"snapshot".to_vec(),

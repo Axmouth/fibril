@@ -803,6 +803,8 @@ async fn three_node_owner_loss_with_checkpoints(
                     .install_queue_learner_checkpoint(
                         receipt.clone(),
                         fibril_broker::queue_engine::FollowerStateCheckpointInstall {
+                            combined_log: cut.combined_log,
+                            event_start_offset: cut.event_start_offset,
                             message_epoch: cut.message_epoch,
                             event_epoch: cut.event_epoch,
                             message_next_offset: cut.message_checkpoint_offset,
@@ -1767,6 +1769,8 @@ async fn admitted_replica_reseed(
     view.install_queue_learner_checkpoint(
         intent.receipt(),
         fibril_broker::queue_engine::FollowerStateCheckpointInstall {
+            combined_log: cut.combined_log,
+            event_start_offset: cut.event_start_offset,
             message_epoch: 1,
             event_epoch: 1,
             message_next_offset: cut.message_checkpoint_offset,

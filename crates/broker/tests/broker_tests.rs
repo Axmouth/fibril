@@ -4001,6 +4001,8 @@ async fn broker_state_checkpoint_export_installs_then_messages_catch_up() {
             Partition::new(0),
             None,
             FollowerStateCheckpointInstall {
+                combined_log: checkpoint.combined_log,
+                event_start_offset: checkpoint.event_start_offset,
                 message_epoch: checkpoint.message_epoch,
                 event_epoch: checkpoint.event_epoch,
                 message_next_offset: checkpoint.message_checkpoint_offset,

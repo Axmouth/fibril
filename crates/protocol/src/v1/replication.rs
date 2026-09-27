@@ -1046,6 +1046,8 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
             };
             self.restore_conn(conn).await;
             Ok(OwnerStateCheckpoint {
+                combined_log: export.checkpoint.combined_log,
+                event_start_offset: export.checkpoint.event_start_offset,
                 message_epoch: export.checkpoint.message_epoch,
                 event_epoch: export.checkpoint.event_epoch,
                 message_checkpoint_offset: export.checkpoint.message_checkpoint_offset,

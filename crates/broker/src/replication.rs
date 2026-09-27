@@ -2911,6 +2911,8 @@ impl Broker<StromaEngine> {
                 partition,
                 group,
                 FollowerStateCheckpointInstall {
+                    combined_log: checkpoint.combined_log,
+                    event_start_offset: checkpoint.event_start_offset,
                     message_epoch: checkpoint.message_epoch,
                     event_epoch: checkpoint.event_epoch,
                     message_next_offset: checkpoint.message_checkpoint_offset,
@@ -2933,7 +2935,7 @@ impl Broker<StromaEngine> {
             );
 
             options.message_from = checkpoint.message_checkpoint_offset;
-            options.event_from = checkpoint.event_next_offset;
+            options.event_from = checkpoint.event_start_offset;
         }
 
         tracing::error!(

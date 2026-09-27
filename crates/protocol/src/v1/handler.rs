@@ -829,6 +829,8 @@ fn to_replication_apply_ok(messages_applied: bool, events_applied: bool) -> Repl
 
 fn to_replication_state_checkpoint(checkpoint: OwnerStateCheckpoint) -> ReplicationStateCheckpoint {
     ReplicationStateCheckpoint {
+        combined_log: checkpoint.combined_log,
+        event_start_offset: checkpoint.event_start_offset,
         message_epoch: checkpoint.message_epoch,
         event_epoch: checkpoint.event_epoch,
         message_checkpoint_offset: checkpoint.message_checkpoint_offset,
@@ -843,6 +845,8 @@ fn to_follower_state_checkpoint_install(
     checkpoint: ReplicationStateCheckpoint,
 ) -> FollowerStateCheckpointInstall {
     FollowerStateCheckpointInstall {
+        combined_log: checkpoint.combined_log,
+        event_start_offset: checkpoint.event_start_offset,
         message_epoch: checkpoint.message_epoch,
         event_epoch: checkpoint.event_epoch,
         message_next_offset: checkpoint.message_checkpoint_offset,

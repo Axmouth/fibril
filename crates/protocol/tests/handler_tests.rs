@@ -3429,6 +3429,8 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
         .collect::<Vec<_>>();
 
     let checkpoint = ReplicationStateCheckpoint {
+        combined_log: owner_checkpoint.combined_log,
+        event_start_offset: owner_checkpoint.event_start_offset,
         message_epoch: owner_checkpoint.message_epoch,
         event_epoch: owner_checkpoint.event_epoch,
         message_checkpoint_offset: owner_checkpoint.message_checkpoint_offset,
