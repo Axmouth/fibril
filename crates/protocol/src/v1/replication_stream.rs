@@ -425,6 +425,7 @@ fn open_batch_policy() -> u8 {
         *POLICY.get_or_init(|| match std::env::var("FIBRIL_EXPERIMENT_OPEN_FOLLOWER_BATCH").as_deref() {
             Ok("1") => 1, // stage as input arrives
             Ok("2") => 2, // attribution control: same sync path, collect first
+            Ok("3") => 3, // open batches, drain queued continuation without a fresh wait
             _ => 0,
         })
     }
@@ -450,6 +451,7 @@ struct OpenBatchInput<'a> {
     linger: std::time::Duration,
     deadline_policy: bool,
     lingered: bool,
+    drain_only: bool,
     bytes: u64,
     limit: u64,
     tail: Option<(u64, u64, u64, u64)>,
@@ -460,12 +462,12 @@ impl OpenBatchInput<'_> {
         let frame = if let Some(first) = self.first.take() {
             first
         } else {
-            if self.bytes >= self.limit || (self.deadline_policy && !self.linger.is_zero()
+            if self.bytes >= self.limit || ((self.deadline_policy || self.drain_only) && !self.linger.is_zero()
                 && tokio::time::Instant::now() >= self.deadline) { return None; }
             let next = match self.rx.try_recv() {
                 Ok(frame) => Some(frame),
                 Err(mpsc::error::TryRecvError::Disconnected) => None,
-                Err(mpsc::error::TryRecvError::Empty) if self.linger.is_zero() => None,
+                Err(mpsc::error::TryRecvError::Empty) if self.drain_only || self.linger.is_zero() => None,
                 Err(mpsc::error::TryRecvError::Empty) if self.deadline_policy => {
                     tokio::time::timeout_at(self.deadline, self.rx.recv()).await.ok().flatten()
                 }
@@ -515,6 +517,7 @@ async fn run_follower_stream_applier_with_policy<S: FollowerStreamSink>(
     let mut message_next = message_from;
     let mut event_next = event_from;
     let mut carry: Option<ReplicationReadOk> = None;
+    let mut drain_continuation = false;
     loop {
         // Read the tunables LIVE each iteration (not captured once at start), so a
         // runtime-settings change takes effect on the next apply with no stream
@@ -559,11 +562,15 @@ async fn run_follower_stream_applier_with_policy<S: FollowerStreamSink>(
             }
         };
 
-        let outcome = if open_policy == 1 && frame_tail(&first).is_some() {
+        // Retain epochs for matching a queued continuation to the completed
+        // history. A carried epoch/gap boundary starts ordinary collection.
+        let applied_history = frame_tail(&first);
+        let outcome = if matches!(open_policy, 1 | 3) && applied_history.is_some() {
             let input = OpenBatchInput {
                 first: Some(first), rx: &mut batch_rx, carry: &mut carry,
                 deadline: tokio::time::Instant::now() + apply_linger,
                 linger: apply_linger, deadline_policy, lingered: false,
+                drain_only: drain_continuation,
                 bytes: 0, limit: max_merge_bytes, tail: None,
             };
             let frames = futures::stream::unfold(input, |mut input| async move {
@@ -634,6 +641,23 @@ async fn run_follower_stream_applier_with_policy<S: FollowerStreamSink>(
             } => {
                 message_next = durable_message_next;
                 event_next = durable_event_next;
+                // Snapshot readiness immediately after successful application.
+                // Waiting for progress-channel capacity must not turn a later
+                // arrival into proof of backlog at the completion boundary.
+                drain_continuation = false;
+                if open_policy == 3 {
+                    if carry.is_none() {
+                        carry = batch_rx.try_recv().ok();
+                    }
+                    drain_continuation = matches!(
+                        (carry.as_ref(), applied_history),
+                        (Some(ReplicationReadOk {
+                            messages: ReplicationMessageRead::Batch { epoch: m, requested_offset: mn, .. },
+                            events: ReplicationEventRead::Batch { epoch: e, requested_offset: en, .. },
+                        }), Some((me, _, ee, _)))
+                        if (*m, *mn, *e, *en) == (me, message_next, ee, event_next)
+                    );
+                }
                 if control_tx
                     .send(FollowerStreamControl::Progress {
                         durable_message_next,
@@ -1222,7 +1246,7 @@ mod tests {
             let mut input = OpenBatchInput {
                 first: Some(batch_from(0, 1)), rx: &mut rx, carry: &mut carry,
                 deadline: tokio::time::Instant::now() + Duration::from_millis(20),
-                linger: Duration::from_millis(20), deadline_policy: true, lingered: false,
+                linger: Duration::from_millis(20), deadline_policy: true, lingered: false, drain_only: false,
                 bytes: 0, limit: if mode == 1 { REC_BYTES } else { 10_000 }, tail: None,
             };
             assert_eq!(frame_tail(&input.next().await.unwrap()).unwrap().1, 1);
@@ -1230,6 +1254,138 @@ mod tests {
             assert!(input.next().await.is_none());
             drop(input);
             if mode == 2 { assert!(carry.is_some()); } else { assert!(rx.try_recv().is_ok()); }
+        }
+    }
+
+    struct ContinuationSink {
+        closed: mpsc::UnboundedSender<(u64, tokio::time::Instant)>,
+        sync: Arc<tokio::sync::Notify>,
+        fail: bool,
+    }
+    #[async_trait]
+    impl FollowerStreamSink for ContinuationSink {
+        async fn apply(&self, _: ReplicationReadOk) -> FollowerApplyOutcome {
+            panic!("unexpected closed apply")
+        }
+        async fn apply_open(&self, mut frames: BoxStream<'_, ReplicationReadOk>) -> FollowerApplyOutcome {
+            let mut next = 0;
+            let mut bytes = 0;
+            while let Some(frame) = frames.next().await {
+                next = frame_tail(&frame).unwrap().1;
+                bytes += batch_bytes(&frame);
+            }
+            self.closed.send((next, tokio::time::Instant::now())).unwrap();
+            self.sync.notified().await;
+            if self.fail { return FollowerApplyOutcome::Error("sync failed".into()); }
+            FollowerApplyOutcome::Applied { durable_message_next: next, durable_event_next: 0, bytes }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn continuation_drains_backlog_then_restores_idle_collection() {
+        let (tx, rx) = mpsc::channel(8);
+        let (control, mut controls) = mpsc::channel(8);
+        let (closed, mut closures) = mpsc::unbounded_channel();
+        let sync = Arc::new(tokio::sync::Notify::new());
+        let task = tokio::spawn(run_follower_stream_applier_with_policy(
+            Arc::new(ContinuationSink { closed, sync: sync.clone(), fail: false }),
+            rx, control, 0, 0, fixed_tunables(0, 20_000, 10_000), true, 3,
+        ));
+        let start = tokio::time::Instant::now();
+        tx.send(batch_from(0, 1)).await.unwrap();
+        let first = closures.recv().await.unwrap();
+        assert_eq!(first.0, 1);
+        assert!(first.1.duration_since(start) >= Duration::from_millis(20));
+        tx.send(batch_from(1, 1)).await.unwrap();
+        tx.send(batch_from(2, 1)).await.unwrap();
+        let completed_at = tokio::time::Instant::now();
+        sync.notify_one();
+        assert_eq!(controls.recv().await, Some(FollowerStreamControl::Progress {
+            durable_message_next: 1, durable_event_next: 0, credit_add_bytes: REC_BYTES,
+        }));
+        assert_eq!(closures.recv().await, Some((3, completed_at)), "queued continuation must close without waiting");
+        assert!(controls.try_recv().is_err(), "staging and closure are not durable progress");
+        sync.notify_one();
+        assert_eq!(controls.recv().await, Some(FollowerStreamControl::Progress {
+            durable_message_next: 3, durable_event_next: 0, credit_add_bytes: 2 * REC_BYTES,
+        }));
+        let idle_start = tokio::time::Instant::now();
+        tx.send(batch_from(3, 1)).await.unwrap();
+        let third = closures.recv().await.unwrap();
+        assert_eq!(third.0, 4);
+        assert!(third.1.duration_since(idle_start) >= Duration::from_millis(20));
+        drop(tx);
+        sync.notify_one();
+        assert!(controls.recv().await.is_some());
+        assert_eq!(task.await.unwrap(), ApplierExit::ReaderClosed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn continuation_epoch_boundary_restores_collection() {
+        for event_epoch in [false, true] {
+            let (tx, rx) = mpsc::channel(8);
+            let (control, mut controls) = mpsc::channel(8);
+            let (closed, mut closures) = mpsc::unbounded_channel();
+            let sync = Arc::new(tokio::sync::Notify::new());
+            let task = tokio::spawn(run_follower_stream_applier_with_policy(
+                Arc::new(ContinuationSink { closed, sync: sync.clone(), fail: false }),
+                rx, control, 0, 0, fixed_tunables(0, 20_000, 10_000), true, 3,
+            ));
+            tx.send(batch_from(0, 1)).await.unwrap();
+            closures.recv().await.unwrap();
+            let mut next = batch_from(1, 1);
+            if event_epoch {
+                if let ReplicationEventRead::Batch { epoch, .. } = &mut next.events { *epoch = 2; }
+            } else if let ReplicationMessageRead::Batch { epoch, .. } = &mut next.messages { *epoch = 2; }
+            tx.send(next).await.unwrap();
+            let now = tokio::time::Instant::now();
+            sync.notify_one();
+            controls.recv().await.unwrap();
+            let second = closures.recv().await.unwrap();
+            assert!(second.1.duration_since(now) >= Duration::from_millis(20));
+            drop(tx);
+            sync.notify_one();
+            controls.recv().await.unwrap();
+            assert_eq!(task.await.unwrap(), ApplierExit::ReaderClosed);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn continuation_does_not_advance_after_failed_apply() {
+        let (tx, rx) = mpsc::channel(8);
+        let (control, mut controls) = mpsc::channel(8);
+        let (closed, mut closures) = mpsc::unbounded_channel();
+        let sync = Arc::new(tokio::sync::Notify::new());
+        let task = tokio::spawn(run_follower_stream_applier_with_policy(
+            Arc::new(ContinuationSink { closed, sync: sync.clone(), fail: true }),
+            rx, control, 0, 0, fixed_tunables(0, 20_000, 10_000), true, 3,
+        ));
+        tx.send(batch_from(0, 1)).await.unwrap();
+        closures.recv().await.unwrap();
+        tx.send(batch_from(1, 1)).await.unwrap();
+        sync.notify_one();
+        assert!(matches!(task.await.unwrap(), ApplierExit::Error(_)));
+        assert!(closures.recv().await.is_none());
+        assert!(controls.recv().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn continuation_drain_retains_size_and_staging_time_bounds() {
+        for time_bound in [false, true] {
+            let (tx, mut rx) = mpsc::channel(8);
+            let mut carry = None;
+            tx.send(batch_from(1, 1)).await.unwrap();
+            let mut input = OpenBatchInput {
+                first: Some(batch_from(0, 1)), rx: &mut rx, carry: &mut carry,
+                deadline: tokio::time::Instant::now() + Duration::from_millis(20),
+                linger: Duration::from_millis(20), deadline_policy: true, lingered: false,
+                drain_only: true, bytes: 0, limit: if time_bound { 10_000 } else { REC_BYTES }, tail: None,
+            };
+            assert!(input.next().await.is_some());
+            if time_bound { tokio::time::advance(Duration::from_millis(21)).await; }
+            assert!(input.next().await.is_none());
+            drop(input);
+            assert!(rx.try_recv().is_ok(), "bounded continuation preserves remaining input");
         }
     }
 
