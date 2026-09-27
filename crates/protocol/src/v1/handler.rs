@@ -3729,6 +3729,7 @@ where
                         let sealed = sealed.seal;
                         let h = sealed.history;
                         let reply = RecoverySealOk {
+                            combined_log: h.log_layout == fibril_broker::recovery::QueueLogLayout::Combined,
                             replica_id,
                             transition: sealed.request.transition,
                             fence_epoch: sealed.request.fence_epoch,

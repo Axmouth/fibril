@@ -4,7 +4,7 @@ use fibril_broker::{
     broker::{Broker, QueueOwnership},
     queue_engine::StromaEngine,
     recovery::{
-        BrokerSealedReplica, RecoveryReadRequest, RecoveryReadSource, RecoverySealRequest,
+        BrokerSealedReplica, RecoveryReadRequest, RecoverySealRequest,
         SealedReplicaFrontiers, inspection::RecoveryInspectionLimits,
     },
     recovery_transfer::{

@@ -12,6 +12,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Breaking changes
 
+- Internal replication checkpoints now distinguish the snapshot boundary from
+  the retained-log backfill start. Sealed-history replies explicitly carry the
+  queue log layout with a new `RSO2` frame signature. Upgrade all participating
+  brokers together. Client publish and consume frames are unchanged.
+
 - Compatible retained-data reuse during queue recovery can upgrade Keratin
   manifests to version 3. Older binaries reject these shared-segment logs; do not
   downgrade them by editing manifests. All participating brokers need compatible

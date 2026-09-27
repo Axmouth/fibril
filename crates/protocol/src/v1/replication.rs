@@ -2138,6 +2138,7 @@ fn validate_recovery_seal_reply(
             (reply.history_version, reply.storage_history.is_some()),
             (1, false) | (2, true)
         )
+        || (reply.combined_log && (command.stream || reply.history_version != 2 || reply.message_head != 0 || reply.message_next != 0))
         || reply.message_head > reply.message_next
         || reply.event_head > reply.event_next
     {
@@ -2153,7 +2154,11 @@ fn validate_recovery_seal_reply(
                 fence_epoch: reply.fence_epoch,
             },
             history: RetainedHistoryIdentity {
-                log_layout: Default::default(),
+                log_layout: if reply.combined_log {
+                    fibril_broker::recovery::QueueLogLayout::Combined
+                } else {
+                    fibril_broker::recovery::QueueLogLayout::Separate
+                },
                 version: reply.history_version,
                 storage_history: reply.storage_history.map(|h| {
                     fibril_broker::queue_engine::PreparedStorageHistory {
@@ -2206,6 +2211,7 @@ mod recovery_tests {
     #[test]
     fn recovery_reply_must_match_target_transition_version_and_bounds() {
         let reply = RecoverySealOk {
+            combined_log: false,
             storage_history: None,
             replica_id: "b".into(),
             transition: [1; 32],
@@ -2221,6 +2227,21 @@ mod recovery_tests {
             event_next: 0,
         };
         assert!(validate_recovery_seal_reply("b", &command(), reply.clone()).is_ok());
+        let mut combined = reply.clone();
+        combined.combined_log = true;
+        assert!(validate_recovery_seal_reply("b", &command(), combined.clone()).is_err());
+        combined.history_version = 2;
+        combined.storage_history = Some(crate::v1::RecoveryStorageHistory {
+            resource_incarnation: [5; 16], accepted_history: [6; 16],
+            writer_session: [7; 16], storage_instance: [8; 16],
+        });
+        let recovered = validate_recovery_seal_reply("b", &command(), combined.clone()).unwrap();
+        assert_eq!(recovered.seal.history.log_layout, fibril_broker::recovery::QueueLogLayout::Combined);
+        let mut stream = command();
+        stream.stream = true;
+        assert!(validate_recovery_seal_reply("b", &stream, combined.clone()).is_err());
+        combined.message_next = 1;
+        assert!(validate_recovery_seal_reply("b", &command(), combined).is_err());
         for mutation in 0..6 {
             let mut bad = reply.clone();
             match mutation {
@@ -2550,6 +2571,7 @@ mod recovery_read_tests {
             "b",
             &command,
             crate::v1::RecoverySealOk {
+                combined_log: false,
                 storage_history: None,
                 replica_id: "b".into(),
                 transition: [1; 32],

@@ -202,6 +202,13 @@ async fn inspect_pair_inner<T: Send + 'static>(
         }
         .map_err(BrokerError::InvalidArgument)?;
     }
+    if allow_same_source {
+        inspector = inspector.with_single_source().map_err(BrokerError::InvalidArgument)?;
+    }
+    // Keep the hash/replay state at one heap address while pages cross the
+    // blocking-worker boundary. Moving the full inspector as each task's
+    // input and output inflates nested async frames, especially in debug builds.
+    let mut inspector = Box::new(inspector);
     let inspect = async {
         let mut left_connection = None;
         let mut right_connection = None;
@@ -254,7 +261,7 @@ async fn inspect_pair_inner<T: Send + 'static>(
             .map_err(|_| BrokerError::Unknown("inspection CPU admission closed".into()))?;
         let (evidence, artifact) = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            finish(inspector)
+            finish(*inspector)
         })
         .await
         .map_err(|e| BrokerError::Unknown(format!("recovery digest worker failed: {e}")))?

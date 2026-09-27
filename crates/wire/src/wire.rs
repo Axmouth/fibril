@@ -3075,12 +3075,13 @@ pub fn encode_recovery_seal_ok(
     if !matches!(
         (reply.history_version, reply.storage_history.is_some()),
         (1, false) | (2, true)
-    ) {
+    ) || (reply.combined_log && (reply.history_version != 2 || reply.message_head != 0 || reply.message_next != 0)) {
         return Err(WireError::InvalidRecordSequence(
-            "invalid sealed history version or binding",
+            "invalid sealed history layout, version or binding",
         ));
     }
-    let mut out = payload_builder(b"RSO1");
+    let mut out = payload_builder(b"RSO2");
+    put_bool(&mut out, reply.combined_log);
     put_str(&mut out, &reply.replica_id)?;
     out.extend_from_slice(&reply.transition);
     out.put_u64(reply.fence_epoch);
@@ -3108,8 +3109,9 @@ pub fn encode_recovery_seal_ok(
 pub fn decode_recovery_seal_ok(frame: &Frame) -> WireResult<crate::RecoverySealOk> {
     expect_op(frame, Op::RecoverySealOk)?;
     let mut r = Reader::new(&frame.payload);
-    r.expect_magic(b"RSO1", "recovery seal response")?;
+    r.expect_magic(b"RSO2", "recovery seal response")?;
     let mut reply = crate::RecoverySealOk {
+        combined_log: r.bool()?,
         storage_history: None,
         replica_id: r.str()?.to_owned(),
         transition: r.take(32)?.try_into().unwrap(),
@@ -3145,6 +3147,9 @@ pub fn decode_recovery_seal_ok(frame: &Frame) -> WireResult<crate::RecoverySealO
         }
     }
     r.finish()?;
+    if reply.combined_log && (reply.history_version != 2 || reply.message_head != 0 || reply.message_next != 0) {
+        return Err(WireError::InvalidRecordSequence("invalid combined history bounds or version"));
+    }
     Ok(reply)
 }
 
@@ -3691,8 +3696,9 @@ mod history_replication_tests {
 mod bound_seal_tests {
     use super::*;
     #[test]
-    fn sealed_history_versions_preserve_legacy_frames_and_require_complete_binding() {
+    fn sealed_history_layouts_roundtrip_and_require_complete_binding() {
         let mut reply = crate::RecoverySealOk {
+            combined_log: false,
             replica_id: "b".into(),
             transition: [1; 32],
             fence_epoch: 8,
@@ -3720,11 +3726,27 @@ mod bound_seal_tests {
         let bound = encode_recovery_seal_ok(1, &reply).unwrap();
         assert_eq!(bound.payload.len(), legacy.payload.len() + 64);
         assert_eq!(decode_recovery_seal_ok(&bound).unwrap(), reply);
+        // A peer cannot tag a nonempty separate lane as combined.
+        let mut malformed = bound.clone();
+        let mut bytes = malformed.payload.to_vec();
+        bytes[4] = 1;
+        malformed.payload = bytes.into();
+        assert!(decode_recovery_seal_ok(&malformed).is_err());
         for size in 0..bound.payload.len() {
             let mut truncated = bound.clone();
             truncated.payload = truncated.payload.slice(..size);
             assert!(decode_recovery_seal_ok(&truncated).is_err());
         }
+        reply.combined_log = true;
+        assert!(encode_recovery_seal_ok(1, &reply).is_err());
+        reply.message_next = 0;
+        let combined = encode_recovery_seal_ok(1, &reply).unwrap();
+        assert_eq!(decode_recovery_seal_ok(&combined).unwrap(), reply);
+        let mut old_magic = combined.clone();
+        let mut bytes = old_magic.payload.to_vec();
+        bytes[..4].copy_from_slice(b"RSO1");
+        old_magic.payload = bytes.into();
+        assert!(decode_recovery_seal_ok(&old_magic).is_err());
         reply.history_version = 1;
         assert!(encode_recovery_seal_ok(1, &reply).is_err());
     }

@@ -24,6 +24,10 @@ use std::{
 async fn serve_test_broker(
     broker: Arc<Broker<StromaEngine>>,
 ) -> (String, tokio::task::JoinHandle<()>) {
+    if std::env::var_os("FIBRIL_TEST_RECOVERY_TRACE").is_some() {
+        static TRACING: std::sync::Once = std::sync::Once::new();
+        TRACING.call_once(fibril_util::init_tracing);
+    }
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap().to_string();
     let task = tokio::spawn(async move {
@@ -459,14 +463,9 @@ async fn automatic_recovery_repeats_and_preserves_confirmed_messages() {
         .await
         .unwrap();
         assert!(provider.pending_recoveries().unwrap().is_empty());
-        assert_eq!(
-            engine
-                .queue_durable_frontiers("q", 0, None)
-                .await
-                .unwrap()
-                .message_next,
-            cycle + 1
-        );
+        let durable = engine.queue_durable_frontiers("q", 0, None).await.unwrap();
+        assert_eq!(durable.message_next, if engine.queue_payloads_in_event_log() { 0 } else { cycle + 1 });
+        assert_eq!(durable.event_next, cycle + 1);
     }
     // The same production stage guards feed the admin snapshot. Wait for the
     // attempt's final guard as activation can become visible just before it drops.
@@ -557,9 +556,6 @@ async fn agreed_checkpoint_partial_installation_recovers_using_compatible_old_hi
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn recovery_copies_multiple_pages_to_a_lagging_checkpoint_replica() {
-    if std::env::var_os("FIBRIL_TEST_RECOVERY_TRACE").is_some() {
-        fibril_util::init_tracing();
-    }
     three_node_owner_loss_with_checkpoints(true, LearnerCase::None, true, false, true).await;
 }
 
@@ -639,6 +635,8 @@ async fn three_node_owner_loss_with_checkpoints(
         brokers.push(broker);
         listeners.push(listener);
     }
+    let combined = brokers[0].engine().queue_payloads_in_event_log();
+    let message_tail = |next| if combined { 0 } else { next };
     let coordinator = &providers[leader as usize - 1];
     coordinator
         .register_queue(&QueueIdentity::new("q", Partition::new(0), None))
@@ -934,7 +932,7 @@ async fn three_node_owner_loss_with_checkpoints(
                         );
                         assert!(
                             providers[2]
-                                .admit_queue_learner(&renewed, &brokers[2].engine(), 4, 4)
+                                .admit_queue_learner(&renewed, &brokers[2].engine(), message_tail(4), 4)
                                 .await
                                 .is_err()
                         );
@@ -961,7 +959,7 @@ async fn three_node_owner_loss_with_checkpoints(
                 .await
                 .unwrap();
             tokio::time::timeout(Duration::from_secs(10), async {
-                while frontiers.0 <= n || frontiers.1 <= n {
+                while frontiers.0 < message_tail(n + 1) || frontiers.1 <= n {
                     brokers[1]
                         .catch_up_replication_follower_from_owner_with_checkpoint(
                             &peer,
@@ -1017,7 +1015,7 @@ async fn three_node_owner_loss_with_checkpoints(
         assert_eq!(joined.history.as_ref().unwrap().replicas.len(), 3);
         brokers[2]
             .engine()
-            .verify_queue_learner_caught_up("q", 0, None, 1, 4, 4)
+            .verify_queue_learner_caught_up("q", 0, None, 1, message_tail(4), 4)
             .await
             .unwrap();
         learner_worker.unwrap().abort();
@@ -1120,7 +1118,7 @@ async fn three_node_owner_loss_with_checkpoints(
                 tokio::time::timeout(Duration::from_secs(10), async {
                     loop {
                         let from = brokers[i].engine().queue_replication_next_offsets("q", 0, None).await.unwrap();
-                        if from.0 >= n + 1 && from.1 >= n + 1 { break; }
+                        if from.0 >= message_tail(n + 1) && from.1 >= n + 1 { break; }
                         brokers[i].catch_up_replication_follower_from_owner(&peers[i-1], "q", Partition::new(0), None,
                             fibril_broker::broker::ReplicationResourceKind::Queue,
                             fibril_broker::broker::BrokerReplicationCatchUpOptions { message_from: from.0, event_from: from.1,
@@ -1182,7 +1180,7 @@ async fn three_node_owner_loss_with_checkpoints(
                         .queue_replication_next_offsets("q", 0, None)
                         .await
                         .unwrap();
-                    if from.0 >= 1041 {
+                    if (if combined { from.1 } else { from.0 }) >= 1041 {
                         break;
                     }
                     brokers[1]
@@ -1225,7 +1223,7 @@ async fn three_node_owner_loss_with_checkpoints(
                     .queue_replication_next_offsets("q", 0, None)
                     .await
                     .unwrap(),
-                (16, 16)
+                (message_tail(16), 16)
             );
         } else {
             let confirm = publisher
@@ -1247,7 +1245,7 @@ async fn three_node_owner_loss_with_checkpoints(
                             .queue_replication_next_offsets("q", 0, None)
                             .await
                             .unwrap();
-                        if from.0 >= 17 && from.1 >= 17 {
+                        if from.0 >= message_tail(17) && from.1 >= 17 {
                             break;
                         }
                         brokers[i]
@@ -1530,6 +1528,8 @@ async fn admitted_replica_reseed(
             result.unwrap();
         }
     }
+    let combined = brokers[0].engine().queue_payloads_in_event_log();
+    let message_tail = |next| if combined { 0 } else { next };
     let original = providers[0]
         .snapshot()
         .assignment_for("q", Partition::new(0), None)
@@ -1685,7 +1685,7 @@ async fn admitted_replica_reseed(
             None,
             ReplicationResourceKind::Queue,
             BrokerReplicationCatchUpOptions {
-                message_from: 4,
+                message_from: message_tail(4),
                 event_from: 4,
                 max_messages_per_read: 16,
                 max_events_per_read: 16,
@@ -1782,7 +1782,7 @@ async fn admitted_replica_reseed(
     .await
     .unwrap();
     assert!(
-        view.verify_queue_learner_caught_up("q", 0, None, 1, 4, 4)
+        view.verify_queue_learner_caught_up("q", 0, None, 1, message_tail(4), 4)
             .await
             .is_err(),
         "checkpoint is incomplete until payload backfill finishes"
@@ -1858,7 +1858,7 @@ async fn admitted_replica_reseed(
     );
     brokers[2]
         .engine()
-        .verify_queue_learner_caught_up("q", 0, None, 1, 5, 5)
+        .verify_queue_learner_caught_up("q", 0, None, 1, message_tail(5), 5)
         .await
         .unwrap();
     let confirm = publisher
@@ -1905,6 +1905,6 @@ async fn admitted_replica_reseed(
     }).await.unwrap();
     for worker in workers {worker.abort();}
     for i in 1..3 {
-        brokers[i].engine().verify_queue_learner_caught_up("q",0,None,1,6,6).await.unwrap();
+        brokers[i].engine().verify_queue_learner_caught_up("q",0,None,1,message_tail(6),6).await.unwrap();
     }
 }

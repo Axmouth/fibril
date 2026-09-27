@@ -1063,6 +1063,7 @@ mod recovery_wire_tests {
         assert!(try_decode::<RecoverySeal>(&trailing).is_err());
         for snapshot_digest in [None, Some([22; 32])] {
             let response = RecoverySealOk {
+                combined_log: false,
                 storage_history: None,
                 replica_id: "b".into(),
                 transition: [19; 32],

@@ -1166,6 +1166,7 @@ pub struct RecoverySeal {
 /// Frozen retained content identity. This response is not a promotion certificate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoverySealOk {
+    pub combined_log: bool,
     pub replica_id: String,
     pub transition: [u8; 32],
     pub fence_epoch: u64,
