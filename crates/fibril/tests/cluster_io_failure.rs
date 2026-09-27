@@ -67,18 +67,16 @@ async fn admitted_cluster_owner_io_failure_recovery_and_rejoin() {
         Ok("1")
     );
     for all in [false, true] {
-        for message in [false, true] {
-            for after_sync in [false, true] {
-                tokio::time::timeout(Duration::from_secs(180), run_case(all, message, after_sync))
-                    .await
-                    .expect("cluster case deadline");
-            }
+        for after_sync in [false, true] {
+            tokio::time::timeout(Duration::from_secs(180), run_case(all, after_sync))
+                .await
+                .expect("cluster case deadline");
         }
     }
 }
 
-async fn run_case(all: bool, message: bool, after_sync: bool) {
-    eprintln!("CASE all={all} message={message} after_sync={after_sync}");
+async fn run_case(all: bool, after_sync: bool) {
+    eprintln!("CASE all={all} after_sync={after_sync}");
     use fibril_broker::coordination::{NodeInfo, QueueIdentity};
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../test_data/cluster-io")
@@ -296,10 +294,7 @@ async fn run_case(all: bool, message: bool, after_sync: bool) {
             n
         );
     }
-    let path = segment_path(
-        &root.join("data-a"),
-        if message { "messages" } else { "events" },
-    );
+    let path = segment_path(&root.join("data-a"), "events");
     let fault_kind = if after_sync {
         keratin_log::io_fault_injection::Fault::FsyncAfterSuccess
     } else {
@@ -337,24 +332,14 @@ async fn run_case(all: bool, message: bool, after_sync: bool) {
     // API intentionally waits for active publishes, so do not call it while
     // holding this publish's fsync.
     let engine = brokers[0].engine();
-    let visible = if message {
-        engine
-            .read_owner_message_records("q", 0, None, PREFIX, 1)
-            .await
-            .map(|r| match r {
-                fibril_broker::queue_engine::OwnerReplicationRead::Batch(b) => b.records.len(),
-                _ => panic!(),
-            })
-    } else {
-        engine
-            .read_owner_event_records("q", 0, None, PREFIX, 1)
-            .await
-            .map(|r| match r {
-                fibril_broker::queue_engine::OwnerReplicationRead::Batch(b) => b.records.len(),
-                _ => panic!(),
-            })
-    }
-    .unwrap();
+    let visible = engine
+        .read_owner_event_records("q", 0, None, PREFIX, 1)
+        .await
+        .map(|r| match r {
+            fibril_broker::queue_engine::OwnerReplicationRead::Batch(b) => b.records.len(),
+            _ => panic!("expected the queue event lane"),
+        })
+        .unwrap();
     assert_eq!(visible, 0);
     drop(engine);
     fault.release();
@@ -363,7 +348,7 @@ async fn run_case(all: bool, message: bool, after_sync: bool) {
         .unwrap()
         .unwrap();
     assert!(result.is_err(), "false broker confirmation: {result:?}");
-    eprintln!("FAULT all={all} message={message} after_sync={after_sync}: {result:?}");
+    eprintln!("FAULT all={all} after_sync={after_sync}: {result:?}");
     drop(fault);
     drop(publisher);
     drop(peers);
@@ -579,7 +564,7 @@ async fn run_case(all: bool, message: bool, after_sync: bool) {
         .queue_durable_frontiers("q", 0, None)
         .await
         .unwrap()
-        .message_next;
+        .event_next;
     let confirmation = publisher
         .publish(
             99u64.to_le_bytes().to_vec(),
@@ -619,7 +604,7 @@ async fn run_case(all: bool, message: bool, after_sync: bool) {
         );
     }
     assert_eq!(values.iter().filter(|v| **v == 99).count(), 1);
-    eprintln!("RECOVERED all={all} message={message} after_sync={after_sync}: {values:?}");
+    eprintln!("RECOVERED all={all} after_sync={after_sync}: {values:?}");
     drop(publisher);
     drop(new_peers);
     for w in workers {
@@ -675,7 +660,8 @@ async fn catch_up(
                 .queue_replication_next_offsets("q", 0, None)
                 .await
                 .unwrap();
-            if from.0 >= target && from.1 >= target {
+            assert_eq!(from.0, 0, "single-log queue has no physical message lane");
+            if from.1 >= target {
                 break;
             }
             broker

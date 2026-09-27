@@ -8,6 +8,17 @@ for further detail. Measurements describe the stated workload and hardware.
 Current capabilities are in [implemented surface](/implemented-surface/);
 remaining work is in the [roadmap](/roadmap/).
 
+## Single-log queue storage
+
+Queue enqueues now carry their payloads in the same ordered log as state changes,
+removing the cross-log publish dependency and lost-payload suffix repair.
+Recovery preserves older live payloads across snapshot boundaries and installs a
+verified event prefix before admitting the new history. The adoption includes
+crash-boundary, learner, reseed and owner-loss coverage in
+[Keratin 77b514c](https://github.com/Axmouth/keratin/commit/77b514c) and
+[Fibril 886f239](https://github.com/Axmouth/fibril/commit/886f239), with a breaking
+fresh-storage requirement and unchanged stream storage.
+
 ## Bounded replication reads and preserved progress
 
 Owner replication reads now stop after the useful byte-bounded prefix and one
