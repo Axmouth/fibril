@@ -2275,7 +2275,7 @@ impl<
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .initialized;
                 if !initialized {
-                    let frontier = self
+                    let mut frontier = self
                         .engine
                         .queue_durable_frontiers(&key.tp, key.part.id(), key.group.as_deref())
                         .await?;
@@ -2286,6 +2286,9 @@ impl<
                             .dependencies
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if self.engine.queue_payloads_in_event_log() {
+                            frontier.message_next = frontier.event_next;
+                        }
                         dependencies.record(frontier);
                         dependencies.initialized = true;
                     }

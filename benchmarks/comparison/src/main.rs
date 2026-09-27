@@ -100,6 +100,9 @@ struct Args {
     /// Fibril-only unconfirmed data publishes, with confirmed final barriers outside measurement.
     #[arg(long)]
     fibril_unconfirmed: bool,
+    /// Experimental sparse Fibril log offsets. Checks strict increase in publish order.
+    #[arg(long)]
+    fibril_sparse_offsets: bool,
     /// JetStream transport pull batch, bounded by prefetch; not application ACK batching.
     #[arg(long, default_value_t = 1024)]
     pull_batch: usize,
@@ -537,6 +540,7 @@ async fn workload(args: Arc<Args>, progress: Arc<Progress>, origin: Instant) -> 
         "workload_start_since_setup_secs":start.duration_since(origin).as_secs_f64(),
         "observed_delivery_per_sec":consumer.completed_in_window as f64 / args.duration_secs as f64,
         "observed_confirm_per_sec":(!args.fibril_unconfirmed).then_some(confirmer.completed_in_window as f64 / args.duration_secs as f64),
+        "fibril_sparse_offsets":args.fibril_sparse_offsets,
         "confirmation_mode":if args.fibril_unconfirmed { "final_barriers_only" } else { "per_message" },
         "final_barrier_records":args.final_barriers(),
         "data_issued":producer.total - args.final_barriers(),

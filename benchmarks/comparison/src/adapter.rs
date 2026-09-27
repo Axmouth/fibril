@@ -10,9 +10,29 @@ use std::{
 };
 
 pub type Confirmation = BoxFuture<'static, Result<()>>;
+
+/// Bounded by outstanding confirmations, including out-of-order completion polls.
+#[derive(Default)]
+pub struct SparseConfirmOffsets {
+    next_id: u64,
+    previous_offset: Option<u64>,
+    pending: std::collections::BTreeMap<u64,u64>,
+}
+impl SparseConfirmOffsets {
+    fn record(&mut self, id:u64, offset:u64) -> Result<()> {
+        ensure!(id >= self.next_id && self.pending.insert(id,offset).is_none(), "duplicate Fibril confirmation identity");
+        while let Some(offset)=self.pending.remove(&self.next_id) {
+            ensure!(self.previous_offset.is_none_or(|previous|offset>previous), "Fibril sparse confirmation offsets did not increase");
+            self.previous_offset=Some(offset);
+            self.next_id+=1;
+        }
+        Ok(())
+    }
+}
+
 pub enum Publisher {
     Pool(Vec<Publisher>, AtomicUsize),
-    Fibril(fibril_client::Publisher),
+    Fibril(fibril_client::Publisher, Option<std::sync::Arc<std::sync::Mutex<SparseConfirmOffsets>>>),
     Nats(jetstream::Context, String),
     Rabbit(lapin::Channel, String),
 }
@@ -26,7 +46,7 @@ impl Publisher {
             _ => self,
         };
         match leaf {
-            Self::Fibril(p) => p.publish(fibril_client::NewMessage::raw(payload)).await.map_err(Into::into),
+            Self::Fibril(p, _) => p.publish(fibril_client::NewMessage::raw(payload)).await.map_err(Into::into),
             _ => anyhow::bail!("unconfirmed comparison is Fibril-only"),
         }
     }
@@ -43,16 +63,18 @@ impl Publisher {
         };
         Ok(match leaf {
             Self::Pool(..) => unreachable!("nested publisher pool"),
-            Self::Fibril(p) => {
+            Self::Fibril(p, sparse) => {
+                let sparse = sparse.clone();
                 let confirmation = p
                     .publish_with_confirmation(fibril_client::NewMessage::raw(payload))
                     .await?;
                 Box::pin(async move {
                     let offset = confirmation.confirmed().await?;
-                    ensure!(
-                        id.is_none_or(|id| offset == id),
-                        "Fibril confirmation offset mismatch: {offset} vs {id:?}"
-                    );
+                    if let (Some(sparse),Some(id)) = (sparse,id) {
+                        sparse.lock().map_err(|_|anyhow!("confirmation validator poisoned"))?.record(id,offset)?;
+                    } else {
+                        ensure!(id.is_none_or(|id| offset == id), "Fibril confirmation offset mismatch: {offset} vs {id:?}");
+                    }
                     Ok(())
                 })
             }
@@ -328,7 +350,7 @@ async fn prepare_single(args: &Args) -> Result<Prepared> {
                     .boxed()
             };
             Ok(Prepared {
-                publisher: Publisher::Fibril(p.publisher(&args.queue)?),
+                publisher: Publisher::Fibril(p.publisher(&args.queue)?, args.fibril_sparse_offsets.then(||Default::default())),
                 deliveries,
                 connections: Connections::Fibril(p, c),
                 settings: json!({"queue":"single partition", "confirm":if args.copies>1 {
@@ -480,5 +502,19 @@ async fn prepare_single(args: &Args) -> Result<Prepared> {
                     "publisher_confirms":true,"mandatory":true,"consumer_ack":"individual"}),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod sparse_offset_tests {
+    use super::*;
+    #[test]
+    fn validates_sparse_identity_order_despite_out_of_order_completions() {
+        let mut offsets=SparseConfirmOffsets::default();
+        offsets.record(1,8).unwrap(); offsets.record(0,2).unwrap(); offsets.record(2,9).unwrap();
+        assert_eq!(offsets.next_id,3); assert!(offsets.pending.is_empty());
+        assert!(offsets.record(2,10).is_err());
+        let mut offsets=SparseConfirmOffsets::default();
+        offsets.record(1,2).unwrap(); assert!(offsets.record(0,3).is_err());
     }
 }

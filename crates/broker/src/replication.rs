@@ -1292,6 +1292,8 @@ fn stroma_event_available_for_replicated_messages(
     message_tail_fully_returned: bool,
 ) -> bool {
     match event {
+        #[cfg(feature = "combined-queue-log-experiment")]
+        StromaEvent::PayloadEnqueue { .. } => true,
         StromaEvent::Enqueue { off, .. }
         | StromaEvent::EnqueueDelayed { off, .. }
         | StromaEvent::MarkInflight { off, .. }
@@ -2245,6 +2247,9 @@ impl Broker<StromaEngine> {
                 )
                 .await?;
             self.ensure_replication_source_owner(topic, partition, group)?;
+            if self.engine.queue_payloads_in_event_log() {
+                return Ok(BrokerOwnerReplicationRecords { messages, events });
+            }
             return Ok(cap_owner_replication_records(
                 BrokerOwnerReplicationRecords { messages, events },
                 max_bytes,
@@ -2273,6 +2278,11 @@ impl Broker<StromaEngine> {
             )
             .await?;
 
+        if self.engine.queue_payloads_in_event_log() {
+            // Reads already obey the event byte budget. Every payload reference
+            // is to an earlier position in this same ordered log.
+            return Ok(BrokerOwnerReplicationRecords { messages, events });
+        }
         Ok(cap_owner_replication_records(
             BrokerOwnerReplicationRecords { messages, events },
             max_bytes,
@@ -3590,7 +3600,9 @@ impl<
             };
             // Reports on a session are ordered. Replace the PAIR; taking each
             // coordinate's max can combine progress from before and after reset.
-            p.message_next = message_next;
+            // Transport offsets remain independent. For combined queues the
+            // event frontier proves the payload prefix used by confirms/delivery.
+            p.message_next = if self.engine.queue_payloads_in_event_log() {event_next} else {message_next};
             p.event_next = event_next;
             p.last_report = Instant::now();
         }
@@ -3635,7 +3647,7 @@ impl<
                     last_report: std::time::Instant::now(),
                     session: 0,
                 });
-            entry.message_next = durable_message_next;
+            entry.message_next = if self.engine.queue_payloads_in_event_log() {durable_event_next} else {durable_message_next};
             entry.event_next = durable_event_next;
             entry.last_report = std::time::Instant::now();
         }
