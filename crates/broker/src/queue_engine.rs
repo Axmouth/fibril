@@ -873,9 +873,10 @@ impl StromaEngine {
         group: Option<&str>,
         from: Offset,
         max: usize,
+        max_bytes: usize,
     ) -> Result<OwnerReplicationRead<Message>, StromaError> {
         self.inner
-            .read_owner_message_records_early(tp, part, group, from, max)
+            .read_owner_message_records_early_with_byte_budget(tp, part, group, from, max, max_bytes)
             .await
     }
 
@@ -887,9 +888,10 @@ impl StromaEngine {
         group: Option<&str>,
         from: Offset,
         max: usize,
+        max_bytes: usize,
     ) -> Result<OwnerReplicationRead<StromaEvent>, StromaError> {
         self.inner
-            .read_owner_event_records_early(tp, part, group, from, max)
+            .read_owner_event_records_early_with_byte_budget(tp, part, group, from, max, max_bytes)
             .await
     }
 

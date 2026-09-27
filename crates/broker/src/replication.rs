@@ -2151,6 +2151,7 @@ impl Broker<StromaEngine> {
                     group,
                     message_from,
                     max_messages,
+                    max_bytes,
                 )
                 .await?;
             let events = self
@@ -2161,6 +2162,7 @@ impl Broker<StromaEngine> {
                     group,
                     event_from,
                     max_events,
+                    max_bytes,
                 )
                 .await?;
             self.ensure_replication_source_owner(topic, partition, group)?;
