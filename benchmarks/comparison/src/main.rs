@@ -77,6 +77,9 @@ struct Args {
     /// Fixed offered messages/s. Omit for saturation.
     #[arg(long, conflicts_with = "saturation")]
     rate: Option<u64>,
+    /// Repeating burst sizes at the average --rate, e.g. 200,100.
+    #[arg(long, value_delimiter = ',')]
+    burst_pattern: Vec<u64>,
     #[arg(long, required_unless_present = "rate")]
     saturation: bool,
     #[arg(long, default_value_t = 1024)]
@@ -192,6 +195,17 @@ impl Args {
                 "planned offered count exceeds --max-messages"
             );
         }
+        if !self.burst_pattern.is_empty() {
+            ensure!(self.rate.is_some() && !self.rpc && self.fault_role.is_none() && !self.setup_only,
+                "bursts require an ordinary paced queue workload");
+            ensure!(self.burst_pattern.len() <= 32 && self.burst_pattern.iter().all(|&n| n > 0 && n <= 1_000_000),
+                "burst pattern requires 1..32 positive sizes of at most 1000000");
+            let cycle: u64 = self.burst_pattern.iter().sum();
+            ensure!(cycle <= 1_000_000, "burst cycle exceeds 1000000 messages");
+            let rate = self.rate.unwrap();
+            ensure!((self.warmup_secs * rate) % cycle == 0 && (self.duration_secs * rate) % cycle == 0,
+                "warmup and duration must each contain whole burst cycles at the requested rate");
+        }
         Ok(())
     }
     fn final_barriers(&self) -> u64 {
@@ -251,11 +265,13 @@ struct Stats {
     admission: Latency,
     latency: Latency,
     scheduled: Latency,
+    burst_delivery: Latency,
 }
 impl Stats {
     fn json(&self) -> Value {
         json!({"total":self.total,"measured":self.measured,"last_ns":self.last_ns,"completed_in_window":self.completed_in_window,
-        "admission":self.admission.summary(),"from_admission":self.latency.summary(),"from_schedule":self.scheduled.summary()})
+        "admission":self.admission.summary(),"from_admission":self.latency.summary(),"from_schedule":self.scheduled.summary(),
+        "burst_delivery_complete_from_schedule":self.burst_delivery.summary()})
     }
 }
 
@@ -284,7 +300,7 @@ async fn issue(
         );
         let intended = a
             .rate
-            .map(|r| scheduled_ns(id, r))
+            .map(|r| scheduled_ns(metrics::burst_bounds(id, &a.burst_pattern).0, r))
             .unwrap_or_else(|| ns(start));
         let deadline = start + Duration::from_nanos(intended);
         if deadline > Instant::now() {
@@ -431,6 +447,7 @@ async fn workload(args: Arc<Args>, progress: Arc<Progress>, origin: Instant) -> 
     let p = progress.clone();
     let consumer = tokio::spawn(async move {
         let mut ids = Ids::default();
+        let mut bursts = metrics::BurstTracker::default();
         let mut stats = Stats::default();
         let mut expected = None;
         loop {
@@ -456,6 +473,12 @@ async fn workload(args: Arc<Args>, progress: Arc<Progress>, origin: Instant) -> 
                     if a.measured(stamp.intended) {
                         stats.measured += 1; stats.latency.record(received-stamp.admitted)?;
                         stats.scheduled.record(received-stamp.intended)?;
+                        if !a.burst_pattern.is_empty() {
+                            let (first, size) = metrics::burst_bounds(stamp.id, &a.burst_pattern);
+                            if let Some(last) = bursts.observe(first, size, received)? {
+                                stats.burst_delivery.record(last - stamp.intended)?;
+                            }
+                        }
                     }
                     p.delivered.store(stats.total, Ordering::Relaxed);
                     message.ack().await?;
@@ -469,6 +492,7 @@ async fn workload(args: Arc<Args>, progress: Arc<Progress>, origin: Instant) -> 
             }
         }
         ids.finish(expected.context("missing published count")?)?;
+        bursts.finish()?;
         Ok::<_, anyhow::Error>(stats)
     });
 
@@ -654,6 +678,29 @@ mod tests {
         a.fibril_unconfirmed = false;
         a.validate().unwrap();
         assert_eq!(a.expected_confirmations(1004), 1004);
+    }
+    #[test]
+    fn bursts_require_whole_paced_cycles() {
+        let mut a = args();
+        a.rate = Some(100);
+        a.burst_pattern = vec![200, 100];
+        a.warmup_secs = 6;
+        a.duration_secs = 60;
+        a.validate().unwrap();
+        a.warmup_secs = 5;
+        assert!(a.validate().is_err());
+        a.warmup_secs = 6;
+        a.duration_secs = 61;
+        assert!(a.validate().is_err());
+        a.duration_secs = 60;
+        a.burst_pattern = vec![0, 100];
+        assert!(a.validate().is_err());
+        a.burst_pattern = vec![200, 100];
+        a.rate = None;
+        assert!(a.validate().is_err());
+        a.rate = Some(100);
+        a.rpc = true;
+        assert!(a.validate().is_err());
     }
     #[test]
     fn warmup_cohort_has_exact_boundaries() {

@@ -170,6 +170,8 @@ def run_case(args, kind, repeat, binary, images, out):
                "--pull-batch", str(args.pull_batch), "--workers", str(args.workers), "--max-messages", str(args.max_messages),
                "--nats-sync", args.nats_sync, "--output", str(case/"client.json")]
         cmd += ["--rate", str(args.rate)] if args.rate is not None else ["--saturation"]
+        if args.burst_pattern:
+            cmd += ["--burst-pattern", args.burst_pattern]
         save(case/"command.json", cmd)
         proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
         deadline = time.monotonic()+args.warmup_secs+args.duration_secs+args.drain_secs+100
@@ -214,6 +216,7 @@ def main():
     p.add_argument("--broker", choices=["all", *IMAGES], default="all")
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument("--rate",type=int); mode.add_argument("--saturation",action="store_true")
+    p.add_argument("--burst-pattern", help="Repeating burst sizes at the average --rate")
     for name, default in [("payload-bytes",1024),("warmup-secs",5),("duration-secs",30),("drain-secs",120),
                           ("confirm-window",4096),("prefetch",1024),("pull-batch",1024),("workers",4),
                           ("max-messages",50_000_000),("repeats",1)]:
@@ -226,6 +229,8 @@ def main():
     for kind in IMAGES:
         p.add_argument("--"+kind+"-image",default=IMAGES[kind])
     args = p.parse_args()
+    if args.burst_pattern and args.rate is None:
+        p.error("--burst-pattern requires --rate")
     if args.rate is not None and args.rate <= 0:
         p.error("--rate must be positive")
     if args.repeats < 1:

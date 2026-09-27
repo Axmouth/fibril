@@ -206,6 +206,8 @@ def run(args, copies):
                 command += ["--delivery-window", str(args.compare_delivery_window)]
             if args.compare_unconfirmed:
                 command += ["--fibril-unconfirmed"]
+            if args.burst_pattern:
+                command += ["--burst-pattern", args.burst_pattern]
             command += ["--rate", str(args.rate_per_sec)] if args.rate_per_sec else ["--saturation"]
             reader = writer = launch(command, "confirmed")
             client_names = ("confirmed",)
@@ -325,6 +327,7 @@ def main():
                         help="Shared issue-to-ACK-submission window for matched Fibril workloads")
     parser.add_argument("--compare-unconfirmed", action="store_true",
                         help="Unconfirmed data with final per-connection confirmed barriers")
+    parser.add_argument("--burst-pattern", help="Comma-separated burst sizes for paced --compare-bin runs")
     parser.add_argument("--copies", type=int, choices=[1, 3], nargs="+", default=[1, 3])
     parser.add_argument("--messages", type=int, default=500_000, help="Messages per connection")
     parser.add_argument("--clients", type=int,
@@ -341,6 +344,8 @@ def main():
                         help="Extra TOML sections for three-copy node configs")
     parser.add_argument("--rust-log", default="warn", help="Broker/client tracing filter")
     args = parser.parse_args()
+    if args.burst_pattern and (not args.compare_bin or args.rate_per_sec <= 0):
+        parser.error("--burst-pattern requires paced --compare-bin")
     if args.clients is None:
         args.clients = 1 if args.compare_bin else 10
     if args.compare_unconfirmed and (not args.compare_bin or not args.compare_delivery_window):
