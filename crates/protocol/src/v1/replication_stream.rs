@@ -413,19 +413,23 @@ pub async fn run_follower_stream_applier<S: FollowerStreamSink>(
         event_from,
         tunables,
         deadline_policy,
-        open_batch_enabled(),
+        open_batch_policy(),
     )
     .await
 }
 
-fn open_batch_enabled() -> bool {
+fn open_batch_policy() -> u8 {
     #[cfg(feature = "open-follower-batch-experiment")]
     {
-        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *ENABLED.get_or_init(|| std::env::var("FIBRIL_EXPERIMENT_OPEN_FOLLOWER_BATCH").as_deref() == Ok("1"))
+        static POLICY: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+        *POLICY.get_or_init(|| match std::env::var("FIBRIL_EXPERIMENT_OPEN_FOLLOWER_BATCH").as_deref() {
+            Ok("1") => 1, // stage as input arrives
+            Ok("2") => 2, // attribution control: same sync path, collect first
+            _ => 0,
+        })
     }
     #[cfg(not(feature = "open-follower-batch-experiment"))]
-    { false }
+    { 0 }
 }
 
 fn frame_tail(frame: &ReplicationReadOk) -> Option<(u64, u64, u64, u64)> {
@@ -493,7 +497,7 @@ async fn run_follower_stream_applier_with_policy<S: FollowerStreamSink>(
     event_from: u64,
     tunables: StreamApplyTunablesFn,
     deadline_policy: bool,
-    open_policy: bool,
+    open_policy: u8,
 ) -> ApplierExit {
     // Microbatch the apply: streamed frames arrive small (the owner reads whatever
     // has trickled in), and applying each one separately means one follower fsync
@@ -555,7 +559,7 @@ async fn run_follower_stream_applier_with_policy<S: FollowerStreamSink>(
             }
         };
 
-        let outcome = if open_policy && frame_tail(&first).is_some() {
+        let outcome = if open_policy == 1 && frame_tail(&first).is_some() {
             let input = OpenBatchInput {
                 first: Some(first), rx: &mut batch_rx, carry: &mut carry,
                 deadline: tokio::time::Instant::now() + apply_linger,
@@ -616,7 +620,11 @@ async fn run_follower_stream_applier_with_policy<S: FollowerStreamSink>(
             }
         }
 
-            sink.apply(merged).await
+            if open_policy == 2 && frame_tail(&merged).is_some() {
+                sink.apply_open(futures::stream::iter([merged]).boxed()).await
+            } else {
+                sink.apply(merged).await
+            }
         };
         match outcome {
             FollowerApplyOutcome::Applied {
@@ -1146,7 +1154,7 @@ mod tests {
         let sync = Arc::new(tokio::sync::Notify::new());
         let task = tokio::spawn(run_follower_stream_applier_with_policy(
             Arc::new(OpenSink { staged, sync: sync.clone() }), rx, control, 0, 0,
-            fixed_tunables(0, 20_000, 10_000), true, true,
+            fixed_tunables(0, 20_000, 10_000), true, 1,
         ));
         tx.send(batch_from(0, 1)).await.unwrap();
         assert_eq!(stages.recv().await, Some(1));
@@ -1170,6 +1178,34 @@ mod tests {
         assert_eq!(controls.recv().await, Some(FollowerStreamControl::Progress {
             durable_message_next: 3, durable_event_next: 0, credit_add_bytes: REC_BYTES,
         }));
+        assert_eq!(task.await.unwrap(), ApplierExit::ReaderClosed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deferred_open_control_collects_first_then_uses_the_same_sync_boundary() {
+        let (tx, rx) = mpsc::channel(8);
+        let (control, mut controls) = mpsc::channel(8);
+        let (staged, mut stages) = mpsc::unbounded_channel();
+        let sync = Arc::new(tokio::sync::Notify::new());
+        let task = tokio::spawn(run_follower_stream_applier_with_policy(
+            Arc::new(OpenSink { staged, sync: sync.clone() }), rx, control, 0, 0,
+            fixed_tunables(0, 20_000, 10_000), true, 2,
+        ));
+        tx.send(batch_from(0, 1)).await.unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(5)).await;
+        tx.send(batch_from(1, 1)).await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(stages.try_recv().is_err());
+        assert!(controls.try_recv().is_err());
+        tokio::time::advance(Duration::from_millis(17)).await;
+        assert_eq!(stages.recv().await, Some(2));
+        assert!(controls.try_recv().is_err());
+        sync.notify_one();
+        assert_eq!(controls.recv().await, Some(FollowerStreamControl::Progress {
+            durable_message_next: 2, durable_event_next: 0, credit_add_bytes: 2 * REC_BYTES,
+        }));
+        drop(tx);
         assert_eq!(task.await.unwrap(), ApplierExit::ReaderClosed);
     }
 
@@ -1245,7 +1281,7 @@ mod tests {
             0,
             fixed_tunables(0, linger_us, max_bytes),
             policy,
-            false,
+            0,
         ));
         (tx, applied_rx, control_rx, task)
     }
