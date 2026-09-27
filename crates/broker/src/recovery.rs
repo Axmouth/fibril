@@ -11,7 +11,7 @@ pub use stroma_core::recovery_budget::{RecoveryBudget, RecoveryBudgetExceeded};
 pub use stroma_core::recovery_replay as replay;
 pub use stroma_core::{
     RecoveryReadPage, RecoveryReadRequest, RecoveryReadSource, RecoveryRecord, RecoverySealRequest,
-    RecoverySequentialRead, RetainedHistoryIdentity, SealedReplicaFrontiers,
+    RecoverySequentialRead, QueueLogLayout, RetainedHistoryIdentity, SealedReplicaFrontiers,
 };
 use tokio::sync::watch;
 

@@ -253,6 +253,7 @@ mod tests {
                     fence_epoch: set.command.fence_epoch,
                 },
                 history: RetainedHistoryIdentity {
+                    log_layout: Default::default(),
                     storage_history: None,
                     version: 1,
                     id: [1; 32],

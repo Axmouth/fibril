@@ -513,6 +513,7 @@ mod tests {
                     fence_epoch: 8,
                 },
                 history: RetainedHistoryIdentity {
+                    log_layout: Default::default(),
                     version: 2,
                     storage_history: Some(quorum.reports["b"].storage.clone()),
                     id: [9; 32],

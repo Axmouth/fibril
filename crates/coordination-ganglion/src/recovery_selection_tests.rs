@@ -97,6 +97,7 @@ fn source(
         *h.finalize().as_bytes()
     };
     let mut history = RetainedHistoryIdentity {
+        log_layout: Default::default(),
         version: 2,
         storage_history: Some(quorum.reports[node].storage.clone()),
         id: [0; 32],

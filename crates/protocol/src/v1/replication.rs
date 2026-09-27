@@ -2151,6 +2151,7 @@ fn validate_recovery_seal_reply(
                 fence_epoch: reply.fence_epoch,
             },
             history: RetainedHistoryIdentity {
+                log_layout: Default::default(),
                 version: reply.history_version,
                 storage_history: reply.storage_history.map(|h| {
                     fibril_broker::queue_engine::PreparedStorageHistory {
@@ -2604,6 +2605,7 @@ mod recovery_read_tests {
     #[test]
     fn read_reply_rejects_wrong_identity_holes_bounds_and_budget_violations() {
         let history = RetainedHistoryIdentity {
+            log_layout: Default::default(),
             storage_history: None,
             version: 1,
             id: [2; 32],
