@@ -19,23 +19,19 @@ also keeps gaps, overlaps, stale epochs, and future prefix-validation failures
 meaningful, because a follower cannot report itself caught up without actually
 holding the corresponding local durable records.
 
-## Replicated events cannot outrun replicated messages
+## Queue payloads and state share a log
 
-Queue state is derived from events, but a ready/delivered/settled event is
-meaningless unless the payload it references is present and accepted in the
-message log. Replication therefore applies strictly in order:
+Each enqueue carries its payload at the containing event offset. ACK, NACK and
+other state changes refer to earlier offsets. A follower validates the frame,
+appends its records, waits for the required local durability and applies events
+in order before reporting progress. Failed or partially completed application
+fences promotion until recovery restores an admitted history.
 
-1. append replicated messages,
-2. append replicated events only if the message append was accepted,
-3. mutate in-memory queue state only if the event append was accepted.
-
-This prevents a follower from holding in-memory state that claims "offset N is
-ready" while payload N is missing, stale, or from a different owner history. A
-rejected message batch skips the paired event batch for that pull, and the
-follower repairs or retries through a safe path. This invariant is enforced at
-recovery and at promotion, not on the live apply path: catch-up legitimately runs
-with events transiently ahead of their messages, so a live hard-fail would be
-wrong.
+Streams retain separate record and cursor-event logs. Their follower path drains
+both storage operations and advances the stream tail only after accepted writes.
+Queue checkpoint backfill may include payload-bearing records older than the
+snapshot cut. Those records restore payload coverage without reapplying state
+already represented by the snapshot.
 
 ## Overlap is a checkpoint repair
 
@@ -44,14 +40,10 @@ Keratin's replicated append rejects partial overlap by default, which is correct
 owner's 0..10, and accepting a suffix over an unproven prefix would silently bless
 divergence.
 
-So the broker's checkpoint-aware catch-up treats overlap or a gap as a repair
-signal: install the owner's queue-state checkpoint, reset local follower logs to
-the checkpoint continuation, then resume pulling. `AlreadyPresent` stays a pure
-idempotence outcome that advances only over the owner-returned range.
-
-A future improvement is prefix hash/CRC validation in Keratin: once an existing
-prefix is proven byte-identical, a suffix append can be safe without a checkpoint
-reset.
+An overlap or gap triggers history repair. An admitted replica cannot silently
+reset its accepted history. A replacement uses an authorized learner or recovery
+installation, with a verified snapshot and the retained payload range it needs.
+Exact duplicate appends preserve idempotence. Incompatible evidence stays fenced.
 
 ## Replica-durable visibility: consumers see only committed data
 
@@ -61,10 +53,9 @@ committed-replicated watermark, the Kafka high-watermark model: a delivery lease
 is only allowed for offsets below the highest offset durable on the required
 number of replicas.
 
-The watermark is the `(nodes - 1)`-th largest follower durable `message_next`
-(the owner is always durable locally), maintained from the same follower progress
-reports that drive the publish-confirm gate, so durability and visibility stay
-consistent by construction. It is exposed to the delivery loop as one per-queue
+The watermark derives from the required followers’ durable queue event frontiers
+and the owner’s locally durable, applied dependencies. The same progress reports
+drive the publish-confirm gate. Payload positions are sparse event offsets. It is exposed to the delivery loop as one per-queue
 atomic ceiling, so the hot path stays lock-free.
 
 Local-durable queues are never gated: with the owner alone defining durability

@@ -212,7 +212,7 @@ export const delivery = {
         [
           5,
           "The follower persists its own copy",
-          "Both logs must complete and apply safely before reporting durable progress.",
+          "The payload-bearing queue log must be durable and applied before reporting progress.",
         ],
         [
           8,

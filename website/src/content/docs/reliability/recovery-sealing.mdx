@@ -312,9 +312,9 @@ queue histories. Unsupported origins remain fenced with a diagnostic.
 
 ## Retained content identity
 
-After draining accepted work and fencing both logs, storage computes a versioned
-BLAKE3 identity over the resource, retained bounds, message records, event records
-and snapshot bytes. Record offsets, flags, headers and payloads participate;
+After draining accepted work and fencing the physical logs, storage computes a
+versioned BLAKE3 identity over the resource, layout, retained records and snapshot
+bytes. Queues have one payload-bearing event log. Streams retain two logs. Record offsets, flags, headers and payloads participate;
 replica-local append timestamps and promise epochs are excluded. Diagnostics
 contain identities and offsets without message payloads.
 
@@ -548,9 +548,9 @@ additional checks below.
 ## Installation and recovered activation
 
 Installation builds a complete replacement generation in a separate directory.
-It copies the verified message log, creates an event baseline at the exact exclusive
-continuation, writes a version-two queue checkpoint and persists a new storage
-receipt. The installer reopens and verifies the baseline before publishing one
+It copies the verified queue event prefix through the exact selected target,
+preserving live payloads older than the snapshot cut. It writes the queue checkpoint
+at that cut and persists a new storage receipt. The installer reopens and verifies the baseline before publishing one
 checksummed, directory-synced route pointer. An external installation anchor prevents
 an interrupted switch from reopening missing directories as a legacy empty queue.
 
@@ -558,7 +558,7 @@ The partition lifecycle lock drains old operations, permanently fences old handl
 and retires pending snapshot work. The new registry entry records an existing
 on-disk queue, ensuring actor materialization loads the installed snapshot. Old
 sealed generations retain their original identity and remain readable under the
-pending transition. Linux SIGKILL tests cover handle retirement, message copying,
+pending transition. Linux SIGKILL tests cover handle retirement, record copying,
 completed generation persistence and route publication.
 
 Each proposed target records its exact plan, coordinator process and storage

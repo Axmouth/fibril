@@ -53,7 +53,7 @@ See also: [reliability semantics](/reliability/semantics/) and
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
-| Append-only message log | Implemented | Storage layer and broker publish path |
+| Queue storage | Implemented | One append-only event log carries queue payloads and state transitions. Streams retain separate payload and cursor-event logs |
 | Append-only event log | Implemented | Storage state changes and recovery |
 | Snapshots | Implemented | Storage recovery and periodic snapshot path |
 | Lazy startup indexing | Implemented | Existing queues can be indexed without materializing all queue state at startup |
@@ -76,7 +76,7 @@ See also: [recovery quarantine](/reliability/recovery-quarantine/).
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
-| Recovery reference verification | Implemented | Recovery checks each replayed event's referenced message offset against the message log's durable tail, and decodes every event record |
+| Recovery reference verification | Implemented | Recovery decodes every event record and rejects forward payload references in single-log queues. Replicated history admission prevents unilateral suffix repair |
 | `recovery.on_mismatch` policy | Implemented | Startup config: `quarantine` (default), `refuse`, or `ignore` |
 | Per-partition quarantine | Implemented | A bad partition is parked (its ops error) while the rest of the broker stays up |
 | Operator repair | Implemented | Admin quarantine banner + `/admin/api/quarantine/repair`; journaled suffix truncation retains earlier events and resumes before log opening |
@@ -702,7 +702,7 @@ See also: [clustering](/concepts/clustering/) and
 | Background learner admission | Partial | Assigned replicas outside the activated write set catch up without an owner recovery fence. Exact durable/applied cuts and payload completeness gate additive consensus admission; old sessions and confirms retain valid progress, and later recovery uses the enlarged witness set. Partial checkpoint backfill and older retained storage generations are supported |
 | Admitted follower repair | Implemented on Unix | Active follower cursors constrain owner compaction. Exhausted history revokes that follower's acknowledgement role, builds a separate complete generation and re-admits it with fresh transport identity. Original recovery evidence and configured confirmation counts are preserved. Stalled pins have time budgets, with byte budgets and automatic old-generation reclamation still pending |
 | Bounded queue recovery worker | Partial | New cluster queues enroll automatically and collect witnesses, select a verified source, resume transfer and activate with bounded retries. Stream origins, recovery membership expansion and recovery-data reclamation remain gates. Legacy histories require recreation to adopt this path |
-| Checkpoint recovery | Partial | Unix installation journals resume interrupted replacement of both logs and queue state before ordinary replay; completion receipts preserve later backfill on retry. Payload dependencies gate promotion across restart. Linux fault/SIGKILL tests pass; non-Unix installation is unsupported pending durable metadata support |
+| Checkpoint recovery | Partial | Unix installation journals resume interrupted replacement of retained queue records and snapshot state before ordinary replay. Completion receipts preserve later backfill on retry. Payload dependencies gate promotion across restart. Linux fault/SIGKILL tests pass; non-Unix installation is unsupported pending durable metadata support |
 | Agreed recovery checkpoints | Experimental, opt-in | `replication.agreed_checkpoint_interval_ms` coordinates one candidate per queue across every admitted replica. Durable replay bases, canonical capsules, authenticated local receipts and guarded consensus publication precede exact retained floors. Recovery uses the accepted snapshot and verified suffix, with ordinary snapshot fallback when compatible material is absent. Optional event/append-byte triggers complement staggered periodic cadence; the shared dashboard reports age, retained ranges and agreement progress. Live payloads, quorum checks and fencing remain required; stream checkpoints and retention-policy tuning remain pending |
 | Conflict diagnostics | Implemented | Bounded, payload-free control history, offsets and effective record identities accompany overlap reports; checkpoint logs show source epochs and continuation offsets |
 | Replica-durable confirms | Partial | Queues require the same follower to cover the payload batch and exact enqueue frontier; epoch/session-fenced progress feeds confirmation and delivery visibility, with timeout and ISR floor |

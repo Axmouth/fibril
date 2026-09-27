@@ -515,10 +515,10 @@ pub enum FollowerReplicationWorkerLoopExit {
 }
 
 /// Which durable resource a follower-replication path is catching up: a queue
-/// partition or a Plexus stream partition. Both are two-log entities (record log
-/// + progress/cursor-event log), so the catch-up, worker loop, and runtime map
-/// are shared; this kind selects only the divergent endpoints — the final engine
-/// apply call and the owner peer's read op (stream-mode). A stream is keyed as a
+/// partition or a Plexus stream partition. Queues carry payloads in their event
+/// log, while streams keep record and cursor-event logs. The catch-up, worker
+/// loop and runtime map are shared. This kind selects the engine apply call and
+/// the owner peer's read operation. A stream is keyed as a
 /// `QueueIdentity` with `group: None` at the worker layer (a topic is either a
 /// queue or a stream, so the map never collides).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

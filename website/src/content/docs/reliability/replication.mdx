@@ -28,7 +28,7 @@ When coordination is enabled and a partition is assigned followers, each
 partition has one **owner** and one or more **followers**:
 
 - **Followers catch up by pulling.** A follower worker reads the owner's durable
-  message and event records over the protocol and applies them durably to its
+  payload-bearing enqueue and state-change records over the protocol and applies them durably to its
   own log. If a follower falls too far behind the owner's retained log, it
   installs an owner checkpoint and resumes from there.
 - **Replicated failover waits for recovery proof.** The controller records a
@@ -41,9 +41,8 @@ partition has one **owner** and one or more **followers**:
   durability policy requires more than the owner, a confirmed publish does not
   return until enough followers have reported the required progress, subject to a
   timeout and an in-sync floor. Each counted follower must have the queue payload
-  batch and its exact enqueue-event frontier; the complete payload group is
-  required when one enqueue record names several messages. Delivery visibility
-  uses the same dependency proof.
+  batch through its exact event frontier. Each enqueue carries its payload in
+  that same log. Delivery visibility uses the same dependency proof.
 
 ## Durability levels
 

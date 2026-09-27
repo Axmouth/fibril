@@ -15,13 +15,12 @@ affected partition so the rest of the broker stays up.
 
 During recovery, Fibril verifies the event log before trusting it:
 
-- **Reference check.** Every replayed event references a message offset. Recovery
-  checks that offset against the message log's durable tail. A reference past the
-  durable tail is a dangling forward reference.
+- **Reference check.** Queue payloads live in enqueue records. Later state changes
+  must reference earlier offsets in that same log. A forward reference is invalid.
 - **Decode check.** Every event record must decode (including its CRC). A record
   that fails to decode is treated as corruption.
 
-When recovery finds the first bad record, it acts according to the
+For an unbound queue, recovery handles the first bad record according to the
 `recovery.on_mismatch` startup setting:
 
 | Policy | Behavior |
@@ -40,26 +39,27 @@ Repairing a quarantined partition truncates its event log to the last valid
 record, dropping the damaged suffix, and clears the quarantine. Trigger it from
 the admin banner or the repair endpoint.
 
-In a replicated cluster, repair is safe to combine with replication: truncating
-to the last valid record drops the bad suffix, and the partition's follower
-replication re-fetches the dropped records from the owner on its next catch-up.
+Accepted replicated histories reject local suffix truncation. Recovery preserves
+the evidence, selects a compatible source and installs a verified generation
+through the coordinated recovery protocol. An ordinary follower retry cannot
+authorize discarding or replacing an accepted history.
 
-## Why truncate-to-valid is a complete repair
+## What local repair discards
 
-Events are always written after the messages they reference. So a dangling
-forward reference can only appear as a lost tail: a crash that durably recorded
-events whose messages did not survive. Truncating back to the last valid record
-removes exactly that unbacked suffix.
+An unbound queue can be explicitly repaired by truncating at the first invalid
+record. This also discards every later record, including any otherwise readable
+payloads and state changes. Skipping an invalid record would lose a transition
+while applying its successors, so replay stops at the damaged boundary.
 
-A corrupt event record is the genuine mid-log failure rather than a lost tail,
-but the safe repair is the same: truncate at the bad record. Skipping it would
-silently drop a state transition, so recovery stops there instead.
+The former two-log lost-payload suffix rule does not apply to this storage format.
+A queue enqueue and its payload are stored together. A forward reference is
+corruption and follows the configured policy.
 
 ## Conditions and limits
 
 - The default `quarantine` keeps the broker available: one bad partition does not
   take down the others.
-- `ignore` discards the bad suffix automatically. Use it only when losing the
+- `ignore` discards the bad suffix automatically for an unbound queue. Use it only when losing the
   unrecoverable tail without an operator step is acceptable.
 - `refuse` is evaluated lazily today: a mismatch is detected when the partition
   is first used after restart rather than eagerly at boot. An eager whole-disk
@@ -68,5 +68,5 @@ silently drop a state transition, so recovery stops there instead.
 ## See also
 
 - [Reliability semantics](/reliability/semantics/) for the durability model.
-- [Replication](/reliability/replication/) for how followers re-fetch a repaired suffix.
+- [Replication](/reliability/replication/) for coordinated history repair and follower catch-up.
 - [Configuration](/configuration/) for the `recovery.on_mismatch` setting.

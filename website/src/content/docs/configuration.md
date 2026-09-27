@@ -300,6 +300,12 @@ marker and booting with setup mode runs setup again. Deployments that
 configure TLS explicitly never need setup mode, and with it armed they boot
 straight through (the marker is written automatically).
 
+Queues store payloads and state transitions in one event log. That log uses the
+`storage.keratin.message_log` capacity and batching settings because it carries
+message bodies. Its default durability is the stronger of the message and event
+profiles. Plexus streams retain a payload log and a cursor-event log, configured
+through the two respective profiles.
+
 `storage.keratin.message_log.segment_max_bytes` and `storage.keratin.event_log.segment_max_bytes` are rollover thresholds. A segment rolls after an append crosses the configured size, so an individual segment can be slightly larger than this value.
 
 `storage.keratin.writer_buffer_factor` sets the startup capacity of each storage

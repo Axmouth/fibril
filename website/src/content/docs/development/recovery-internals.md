@@ -42,18 +42,18 @@ installation; later owner applications can proceed after capture and mark the
 queue dirty again. Directory durability and crash acceptance on other platforms
 remain separate validation work.
 
-## Parallel append recovery
+## Single-log queue recovery
 
-Message and enqueue-event durability can overlap. Recovery folds enqueue and
-cancel events against the durable message tail to identify an unconfirmed suffix
-whose payloads were lost. Ordinary confirmation requires both durable logs, so
-this suffix can be removed without dropping a confirmed publication.
+An enqueue record carries its payload. Its event offset identifies that payload,
+and subsequent state changes refer to earlier payload offsets in the same log.
+Recovery decodes retained records and rejects forward references. Corruption
+uses the configured quarantine, refusal or explicit local-repair policy.
 
-Corrupt records and unexplained missing non-enqueue dependencies use the configured
-corruption policy. A preceding dangling enqueue does not conceal later corruption.
-The suffix-repair journal preserves the valid prefix and resumes an interrupted
-cut before ordinary log opening. Checkpoint installation has a separate journal
-covering replacement of both logs and actor state.
+Local suffix repair requires an unbound storage history. Accepted replicated
+histories preserve their bytes for coordinated recovery and cannot independently
+truncate or reuse offsets. Checkpoint installation has a separate journal covering
+the retained payload-bearing event prefix and actor snapshot. The prefix may start
+before the snapshot cut when older messages remain live.
 
 ## Recovery comparison
 
