@@ -123,7 +123,9 @@ impl RecoveryWitnessSet {
                 .ok_or("artifact is not from a collected witness")?
                 .seal;
             let evidence = artifact.evidence();
-            if evidence.version != 2
+            if evidence.log_layout != seal.history.log_layout
+                || evidence.payload_log != seal.history.payload_log()
+                || evidence.version != 2
                 || evidence.history_id != seal.history.id
                 || evidence.event_next != seal.event_next
                 || evidence.message_next != seal.message_next

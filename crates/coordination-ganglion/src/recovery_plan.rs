@@ -60,6 +60,7 @@ impl QueueRecoveryPlan {
             binding: self.binding.clone(),
             fence_epoch: assignment.epoch,
             source_history: s.source_history,
+            payload_log: source.payload_log(),
             message_head: s.message_head,
             message_next: s.message_next,
             event_next: s.event_next,
@@ -130,7 +131,10 @@ impl QueueRecoveryPlan {
     /// than silently choosing a newer checkpoint or another sealed history.
     pub fn verify_artifact(&self, artifact: &RecoveryQueueStateArtifact) -> Result<(), String> {
         let evidence = artifact.evidence();
-        if evidence.version != 2
+        let source = self.source_history().ok_or("recovery source is missing")?;
+        if evidence.log_layout != source.log_layout
+            || evidence.payload_log != source.payload_log()
+            || evidence.version != 2
             || evidence.history_id != self.selected.source_history
             || evidence.event_next != self.event_next()
             || evidence.message_next != self.message_next()

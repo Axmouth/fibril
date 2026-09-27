@@ -469,6 +469,7 @@ async fn prepare_target(
     timing: &crate::recovery_timing::RecoveryTiming,
 ) -> Result<(), String> {
     let seal_command = pending.seal_command()?;
+    let payload_log = plan.source_history().ok_or("recovery source is missing")?.payload_log();
     timing
         .stage("prepare_target", node, async {
             // Existing old storage must be durably fenced before replacement.
@@ -501,10 +502,13 @@ async fn prepare_target(
             else {
                 return Err("invalid staging progress response".into());
             };
+            if next < payload_log.head || next > payload_log.next {
+                return Err("staging progress is outside the selected log".into());
+            }
             timing
                 .stage("copy_pages", node, async {
                     let mut prefetched = None;
-                    while next < plan.message_next() {
+                    while next < payload_log.next {
                         let page = match prefetched.take() {
                             Some(page) => page,
                             None => {
@@ -519,7 +523,7 @@ async fn prepare_target(
                                 .await?
                             }
                         };
-                        if page.next <= next || page.next > plan.message_next() {
+                        if page.next <= next || page.next > payload_log.next {
                             return Err("recovery page made no valid progress".into());
                         }
                         let expected_next = page.next;
@@ -527,7 +531,7 @@ async fn prepare_target(
                         // Own both futures through completion: a failed append
                         // must not leave an unbounded/detached source read behind.
                         let (appended, ahead) = tokio::join!(append, async {
-                            if expected_next < plan.message_next() {
+                            if expected_next < payload_log.next {
                                 read_source_page(
                                     config,
                                     plan,
@@ -545,7 +549,7 @@ async fn prepare_target(
                         let Reply::Progress(progress) = appended? else {
                             return Err("invalid append response".into());
                         };
-                        if progress <= next || progress > plan.message_next() {
+                        if progress <= next || progress > payload_log.next {
                             return Err("invalid staged progress".into());
                         }
                         // A resumed target can already be ahead. Discard a page
@@ -586,6 +590,7 @@ async fn read_source_page(
     // Completed-stage reads share one per-broker stage lock.
     // Serialize source reads while target appends still overlap.
     let _read = source_reads.lock().await;
+    let source_kind = plan.source_history().ok_or("recovery source is missing")?.payload_log().source;
     Ok(if let Some(source) = completed_source {
         let Reply::Page(page) = transfer(
             config,
@@ -611,7 +616,7 @@ async fn read_source_page(
             &RecoveryReadRequest {
                 seal: report.seal.request.clone(),
                 history_id: report.seal.history.id,
-                source: RecoveryReadSource::Messages,
+                source: source_kind,
                 from: next,
                 max_records: 4096,
                 max_bytes: 16 * 1024 * 1024,
@@ -622,7 +627,7 @@ async fn read_source_page(
         .map_err(err)?;
         fibril_broker::recovery::RecoveryReadPage {
             history_id: page.history_id,
-            source: RecoveryReadSource::Messages,
+            source: source_kind,
             from: page.from,
             next: page.next,
             end: page.end,
