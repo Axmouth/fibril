@@ -210,6 +210,20 @@ mod tests {
         )
         .await
         .unwrap();
+        engine
+            .initialize_empty_storage_history(
+                "q",
+                0,
+                None,
+                stroma_core::PartitionKind::Queue,
+                stroma_core::StorageHistoryBinding {
+                    resource_incarnation: [1; 16],
+                    accepted_history: [2; 16],
+                    writer_session: [3; 16],
+                },
+            )
+            .await
+            .unwrap();
         let authority = Arc::new(Authority::default());
         let broker =
             Broker::new_with_ownership(engine, BrokerConfig::default(), None, authority.clone());

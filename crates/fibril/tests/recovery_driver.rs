@@ -464,7 +464,7 @@ async fn automatic_recovery_repeats_and_preserves_confirmed_messages() {
         .unwrap();
         assert!(provider.pending_recoveries().unwrap().is_empty());
         let durable = engine.queue_durable_frontiers("q", 0, None).await.unwrap();
-        assert_eq!(durable.message_next, if engine.queue_payloads_in_event_log() { 0 } else { cycle + 1 });
+        assert_eq!(durable.message_next, 0);
         assert_eq!(durable.event_next, cycle + 1);
     }
     // The same production stage guards feed the admin snapshot. Wait for the
@@ -635,8 +635,7 @@ async fn three_node_owner_loss_with_checkpoints(
         brokers.push(broker);
         listeners.push(listener);
     }
-    let combined = brokers[0].engine().queue_payloads_in_event_log();
-    let message_tail = |next| if combined { 0 } else { next };
+    let message_tail = |_: u64| 0;
     let coordinator = &providers[leader as usize - 1];
     coordinator
         .register_queue(&QueueIdentity::new("q", Partition::new(0), None))
@@ -1180,7 +1179,7 @@ async fn three_node_owner_loss_with_checkpoints(
                         .queue_replication_next_offsets("q", 0, None)
                         .await
                         .unwrap();
-                    if (if combined { from.1 } else { from.0 }) >= 1041 {
+                    if from.1 >= 1041 {
                         break;
                     }
                     brokers[1]
@@ -1528,8 +1527,7 @@ async fn admitted_replica_reseed(
             result.unwrap();
         }
     }
-    let combined = brokers[0].engine().queue_payloads_in_event_log();
-    let message_tail = |next| if combined { 0 } else { next };
+    let message_tail = |_: u64| 0;
     let original = providers[0]
         .snapshot()
         .assignment_for("q", Partition::new(0), None)

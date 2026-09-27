@@ -2286,9 +2286,7 @@ impl<
                             .dependencies
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        if self.engine.queue_payloads_in_event_log() {
-                            frontier.message_next = frontier.event_next;
-                        }
+                        frontier.message_next = frontier.event_next;
                         dependencies.record(frontier);
                         dependencies.initialized = true;
                     }

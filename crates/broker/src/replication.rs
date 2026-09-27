@@ -1292,7 +1292,6 @@ fn stroma_event_available_for_replicated_messages(
     message_tail_fully_returned: bool,
 ) -> bool {
     match event {
-        #[cfg(feature = "combined-queue-log-experiment")]
         StromaEvent::PayloadEnqueue { .. } => true,
         StromaEvent::Enqueue { off, .. }
         | StromaEvent::EnqueueDelayed { off, .. }
@@ -3529,7 +3528,6 @@ impl<
 > Broker<E>
 {
     fn partition_payloads_in_event_log(&self, topic: &str, partition: u32, group: Option<&str>) -> bool {
-        if !self.engine.queue_payloads_in_event_log() { return false; }
         // A cold stream assignment can precede its local kind marker and handle.
         // Coordination already knows its kind, even before the first publish.
         if group.is_none() && self.stream_declared_in_coordination(topic) {

@@ -12,6 +12,12 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Breaking changes
 
+- Work queues use a single ordered storage log. The combined-queue and
+  unordered-application experiment features are removed. Use a fresh storage
+  root when upgrading from the previous queue format. Stream storage retains
+  its separate payload and cursor logs. Early replication remains an opt-in
+  process-start experiment without a dashboard setting.
+
 - Internal replication checkpoints now distinguish the snapshot boundary from
   the retained-log backfill start. Sealed-history replies explicitly carry the
   queue log layout with a new `RSO2` frame signature. Upgrade all participating

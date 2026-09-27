@@ -42,10 +42,8 @@ name = "stream_filter"
 harness = false
 
 [features]
-combined-queue-log-experiment = ["stroma-core/combined-queue-log-experiment"]
 writer-stage-trace = ["stroma-core/writer-stage-trace"]
 early-replication-experiment = ["stroma-core/early-replication-experiment"]
-ordered-queue-apply-experiment = ["stroma-core/ordered-queue-apply-experiment"]
 # Exposes coordination::contract_tests so other crates can run the shared
 # provider contract suite against their Coordination implementations.
 provider-contract-tests = []
