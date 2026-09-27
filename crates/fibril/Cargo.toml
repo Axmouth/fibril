@@ -45,6 +45,7 @@ rustls-pemfile = "2"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 
 [features]
+fixed-coalesce-deadline-experiment = ["fibril-protocol/fixed-coalesce-deadline-experiment"]
 writer-stage-trace = ["fibril-broker/writer-stage-trace"]
 io-fault-injection = ["keratin-log/io-fault-injection"]
 early-replication-experiment = ["fibril-broker/early-replication-experiment"]

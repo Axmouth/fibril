@@ -386,11 +386,41 @@ pub trait FollowerStreamSink: Send + Sync + 'static {
 /// polling). `keepalive` of zero disables the keepalive.
 pub async fn run_follower_stream_applier<S: FollowerStreamSink>(
     sink: Arc<S>,
+    batch_rx: mpsc::Receiver<ReplicationReadOk>,
+    control_tx: mpsc::Sender<FollowerStreamControl>,
+    message_from: u64,
+    event_from: u64,
+    tunables: StreamApplyTunablesFn,
+) -> ApplierExit {
+    #[cfg(feature = "fixed-coalesce-deadline-experiment")]
+    let deadline_policy = {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var("FIBRIL_EXPERIMENT_FIXED_COALESCE_DEADLINE").as_deref() == Ok("1")
+        })
+    };
+    #[cfg(not(feature = "fixed-coalesce-deadline-experiment"))]
+    let deadline_policy = false;
+    run_follower_stream_applier_with_policy(
+        sink,
+        batch_rx,
+        control_tx,
+        message_from,
+        event_from,
+        tunables,
+        deadline_policy,
+    )
+    .await
+}
+
+async fn run_follower_stream_applier_with_policy<S: FollowerStreamSink>(
+    sink: Arc<S>,
     mut batch_rx: mpsc::Receiver<ReplicationReadOk>,
     control_tx: mpsc::Sender<FollowerStreamControl>,
     message_from: u64,
     event_from: u64,
     tunables: StreamApplyTunablesFn,
+    deadline_policy: bool,
 ) -> ApplierExit {
     // Microbatch the apply: streamed frames arrive small (the owner reads whatever
     // has trickled in), and applying each one separately means one follower fsync
@@ -455,11 +485,27 @@ pub async fn run_follower_stream_applier<S: FollowerStreamSink>(
         // Fold as many contiguous frames as are ready (plus a one-shot linger).
         let mut merged = first;
         let mut lingered = false;
+        // One budget starts when this apply's first frame is available. Further
+        // arrivals do not renew it. Zero preserves drain-only behavior.
+        let collection_deadline = tokio::time::Instant::now() + apply_linger;
         while batch_bytes(&merged) < max_merge_bytes {
+            if deadline_policy
+                && !apply_linger.is_zero()
+                && tokio::time::Instant::now() >= collection_deadline
+            {
+                break;
+            }
             let next = match batch_rx.try_recv() {
                 Ok(batch) => Some(batch),
                 Err(mpsc::error::TryRecvError::Empty) => {
-                    if lingered || apply_linger.is_zero() {
+                    if apply_linger.is_zero() {
+                        None
+                    } else if deadline_policy {
+                        tokio::time::timeout_at(collection_deadline, batch_rx.recv())
+                            .await
+                            .ok()
+                            .flatten()
+                    } else if lingered {
                         None
                     } else {
                         lingered = true;
@@ -982,6 +1028,164 @@ mod tests {
                 next_offset: 0,
                 records: Vec::new(),
             },
+        }
+    }
+
+    struct DeadlineSink {
+        applied: mpsc::UnboundedSender<(u64, u64, tokio::time::Instant)>,
+    }
+
+    #[async_trait]
+    impl FollowerStreamSink for DeadlineSink {
+        async fn apply(&self, batch: ReplicationReadOk) -> FollowerApplyOutcome {
+            let bytes = batch_bytes(&batch);
+            let ReplicationMessageRead::Batch {
+                requested_offset,
+                next_offset,
+                ..
+            } = batch.messages
+            else {
+                return FollowerApplyOutcome::CheckpointRequired;
+            };
+            self.applied
+                .send((requested_offset, next_offset, tokio::time::Instant::now()))
+                .unwrap();
+            FollowerApplyOutcome::Applied {
+                durable_message_next: next_offset,
+                durable_event_next: 0,
+                bytes,
+            }
+        }
+    }
+
+    fn deadline_harness(
+        policy: bool,
+        linger_us: u64,
+        max_bytes: u64,
+    ) -> (
+        mpsc::Sender<ReplicationReadOk>,
+        mpsc::UnboundedReceiver<(u64, u64, tokio::time::Instant)>,
+        mpsc::Receiver<FollowerStreamControl>,
+        tokio::task::JoinHandle<ApplierExit>,
+    ) {
+        let (tx, rx) = mpsc::channel(8);
+        let (applied, applied_rx) = mpsc::unbounded_channel();
+        let (control, control_rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_follower_stream_applier_with_policy(
+            Arc::new(DeadlineSink { applied }),
+            rx,
+            control,
+            0,
+            0,
+            fixed_tunables(0, linger_us, max_bytes),
+            policy,
+        ));
+        (tx, applied_rx, control_rx, task)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_collects_later_frames_without_renewing_budget() {
+        let (tx, mut applied, mut controls, task) = deadline_harness(true, 20_000, 10_000);
+        let start = tokio::time::Instant::now();
+        tx.send(batch_from(0, 1)).await.unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(5)).await;
+        tx.send(batch_from(1, 1)).await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(
+            applied.try_recv().is_err(),
+            "second arrival must not end collection"
+        );
+        tokio::time::advance(Duration::from_millis(10)).await;
+        tx.send(batch_from(2, 1)).await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(applied.try_recv().is_err());
+        tokio::time::advance(Duration::from_millis(7)).await;
+        let (first, next, at) = applied.recv().await.unwrap();
+        assert_eq!((first, next), (0, 3));
+        assert!(
+            at - start <= Duration::from_millis(22),
+            "arrivals must not reset deadline"
+        );
+        assert_eq!(
+            controls.recv().await.unwrap(),
+            FollowerStreamControl::Progress {
+                durable_message_next: 3,
+                durable_event_next: 0,
+                credit_add_bytes: 3 * REC_BYTES,
+            }
+        );
+        drop(tx);
+        assert_eq!(task.await.unwrap(), ApplierExit::ReaderClosed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn original_policy_still_closes_after_one_extra_arrival() {
+        let (tx, mut applied, _controls, task) = deadline_harness(false, 20_000, 10_000);
+        let start = tokio::time::Instant::now();
+        tx.send(batch_from(0, 1)).await.unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(5)).await;
+        tx.send(batch_from(1, 1)).await.unwrap();
+        let (first, next, at) = applied.recv().await.unwrap();
+        assert_eq!((first, next), (0, 2));
+        assert!(at - start < Duration::from_millis(20));
+        drop(tx);
+        assert_eq!(task.await.unwrap(), ApplierExit::ReaderClosed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_byte_bound_flushes_without_waiting() {
+        let (tx, mut applied, _controls, task) = deadline_harness(true, 20_000, 2 * REC_BYTES);
+        let start = tokio::time::Instant::now();
+        tx.send(batch_from(0, 1)).await.unwrap();
+        tx.send(batch_from(1, 1)).await.unwrap();
+        let (first, next, at) = applied.recv().await.unwrap();
+        assert_eq!((first, next), (0, 2));
+        assert!(at - start < Duration::from_millis(20));
+        drop(tx);
+        assert_eq!(task.await.unwrap(), ApplierExit::ReaderClosed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_preserves_gap_and_epoch_boundaries() {
+        for change_epoch in [false, true] {
+            let (tx, mut applied, _controls, task) = deadline_harness(true, 20_000, 10_000);
+            let start = tokio::time::Instant::now();
+            tx.send(batch_from(0, 1)).await.unwrap();
+            let mut second = batch_from(if change_epoch { 1 } else { 10 }, 1);
+            if change_epoch {
+                let ReplicationMessageRead::Batch { epoch, .. } = &mut second.messages else {
+                    unreachable!()
+                };
+                *epoch = 2;
+            }
+            tx.send(second).await.unwrap();
+            let (first, next, at) = applied.recv().await.unwrap();
+            assert_eq!((first, next), (0, 1));
+            assert!(at - start < Duration::from_millis(20));
+            drop(tx);
+            let (first, next, _) = applied.recv().await.unwrap();
+            assert_eq!((first, next), if change_epoch { (1, 2) } else { (10, 11) });
+            assert_eq!(task.await.unwrap(), ApplierExit::ReaderClosed);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_zero_and_reader_close_flush_promptly() {
+        for zero in [false, true] {
+            let (tx, mut applied, _controls, task) =
+                deadline_harness(true, if zero { 0 } else { 20_000 }, 10_000);
+            let start = tokio::time::Instant::now();
+            tx.send(batch_from(0, 1)).await.unwrap();
+            if zero {
+                tokio::task::yield_now().await;
+            }
+            drop(tx);
+            let (first, next, at) = applied.recv().await.unwrap();
+            assert_eq!((first, next), (0, 1));
+            assert!(at - start < Duration::from_millis(20));
+            assert_eq!(task.await.unwrap(), ApplierExit::ReaderClosed);
         }
     }
 
