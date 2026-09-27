@@ -1808,6 +1808,21 @@ struct StreamApplyAdapterSink {
 
 #[async_trait::async_trait]
 impl FollowerStreamSink for StreamApplyAdapterSink {
+    async fn apply_open(&self, frames: futures::stream::BoxStream<'_, ReplicationReadOk>) -> FollowerApplyOutcome {
+        use futures::StreamExt;
+        let mut bytes = 0u64;
+        let records = frames.map(|frame| {
+            bytes = bytes.saturating_add(stream_batch_bytes(&frame));
+            to_broker_owner_replication_records(frame)
+        }).boxed();
+        match self.apply.apply_open_stream_batch(records).await {
+            Ok(ReplicatedStreamApply::Applied { message_next, event_next }) => FollowerApplyOutcome::Applied {
+                durable_message_next: message_next, durable_event_next: event_next, bytes,
+            },
+            Ok(ReplicatedStreamApply::CheckpointRequired) => FollowerApplyOutcome::CheckpointRequired,
+            Err(err) => FollowerApplyOutcome::Error(err.to_string()),
+        }
+    }
     async fn apply(&self, batch: ReplicationReadOk) -> FollowerApplyOutcome {
         let bytes = stream_batch_bytes(&batch);
         let records = match to_broker_owner_replication_records(batch) {

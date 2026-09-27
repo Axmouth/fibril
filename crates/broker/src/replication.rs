@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use futures::future::BoxFuture;
+use futures::{StreamExt, stream::BoxStream};
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 use tokio_util::sync::CancellationToken;
 
@@ -401,6 +402,21 @@ struct HistoryStreamApply {
     inner: Arc<dyn BrokerReplicationStreamApply>,
 }
 impl BrokerReplicationStreamApply for HistoryStreamApply {
+    fn apply_open_stream_batch<'a>(
+        &'a self,
+        frames: BoxStream<'a, Result<BrokerOwnerReplicationRecords, BrokerError>>,
+    ) -> BoxFuture<'a, Result<ReplicatedStreamApply, BrokerError>> {
+        Box::pin(async move {
+            self.broker.authorize_history_replication(&self.history, false)?;
+            let checked = frames.map(|frame| {
+                self.broker.authorize_history_replication(&self.history, false)?;
+                frame
+            }).boxed();
+            let outcome = self.inner.apply_open_stream_batch(checked).await?;
+            self.broker.authorize_history_replication(&self.history, false)?;
+            Ok(outcome)
+        })
+    }
     fn apply_stream_batch<'a>(
         &'a self,
         records: BrokerOwnerReplicationRecords,
@@ -542,6 +558,12 @@ pub enum FollowerStreamExit {
 /// streaming peer. Lets the protocol transport apply through the broker without
 /// the broker depending on the protocol crate (mirrors the resolver injection).
 pub trait BrokerReplicationStreamApply: Send + Sync {
+    fn apply_open_stream_batch<'a>(
+        &'a self,
+        _frames: BoxStream<'a, Result<BrokerOwnerReplicationRecords, BrokerError>>,
+    ) -> BoxFuture<'a, Result<ReplicatedStreamApply, BrokerError>> {
+        Box::pin(async { Err(BrokerError::InvalidArgument("open follower batches unsupported".into())) })
+    }
     fn apply_stream_batch<'a>(
         &'a self,
         records: BrokerOwnerReplicationRecords,
@@ -563,6 +585,63 @@ pub(crate) struct WorkerStreamApply {
 }
 
 impl BrokerReplicationStreamApply for WorkerStreamApply {
+    fn apply_open_stream_batch<'a>(
+        &'a self,
+        frames: BoxStream<'a, Result<BrokerOwnerReplicationRecords, BrokerError>>,
+    ) -> BoxFuture<'a, Result<ReplicatedStreamApply, BrokerError>> {
+        Box::pin(async move {
+            let mut progress = Vec::new();
+            let frames = frames.map(|frame| {
+                let convert = || -> Result<_, BrokerError> {
+                    let records = frame?;
+                    let m = owner_read_batch_progress("message", &records.messages)?
+                        .ok_or_else(|| BrokerError::InvalidArgument("open batch requires message history".into()))?;
+                    let e = owner_read_batch_progress("event", &records.events)?
+                        .ok_or_else(|| BrokerError::InvalidArgument("open batch requires event history".into()))?;
+                    let messages = match records.messages {
+                        OwnerReplicationRead::Batch(b) if !b.records.is_empty() => Some(ReplicatedMessageBatch {
+                            epoch: b.epoch, first_offset: b.records[0].0,
+                            records: b.records.into_iter().map(|(_, r)| r).collect(),
+                            durability: Some(KDurability::AfterFsync),
+                        }),
+                        _ => None,
+                    };
+                    let events = match records.events {
+                        OwnerReplicationRead::Batch(b) if !b.records.is_empty() => Some(ReplicatedEventBatch {
+                            epoch: b.epoch, first_offset: b.records[0].0,
+                            events: b.records.into_iter().map(|(_, r)| r).collect(),
+                            durability: Some(KDurability::AfterFsync),
+                        }),
+                        _ => None,
+                    };
+                    Ok(((m, e), (messages, events)))
+                };
+                convert().map(|(p, batches)| { progress.push(p); batches })
+                    .map_err(|e| stroma_core::StromaError::Io(e.to_string()))
+            }).boxed();
+            let outcomes = self.broker.engine.apply_open_replicated_queue_batch(
+                &self.topic, self.partition.id(), self.group.as_deref(), frames,
+            ).await?;
+            if outcomes.len() != progress.len() {
+                return Err(BrokerError::InvalidArgument("open batch completion count mismatch".into()));
+            }
+            let mut final_progress = None;
+            for ((m, e), outcome) in progress.into_iter().zip(outcomes) {
+                let m = replicated_append_progress_after_apply("message", &m, outcome.message_log.as_ref())?;
+                let e = replicated_append_progress_after_apply("event", &e, outcome.event_log.as_ref())?;
+                match (m, e) {
+                    (ReplicatedAppendProgress::Advanced(m), ReplicatedAppendProgress::Advanced(e)) => final_progress = Some((m, e)),
+                    _ => return Ok(ReplicatedStreamApply::CheckpointRequired),
+                }
+            }
+            let (message_next, event_next) = final_progress.ok_or_else(|| BrokerError::InvalidArgument("empty open batch".into()))?;
+            let mut state = self.worker.lock().await;
+            state.message_next_offset = message_next;
+            state.event_next_offset = event_next;
+            state.status = FollowerReplicationWorkerStatus::CaughtUp;
+            Ok(ReplicatedStreamApply::Applied { message_next, event_next })
+        })
+    }
     fn apply_stream_batch<'a>(
         &'a self,
         records: BrokerOwnerReplicationRecords,

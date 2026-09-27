@@ -1086,6 +1086,13 @@ impl StromaEngine {
         Ok(())
     }
 
+    pub async fn apply_open_replicated_queue_batch(
+        &self, tp: &str, part: u32, group: Option<&str>,
+        frames: futures::stream::BoxStream<'_, Result<(Option<ReplicatedMessageBatch>, Option<ReplicatedEventBatch>), StromaError>>,
+    ) -> Result<Vec<ReplicatedQueueApplyOutcome>, StromaError> {
+        self.inner.apply_open_replicated_queue_batch(tp, part, group, frames).await
+    }
+
     pub async fn apply_replicated_queue_batch(
         &self,
         tp: &str,
