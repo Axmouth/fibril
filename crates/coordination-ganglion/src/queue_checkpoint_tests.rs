@@ -7,6 +7,7 @@ mod checkpoint_agreement {
 
     fn contents(event_next: u64) -> QueueCheckpointContents {
         QueueCheckpointContents {
+            log_layout: Default::default(),
             event_next,
             message_head: 0,
             message_next: 5,
@@ -46,6 +47,16 @@ mod checkpoint_agreement {
                 .unwrap();
         }
         agreement.finish(snapshot, previous).unwrap()
+    }
+
+    #[test]
+    fn checkpoint_receipt_cannot_change_payload_layout() {
+        let (snapshot, _, _) = activated();
+        let proposal = proposal(&snapshot, 5);
+        let mut bad = receipt(&proposal, "a");
+        bad.contents.log_layout = fibril_broker::recovery::QueueLogLayout::Combined;
+        let mut agreement = QueueCheckpointAgreement::new(&snapshot, proposal).unwrap();
+        assert!(agreement.record(&snapshot, "a", bad).is_err());
     }
 
     #[test]

@@ -70,7 +70,7 @@ impl Attempt {
         if let Some(target) = &self.target {
             if self.pins.len() != self.context.replicas.len()
                 || self.pins.values().any(|p| {
-                    target.event_next < p.event_next
+                    target.log_layout != p.log_layout || target.event_next < p.event_next
                         || target.message_next < p.message_next
                         || target.message_head < p.message_head
                 })
@@ -135,6 +135,7 @@ fn storage(
 }
 fn empty_contents() -> QueueCheckpointContents {
     QueueCheckpointContents {
+        log_layout: Default::default(),
         event_next: 0,
         message_head: 0,
         message_next: 0,

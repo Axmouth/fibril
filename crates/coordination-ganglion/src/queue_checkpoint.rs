@@ -173,6 +173,7 @@ impl QueueCheckpointProposal {
             || self.owner != old.owner
             || self.replicas != old.replicas
             || self.candidate == old.candidate
+            || self.contents.log_layout != old.contents.log_layout
             || self.contents.event_next <= old.contents.event_next
             || self.contents.message_next < old.contents.message_next
             || self.contents.message_head < old.contents.message_head
