@@ -2247,7 +2247,7 @@ impl Broker<StromaEngine> {
                 )
                 .await?;
             self.ensure_replication_source_owner(topic, partition, group)?;
-            if self.engine.queue_payloads_in_event_log() {
+            if self.partition_payloads_in_event_log(topic, partition.id(), group) {
                 return Ok(BrokerOwnerReplicationRecords { messages, events });
             }
             return Ok(cap_owner_replication_records(
@@ -2278,7 +2278,7 @@ impl Broker<StromaEngine> {
             )
             .await?;
 
-        if self.engine.queue_payloads_in_event_log() {
+        if self.partition_payloads_in_event_log(topic, partition.id(), group) {
             // Reads already obey the event byte budget. Every payload reference
             // is to an earlier position in this same ordered log.
             return Ok(BrokerOwnerReplicationRecords { messages, events });
@@ -3528,6 +3528,16 @@ impl<
         + 'static,
 > Broker<E>
 {
+    fn partition_payloads_in_event_log(&self, topic: &str, partition: u32, group: Option<&str>) -> bool {
+        if !self.engine.queue_payloads_in_event_log() { return false; }
+        // A cold stream assignment can precede its local kind marker and handle.
+        // Coordination already knows its kind, even before the first publish.
+        if group.is_none() && self.stream_declared_in_coordination(topic) {
+            return false;
+        }
+        self.engine.partition_payloads_in_event_log(topic, partition, group)
+    }
+
     pub fn begin_replication_progress_session(
         &self,
         topic: &str,
@@ -3592,6 +3602,9 @@ impl<
         {
             return;
         }
+        let combined = self.partition_payloads_in_event_log(
+            &session.key.tp, session.key.part.id(), session.key.group.as_deref(),
+        );
         {
             let mut followers = session.cell.lock_followers();
             let Some(p) = followers
@@ -3604,7 +3617,7 @@ impl<
             // coordinate's max can combine progress from before and after reset.
             // Transport offsets remain independent. For combined queues the
             // event frontier proves the payload prefix used by confirms/delivery.
-            p.message_next = if self.engine.queue_payloads_in_event_log() {event_next} else {message_next};
+            p.message_next = if combined { event_next } else { message_next };
             p.event_next = event_next;
             p.last_report = Instant::now();
         }
@@ -3634,6 +3647,7 @@ impl<
             part: partition,
             group: group.map(str::to_string),
         };
+        let combined = self.partition_payloads_in_event_log(topic, partition.id(), group);
         let cell = self
             .replication_progress
             .entry(key.clone())
@@ -3649,7 +3663,7 @@ impl<
                     last_report: std::time::Instant::now(),
                     session: 0,
                 });
-            entry.message_next = if self.engine.queue_payloads_in_event_log() {durable_event_next} else {durable_message_next};
+            entry.message_next = if combined { durable_event_next } else { durable_message_next };
             entry.event_next = durable_event_next;
             entry.last_report = std::time::Instant::now();
         }

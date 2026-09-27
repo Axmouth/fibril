@@ -642,6 +642,10 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- Replication progress and byte limits select the partition layout in mixed
+  queue and stream deployments. Stream confirms use payload progress even when
+  single-log queues are enabled or a stream assignment is still cold.
+
 - Protect active follower cursors during owner compaction. An admitted follower
   whose history is already missing now requests coordinated repair instead of
   repeatedly attempting a forbidden legacy checkpoint reset. Repair preserves its

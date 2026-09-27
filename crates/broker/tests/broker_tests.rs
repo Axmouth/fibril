@@ -3520,18 +3520,20 @@ async fn owner_replication_read_serves_coordination_declared_stream() {
         .get_or_open_stream("events", 0, StreamDurability::Durable, None)
         .await
         .unwrap();
-    channel
-        .publish(
-            MessageHeaders {
-                published: unix_millis(),
-                publish_received: unix_millis(),
-                content_type: None,
-                extra: Default::default(),
-            },
-            b"record".to_vec(),
-        )
-        .await
-        .unwrap();
+    for _ in 0..3 {
+        channel
+            .publish(
+                MessageHeaders {
+                    published: unix_millis(),
+                    publish_received: unix_millis(),
+                    content_type: None,
+                    extra: Default::default(),
+                },
+                b"record".to_vec(),
+            )
+            .await
+            .unwrap();
+    }
 
     let records = broker
         .read_owner_replication_records(
@@ -3542,14 +3544,16 @@ async fn owner_replication_read_serves_coordination_declared_stream() {
             0,
             10,
             10,
-            usize::MAX,
+            1,
             0,
         )
         .await
         .expect("stream owner must serve replication reads");
     // Reaching here is the regression: the guard admitted the stream
     // owner. The read itself returns the owner's batch/checkpoint view.
-    drop(records);
+    let stroma_core::OwnerReplicationRead::Batch(messages) = records.messages else { panic!("retained stream records") };
+    assert_eq!(messages.records.len(), 1, "byte budget permits one oversized record, not the whole stream batch");
+    assert_eq!(messages.next_offset, 1);
 
     // The queue guard still rejects topics owned by neither table.
     let err = broker
@@ -3954,6 +3958,16 @@ async fn durable_stream_publish_confirm_waits_for_follower_progress() {
         .await_stream_replication_confirm("events", Partition::new(0), None, 0)
         .await
         .expect("confirm resolves once the follower reports durable progress");
+
+    // Network sessions must also keep payload and cursor progress independent.
+    // Cursor events alone cannot prove a stream payload was persisted.
+    let session = broker.begin_replication_progress_session(
+        "events", Partition::new(0), None, "follower-b", 1,
+    ).unwrap();
+    broker.record_replication_session_progress(&session, 0, 10);
+    assert!(broker.await_stream_replication_confirm("events", Partition::new(0), None, 0).await.is_err());
+    broker.record_replication_session_progress(&session, 1, 0);
+    broker.await_stream_replication_confirm("events", Partition::new(0), None, 0).await.unwrap();
 
     broker.shutdown().await;
 }
