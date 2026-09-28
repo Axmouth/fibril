@@ -54,6 +54,13 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- Automatic queue recovery resumes completed local inspection phases and staged
+  offsets without a total-history record/byte budget or whole-attempt deadline.
+  Per-page, retained-state, concurrency and free-space admission remain bounded.
+  Completed seal and verification replies can be retried without repeating full
+  scans. Fresh consensus authority and complete installation validation remain
+  required. Obsolete private inspection caches are reclaimed in bounded steps.
+
 - The checkpoint story includes delayed agreement, successful retry and conflicting
   evidence branches, with shared animation and static transcripts.
 - Recovery timelines show numeric work-budget failures and whether an unchanged

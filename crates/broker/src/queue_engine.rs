@@ -1041,6 +1041,12 @@ impl StromaEngine {
             .await
     }
 
+    pub fn completed_queue_recovery_seal(
+        &self, topic: &str, part: u32, group: Option<&str>, request: &crate::recovery::RecoverySealRequest,
+    ) -> Result<Option<crate::recovery::SealedReplicaFrontiers>, StromaError> {
+        self.inner.completed_queue_recovery_seal(topic, part, group, request)
+    }
+
     pub async fn seal_replica_for_recovery(
         &self,
         topic: &str,

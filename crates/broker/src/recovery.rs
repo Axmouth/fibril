@@ -6,13 +6,13 @@ use crate::{
     queue_engine::StromaEngine,
 };
 use std::sync::{Arc, Mutex};
+pub use stroma_core::recovery_budget::{RecoveryBudget, RecoveryBudgetExceeded};
 pub use stroma_core::recovery_inspection as inspection;
 pub use stroma_core::recovery_journal as journal;
-pub use stroma_core::recovery_budget::{RecoveryBudget, RecoveryBudgetExceeded};
 pub use stroma_core::recovery_replay as replay;
 pub use stroma_core::{
-    RecoveryReadPage, RecoveryReadRequest, RecoveryReadSource, RecoveryRecord, RecoverySealRequest,
-    RecoverySequentialRead, QueueLogLayout, RetainedHistoryIdentity, SealedReplicaFrontiers,
+    QueueLogLayout, RecoveryReadPage, RecoveryReadRequest, RecoveryReadSource, RecoveryRecord,
+    RecoverySealRequest, RecoverySequentialRead, RetainedHistoryIdentity, SealedReplicaFrontiers,
 };
 use tokio::sync::watch;
 
@@ -38,10 +38,21 @@ pub(crate) struct RecoverySealFlight {
     result: watch::Receiver<Option<SealResult>>,
 }
 
-struct FlightGuard(Arc<Mutex<Option<RecoverySealFlight>>>);
+struct FlightGuard(
+    Arc<Mutex<Option<RecoverySealFlight>>>,
+    watch::Receiver<Option<SealResult>>,
+    bool,
+);
 impl Drop for FlightGuard {
     fn drop(&mut self) {
-        self.0.lock().unwrap().take();
+        let mut current = self.0.lock().unwrap();
+        if current
+            .as_ref()
+            .is_some_and(|flight| flight.result.same_channel(&self.1))
+            && (!self.2 || !matches!(self.1.borrow().as_ref(), Some(Ok(_))))
+        {
+            current.take();
+        }
     }
 }
 
@@ -102,20 +113,29 @@ impl Broker<StromaEngine> {
 
     /// The protocol authenticates the peer first. Only one recovery seal runs
     /// per broker; identical concurrent requests share it, conflicting requests
-    /// get a busy error. Caller cancellation cannot cancel admitted work.
+    /// get a busy error. Caller cancellation cannot cancel admitted work. One
+    /// completed result is retained for lost replies and freshly reauthorized.
     pub async fn seal_replica_for_recovery(
         &self,
         command: RecoverySealCommand,
     ) -> Result<BrokerSealedReplica, BrokerError> {
-        let mut result = {
+        let (mut result, cached) = {
             let mut current = self.recovery_seal_flight.lock().unwrap();
             if let Some(flight) = &*current {
-                if flight.command != command {
+                if flight.command != command && flight.result.borrow().is_none() {
                     return Err(BrokerError::InvalidArgument(
-                        "another recovery seal is in progress; retry later".into(),
+                        "another recovery seal is in progress, retry later".into(),
                     ));
                 }
-                flight.result.clone()
+            }
+            if current.as_ref().is_some_and(|flight| {
+                flight.command != command || matches!(flight.result.borrow().as_ref(), Some(Err(_)))
+            }) {
+                current.take();
+            }
+            if let Some(flight) = &*current {
+                let cached = matches!(flight.result.borrow().as_ref(), Some(Ok(_)));
+                (flight.result.clone(), cached)
             } else {
                 let (sender, receiver) = watch::channel(None);
                 *current = Some(RecoverySealFlight {
@@ -125,8 +145,10 @@ impl Broker<StromaEngine> {
                 let ownership = self.ownership.clone();
                 let engine = self.engine.clone();
                 let flight = self.recovery_seal_flight.clone();
+                let guard_result = receiver.clone();
+                let command = command.clone();
                 tokio::spawn(async move {
-                    let _guard = FlightGuard(flight);
+                    let _guard = FlightGuard(flight, guard_result, !command.stream);
                     let outcome = async {
                         let node_id = tokio::time::timeout(
                             std::time::Duration::from_secs(10),
@@ -134,6 +156,27 @@ impl Broker<StromaEngine> {
                         )
                         .await
                         .map_err(|_| "recovery authorization timed out".to_string())??;
+                        if !command.stream {
+                            let saved_engine = engine.clone();
+                            let saved_command = command.clone();
+                            let completed = tokio::task::spawn_blocking(move || {
+                                saved_engine.completed_queue_recovery_seal(
+                                    &saved_command.topic,
+                                    saved_command.partition.id(),
+                                    saved_command.group.as_deref(),
+                                    &RecoverySealRequest {
+                                        transition: saved_command.transition,
+                                        fence_epoch: saved_command.fence_epoch,
+                                    },
+                                )
+                            })
+                            .await
+                            .map_err(|e| e.to_string())?
+                            .map_err(|e| e.to_string())?;
+                            if let Some(seal) = completed {
+                                return Ok(BrokerSealedReplica { node_id, seal });
+                            }
+                        }
                         let seal = engine
                             .seal_replica_for_recovery(
                                 &command.topic,
@@ -150,12 +193,33 @@ impl Broker<StromaEngine> {
                         Ok(BrokerSealedReplica { node_id, seal })
                     }
                     .await;
-                    drop(_guard);
                     sender.send_replace(Some(outcome));
+                    drop(_guard);
                 });
-                receiver
+                (receiver, false)
             }
         };
+        if cached {
+            // The seal is immutable in this process. A lost response can reuse
+            // completed work, but never the old request's consensus authority.
+            let node = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                self.ownership.authorize_recovery_seal(&command),
+            )
+            .await
+            .map_err(|_| BrokerError::Unknown("recovery authorization timed out".into()))?
+            .map_err(BrokerError::InvalidArgument)?;
+            if result
+                .borrow()
+                .as_ref()
+                .and_then(|result| result.as_ref().ok())
+                .is_none_or(|report| report.node_id != node)
+            {
+                return Err(BrokerError::InvalidArgument(
+                    "cached seal node differs from current authority".into(),
+                ));
+            }
+        }
         loop {
             let completed = result.borrow().clone();
             if let Some(completed) = completed {
@@ -173,12 +237,13 @@ impl Broker<StromaEngine> {
 mod tests {
     use super::*;
     use crate::broker::{BrokerConfig, QueueOwnership};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::Notify;
 
     #[derive(Debug, Default)]
     struct Authority {
         calls: AtomicUsize,
+        denied: AtomicBool,
         started: Notify,
         release: Notify,
     }
@@ -192,6 +257,9 @@ mod tests {
         ) -> futures::future::BoxFuture<'a, Result<String, String>> {
             Box::pin(async move {
                 self.calls.fetch_add(1, Ordering::Relaxed);
+                if self.denied.load(Ordering::Relaxed) {
+                    return Err("authority revoked".into());
+                }
                 self.started.notify_one();
                 self.release.notified().await;
                 Ok("test-replica".into())
@@ -256,10 +324,23 @@ mod tests {
         assert_eq!(authority.calls.load(Ordering::Relaxed), 1);
         authority.release.notify_one();
         let (second, third) = tokio::join!(second, third);
-        assert_eq!(second.unwrap(), third.unwrap());
-        assert!(broker.recovery_seal_flight.lock().unwrap().is_none());
+        let expected = second.unwrap();
+        assert_eq!(expected, third.unwrap());
+        assert!(broker.recovery_seal_flight.lock().unwrap().is_some());
+        let retry = call(command.clone());
+        authority.started.notified().await;
+        assert_eq!(authority.calls.load(Ordering::Relaxed), 2);
+        authority.release.notify_one();
+        assert_eq!(retry.await.unwrap().unwrap(), expected);
+        authority.denied.store(true, Ordering::Relaxed);
+        assert!(broker.seal_replica_for_recovery(command).await.is_err());
+        assert_eq!(authority.calls.load(Ordering::Relaxed), 3);
         broker.shutdown().await;
     }
 }
 
 pub use stroma_core::recovery_snapshot as snapshot;
+
+pub use stroma_core::recovery_phase as phase;
+
+pub use stroma_core::recovery_cache as cache;

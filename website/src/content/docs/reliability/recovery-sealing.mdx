@@ -380,16 +380,17 @@ checkpoint requirements. The basic inspection reports snapshot digests; the chec
 also interprets exact snapshot state. The inspector never combines independent maximum log tails,
 chooses a source, installs state or activates an owner.
 
-Default inspection limits are 256 records and 1 MiB per page, 1,024 pages,
+The bounded diagnostic inspection API defaults to 256 records and 1 MiB per page, 1,024 pages,
 1,000,000 records and 256 MiB of canonical record bytes across both replicas.
 Callers supply a whole-operation deadline. Budget exhaustion, malformed pages,
 transferred-digest mismatch, timeout and source loss return an error without a
 partial success report. Dependency decoding accepts at most 65,536 entries in an
 event batch; larger or unfamiliar encodings leave an explicit semantic gap.
 The automatic worker admits one recovery at a time per node, with at most 16
-replicas and a two-minute attempt budget. Automatic inspection reuses authenticated
-connections and sequential read cursors. Strict diagnostic and copy-fallback reads
-retain per-page scans.
+replicas. It uses resumable inspection phases with bounded pages and retained
+state, independent of total historical records or bytes. Automatic inspection
+reuses authenticated connections and sequential read cursors. Strict diagnostic
+and copy-fallback reads retain per-page scans.
 
 ## Queue state at an exact boundary
 
@@ -453,9 +454,11 @@ history and quorum installation remain prerequisites for automatic activation.
 
 ## Cost and limits
 
-Hashing scans all retained records on each explicit seal or completed retry in
-chunks of 64 records. Each sealed-read page also scans all retained data, so
-transferring many pages currently repeats that I/O. Returned pages are capped at
+The strict storage sealing API hashes all retained records. Broker retries can
+restate a completed immutable seal receipt after fresh authorization, avoiding a
+second full scan after a lost response. Strict sealed-read pages also scan the
+retained data. Automatic inspection uses sequential cursors and journals fetched
+pages, then verifies each complete sealed digest. Returned pages are capped at
 16 MiB and 4,096 records; log budgets include 18 bytes of wire metadata per record.
 The strict disk reader caps a single record allocation at 64 MiB, snapshot reads
 use 64 KiB chunks, and recovery metadata is capped at 64 KiB. Segment enumeration
@@ -530,8 +533,9 @@ files, seals and storage bindings remain untouched. The source remains readable
 while a replacement copy is prepared.
 
 One stage is open per storage instance. Pages are bounded to 4096 records and
-16 MiB, with configurable total logical-byte and record budgets; defaults are
-1 GiB and one million records. Native framing, indexes and preallocation consume
+16 MiB. The bounded staging API defaults to totals of 1 GiB and one million
+records. Automatic staging instead checks free-space admission for each new page
+and retains the page and state bounds. Native framing, indexes and preallocation consume
 additional disk. Exact page retries are idempotent, while conflicting records,
 gaps, partial overlaps and substituted source identities are rejected. An append
 error requires reopening the stage to reconstruct its durable progress.
@@ -584,26 +588,33 @@ Target preparation and installation also allow two replicas at a time. Pairwise
 history comparisons remain sequential. Source page reads during transfer are
 serialized, with one page prefetched while the preceding append completes.
 
-The worker retains an immutable plan across retries, resumes staged offsets and
-prefers a completed transferred source. Attempts have a two-minute deadline and
-exponential backoff capped at 30 seconds. Storage operations already admitted to
-owned tasks continue through caller cancellation.
-Every node independently retries exact-process admission after activation, covering
-a lost activation response or an owner disappearing before all admission replies.
+The worker retains an immutable plan, completed inspection/comparison phases and
+staged offsets across retries. It prefers a completed transferred source. Fetched
+pages from interrupted inspections are revalidated locally. Completed results
+bind exact contacted replicas, seals, resource identities, limits and a semantic
+version. Restoring a result does not supply fresh consensus authority.
+
+Each network or inspection work item has a ten-second deadline. There is no
+whole-history deadline. Failed attempts back off exponentially, capped at 30
+seconds. Admitted storage and finalization tasks continue through caller
+cancellation. One recovery job runs separately from metadata admission, so a
+progressing large history can continue while control work proceeds. Every node
+independently retries exact-process admission after activation, covering a lost
+activation response or an owner disappearing before all admission replies.
 
 Automatic recovery accepts at most 16 replicas in either the old or proposed set.
-Its inspection pages allow 4096 records and 16 MiB. Snapshot/artifact transfers
-also have a 16 MiB cap. Inspection retains separate totals of 1024 pages, one
-million records and 256 MiB of canonical record bytes per inspection operation.
-Pair inspection shares those totals across both replicas. Queue replay permits
-one million semantic operations per replica, including entries within batches.
-Each storage stage permits one million records and 1 GiB of logical transferred
-record bytes. These are separate budgets, so the staging cap is not a promise
-that every backlog below 1 GiB can recover automatically.
+Inspection and transfer pages allow 4096 records and 16 MiB. Snapshot artifacts
+have a separate 128 MiB bound and transfer in chunks of at most 1 MiB. Reconstructed
+state admits at most one million retained collection entries, including timer
+heaps. These state and per-step bounds remain independent of cumulative history.
+New journal, snapshot and staging writes check a 256 MiB free-space reserve.
+This is advisory admission. Concurrent filesystem users can still exhaust space.
 
-Budget exhaustion leaves the queue fenced and schedules a retry. An unchanged
-history that still exceeds a budget needs operator or implementation intervention.
-The worker does not discard records or weaken quorum requirements to fit a limit.
+A page, state or storage-admission failure leaves the queue fenced. Retrying an
+unchanged oversized state or record cannot make it fit. Freeing storage can allow
+an admitted history to continue from durable progress. Partial results never
+count as witnesses or authorize activation. An interrupted phase may repeat CPU
+validation of cached pages. Completed phases avoid repeating that work.
 Oversized records, incompatible histories, crossed tails without a complete source, unsupported legacy origins and
 stream state remain fenced. When the recovery candidate becomes unavailable or
 starts draining, the controller can select another live, non-draining member of
@@ -624,7 +635,8 @@ coverage, recovery membership expansion and retained-data reclamation remain
 rollout work. Migration of existing queues is unsupported; existing experimental
 queues must be drained and recreated to adopt the new recovery path. See the
 [transition policy](/development/failover-plan/#existing-experimental-queues).
-Retained generations
-and stages currently require additional disk and have no automatic reclamation.
-Per-queue disk estimates describe active logs; retained recovery data needs separate
-accounting. Process-crash tests do not establish hardware power-loss behavior.
+Retired inspection caches are reclaimed in bounded background steps after a fresh
+metadata check. Namespace leases preserve ongoing work and durable retirement
+markers reject stale reopen attempts. Installed stages and retained generations
+still require additional disk and have no automatic reclamation. Per-queue disk
+estimates describe active logs. Retained recovery data needs separate accounting. Process-crash tests do not establish hardware power-loss behavior.

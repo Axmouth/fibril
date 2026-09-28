@@ -45,9 +45,11 @@ For a more detailed checklist of what is wired and what conditions apply, see
 | Exclusive consumer groups | Partial | Rust, TypeScript, Python, Go, and C# client opt-in for one active consumer per partition, with sticky assignment and cross-broker coordinator wiring |
 | Transactions | Out of scope | Not planned. Transactional publish/consume workflows are intentionally excluded |
 
-Valid histories can exceed current automatic recovery budgets and remain fenced.
-[Large-history recovery availability](/roadmap/#large-history-recovery-availability)
-is a high-priority gap.
+Automatic recovery resumes durable inspection phases and bounded transfer pages
+without a cumulative history-size ceiling. Oversized individual records or live
+state, insufficient storage and unsupported histories still leave queues fenced.
+[Large-history acceptance and resource accounting](/roadmap/#large-history-recovery-availability)
+remain high-priority work.
 
 Cluster recovery still needs broader partition, power-loss and sustained-load
 acceptance, authoritative stream-history recovery and safe reclamation of retained

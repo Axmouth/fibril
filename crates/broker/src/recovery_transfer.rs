@@ -4,7 +4,7 @@ use crate::{
     broker::{Broker, BrokerError},
     queue_engine::{
         PreparedQueueRecovery, QueueRecoveryStage, QueueRecoveryStageReceipt,
-        QueueRecoveryStageSpec, StromaEngine,
+        QueueRecoveryStageSpec, RecoveryStageLimits, StromaEngine,
     },
     recovery::{RecoveryReadPage, RecoverySealRequest},
 };
@@ -189,7 +189,7 @@ impl Broker<StromaEngine> {
                             .open_queue_recovery_stage_reusing(
                                 authority.spec.clone(),
                                 snapshot.clone(),
-                                Default::default(),
+                                RecoveryStageLimits::incremental(),
                                 authority.seal.clone(),
                             )
                             .await
@@ -198,14 +198,17 @@ impl Broker<StromaEngine> {
                         engine
                             .open_queue_recovery_stage_from_snapshot(
                                 authority.spec.clone(),
-                                Default::default(),
+                                RecoveryStageLimits::incremental(),
                                 authority.seal.clone(),
                             )
                             .await
                     }
                     _ => {
                         engine
-                            .resume_queue_recovery_stage(authority.spec.clone(), Default::default())
+                            .resume_queue_recovery_stage(
+                                authority.spec.clone(),
+                                RecoveryStageLimits::incremental(),
+                            )
                             .await
                     }
                 }
@@ -226,9 +229,13 @@ impl Broker<StromaEngine> {
                     QueueRecoveryOperation::Append { page } => Ok(QueueRecoveryReply::Progress(
                         stage.append(page).await.map_err(error)?,
                     )),
-                    QueueRecoveryOperation::Finish => Ok(QueueRecoveryReply::Complete(
-                        stage.finish().await.map_err(error)?,
-                    )),
+                    QueueRecoveryOperation::Finish => {
+                        let receipt = match stage.completion_receipt().await.map_err(error)? {
+                            Some(receipt) => receipt,
+                            None => stage.finish().await.map_err(error)?,
+                        };
+                        Ok(QueueRecoveryReply::Complete(receipt))
+                    }
                     QueueRecoveryOperation::Snapshot => {
                         if authority.spec.snapshot_bytes > 16 * 1024 * 1024 {
                             return Err(error("snapshot requires chunked transfer"));

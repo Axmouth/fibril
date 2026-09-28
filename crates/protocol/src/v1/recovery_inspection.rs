@@ -13,6 +13,7 @@ use fibril_broker::{
             RecoveryPairInspector, RecoverySide,
         },
         journal::{RecoveryInspectionJournal, RecoveryJournalIdentity},
+        phase::{RecoveryPhaseKind, RecoveryPhaseRecipe, RecoveryPhaseStore},
         replay::{RecoveryQueueStateArtifact, RecoveryReplayLimits},
     },
 };
@@ -63,6 +64,141 @@ pub async fn inspect_recovery_pair_with_journal(
     )
     .await
     .map(|(report, ())| report)
+}
+
+fn phase_recipe(
+    command: &RecoverySealCommand,
+    left: &BrokerSealedReplica,
+    right: &BrokerSealedReplica,
+    limits: RecoveryInspectionLimits,
+    kind: RecoveryPhaseKind,
+) -> Result<RecoveryPhaseRecipe, BrokerError> {
+    for replica in [left, right] {
+        if replica.seal.request.transition != command.transition
+            || replica.seal.request.fence_epoch != command.fence_epoch
+        {
+            return Err(BrokerError::InvalidArgument(
+                "phase transition differs from requested recovery".into(),
+            ));
+        }
+    }
+    Ok(RecoveryPhaseRecipe {
+        sources: [left, right].map(|replica| RecoveryJournalIdentity {
+            topic: command.topic.clone(),
+            partition: command.partition.id(),
+            group: command.group.clone(),
+            stream: command.stream,
+            replica: replica.node_id.clone(),
+            seal: replica.seal.clone(),
+        }),
+        limits,
+        state_entries: 1_000_000,
+        kind,
+    })
+}
+
+/// Persist completed local comparisons, retaining tentative pages on interruption.
+/// A restored result still requires current witness/lineage and plan authority.
+pub async fn inspect_recovery_pair_resumable(
+    config: &ProtocolOwnerPeerResolverConfig,
+    command: &RecoverySealCommand,
+    left: &BrokerSealedReplica,
+    right: &BrokerSealedReplica,
+    limits: RecoveryInspectionLimits,
+    deadline: std::time::Duration,
+    root: &std::path::Path,
+) -> Result<ProtocolRecoveryPairInspection, BrokerError> {
+    let recipe = phase_recipe(command, left, right, limits, RecoveryPhaseKind::Comparison)?;
+    let path = root.to_path_buf();
+    let (store, saved) = inspection_work(deadline, "completed comparison read", move || {
+        let store = RecoveryPhaseStore::open(&path, recipe).map_err(|e| e.to_string())?;
+        let saved = store.load().map_err(|e| e.to_string())?;
+        Ok((store, saved))
+    })
+    .await?;
+    if let Some(saved) = saved {
+        tracing::info!(
+            left_replica = left.node_id,
+            right_replica = right.node_id,
+            "reused completed local recovery comparison"
+        );
+        return Ok(ProtocolRecoveryPairInspection {
+            left_node: left.node_id.clone(),
+            right_node: right.node_id.clone(),
+            evidence: saved.report,
+        });
+    }
+    inspect_pair_inner(config, command, left, right, limits, None, deadline, false,
+        Some(root), move |inspector| {
+            let report = inspector.finish()?;
+            // Publication belongs to the admitted finish task. A caller timing
+            // out while this task finishes must not discard completed work.
+            store.save(&report, None).map_err(|e| e.to_string())?;
+            Ok((report, ()))
+        }).await.map(|(report, ())| report)
+}
+
+/// Restore a completed locally verified source phase, or continue its pages.
+pub async fn inspect_recovery_source_artifact_resumable(
+    config: &ProtocolOwnerPeerResolverConfig,
+    command: &RecoverySealCommand,
+    source: &BrokerSealedReplica,
+    limits: RecoveryInspectionLimits,
+    replay_limits: RecoveryReplayLimits,
+    max_checkpoint_bytes: u32,
+    max_artifact_bytes: usize,
+    deadline: std::time::Duration,
+    root: &std::path::Path,
+) -> Result<RecoveryQueueStateArtifact, BrokerError> {
+    let recipe = phase_recipe(
+        command,
+        source,
+        source,
+        limits,
+        RecoveryPhaseKind::SourceArtifact {
+            replay: replay_limits,
+            checkpoint_bytes: max_checkpoint_bytes,
+            artifact_bytes: max_artifact_bytes,
+        },
+    )?;
+    let path = root.to_path_buf();
+    let (store, saved) = inspection_work(deadline, "completed source read", move || {
+        let store = RecoveryPhaseStore::open(&path, recipe).map_err(|e| e.to_string())?;
+        let saved = store.load().map_err(|e| e.to_string())?;
+        Ok((store, saved))
+    })
+    .await?;
+    if let Some(saved) = saved {
+        tracing::info!(
+            replica = source.node_id,
+            "reused completed local recovery inspection"
+        );
+        return saved.artifact.ok_or_else(|| {
+            BrokerError::InvalidArgument("completed source has no artifact".into())
+        });
+    }
+    let (_, artifact) = inspect_pair_inner(
+        config,
+        command,
+        source,
+        source,
+        limits,
+        Some((
+            source.seal.event_next,
+            replay_limits,
+            Some(max_checkpoint_bytes),
+        )),
+        deadline,
+        true,
+        Some(root),
+        move |inspector| {
+            let (report, [artifact, _]) = inspector.finish_with_queue_artifacts(max_artifact_bytes)?;
+            store.save(&report, Some(&artifact)).map_err(|e| e.to_string())?;
+            Ok((report, artifact))
+        },
+    )
+    .await?;
+    Ok(artifact)
 }
 
 /// Reconstruct both fully retained queue histories at the same exclusive event
@@ -180,7 +316,9 @@ async fn inspect_source_artifact(
     deadline: std::time::Duration,
     journal_root: Option<&std::path::Path>,
 ) -> Result<RecoveryQueueStateArtifact, BrokerError> {
-    if max_artifact_bytes == 0 || max_artifact_bytes > fibril_broker::recovery::snapshot::MAX_RECOVERY_SNAPSHOT_BYTES {
+    if max_artifact_bytes == 0
+        || max_artifact_bytes > fibril_broker::recovery::snapshot::MAX_RECOVERY_SNAPSHOT_BYTES
+    {
         return Err(BrokerError::InvalidArgument(
             "invalid recovery artifact limit".into(),
         ));

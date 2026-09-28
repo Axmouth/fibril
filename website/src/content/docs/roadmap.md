@@ -180,17 +180,20 @@ The compatibility work follows this order:
 
 ## Large-history recovery availability
 
-High priority: make automatic recovery progress through large valid histories
-without fixed total-size ceilings. Keep bounded pages, memory and transfer windows,
-and add verifiable continuation for inspection/replay and chunked snapshots.
-Progress must survive attempt deadlines and restart while retaining exact history,
-quorum and activation requirements. Exercise the current byte, record, semantic
-operation and snapshot limits with boundary-crossing fault tests. Extend existing
-operation-level budget diagnostics with durable progress across continuation phases.
+High priority: complete large-history cluster acceptance across byte, record,
+semantic-operation and snapshot boundaries. Cover interruption, process restart,
+source loss, fresh confirmed traffic and old-node rejoin. Measure peak state
+memory, temporary disk and small-history overhead. Extend operation-level budget
+diagnostics with durable progress across continuation phases.
 
-Implement [resumable phases](/development/recovery-continuation/#resumable-recovery-phases)
-with verified progress before source selection, phase-specific retries and bounded
-work windows. A preliminary work journal grants no installation or serving authority.
+Add safe quarantine and refetch for corrupt tentative caches, with fresh authority
+and visible storage errors. Reclaim retained generations and installed stages only
+after proving that recovery and learner readers no longer need them. Expand
+membership recovery beyond a fixed proposed replica set.
+
+The [resumable phase design](/development/recovery-continuation/#resumable-recovery-phases)
+records the authority and retry requirements. Partial journals remain tentative,
+and completed local phases require fresh authority before installation or serving.
 
 Assess pairwise history comparison scaling separately. Preserve equivalent evidence
 when reducing repeated reads or changing comparison scheduling.

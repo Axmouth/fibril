@@ -10,7 +10,8 @@ use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_protocol::v1::{
     handler::{ConnectionSettings, handle_connection},
     recovery_inspection::{
-        inspect_recovery_source_artifact, inspect_recovery_source_artifact_with_journal,
+        inspect_recovery_source_artifact, inspect_recovery_source_artifact_resumable,
+        inspect_recovery_source_artifact_with_journal,
     },
     replication::ProtocolOwnerPeerResolverConfig,
 };
@@ -161,7 +162,10 @@ async fn inspection_download_resumes_over_tcp_then_revalidates_without_source() 
         ..Default::default()
     };
     let continued_limits = RecoveryInspectionLimits {
-        total_pages: 1, total_records: 1, total_bytes: 1, ..limits
+        total_pages: 1,
+        total_records: 1,
+        total_bytes: 1,
+        ..limits
     };
     let journal = root.join("candidate");
     authority.remaining.store(2, Ordering::Relaxed);
@@ -207,6 +211,20 @@ async fn inspection_download_resumes_over_tcp_then_revalidates_without_source() 
     .await
     .unwrap();
     assert_eq!(resumed, direct);
+    let completed = inspect_recovery_source_artifact_resumable(
+        &config,
+        &command,
+        &sealed,
+        continued_limits,
+        Default::default(),
+        4096,
+        4096,
+        Duration::from_secs(10),
+        &journal,
+    )
+    .await
+    .unwrap();
+    assert_eq!(completed, direct);
     stop.cancel();
     server.await.unwrap();
     let offline = ProtocolOwnerPeerResolverConfig::new(HashMap::new());
@@ -236,6 +254,51 @@ async fn inspection_download_resumes_over_tcp_then_revalidates_without_source() 
             Default::default(),
             4096,
             4096,
+            Duration::from_secs(10),
+            &journal
+        )
+        .await
+        .is_err()
+    );
+    // A completed phase survives removal of its tentative pages and an offline
+    // source. Altered recipes cannot reuse it or invent verified evidence.
+    let cache = fibril_broker::recovery::journal::RecoveryInspectionJournal::open(
+        &journal,
+        fibril_broker::recovery::journal::RecoveryJournalIdentity {
+            topic: command.topic.clone(),
+            partition: command.partition.id(),
+            group: command.group.clone(),
+            stream: false,
+            replica: sealed.node_id.clone(),
+            seal: sealed.seal.clone(),
+        },
+    )
+    .unwrap();
+    assert!(cache.clear_pages().unwrap() > 0);
+    drop(cache);
+    let completed = inspect_recovery_source_artifact_resumable(
+        &offline,
+        &command,
+        &sealed,
+        continued_limits,
+        Default::default(),
+        4096,
+        4096,
+        Duration::from_secs(10),
+        &journal,
+    )
+    .await
+    .unwrap();
+    assert_eq!(completed, direct);
+    assert!(
+        inspect_recovery_source_artifact_resumable(
+            &offline,
+            &command,
+            &sealed,
+            continued_limits,
+            Default::default(),
+            4096,
+            8192,
             Duration::from_secs(10),
             &journal
         )

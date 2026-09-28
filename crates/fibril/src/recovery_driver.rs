@@ -4,8 +4,8 @@ use fibril_broker::{
     broker::{Broker, QueueOwnership},
     queue_engine::StromaEngine,
     recovery::{
-        BrokerSealedReplica, RecoveryReadRequest, RecoverySealRequest,
-        SealedReplicaFrontiers, inspection::RecoveryInspectionLimits,
+        BrokerSealedReplica, RecoveryReadRequest, RecoverySealRequest, SealedReplicaFrontiers,
+        inspection::RecoveryInspectionLimits,
     },
     recovery_transfer::{
         QueueRecoveryCommand, QueueRecoveryOperation as Operation, QueueRecoveryReply as Reply,
@@ -17,7 +17,9 @@ use fibril_coordination_ganglion::{
     recovery_witnesses::RecoveryWitnessSet,
 };
 use fibril_protocol::v1::{
-    recovery_inspection::{inspect_recovery_pair, inspect_recovery_source_artifact},
+    recovery_inspection::{
+        inspect_recovery_pair_resumable, inspect_recovery_source_artifact_resumable,
+    },
     recovery_transfer::request_transfer,
     replication::{ProtocolOwnerPeerResolverConfig, request_recovery_read, request_recovery_seal},
 };
@@ -34,7 +36,7 @@ const MAX_REPLICAS: usize = 16;
 // wire encoding and storage buffers are additional allocations.
 const PARALLEL_REPLICAS: usize = 2;
 // Sequential inspection verifies each complete retained history. Use the wire limits
-// to amortize those scans, while keeping total inspection budgets unchanged.
+// to amortize scans. The resumable path bounds retained state and individual pages.
 fn automatic_inspection_limits() -> RecoveryInspectionLimits {
     RecoveryInspectionLimits {
         page_records: 4096,
@@ -74,13 +76,18 @@ async fn transfer(
     .map_err(err)
 }
 async fn completed_snapshot(
-    config: &ProtocolOwnerPeerResolverConfig, plan: &QueueRecoveryPlan, node: &str,
+    config: &ProtocolOwnerPeerResolverConfig,
+    plan: &QueueRecoveryPlan,
+    node: &str,
 ) -> Result<Vec<u8>, String> {
     use fibril_broker::recovery::snapshot::{MAX_RECOVERY_SNAPSHOT_BYTES, SNAPSHOT_CHUNK_BYTES};
     let total = plan.snapshot_bytes();
-    if total == 0 || total > MAX_RECOVERY_SNAPSHOT_BYTES as u64 { return Err("selected snapshot exceeds retained-state byte admission".into()); }
+    if total == 0 || total > MAX_RECOVERY_SNAPSHOT_BYTES as u64 {
+        return Err("selected snapshot exceeds retained-state byte admission".into());
+    }
     let bytes = if total <= 16 * 1024 * 1024 {
-        let Reply::Snapshot(bytes) = transfer(config, plan, node, Operation::Snapshot).await? else {
+        let Reply::Snapshot(bytes) = transfer(config, plan, node, Operation::Snapshot).await?
+        else {
             return Err("invalid completed snapshot reply".into());
         };
         bytes
@@ -88,11 +95,27 @@ async fn completed_snapshot(
         let mut bytes = Vec::with_capacity(total as usize);
         while (bytes.len() as u64) < total {
             let from = bytes.len() as u64;
-            let Reply::SnapshotChunk { from: actual, bytes: chunk } = transfer(config, plan, node,
-                Operation::SnapshotRead { from, max_bytes: SNAPSHOT_CHUNK_BYTES as u32 }).await? else {
+            let Reply::SnapshotChunk {
+                from: actual,
+                bytes: chunk,
+            } = transfer(
+                config,
+                plan,
+                node,
+                Operation::SnapshotRead {
+                    from,
+                    max_bytes: SNAPSHOT_CHUNK_BYTES as u32,
+                },
+            )
+            .await?
+            else {
                 return Err("invalid completed snapshot chunk reply".into());
             };
-            if actual != from || chunk.is_empty() || chunk.len() > SNAPSHOT_CHUNK_BYTES || from + chunk.len() as u64 > total {
+            if actual != from
+                || chunk.is_empty()
+                || chunk.len() > SNAPSHOT_CHUNK_BYTES
+                || from + chunk.len() as u64 > total
+            {
                 return Err("completed snapshot chunk differs from selected bounds".into());
             }
             bytes.extend_from_slice(&chunk);
@@ -104,23 +127,50 @@ async fn completed_snapshot(
 }
 
 async fn begin_target(
-    config: &ProtocolOwnerPeerResolverConfig, plan: &QueueRecoveryPlan, node: &str, snapshot: &[u8],
+    config: &ProtocolOwnerPeerResolverConfig,
+    plan: &QueueRecoveryPlan,
+    node: &str,
+    snapshot: &[u8],
 ) -> Result<Reply, String> {
     use fibril_broker::recovery::snapshot::SNAPSHOT_CHUNK_BYTES;
     plan.verify_snapshot(snapshot)?;
     if snapshot.len() <= 16 * 1024 * 1024 {
-        return transfer(config, plan, node, Operation::Begin { snapshot: snapshot.to_vec() }).await;
+        return transfer(
+            config,
+            plan,
+            node,
+            Operation::Begin {
+                snapshot: snapshot.to_vec(),
+            },
+        )
+        .await;
     }
-    let Reply::SnapshotProgress(mut from) = transfer(config, plan, node, Operation::SnapshotProgress).await? else {
+    let Reply::SnapshotProgress(mut from) =
+        transfer(config, plan, node, Operation::SnapshotProgress).await?
+    else {
         return Err("invalid snapshot transfer progress reply".into());
     };
-    if from > plan.snapshot_bytes() { return Err("snapshot transfer progress exceeds selected length".into()); }
+    if from > plan.snapshot_bytes() {
+        return Err("snapshot transfer progress exceeds selected length".into());
+    }
     while from < plan.snapshot_bytes() {
         let end = (from as usize + SNAPSHOT_CHUNK_BYTES).min(snapshot.len());
-        let Reply::SnapshotProgress(next) = transfer(config, plan, node, Operation::SnapshotAppend {
-            from, bytes: snapshot[from as usize..end].to_vec(),
-        }).await? else { return Err("invalid snapshot append progress reply".into()); };
-        if next != end as u64 { return Err("snapshot append made unexpected progress".into()); }
+        let Reply::SnapshotProgress(next) = transfer(
+            config,
+            plan,
+            node,
+            Operation::SnapshotAppend {
+                from,
+                bytes: snapshot[from as usize..end].to_vec(),
+            },
+        )
+        .await?
+        else {
+            return Err("invalid snapshot append progress reply".into());
+        };
+        if next != end as u64 {
+            return Err("snapshot append made unexpected progress".into());
+        }
         from = next;
     }
     transfer(config, plan, node, Operation::BeginTransferredSnapshot).await
@@ -144,8 +194,9 @@ fn source_report(plan: &QueueRecoveryPlan) -> Result<BrokerSealedReplica, String
     })
 }
 
-/// One bounded attempt. Repeating it resumes the same immutable plan and staged
-/// offsets. Callers supply authenticated peer addresses and impose a total deadline.
+/// Resume completed inspection phases, the immutable plan and staged offsets.
+/// Each network/storage step has its own admission and deadline. The automatic
+/// worker keeps progressing histories independent of a whole-attempt stopwatch.
 pub async fn recover_queue_once(
     provider: &GanglionCoordination,
     broker: &Broker<StromaEngine>,
@@ -187,14 +238,24 @@ async fn recover_queue_attempt(
         || pending.proposed.replica_set_size() > MAX_REPLICAS
     {
         return Err(fibril_broker::recovery::RecoveryBudgetExceeded::message(
-            fibril_broker::recovery::RecoveryBudget::ReplicaCount, MAX_REPLICAS as u64, 0,
-            pending.previous.replica_set_size().max(pending.proposed.replica_set_size()) as u64,
+            fibril_broker::recovery::RecoveryBudget::ReplicaCount,
+            MAX_REPLICAS as u64,
+            0,
+            pending
+                .previous
+                .replica_set_size()
+                .max(pending.proposed.replica_set_size()) as u64,
         ));
     }
     let seal_command = pending.seal_command()?;
-    // Attempt-local only: a resumed persisted plan reconstructs its source as
-    // before. Keep the selected replay result alive across plan persistence.
-    let mut selected_artifact = None;
+    let journal_root = broker.engine().recovery_inspection_journal_root().join(
+        pending
+            .transition_digest()?
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+    );
+    let state_bytes = fibril_broker::recovery::snapshot::MAX_RECOVERY_SNAPSHOT_BYTES;
     let plan = if let Some(plan) = provider.queue_recovery_plan(pending).map_err(err)? {
         plan
     } else {
@@ -214,6 +275,7 @@ async fn recover_queue_attempt(
                 .iter()
                 .map(|node| {
                     let seal_command = &seal_command;
+                    let journal_root = &journal_root;
                     async move {
                         let report = timing
                             .stage(
@@ -228,18 +290,20 @@ async fn recover_queue_attempt(
                                     .stage(
                                         "inspect_source",
                                         node,
-                                        inspect_recovery_source_artifact(
+                                        inspect_recovery_source_artifact_resumable(
                                             config,
                                             seal_command,
                                             report,
                                             automatic_inspection_limits(),
                                             Default::default(),
-                                            16 * 1024 * 1024,
-                                            16 * 1024 * 1024,
+                                            state_bytes as u32,
+                                            state_bytes,
                                             RPC,
+                                            journal_root,
                                         ),
                                     )
-                                    .await,
+                                    .await
+                                    .map(|artifact| artifact.summary()),
                             ),
                             Err(_) => None,
                         };
@@ -287,13 +351,14 @@ async fn recover_queue_attempt(
                     .stage(
                         "compare_pair",
                         &format!("{}+{}", left.node_id, right.node_id),
-                        inspect_recovery_pair(
+                        inspect_recovery_pair_resumable(
                             config,
                             &seal_command,
                             left,
                             right,
                             automatic_inspection_limits(),
                             RPC,
+                            &journal_root,
                         ),
                     )
                     .await
@@ -301,7 +366,7 @@ async fn recover_queue_attempt(
                 comparisons.push(pair.evidence);
             }
         }
-        let selection = witnesses.select_queue_source(
+        let selection = witnesses.select_queue_source_summaries(
             &provider.consensus_node().committed_snapshot(),
             &artifacts,
             &comparisons,
@@ -314,7 +379,6 @@ async fn recover_queue_attempt(
             )
             .await
             .map_err(err)?;
-        selected_artifact = artifacts.remove(plan.source_node());
         plan
     };
     let members: Vec<_> = std::iter::once(&candidate.owner)
@@ -339,27 +403,24 @@ async fn recover_queue_attempt(
         }
     }
     if snapshot.is_none() {
-        let artifact = if let Some(artifact) = selected_artifact.take() {
-            artifact
-        } else {
-            timing
-                .stage(
-                    "reinspect_source",
-                    plan.source_node(),
-                    inspect_recovery_source_artifact(
-                        config,
-                        &seal_command,
-                        &source_report(&plan)?,
-                        automatic_inspection_limits(),
-                        Default::default(),
-                        16 * 1024 * 1024,
-                        16 * 1024 * 1024,
-                        RPC,
-                    ),
-                )
-                .await
-                .map_err(err)?
-        };
+        let artifact = timing
+            .stage(
+                "reinspect_source",
+                plan.source_node(),
+                inspect_recovery_source_artifact_resumable(
+                    config,
+                    &seal_command,
+                    &source_report(&plan)?,
+                    automatic_inspection_limits(),
+                    Default::default(),
+                    state_bytes as u32,
+                    state_bytes,
+                    RPC,
+                    &journal_root,
+                ),
+            )
+            .await
+            .map_err(err)?;
         plan.verify_artifact(&artifact)?;
         snapshot = Some(artifact.state_snapshot().to_vec());
     }
@@ -522,7 +583,10 @@ async fn prepare_target(
     timing: &crate::recovery_timing::RecoveryTiming,
 ) -> Result<(), String> {
     let seal_command = pending.seal_command()?;
-    let payload_log = plan.source_history().ok_or("recovery source is missing")?.payload_log();
+    let payload_log = plan
+        .source_history()
+        .ok_or("recovery source is missing")?
+        .payload_log();
     timing
         .stage("prepare_target", node, async {
             // Existing old storage must be durably fenced before replacement.
@@ -636,7 +700,11 @@ async fn read_source_page(
     // Completed-stage reads share one per-broker stage lock.
     // Serialize source reads while target appends still overlap.
     let _read = source_reads.lock().await;
-    let source_kind = plan.source_history().ok_or("recovery source is missing")?.payload_log().source;
+    let source_kind = plan
+        .source_history()
+        .ok_or("recovery source is missing")?
+        .payload_log()
+        .source;
     Ok(if let Some(source) = completed_source {
         let Reply::Page(page) = transfer(
             config,
@@ -707,12 +775,103 @@ pub fn spawn(
         let _learners =
             crate::queue_learner_driver::spawn(provider.clone(), broker.clone(), config.clone());
         let mut failures: HashMap<[u8; 32], (tokio::time::Instant, u64, String)> = HashMap::new();
+        // One admitted queue recovery preserves the per-node stage cache. Its
+        // bounded RPC/inspection steps run separately from metadata admission,
+        // so a long but progressing history does not block those control loops.
+        let mut jobs: tokio::task::JoinSet<(PendingRecovery, Result<(), String>)> =
+            tokio::task::JoinSet::new();
+        let mut running: Option<(PendingRecovery, tokio::task::AbortHandle)> = None;
+        let mut cleanup_state = Some(fibril_broker::recovery::cache::RecoveryCacheSweep::default());
+        let mut cleanup_job: Option<
+            tokio::task::JoinHandle<(
+                fibril_broker::recovery::cache::RecoveryCacheSweep,
+                Result<fibril_broker::recovery::cache::RecoveryCacheSweepStep, String>,
+            )>,
+        > = None;
+        let mut cleanup_at = tokio::time::Instant::now();
         let mut wake =
             crate::recovery_wake::RecoveryWake::new(provider.consensus_node().watch_committed());
         loop {
             let state = wake.next().await;
             if broker.is_shutting_down() {
+                jobs.abort_all();
                 break;
+            }
+            while let Some(outcome) = jobs.try_join_next() {
+                match outcome {
+                    Ok((pending, outcome)) => {
+                        let id = pending.transition_digest().unwrap_or_default();
+                        match outcome {
+                            Ok(()) => {
+                                failures.remove(&id);
+                            }
+                            Err(error) => {
+                                let previous = failures.get(&id);
+                                let delay = previous.map_or(1, |(_, delay, _)| (delay * 2).min(30));
+                                if previous.is_none_or(|(_, _, old)| old != &error) {
+                                    tracing::warn!(topic=pending.proposed.resource.name,partition=pending.proposed.resource.partition,retry_seconds=delay,%error,"queue remains fenced, recovery will resume verified phases");
+                                }
+                                failures.insert(
+                                    id,
+                                    (
+                                        tokio::time::Instant::now() + Duration::from_secs(delay),
+                                        delay,
+                                        error,
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    Err(error) if !error.is_cancelled() => {
+                        tracing::error!(%error, "recovery worker failed, durable phases remain available");
+                        if let Some((pending, _)) = &running {
+                            failures.insert(
+                                pending.transition_digest().unwrap_or_default(),
+                                (
+                                    tokio::time::Instant::now() + Duration::from_secs(1),
+                                    1,
+                                    error.to_string(),
+                                ),
+                            );
+                        }
+                    }
+                    Err(_) => {}
+                }
+                running = None;
+            }
+            if cleanup_job.as_ref().is_some_and(|job| job.is_finished()) {
+                match cleanup_job.take().unwrap().await {
+                    Ok((sweep, result)) => {
+                        cleanup_state = Some(sweep);
+                        let complete = match result {
+                            Ok(step) => {
+                                if step.cleanup.removed_files != 0 {
+                                    tracing::debug!(
+                                        files = step.cleanup.removed_files,
+                                        bytes = step.cleanup.removed_bytes,
+                                        "reclaimed retired recovery inspection cache"
+                                    );
+                                }
+                                step.cycle_complete
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error,"recovery inspection cleanup will retry");
+                                true
+                            }
+                        };
+                        cleanup_at = tokio::time::Instant::now()
+                            + if complete {
+                                Duration::from_secs(30)
+                            } else {
+                                Duration::ZERO
+                            };
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error,"recovery inspection cleanup worker failed");
+                        cleanup_state = Some(Default::default());
+                        cleanup_at = tokio::time::Instant::now() + Duration::from_secs(30);
+                    }
+                }
             }
             config.nodes = state
                 .nodes
@@ -826,6 +985,58 @@ pub fn spawn(
                 .filter_map(|p| p.transition_digest().ok())
                 .collect();
             failures.retain(|id, _| active.contains(id));
+            if cleanup_job.is_none() && tokio::time::Instant::now() >= cleanup_at {
+                if let Some(mut sweep) = cleanup_state.take() {
+                    let root = broker.engine().recovery_inspection_journal_root();
+                    let cleanup_provider = provider.clone();
+                    cleanup_job = Some(tokio::task::spawn_blocking(move || {
+                        let result = sweep
+                            .step(&root, |id| {
+                                // Observe consensus after finding this cache. A
+                                // transition created since the sweep started
+                                // must not be retired from a stale active set.
+                                let pending = cleanup_provider.pending_recoveries()
+                                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                                for item in pending {
+                                    let digest = item.transition_digest()
+                                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                                    let encoded: String = digest.iter()
+                                        .map(|byte| format!("{byte:02x}")).collect();
+                                    if encoded == id { return Ok(true); }
+                                }
+                                Ok(false)
+                            }, 32, 128)
+                            .map_err(|e| e.to_string());
+                        (sweep, result)
+                    }));
+                }
+            }
+            if let Some((work, task)) = &running {
+                let current = requests
+                    .iter()
+                    .find(|p| p.transition_digest().ok() == work.transition_digest().ok());
+                let still_owned = if let Some(current) = current {
+                    provider
+                        .queue_recovery_candidate(current)
+                        .ok()
+                        .is_some_and(|candidate| {
+                            provider.replication_node_id() == Some(candidate.owner.as_str())
+                        })
+                } else {
+                    // Activation removes the pending barrier before admission
+                    // replies finish. Let that successful work finish normally.
+                    state
+                        .assignments
+                        .get(&work.proposed.resource)
+                        .is_some_and(|assignment| {
+                            assignment.epoch == work.proposed.epoch
+                                && provider.replication_node_id() == Some(assignment.owner.as_str())
+                        })
+                };
+                if !still_owned {
+                    task.abort();
+                }
+            }
             for pending in requests {
                 // Let the original driver report malformed/stale authority via
                 // the existing bounded error path instead of silently skipping it.
@@ -847,37 +1058,21 @@ pub fn spawn(
                 {
                     continue;
                 }
-                let outcome = tokio::time::timeout(
-                    Duration::from_secs(120),
-                    recover_queue_once(&provider, &broker, &config, &pending),
-                )
-                .await
-                .unwrap_or_else(|_| {
-                    Err(
-                        "recovery attempt exceeded two-minute work budget; durable stages retained"
-                            .into(),
-                    )
-                });
-                match outcome {
-                    Ok(()) => {
-                        failures.remove(&id);
-                    }
-                    Err(e) => {
-                        let previous = failures.get(&id);
-                        let delay = previous.map_or(1, |(_, d, _)| (d * 2).min(30));
-                        if previous.is_none_or(|(_, _, old)| old != &e) {
-                            tracing::warn!(topic=pending.proposed.resource.name,partition=pending.proposed.resource.partition,retry_seconds=delay,error=%e,"queue remains fenced; recovery will retry within verified bounds");
-                        }
-                        failures.insert(
-                            id,
-                            (
-                                tokio::time::Instant::now() + Duration::from_secs(delay),
-                                delay,
-                                e,
-                            ),
-                        );
-                    }
+                if !jobs.is_empty() {
+                    break;
                 }
+                let work_provider = provider.clone();
+                let work_broker = broker.clone();
+                let work_config = config.clone();
+                let work_pending = pending.clone();
+                let task = jobs.spawn(async move {
+                    let outcome =
+                        recover_queue_once(&work_provider, &work_broker, &work_config, &pending)
+                            .await;
+                    (pending, outcome)
+                });
+                running = Some((work_pending, task));
+                break;
             }
         }
     })

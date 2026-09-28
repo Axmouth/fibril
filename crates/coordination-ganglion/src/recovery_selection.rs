@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use fibril_broker::recovery::{
     inspection::{RecoveryOverlap, RecoveryPairInspection},
-    replay::RecoveryQueueStateArtifact,
+    replay::{RecoveryQueueStateArtifact, RecoveryQueueStateSummary},
 };
 use ganglion_core::{CoordinationSnapshot, ResourceIdentity};
 use serde::{Deserialize, Serialize};
@@ -70,6 +70,21 @@ impl RecoveryWitnessSet {
         &self,
         snapshot: &CoordinationSnapshot,
         artifacts: &BTreeMap<String, RecoveryQueueStateArtifact>,
+        comparisons: &[RecoveryPairInspection],
+    ) -> Result<QueueRecoverySelection, String> {
+        let summaries = artifacts
+            .iter()
+            .map(|(node, artifact)| (node.clone(), artifact.summary()))
+            .collect();
+        self.select_queue_source_summaries(snapshot, &summaries, comparisons)
+    }
+
+    /// Select using verified summaries so replica count does not multiply retained
+    /// snapshot memory. The selected bytes are reopened from their exact phase.
+    pub fn select_queue_source_summaries(
+        &self,
+        snapshot: &CoordinationSnapshot,
+        artifacts: &BTreeMap<String, RecoveryQueueStateSummary>,
         comparisons: &[RecoveryPairInspection],
     ) -> Result<QueueRecoverySelection, String> {
         if !matches!(
@@ -212,7 +227,7 @@ impl RecoveryWitnessSet {
             message_head: source.message_head(),
             message_next,
             snapshot_digest: source.snapshot_digest(),
-            snapshot_bytes: source.state_snapshot().len() as u64,
+            snapshot_bytes: source.snapshot_bytes(),
             state_digest: source.evidence().lease_normalized_state_digest,
             live_payload_digest: source.evidence().live_payload_digest.unwrap(),
             witnesses: reports

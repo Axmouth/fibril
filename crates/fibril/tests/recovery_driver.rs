@@ -559,6 +559,21 @@ async fn recovery_copies_multiple_pages_to_a_lagging_checkpoint_replica() {
     three_node_owner_loss_with_checkpoints(true, LearnerCase::None, true, false, true).await;
 }
 
+#[derive(Clone, Copy)]
+struct RecoveryCopyHistory {
+    records: u64,
+    payload_bytes: usize,
+    recovery_timeout: Duration,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "large replicated recovery acceptance, writes several GiB"]
+async fn automatic_recovery_exceeds_old_inspection_and_staging_byte_limits() {
+    three_node_owner_loss_with_history(true, LearnerCase::None, true, false,
+        Some(RecoveryCopyHistory { records: 16_385, payload_bytes: 64 * 1024,
+            recovery_timeout: Duration::from_secs(300) })).await;
+}
+
 async fn three_node_owner_loss_with_checkpoints(
     recover: bool,
     learner: LearnerCase,
@@ -566,11 +581,25 @@ async fn three_node_owner_loss_with_checkpoints(
     partial_checkpoint: bool,
     copy_pages: bool,
 ) {
+    three_node_owner_loss_with_history(recover, learner, checkpoints, partial_checkpoint,
+        copy_pages.then_some(RecoveryCopyHistory { records: 1025, payload_bytes: 64 * 1024,
+            recovery_timeout: Duration::from_secs(70) })).await;
+}
+
+async fn three_node_owner_loss_with_history(
+    recover: bool,
+    learner: LearnerCase,
+    checkpoints: bool,
+    partial_checkpoint: bool,
+    copy_history: Option<RecoveryCopyHistory>,
+) {
     use fibril_broker::coordination::{NodeInfo, QueueIdentity};
-    let root = std::env::temp_dir().join(format!(
+    let root = std::path::Path::new(env!("CARGO_WORKSPACE_DIR")).join("test_data").join(format!(
         "fibril-three-node-enrollment-{}",
         uuid::Uuid::new_v4()
     ));
+    std::fs::create_dir_all(&root).unwrap();
+    let _fixture = keratin_log::util::TempDir { root: root.clone() };
     let mut nodes = Vec::new();
     let mut servers = Vec::new();
     for id in 1..=3 {
@@ -1066,7 +1095,6 @@ async fn three_node_owner_loss_with_checkpoints(
         for server in servers {
             server.shutdown();
         }
-        std::fs::remove_dir_all(root).unwrap();
         return;
     }
     if learner == LearnerCase::Reseed {
@@ -1084,7 +1112,6 @@ async fn three_node_owner_loss_with_checkpoints(
         for server in servers {
             server.shutdown();
         }
-        std::fs::remove_dir_all(root).unwrap();
         return;
     }
     if checkpoints {
@@ -1150,72 +1177,42 @@ async fn three_node_owner_loss_with_checkpoints(
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }).await.unwrap();
-        if copy_pages {
+        if let Some(copy) = copy_history {
             // Only b receives this confirmed suffix; c retains the agreed
             // checkpoint. More than 64 MiB forces multiple transfer pages after
             // a stops, so recovery must copy real payloads into c's new stage.
-            let mut confirms = Vec::new();
-            for n in 16..1041u64 {
-                let mut payload = vec![0x5a; 64 * 1024];
-                payload[..8].copy_from_slice(&n.to_le_bytes());
-                confirms.push(
-                    publisher
-                        .publish(
-                            payload,
-                            unix_millis(),
-                            unix_millis(),
-                            None,
-                            Default::default(),
-                            None,
-                        )
-                        .await
-                        .unwrap(),
-                );
-            }
-            tokio::time::timeout(Duration::from_secs(30), async {
-                loop {
-                    let from = brokers[1]
-                        .engine()
-                        .queue_replication_next_offsets("q", 0, None)
-                        .await
-                        .unwrap();
-                    if from.1 >= 1041 {
-                        break;
-                    }
-                    brokers[1]
-                        .catch_up_replication_follower_from_owner(
-                            &peers[0],
-                            "q",
-                            Partition::new(0),
-                            None,
+            let started = Instant::now();
+            let final_offset = 16 + copy.records;
+            for batch_start in (16..final_offset).step_by(128) {
+                let batch_end = (batch_start + 128).min(final_offset);
+                let mut confirms = Vec::new();
+                for n in batch_start..batch_end {
+                    let mut payload = vec![0x5a; copy.payload_bytes];
+                    payload[..8].copy_from_slice(&n.to_le_bytes());
+                    confirms.push(publisher.publish(payload, unix_millis(), unix_millis(), None,
+                        Default::default(), None).await.unwrap());
+                }
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    loop {
+                        let from = brokers[1].engine().queue_replication_next_offsets("q", 0, None).await.unwrap();
+                        if from.1 >= batch_end { break; }
+                        brokers[1].catch_up_replication_follower_from_owner(&peers[0], "q", Partition::new(0), None,
                             fibril_broker::broker::ReplicationResourceKind::Queue,
                             fibril_broker::broker::BrokerReplicationCatchUpOptions {
-                                message_from: from.0,
-                                event_from: from.1,
-                                max_messages_per_read: 4096,
-                                max_events_per_read: 4096,
-                                max_bytes_per_read: 16 * 1024 * 1024,
-                                max_iterations: 16,
-                                max_wait_ms: 0,
-                            },
-                        )
-                        .await
-                        .unwrap();
-                    tokio::time::sleep(Duration::from_millis(5)).await;
+                                message_from: from.0, event_from: from.1,
+                                max_messages_per_read: 4096, max_events_per_read: 4096,
+                                max_bytes_per_read: 16 * 1024 * 1024, max_iterations: 16, max_wait_ms: 0,
+                            }).await.unwrap();
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                }).await.unwrap();
+                for (index, confirm) in confirms.into_iter().enumerate() {
+                    assert_eq!(tokio::time::timeout(Duration::from_secs(10), confirm).await.unwrap().unwrap().unwrap(),
+                        batch_start + index as u64);
                 }
-            })
-            .await
-            .unwrap();
-            for (index, confirm) in confirms.into_iter().enumerate() {
-                assert_eq!(
-                    tokio::time::timeout(Duration::from_secs(10), confirm)
-                        .await
-                        .unwrap()
-                        .unwrap()
-                        .unwrap(),
-                    index as u64 + 16
-                );
             }
+            eprintln!("confirmed suffix: records={} payload_bytes={} elapsed={:?}",
+                copy.records, copy.records * copy.payload_bytes as u64, started.elapsed());
             assert_eq!(
                 brokers[2]
                     .engine()
@@ -1421,7 +1418,8 @@ async fn three_node_owner_loss_with_checkpoints(
             providers[1].pending_recoveries().unwrap(),
             vec![pending.clone()]
         );
-        tokio::time::timeout(Duration::from_secs(70), async {
+        let recovery_started = Instant::now();
+        tokio::time::timeout(copy_history.map_or(Duration::from_secs(70), |c| c.recovery_timeout), async {
             loop {
                 if (1..3).all(|i| {
                     providers[i]
@@ -1460,9 +1458,66 @@ async fn three_node_owner_loss_with_checkpoints(
             assignment.durability,
             ReplicationDurabilityPolicy::MajorityDurable
         );
+        if copy_history.is_some() {
+                for i in 1..3 {
+                    for result in brokers[i].apply_assignment_snapshot_transitions(["a", "b", "c"][i],
+                        &fibril_broker::coordination::CoordinationSnapshot::default(), &providers[i].snapshot()).await {
+                        result.unwrap();
+                    }
+                }
+        }
         if checkpoints {
-            let deliveries = brokers[1].engine().poll_ready("q", 0, None, 2048, unix_millis() + 60_000, u64::MAX).await.unwrap();
-            assert_eq!(deliveries.iter().map(|m| u64::from_le_bytes(m.payload[..8].try_into().unwrap())).collect::<Vec<_>>(), (0..if copy_pages { 1041 } else { 17 }).collect::<Vec<_>>());
+            let expected = copy_history.map_or(17, |c| 16 + c.records);
+            let mut next = 0;
+            while next < expected {
+                let deliveries = brokers[1].engine().poll_ready("q", 0, None, 128, unix_millis() + 60_000, u64::MAX).await.unwrap();
+                assert!(!deliveries.is_empty(), "confirmed payload missing at {next}");
+                for message in deliveries {
+                    assert_eq!(u64::from_le_bytes(message.payload[..8].try_into().unwrap()), next);
+                    if let Some(copy) = copy_history {
+                        if next >= 16 {
+                            assert_eq!(message.payload.len(), copy.payload_bytes);
+                            assert!(message.payload[8..].iter().all(|byte| *byte == 0x5a));
+                        }
+                    }
+                    next += 1;
+                }
+            }
+            eprintln!("recovery with delivery verification: confirmed_ids={expected} elapsed={:?}", recovery_started.elapsed());
+            if copy_history.is_some() {
+                // Exercise the installed history's ordinary publish path too.
+                let peer = fibril_protocol::v1::replication::connect_protocol_owner_peer(
+                    config.nodes["b"].clone(), config.auth.as_ref(), None, "recovered-test", "1")
+                    .await.unwrap().with_reporter("c")
+                    .with_history_session(history.session("q", Partition::new(0), None, false, "c", "b").unwrap());
+                let publisher = brokers[1].get_publisher("q", Partition::new(0), &None).await.unwrap();
+                let confirmation = publisher.publish(b"after-recovery".to_vec(), unix_millis(), unix_millis(),
+                    None, Default::default(), None).await.unwrap();
+                let replicate = async {
+                    loop {
+                        let from = brokers[2].engine().queue_replication_next_offsets("q", 0, None).await.unwrap();
+                        brokers[2].catch_up_replication_follower_from_owner(&peer, "q", Partition::new(0), None,
+                            fibril_broker::broker::ReplicationResourceKind::Queue,
+                            fibril_broker::broker::BrokerReplicationCatchUpOptions {
+                                message_from: from.0, event_from: from.1,
+                                max_messages_per_read: 4096, max_events_per_read: 4096,
+                                max_bytes_per_read: 16 * 1024 * 1024, max_iterations: 16, max_wait_ms: 0,
+                            }).await.unwrap();
+                        tokio::time::sleep(Duration::from_millis(2)).await;
+                    }
+                };
+                tokio::select! {
+                    result = tokio::time::timeout(Duration::from_secs(10), confirmation) => {
+                        result.unwrap().unwrap().unwrap();
+                    }
+                    _ = replicate => unreachable!(),
+                }
+                let delivered = brokers[1].engine().poll_ready("q", 0, None, 1, unix_millis() + 60_000, u64::MAX).await.unwrap();
+                assert_eq!(delivered.len(), 1);
+                assert_eq!(&delivered[0].payload[..], b"after-recovery");
+                eprintln!("fresh publish confirmed and delivered after recovery");
+            }
+
         }
 
     }
@@ -1485,7 +1540,6 @@ async fn three_node_owner_loss_with_checkpoints(
     }
     drop(brokers);
     drop(providers);
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1543,7 +1597,7 @@ async fn admitted_replica_reseed(
         .get_publisher("q", Partition::new(0), &None)
         .await
         .unwrap();
-    let catch_up = |i: usize| async move {
+    let catch_up = |i: usize, target: u64| async move {
         let assignment = providers[0]
             .snapshot()
             .assignment_for("q", Partition::new(0), None)
@@ -1568,11 +1622,14 @@ async fn admitted_replica_reseed(
                 .session("q", Partition::new(0), None, false, id, "a")
                 .unwrap(),
         );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
         let from = brokers[i]
             .engine()
             .queue_replication_next_offsets("q", 0, None)
             .await
             .unwrap();
+        if from.1 >= target { break; }
         brokers[i]
             .catch_up_replication_follower_from_owner(
                 &peer,
@@ -1592,6 +1649,9 @@ async fn admitted_replica_reseed(
             )
             .await
             .unwrap();
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        }).await.unwrap();
         peer
     };
     let mut healthy_peer = None;
@@ -1607,8 +1667,8 @@ async fn admitted_replica_reseed(
             )
             .await
             .unwrap();
-        let b = catch_up(1).await;
-        let c = catch_up(2).await;
+        let b = catch_up(1, n + 1).await;
+        let c = catch_up(2, n + 1).await;
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(5), confirm)
                 .await
@@ -1805,9 +1865,15 @@ async fn admitted_replica_reseed(
         .await
         .unwrap();
     let b = healthy_peer.take().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
     let from = brokers[1].engine().queue_replication_next_offsets("q",0,None).await.unwrap();
+    if from.1 >= 5 { break; }
     brokers[1].catch_up_replication_follower_from_owner(&b,"q",Partition::new(0),None,ReplicationResourceKind::Queue,BrokerReplicationCatchUpOptions {
         message_from:from.0,event_from:from.1,max_messages_per_read:4096,max_events_per_read:4096,max_bytes_per_read:16*1024*1024,max_iterations:16,max_wait_ms:0,
+    }).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
     }).await.unwrap();
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(5), confirm)
@@ -1870,7 +1936,7 @@ async fn admitted_replica_reseed(
         )
         .await
         .unwrap();
-    let c = catch_up(2).await;
+    let c = catch_up(2, 6).await;
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(5), confirm)
             .await
