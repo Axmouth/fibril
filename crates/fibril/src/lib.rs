@@ -1682,7 +1682,12 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     let config = config;
 
     let metrics = Metrics::new(3 * 60 * 60);
-    let keratin_default = KeratinConfig::default();
+    let mut keratin_default = KeratinConfig::default();
+    // Disposable performance probe. This is not a supported durability policy.
+    if std::env::var("KERATIN_EXPERIMENT_AFTERFLUSH").as_deref() == Ok("1") {
+        keratin_default.default_durability = fibril_broker::queue_engine::KDurability::AfterFlush;
+        tracing::warn!("AFTERFLUSH PERFORMANCE EXPERIMENT: confirmations do not guarantee persistence");
+    }
     let adaptive_staging =
         config
             .storage

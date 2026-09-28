@@ -2395,7 +2395,10 @@ impl Broker<StromaEngine> {
                     // Followers apply durably so their reported pull offsets
                     // are honest DURABLE progress for owner confirm policies
                     // (replica_durable/majority_durable).
-                    durability: Some(KDurability::AfterFsync),
+                    durability: Some(if kind == ReplicationResourceKind::Queue
+                        && std::env::var("KERATIN_EXPERIMENT_AFTERFLUSH").as_deref() == Ok("1") {
+                        KDurability::AfterFlush
+                    } else { KDurability::AfterFsync }),
                 })
             }
             OwnerReplicationRead::Batch(_) => None,
@@ -2434,7 +2437,10 @@ impl Broker<StromaEngine> {
                     // Followers apply durably so their reported pull offsets
                     // are honest DURABLE progress for owner confirm policies
                     // (replica_durable/majority_durable).
-                    durability: Some(KDurability::AfterFsync),
+                    durability: Some(if kind == ReplicationResourceKind::Queue
+                        && std::env::var("KERATIN_EXPERIMENT_AFTERFLUSH").as_deref() == Ok("1") {
+                        KDurability::AfterFlush
+                    } else { KDurability::AfterFsync }),
                 })
             }
             OwnerReplicationRead::Batch(_) => None,
