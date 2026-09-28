@@ -564,6 +564,8 @@ struct RecoveryCopyHistory {
     records: u64,
     payload_bytes: usize,
     recovery_timeout: Duration,
+    lose_source: bool,
+    unique_ttl: bool,
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -571,7 +573,30 @@ struct RecoveryCopyHistory {
 async fn automatic_recovery_exceeds_old_inspection_and_staging_byte_limits() {
     three_node_owner_loss_with_history(true, LearnerCase::None, true, false,
         Some(RecoveryCopyHistory { records: 16_385, payload_bytes: 64 * 1024,
-            recovery_timeout: Duration::from_secs(300) })).await;
+            recovery_timeout: Duration::from_secs(300), lose_source: false, unique_ttl: false })).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recovery_keeps_downloaded_source_after_source_loss_and_candidate_restart() {
+    three_node_owner_loss_with_history(true, LearnerCase::None, true, false,
+        Some(RecoveryCopyHistory { records: 65, payload_bytes: 1024,
+            recovery_timeout: Duration::from_secs(70), lose_source: true, unique_ttl: false })).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "large replicated recovery acceptance, over one million retained records"]
+async fn automatic_recovery_exceeds_old_record_and_operation_limits() {
+    three_node_owner_loss_with_history(true, LearnerCase::None, true, false,
+        Some(RecoveryCopyHistory { records: 1_100_000, payload_bytes: 1024,
+            recovery_timeout: Duration::from_secs(600), lose_source: false, unique_ttl: false })).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "large live-state recovery acceptance, 750000 distinct TTL deadlines"]
+async fn automatic_recovery_transfers_snapshot_larger_than_one_control_frame() {
+    three_node_owner_loss_with_history(true, LearnerCase::None, true, false,
+        Some(RecoveryCopyHistory { records: 750_000, payload_bytes: 128,
+            recovery_timeout: Duration::from_secs(600), lose_source: false, unique_ttl: true })).await;
 }
 
 async fn three_node_owner_loss_with_checkpoints(
@@ -583,7 +608,7 @@ async fn three_node_owner_loss_with_checkpoints(
 ) {
     three_node_owner_loss_with_history(recover, learner, checkpoints, partial_checkpoint,
         copy_pages.then_some(RecoveryCopyHistory { records: 1025, payload_bytes: 64 * 1024,
-            recovery_timeout: Duration::from_secs(70) })).await;
+            recovery_timeout: Duration::from_secs(70), lose_source: false, unique_ttl: false })).await;
 }
 
 async fn three_node_owner_loss_with_history(
@@ -600,6 +625,9 @@ async fn three_node_owner_loss_with_history(
     ));
     std::fs::create_dir_all(&root).unwrap();
     let _fixture = keratin_log::util::TempDir { root: root.clone() };
+    let lose_source = copy_history.is_some_and(|c| c.lose_source);
+    let copied_follower = if lose_source { 2 } else { 1 };
+    let lagging_follower = if lose_source { 1 } else { 2 };
     let mut nodes = Vec::new();
     let mut servers = Vec::new();
     for id in 1..=3 {
@@ -1183,20 +1211,22 @@ async fn three_node_owner_loss_with_history(
             // a stops, so recovery must copy real payloads into c's new stage.
             let started = Instant::now();
             let final_offset = 16 + copy.records;
-            for batch_start in (16..final_offset).step_by(128) {
-                let batch_end = (batch_start + 128).min(final_offset);
+            let expiry_base = unix_millis() + 86_400_000;
+            let batch_size = (8 * 1024 * 1024 / copy.payload_bytes).clamp(128, 4096);
+            for batch_start in (16..final_offset).step_by(batch_size) {
+                let batch_end = (batch_start + batch_size as u64).min(final_offset);
                 let mut confirms = Vec::new();
                 for n in batch_start..batch_end {
                     let mut payload = vec![0x5a; copy.payload_bytes];
                     payload[..8].copy_from_slice(&n.to_le_bytes());
                     confirms.push(publisher.publish(payload, unix_millis(), unix_millis(), None,
-                        Default::default(), None).await.unwrap());
+                        Default::default(), copy.unique_ttl.then_some(expiry_base + n)).await.unwrap());
                 }
                 tokio::time::timeout(Duration::from_secs(30), async {
                     loop {
-                        let from = brokers[1].engine().queue_replication_next_offsets("q", 0, None).await.unwrap();
+                        let from = brokers[copied_follower].engine().queue_replication_next_offsets("q", 0, None).await.unwrap();
                         if from.1 >= batch_end { break; }
-                        brokers[1].catch_up_replication_follower_from_owner(&peers[0], "q", Partition::new(0), None,
+                        brokers[copied_follower].catch_up_replication_follower_from_owner(&peers[copied_follower - 1], "q", Partition::new(0), None,
                             fibril_broker::broker::ReplicationResourceKind::Queue,
                             fibril_broker::broker::BrokerReplicationCatchUpOptions {
                                 message_from: from.0, event_from: from.1,
@@ -1214,7 +1244,7 @@ async fn three_node_owner_loss_with_history(
             eprintln!("confirmed suffix: records={} payload_bytes={} elapsed={:?}",
                 copy.records, copy.records * copy.payload_bytes as u64, started.elapsed());
             assert_eq!(
-                brokers[2]
+                brokers[lagging_follower]
                     .engine()
                     .queue_replication_next_offsets("q", 0, None)
                     .await
@@ -1296,6 +1326,7 @@ async fn three_node_owner_loss_with_history(
     listeners[0].abort();
     let mut workers = Vec::new();
     for i in 1..3 {
+        if lose_source { continue; }
         workers.push(fibril::recovery_driver::spawn(
             providers[i].clone(),
             brokers[i].clone(),
@@ -1418,9 +1449,72 @@ async fn three_node_owner_loss_with_history(
             providers[1].pending_recoveries().unwrap(),
             vec![pending.clone()]
         );
+        if lose_source {
+            use fibril_broker::recovery::inspection::RecoveryInspectionLimits;
+            use fibril_coordination_ganglion::recovery_witnesses::RecoveryWitnessSet;
+            use fibril_protocol::v1::recovery_inspection::{inspect_recovery_source_artifact_resumable, inspect_recovery_pair_resumable};
+            let command = pending.seal_command().unwrap();
+            let transition = pending.transition_digest().unwrap().iter().map(|b| format!("{b:02x}")).collect::<String>();
+            let journal = brokers[1].engine().recovery_inspection_journal_root().join(transition);
+            let limits = RecoveryInspectionLimits { page_records: 4096, page_bytes: 16 * 1024 * 1024, ..Default::default() };
+            let mut witnesses = RecoveryWitnessSet::new(&providers[1].consensus_node().committed_snapshot(), &pending).unwrap();
+            let mut reports = Vec::new();
+            let mut summaries = BTreeMap::new();
+            for id in ["b", "c"] {
+                let report = fibril_protocol::v1::replication::request_recovery_seal(&config, id, &command, Duration::from_secs(10)).await.unwrap();
+                let artifact = inspect_recovery_source_artifact_resumable(&config, &command, &report, limits,
+                    Default::default(), 128 * 1024 * 1024, 128 * 1024 * 1024, Duration::from_secs(10), &journal).await.unwrap();
+                witnesses.record(&providers[1].consensus_node().committed_snapshot(), id, report.clone()).unwrap();
+                summaries.insert(id.to_owned(), artifact.summary());
+                reports.push(report);
+            }
+            let pair = inspect_recovery_pair_resumable(&config, &command, &reports[0], &reports[1], limits,
+                Duration::from_secs(10), &journal).await.unwrap();
+            let selection = witnesses.select_queue_source_summaries(&providers[1].consensus_node().committed_snapshot(),
+                &summaries, &[pair.evidence]).unwrap();
+            let plan = providers[1].persist_queue_recovery_plan(&pending, &witnesses, &selection).await.unwrap();
+            assert_eq!(plan.source_node(), "c");
+            listeners[2].abort();
+            let _ = (&mut listeners[2]).await;
+            brokers[2].shutdown().await;
+            assert!(fibril::recovery_driver::recover_queue_once(&providers[1], &brokers[1], &config, &pending).await.is_err());
+            assert_eq!(providers[1].pending_recoveries().unwrap(), vec![pending.clone()],
+                "source loss must not reduce the required installed quorum");
+            // The candidate must finish its private copy without the source.
+            use fibril_broker::recovery_transfer::{QueueRecoveryCommand, QueueRecoveryRequest, QueueRecoveryOperation, QueueRecoveryReply};
+            let ready = brokers[1].recovery_transfer(QueueRecoveryRequest {
+                command: QueueRecoveryCommand { replica_id: "b".into(), topic: "q".into(), partition: 0, group: None, plan: plan.digest().unwrap() },
+                operation: QueueRecoveryOperation::Snapshot,
+            }).await.unwrap();
+            assert!(matches!(ready, QueueRecoveryReply::Snapshot(_)));
+            // Restart both candidate and old source. The immutable plan and
+            // completed target survive without redoing original source inspection.
+            listeners[1].abort();
+            let _ = (&mut listeners[1]).await;
+            brokers[1].shutdown().await;
+            for (i, id) in [(1, "b"), (2, "c")] {
+                let engine = StromaEngine::open(root.join(format!("data-{id}")),
+                    StromaKeratinConfig::from_message_log(KeratinConfig::test_default()), SnapshotConfig::default()).await.unwrap();
+                let broker = Broker::new_with_ownership(engine, BrokerConfig::default(), None, providers[i].clone());
+                let (address, listener) = serve_test_broker(broker.clone()).await;
+                providers[i].register_self(&NodeInfo { node_id: id.into(), broker_addr: address.clone(), admin_addr: None }).await.unwrap();
+                config.nodes.insert(id.into(), address);
+                brokers[i] = broker;
+                listeners[i] = listener;
+            }
+            for i in 1..3 {
+                workers.push(fibril::recovery_driver::spawn(providers[i].clone(), brokers[i].clone(), config.clone()));
+            }
+        }
         let recovery_started = Instant::now();
+        let mut observed_snapshot_bytes = 0;
         tokio::time::timeout(copy_history.map_or(Duration::from_secs(70), |c| c.recovery_timeout), async {
             loop {
+                if copy_history.is_some_and(|c| c.unique_ttl) {
+                    if let Ok(Some(plan)) = providers[1].queue_recovery_plan(&pending) {
+                        observed_snapshot_bytes = plan.snapshot_bytes();
+                    }
+                }
                 if (1..3).all(|i| {
                     providers[i]
                         .pending_recoveries()
@@ -1444,6 +1538,11 @@ async fn three_node_owner_loss_with_history(
         })
         .await
         .unwrap();
+        if copy_history.is_some_and(|c| c.unique_ttl) {
+            assert!(observed_snapshot_bytes > 16 * 1024 * 1024,
+                "large live-state case must cross a whole control-frame snapshot: {observed_snapshot_bytes}");
+            eprintln!("selected snapshot bytes={observed_snapshot_bytes}");
+        }
         let assignment = providers[1]
             .snapshot()
             .assignment_for("q", Partition::new(0), None)
@@ -1458,6 +1557,43 @@ async fn three_node_owner_loss_with_history(
             assignment.durability,
             ReplicationDurabilityPolicy::MajorityDurable
         );
+        if copy_history.is_some_and(|copy| copy.records >= 16_385) {
+            // A returning old owner must use the non-voting learner path. Its
+            // old bytes cannot grant admission into the newly recovered history.
+            let rejoin_started = Instant::now();
+            let engine = StromaEngine::open(root.join("data-a"),
+                StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+                SnapshotConfig::default()).await.unwrap();
+            let broker = Broker::new_with_ownership(engine, BrokerConfig::default(), None, providers[0].clone());
+            let (address, listener) = serve_test_broker(broker.clone()).await;
+            providers[0].register_self(&NodeInfo { node_id: "a".into(), broker_addr: address.clone(), admin_addr: None }).await.unwrap();
+            config.nodes.insert("a".into(), address);
+            brokers[0] = broker;
+            listeners[0] = listener;
+            for i in 1..3 {
+                for result in brokers[i].apply_assignment_snapshot_transitions(["a", "b", "c"][i],
+                    &fibril_broker::coordination::CoordinationSnapshot::default(), &providers[i].snapshot()).await {
+                    result.unwrap();
+                }
+            }
+            tokio::time::timeout(Duration::from_secs(180), async {
+                loop {
+                    match fibril::queue_learner_driver::learn_queue_once(&providers[0], &brokers[0], &config, &resource).await {
+                        Ok(()) => break,
+                        Err(error) => eprintln!("returning old owner learner retry: {error}"),
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }).await.expect("returning old owner must join the recovered history");
+            let rejoined = providers[0].snapshot().assignment_for("q", Partition::new(0), None).unwrap().clone();
+            assert_eq!(rejoined.owner, "b");
+            assert_eq!(rejoined.epoch, assignment.epoch);
+            assert_eq!(rejoined.durability, ReplicationDurabilityPolicy::MajorityDurable);
+            assert!(rejoined.history.as_ref().unwrap().replicas.contains_key("a"));
+            brokers[0].engine().verify_queue_learner_caught_up("q", 0, None,
+                assignment.epoch, 0, 16 + copy_history.unwrap().records).await.unwrap();
+            eprintln!("old owner rejoined after large recovery: elapsed={:?}", rejoin_started.elapsed());
+        }
         if copy_history.is_some() {
                 for i in 1..3 {
                     for result in brokers[i].apply_assignment_snapshot_transitions(["a", "b", "c"][i],
@@ -1516,6 +1652,21 @@ async fn three_node_owner_loss_with_history(
                 assert_eq!(delivered.len(), 1);
                 assert_eq!(&delivered[0].payload[..], b"after-recovery");
                 eprintln!("fresh publish confirmed and delivered after recovery");
+                if copy_history.is_some_and(|copy| copy.records >= 16_385) {
+                    let transition: String = pending.transition_digest().unwrap().iter()
+                        .map(|byte| format!("{byte:02x}")).collect();
+                    let cache = brokers[1].engine().recovery_inspection_journal_root().join(transition);
+                    tokio::time::timeout(Duration::from_secs(60), async {
+                        while !cache.join("reclaimed").exists() {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                    }).await.expect("automatic sweep must reclaim completed recovery cache");
+                    let mut files: Vec<_> = std::fs::read_dir(&cache).unwrap()
+                        .map(|entry| entry.unwrap().file_name().into_string().unwrap()).collect();
+                    files.sort();
+                    assert_eq!(files, [".namespace.lock", "reclaimed", "retired"]);
+                    eprintln!("automatic inspection cache reclamation verified");
+                }
             }
 
         }
@@ -1525,7 +1676,7 @@ async fn three_node_owner_loss_with_history(
         w.abort();
         let _ = w.await;
     }
-    for b in &brokers[1..] {
+    for b in &brokers {
         b.shutdown().await;
     }
     for l in listeners {

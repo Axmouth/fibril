@@ -66,6 +66,27 @@ pub async fn inspect_recovery_pair_with_journal(
     .map(|(report, ())| report)
 }
 
+fn journal_identity(
+    command: &RecoverySealCommand,
+    source: &BrokerSealedReplica,
+) -> Result<RecoveryJournalIdentity, BrokerError> {
+    if source.seal.request.transition != command.transition
+        || source.seal.request.fence_epoch != command.fence_epoch
+    {
+        return Err(BrokerError::InvalidArgument(
+            "journal transition differs from requested recovery".into(),
+        ));
+    }
+    Ok(RecoveryJournalIdentity {
+        topic: command.topic.clone(),
+        partition: command.partition.id(),
+        group: command.group.clone(),
+        stream: command.stream,
+        replica: source.node_id.clone(),
+        seal: source.seal.clone(),
+    })
+}
+
 fn phase_recipe(
     command: &RecoverySealCommand,
     left: &BrokerSealedReplica,
@@ -73,28 +94,33 @@ fn phase_recipe(
     limits: RecoveryInspectionLimits,
     kind: RecoveryPhaseKind,
 ) -> Result<RecoveryPhaseRecipe, BrokerError> {
-    for replica in [left, right] {
-        if replica.seal.request.transition != command.transition
-            || replica.seal.request.fence_epoch != command.fence_epoch
-        {
-            return Err(BrokerError::InvalidArgument(
-                "phase transition differs from requested recovery".into(),
-            ));
-        }
-    }
     Ok(RecoveryPhaseRecipe {
-        sources: [left, right].map(|replica| RecoveryJournalIdentity {
-            topic: command.topic.clone(),
-            partition: command.partition.id(),
-            group: command.group.clone(),
-            stream: command.stream,
-            replica: replica.node_id.clone(),
-            seal: replica.seal.clone(),
-        }),
+        sources: [journal_identity(command, left)?, journal_identity(command, right)?],
         limits,
         state_entries: 1_000_000,
         kind,
     })
+}
+
+/// Read tentative local bytes for an exact source and request. This supplies no
+/// witness or serving authority. A recovery target must validate the complete
+/// planned history and its live payload dependencies before installation.
+/// Missing pages allow a caller to use another source. Corrupt pages fail closed.
+pub async fn read_cached_recovery_page(
+    root: &std::path::Path,
+    command: &RecoverySealCommand,
+    source: &BrokerSealedReplica,
+    request: &fibril_broker::recovery::RecoveryReadRequest,
+    deadline: std::time::Duration,
+) -> Result<Option<RecoveryReadPage>, BrokerError> {
+    let identity = journal_identity(command, source)?;
+    let path = root.to_path_buf();
+    let request = request.clone();
+    inspection_work(deadline, "cached transfer page", move || {
+        let journal = RecoveryInspectionJournal::open(&path, identity)
+            .map_err(|e| e.to_string())?;
+        journal.read(&request).map_err(|e| e.to_string())
+    }).await
 }
 
 /// Persist completed local comparisons, retaining tentative pages on interruption.
@@ -482,14 +508,7 @@ async fn inspect_pair_inner<T: Send + 'static>(
             let index = if side == RecoverySide::Left { 0 } else { 1 };
             let cached = if let Some(root) = journal_root {
                 let root = root.to_path_buf();
-                let identity = RecoveryJournalIdentity {
-                    topic: command.topic.clone(),
-                    partition: command.partition.id(),
-                    group: command.group.clone(),
-                    stream: command.stream,
-                    replica: replica.node_id.clone(),
-                    seal: replica.seal.clone(),
-                };
+                let identity = journal_identity(command, replica)?;
                 let journal = journals[index].take();
                 let read_request = request.clone();
                 let (journal, page) =

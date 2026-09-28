@@ -18,7 +18,7 @@ use fibril_coordination_ganglion::{
 };
 use fibril_protocol::v1::{
     recovery_inspection::{
-        inspect_recovery_pair_resumable, inspect_recovery_source_artifact_resumable,
+        inspect_recovery_pair_resumable, inspect_recovery_source_artifact_resumable, read_cached_recovery_page,
     },
     recovery_transfer::request_transfer,
     replication::{ProtocolOwnerPeerResolverConfig, request_recovery_read, request_recovery_seal},
@@ -436,6 +436,7 @@ async fn recover_queue_attempt(
                 let snapshot = &snapshot;
                 let source = completed_source.as_deref();
                 let source_reads = &source_reads;
+                let journal_root = &journal_root;
                 async move {
                     (
                         node,
@@ -447,6 +448,7 @@ async fn recover_queue_attempt(
                             snapshot,
                             source,
                             source_reads,
+                            journal_root,
                             timing,
                         )
                         .await,
@@ -474,6 +476,7 @@ async fn recover_queue_attempt(
             &snapshot,
             Some(source),
             &source_reads,
+            &journal_root,
             timing,
         )
         .await
@@ -580,6 +583,7 @@ async fn prepare_target(
     snapshot: &[u8],
     completed_source: Option<&str>,
     source_reads: &tokio::sync::Mutex<()>,
+    journal_root: &std::path::Path,
     timing: &crate::recovery_timing::RecoveryTiming,
 ) -> Result<(), String> {
     let seal_command = pending.seal_command()?;
@@ -628,6 +632,7 @@ async fn prepare_target(
                                     &seal_command,
                                     completed_source,
                                     source_reads,
+                                    journal_root,
                                     next,
                                 )
                                 .await?
@@ -648,6 +653,7 @@ async fn prepare_target(
                                     &seal_command,
                                     completed_source,
                                     source_reads,
+                                    journal_root,
                                     expected_next,
                                 )
                                 .await
@@ -695,6 +701,7 @@ async fn read_source_page(
     seal_command: &fibril_broker::recovery::RecoverySealCommand,
     completed_source: Option<&str>,
     source_reads: &tokio::sync::Mutex<()>,
+    journal_root: &std::path::Path,
     next: u64,
 ) -> Result<fibril_broker::recovery::RecoveryReadPage, String> {
     // Completed-stage reads share one per-broker stage lock.
@@ -705,6 +712,23 @@ async fn read_source_page(
         .ok_or("recovery source is missing")?
         .payload_log()
         .source;
+    let report = source_report(plan)?;
+    let request = RecoveryReadRequest {
+        seal: report.seal.request.clone(),
+        history_id: report.seal.history.id,
+        source: source_kind,
+        from: next,
+        max_records: 4096,
+        max_bytes: 16 * 1024 * 1024,
+    };
+    if let Some(page) = read_cached_recovery_page(journal_root, seal_command, &report, &request, RPC)
+        .await.map_err(err)?
+    {
+        // The journal belongs to the candidate. Losing the original source
+        // does not discard downloaded bytes. Target Finish still verifies the
+        // entire selected digest, followed by ordinary installation authority.
+        return Ok(page);
+    }
     Ok(if let Some(source) = completed_source {
         let Reply::Page(page) = transfer(
             config,
@@ -722,19 +746,11 @@ async fn read_source_page(
         };
         page
     } else {
-        let report = source_report(&plan)?;
         let page = request_recovery_read(
             config,
             &seal_command,
             &report,
-            &RecoveryReadRequest {
-                seal: report.seal.request.clone(),
-                history_id: report.seal.history.id,
-                source: source_kind,
-                from: next,
-                max_records: 4096,
-                max_bytes: 16 * 1024 * 1024,
-            },
+            &request,
             RPC,
         )
         .await

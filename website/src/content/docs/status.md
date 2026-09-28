@@ -48,7 +48,9 @@ For a more detailed checklist of what is wired and what conditions apply, see
 Automatic recovery resumes durable inspection phases and bounded transfer pages
 without a cumulative history-size ceiling. Oversized individual records or live
 state, insufficient storage and unsupported histories still leave queues fenced.
-[Large-history acceptance and resource accounting](/roadmap/#large-history-recovery-availability)
+Maintained three-node tests cross 1 GiB of payloads, 1.1 million messages and
+the former 16 MiB snapshot limit, verifying confirmed data and fresh traffic.
+[Broader load coverage and resource accounting](/roadmap/#large-history-recovery-availability)
 remain high-priority work.
 
 Cluster recovery still needs broader partition, power-loss and sustained-load

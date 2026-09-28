@@ -8,6 +8,23 @@ for further detail. Measurements describe the stated workload and hardware.
 Current capabilities are in [implemented surface](/implemented-surface/);
 remaining work is in the [roadmap](/roadmap/).
 
+## Resumable queue recovery
+
+Queue recovery persists exact inspection pages and completed phases, transfers
+large snapshots in chunks and stages history under per-step and free-space bounds.
+Downloaded source pages remain usable after source loss, with full target
+verification and the existing activation quorum still required.
+[Maintained acceptance cases](/reliability/recovery-sealing/#large-history-acceptance)
+cross the former byte, record and snapshot limits and exercise old-owner rejoin.
+
+## Fragmented TTL replay
+
+Enqueuing messages with distinct TTL deadlines scanned every existing deadline
+to decide whether to wake the expiry worker, making reconstruction quadratic.
+A coalesced notification removes that per-enqueue scan while expiry selection
+still computes the exact minimum. An isolated 40,000-deadline release probe
+changed from about 943 ms to 7 ms, with deadline ordering and wakeup tests.
+
 ## Single-log queue storage
 
 Queue enqueues now carry their payloads in the same ordered log as state changes,

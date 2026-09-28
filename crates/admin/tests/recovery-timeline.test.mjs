@@ -101,9 +101,9 @@ test('failure outside a recorded stage stays explicit without inventing a failed
 test('budget failures show exact work and unchanged retry guidance without guessing for legacy errors', () => {
   const attempt = structuredClone(snapshot.attempts[1]);
   attempt.stages[0].outcome = 'error';
-  attempt.stages[0].budget = { budget: 'inspection_records', limit: 1000, completed: 900, requested: 200, unchanged_retry_can_help: false };
+  attempt.stages[0].budget = { budget: 'replay_state_entries', limit: 1000, completed: 900, requested: 200, unchanged_retry_can_help: false };
   const html = detail(attempt);
-  assert(html.includes('Inspection records limit reached'));
+  assert(html.includes('Retained state entries limit reached'));
   assert(html.includes('Limit 1000 · accepted before this check 900 · next work refused 200'));
   assert(html.includes('An unchanged retry cannot clear this limit'));
   delete attempt.stages[0].budget;

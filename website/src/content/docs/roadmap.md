@@ -180,11 +180,13 @@ The compatibility work follows this order:
 
 ## Large-history recovery availability
 
-High priority: complete large-history cluster acceptance across byte, record,
-semantic-operation and snapshot boundaries. Cover interruption, process restart,
-source loss, fresh confirmed traffic and old-node rejoin. Measure peak state
-memory, temporary disk and small-history overhead. Extend operation-level budget
-diagnostics with durable progress across continuation phases.
+Extend large-history acceptance to sustained traffic, multiple simultaneous
+recoveries and storage pressure. Measure per-node state memory and unique physical
+temporary disk use across larger replica sets. Exercise combined source loss,
+process restart and repeated candidate replacement under those loads. Extend
+operation-level budget diagnostics with durable progress across continuation
+phases. Maintained boundary coverage is described in the
+[recovery acceptance guide](/reliability/recovery-sealing/#large-history-acceptance).
 
 Add safe quarantine and refetch for corrupt tentative caches, with fresh authority
 and visible storage errors. Reclaim retained generations and installed stages only

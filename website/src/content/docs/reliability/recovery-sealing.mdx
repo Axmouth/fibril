@@ -589,8 +589,11 @@ history comparisons remain sequential. Source page reads during transfer are
 serialized, with one page prefetched while the preceding append completes.
 
 The worker retains an immutable plan, completed inspection/comparison phases and
-staged offsets across retries. It prefers a completed transferred source. Fetched
-pages from interrupted inspections are revalidated locally. Completed results
+staged offsets across retries. Transfer first reuses exact selected-source pages
+from the candidate’s inspection journal, then tries a completed transferred source
+or the original source. This preserves downloaded bytes when the original source
+disappears. Every target still verifies the complete planned history before
+installation. Fetched pages from interrupted inspections are revalidated locally. Completed results
 bind exact contacted replicas, seals, resource identities, limits and a semantic
 version. Restoring a result does not supply fresh consensus authority.
 
@@ -640,3 +643,21 @@ metadata check. Namespace leases preserve ongoing work and durable retirement
 markers reject stale reopen attempts. Installed stages and retained generations
 still require additional disk and have no automatic reclamation. Per-queue disk
 estimates describe active logs. Retained recovery data needs separate accounting. Process-crash tests do not establish hardware power-loss behavior.
+
+
+### Large-history acceptance
+
+Maintained three-node tests exercise recovery with more than 1 GiB of confirmed
+payloads, 1.1 million messages and an 18,000,110-byte state snapshot with distinct
+TTL deadlines. Each case checks every confirmed message ID and payload byte,
+then confirms and delivers new work after activation. The large record and
+snapshot cases also restart the old owner, verify its non-voting catch-up and
+admission without replacing the serving owner, and check automatic inspection
+cache reclamation. A separate case removes
+the source after inspection, verifies that the candidate finishes its private
+copy without reducing the required quorum, and restarts both candidate and source.
+
+These are release-mode Linux acceptance tests on one host. Three brokers,
+metadata nodes and test clients share a process and filesystem. They establish
+coverage of the former cumulative limits. They do not establish a failover
+latency target, a per-node memory bound or hardware power-loss behavior.

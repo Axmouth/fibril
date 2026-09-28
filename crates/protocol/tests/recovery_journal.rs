@@ -11,7 +11,7 @@ use fibril_protocol::v1::{
     handler::{ConnectionSettings, handle_connection},
     recovery_inspection::{
         inspect_recovery_source_artifact, inspect_recovery_source_artifact_resumable,
-        inspect_recovery_source_artifact_with_journal,
+        inspect_recovery_source_artifact_with_journal, read_cached_recovery_page,
     },
     replication::ProtocolOwnerPeerResolverConfig,
 };
@@ -260,6 +260,74 @@ async fn inspection_download_resumes_over_tcp_then_revalidates_without_source() 
         .await
         .is_err()
     );
+    // An offline source's exact cached pages can populate a fresh private
+    // target. The cache supplies bytes only, and Finish must verify the full
+    // selected digest even if the page's native framing was accepted.
+    let evidence = direct.evidence();
+    let spec = stroma_core::QueueRecoveryStageSpec {
+        plan: [11; 32], topic: "q".into(), partition: 0, group: None,
+        binding: stroma_core::StorageHistoryBinding {
+            resource_incarnation: [1; 16], accepted_history: [9; 16], writer_session: [10; 16],
+        },
+        fence_epoch: 8, source_history: evidence.history_id,
+        payload_log: evidence.payload_log.clone(),
+        message_head: direct.message_head(), message_next: evidence.message_next,
+        event_next: evidence.event_next, message_digest: evidence.message_digest,
+        snapshot_digest: direct.snapshot_digest(), snapshot_bytes: direct.state_snapshot().len() as u64,
+        state_digest: evidence.lease_normalized_state_digest,
+        live_payload_digest: evidence.live_payload_digest.unwrap(),
+    };
+    let target = stroma_core::Stroma::open(root.join("target"),
+        stroma_core::StromaKeratinConfig::from_message_log(stroma_core::KeratinConfig::test_default()),
+        stroma_core::SnapshotConfig::default()).await.unwrap();
+    let stage = target.open_queue_recovery_stage(spec.clone(), direct.state_snapshot().to_vec(),
+        stroma_core::RecoveryStageLimits::incremental()).await.unwrap();
+    let request_at = |from| fibril_broker::recovery::RecoveryReadRequest {
+        seal: sealed.seal.request.clone(), history_id: sealed.seal.history.id,
+        source: evidence.payload_log.source, from, max_records: limits.page_records,
+        max_bytes: limits.page_bytes,
+    };
+    let mut next = spec.payload_log.head;
+    while next < spec.payload_log.next {
+        let page = read_cached_recovery_page(&journal, &command, &sealed, &request_at(next), Duration::from_secs(10))
+            .await.unwrap().expect("all inspected pages remain available offline");
+        next = stage.append(page).await.unwrap();
+    }
+    assert_eq!(stage.finish().await.unwrap().source_history, evidence.history_id);
+    drop(stage);
+    target.shutdown().await.unwrap();
+
+    let mut another = sealed.clone();
+    another.node_id = "another-replica".into();
+    assert!(read_cached_recovery_page(&journal, &command, &another, &request_at(0), Duration::from_secs(10))
+        .await.unwrap().is_none());
+    assert!(read_cached_recovery_page(&journal, &wrong, &sealed, &request_at(0), Duration::from_secs(10))
+        .await.is_err());
+    let mut wrong_request = request_at(0);
+    wrong_request.history_id[0] ^= 1;
+    assert!(read_cached_recovery_page(&journal, &command, &sealed, &wrong_request, Duration::from_secs(10))
+        .await.is_err());
+    let mut absent_request = request_at(0);
+    absent_request.max_records += 1;
+    assert!(read_cached_recovery_page(&journal, &command, &sealed, &absent_request, Duration::from_secs(10))
+        .await.unwrap().is_none());
+
+    let corrupt_path = std::fs::read_dir(&journal).unwrap().filter_map(Result::ok)
+        .filter(|e| e.file_type().unwrap().is_dir())
+        .flat_map(|e| std::fs::read_dir(e.path()).unwrap().filter_map(Result::ok))
+        .map(|e| e.path()).find(|p| p.extension().is_some_and(|ext| ext == "page")).unwrap();
+    let original = std::fs::read(&corrupt_path).unwrap();
+    let mut corrupt = original.clone();
+    corrupt[8] ^= 1;
+    std::fs::write(&corrupt_path, corrupt).unwrap();
+    let mut refused = 0;
+    for from in (0..12).step_by(2) {
+        if read_cached_recovery_page(&journal, &command, &sealed, &request_at(from), Duration::from_secs(10))
+            .await.is_err() { refused += 1; }
+    }
+    assert_eq!(refused, 1, "corrupt local pages must not silently fall back");
+    std::fs::write(corrupt_path, original).unwrap();
+
     // A completed phase survives removal of its tentative pages and an offline
     // source. Altered recipes cannot reuse it or invent verified evidence.
     let cache = fibril_broker::recovery::journal::RecoveryInspectionJournal::open(

@@ -59,12 +59,14 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   Per-page, retained-state, concurrency and free-space admission remain bounded.
   Completed seal and verification replies can be retried without repeating full
   scans. Fresh consensus authority and complete installation validation remain
-  required. Obsolete private inspection caches are reclaimed in bounded steps.
+  required. Transfer reuses exact downloaded source pages and still verifies the
+  complete target history, preserving progress when the original source disappears.
+  Obsolete private inspection caches are reclaimed in bounded steps.
 
 - The checkpoint story includes delayed agreement, successful retry and conflicting
   evidence branches, with shared animation and static transcripts.
 - Recovery timelines show numeric work-budget failures and whether an unchanged
-  retry can help. The demo includes a record-budget failure.
+  retry can help. The demo includes a retained-state entry budget failure.
 - Settings reports whether installed broker and connection runtime values on the
   serving node match the saved document, independently of revision counters.
 

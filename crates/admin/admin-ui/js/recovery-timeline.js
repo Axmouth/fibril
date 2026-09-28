@@ -41,7 +41,7 @@
     if (!b) return '';
     const names = { inspection_pages: 'Inspection pages', inspection_records: 'Inspection records',
       inspection_bytes: 'Inspection bytes', snapshot_bytes: 'Snapshot bytes', replay_operations: 'Replay operations',
-      artifact_bytes: 'Recovery artifact bytes', stage_records: 'Staging records', stage_bytes: 'Staging bytes',
+      replay_state_entries: 'Retained state entries', artifact_bytes: 'Recovery artifact bytes', stage_records: 'Staging records', stage_bytes: 'Staging bytes',
       record_bytes: 'Record bytes per page', replica_count: 'Replica count' };
     return `<p><strong>${escape(names[b.budget] || b.budget)} limit reached.</strong> Limit ${escape(b.limit)} · accepted before this check ${escape(b.completed)} · next work refused ${escape(b.requested)}.</p>`
       + `<p>${b.unchanged_retry_can_help === false ? 'An unchanged retry cannot clear this limit. The history, available source or supported budget must change.' : 'Whether a retry can help is unknown.'} Counts describe this operation and do not certify complete recovery verification.</p>`;

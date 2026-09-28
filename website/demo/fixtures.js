@@ -144,8 +144,8 @@
     outcome: 'error', omitted_stages: 0, labels_truncated: false, stages: [
       stage(0, 'witness_seal', 'broker-2', 0, 20000),
       { ...stage(1, 'inspect_source', 'broker-2', 20000, 4180000, 'error'),
-        budget: { budget: 'inspection_records', limit: 1000000, completed: 999900,
-          requested: 200, unchanged_retry_can_help: false } },
+        budget: { budget: 'replay_state_entries', limit: 1000000, completed: 0,
+          requested: 1000100, unchanged_retry_can_help: false } },
     ],
   });
   const latest = samples.at(-1);
