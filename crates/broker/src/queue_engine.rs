@@ -558,6 +558,11 @@ impl StreamStore for StromaEngine {
 }
 
 impl StromaEngine {
+    /// Local tentative recovery downloads. These files carry no serving authority.
+    pub fn recovery_inspection_journal_root(&self) -> std::path::PathBuf {
+        self.inner.root().join("recovery-inspection")
+    }
+
     pub async fn open(
         root: impl AsRef<Path>,
         keratin_cfg: StromaKeratinConfig,

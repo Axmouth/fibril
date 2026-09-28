@@ -12,6 +12,7 @@ use fibril_broker::{
             RecoveryInspectionLimits, RecoveryOverlap, RecoveryPairInspection,
             RecoveryPairInspector, RecoverySide,
         },
+        journal::{RecoveryInspectionJournal, RecoveryJournalIdentity},
         replay::{RecoveryQueueStateArtifact, RecoveryReplayLimits},
     },
 };
@@ -35,6 +36,33 @@ pub async fn inspect_recovery_pair(
     deadline: std::time::Duration,
 ) -> Result<ProtocolRecoveryPairInspection, BrokerError> {
     inspect_pair(config, command, left, right, limits, None, deadline).await
+}
+
+/// Inspect exact contacted witnesses using a durable local page journal. Cached
+/// pages are fully revalidated and never count as another independent witness.
+pub async fn inspect_recovery_pair_with_journal(
+    config: &ProtocolOwnerPeerResolverConfig,
+    command: &RecoverySealCommand,
+    left: &BrokerSealedReplica,
+    right: &BrokerSealedReplica,
+    limits: RecoveryInspectionLimits,
+    deadline: std::time::Duration,
+    journal_root: &std::path::Path,
+) -> Result<ProtocolRecoveryPairInspection, BrokerError> {
+    inspect_pair_inner(
+        config,
+        command,
+        left,
+        right,
+        limits,
+        None,
+        deadline,
+        false,
+        Some(journal_root),
+        |inspector| inspector.finish().map(|report| (report, ())),
+    )
+    .await
+    .map(|(report, ())| report)
 }
 
 /// Reconstruct both fully retained queue histories at the same exclusive event
@@ -101,6 +129,57 @@ pub async fn inspect_recovery_source_artifact(
     max_artifact_bytes: usize,
     deadline: std::time::Duration,
 ) -> Result<RecoveryQueueStateArtifact, BrokerError> {
+    inspect_source_artifact(
+        config,
+        command,
+        source,
+        limits,
+        replay_limits,
+        max_checkpoint_bytes,
+        max_artifact_bytes,
+        deadline,
+        None,
+    )
+    .await
+}
+
+/// Retain tentative pages across retries while preserving all sealed validation.
+pub async fn inspect_recovery_source_artifact_with_journal(
+    config: &ProtocolOwnerPeerResolverConfig,
+    command: &RecoverySealCommand,
+    source: &BrokerSealedReplica,
+    limits: RecoveryInspectionLimits,
+    replay_limits: RecoveryReplayLimits,
+    max_checkpoint_bytes: u32,
+    max_artifact_bytes: usize,
+    deadline: std::time::Duration,
+    journal_root: &std::path::Path,
+) -> Result<RecoveryQueueStateArtifact, BrokerError> {
+    inspect_source_artifact(
+        config,
+        command,
+        source,
+        limits,
+        replay_limits,
+        max_checkpoint_bytes,
+        max_artifact_bytes,
+        deadline,
+        Some(journal_root),
+    )
+    .await
+}
+
+async fn inspect_source_artifact(
+    config: &ProtocolOwnerPeerResolverConfig,
+    command: &RecoverySealCommand,
+    source: &BrokerSealedReplica,
+    limits: RecoveryInspectionLimits,
+    replay_limits: RecoveryReplayLimits,
+    max_checkpoint_bytes: u32,
+    max_artifact_bytes: usize,
+    deadline: std::time::Duration,
+    journal_root: Option<&std::path::Path>,
+) -> Result<RecoveryQueueStateArtifact, BrokerError> {
     if max_artifact_bytes == 0 || max_artifact_bytes > 16 * 1024 * 1024 {
         return Err(BrokerError::InvalidArgument(
             "invalid recovery artifact limit".into(),
@@ -119,6 +198,7 @@ pub async fn inspect_recovery_source_artifact(
         )),
         deadline,
         true,
+        journal_root,
         move |inspector| inspector.finish_with_queue_artifacts(max_artifact_bytes),
     )
     .await?;
@@ -128,6 +208,35 @@ pub async fn inspect_recovery_source_artifact(
 // Admission remains held by owned CPU work if its caller times out. This bounds
 // concurrent sorting/replay even when requests disconnect or deadlines expire.
 static INSPECTION_CPU_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+// Each bounded blocking operation owns admission through caller cancellation.
+// A progressing journal inspection has per-operation deadlines, rather than one
+// deadline proportional to the entire sealed history.
+async fn inspection_work<T: Send + 'static>(
+    deadline: std::time::Duration,
+    operation: &'static str,
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, BrokerError> {
+    let permit = tokio::time::timeout(deadline, INSPECTION_CPU_SLOTS.acquire())
+        .await
+        .map_err(|_| BrokerError::Unknown(format!("{operation} admission timed out")))?
+        .map_err(|_| BrokerError::Unknown("inspection CPU admission closed".into()))?;
+    tokio::time::timeout(
+        deadline,
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            work()
+        }),
+    )
+    .await
+    .map_err(|_| {
+        BrokerError::Unknown(format!(
+            "{operation} timed out, durable downloaded pages retained"
+        ))
+    })?
+    .map_err(|e| BrokerError::Unknown(format!("{operation} worker failed: {e}")))?
+    .map_err(BrokerError::InvalidArgument)
+}
 
 async fn inspect_pair(
     config: &ProtocolOwnerPeerResolverConfig,
@@ -147,6 +256,7 @@ async fn inspect_pair(
         replay,
         deadline,
         false,
+        None,
         |inspector| inspector.finish().map(|report| (report, ())),
     )
     .await
@@ -162,6 +272,7 @@ async fn inspect_pair_inner<T: Send + 'static>(
     replay: Option<(u64, RecoveryReplayLimits, Option<u32>)>,
     deadline: std::time::Duration,
     allow_same_source: bool,
+    journal_root: Option<&std::path::Path>,
     finish: impl FnOnce(RecoveryPairInspector) -> Result<(RecoveryPairInspection, T), String>
     + Send
     + 'static,
@@ -202,8 +313,15 @@ async fn inspect_pair_inner<T: Send + 'static>(
         }
         .map_err(BrokerError::InvalidArgument)?;
     }
+    if journal_root.is_some() {
+        inspector = inspector
+            .with_incremental_work(1_000_000)
+            .map_err(BrokerError::InvalidArgument)?;
+    }
     if allow_same_source {
-        inspector = inspector.with_single_source().map_err(BrokerError::InvalidArgument)?;
+        inspector = inspector
+            .with_single_source()
+            .map_err(BrokerError::InvalidArgument)?;
     }
     // Keep the hash/replay state at one heap address while pages cross the
     // blocking-worker boundary. Moving the full inspector as each task's
@@ -212,6 +330,9 @@ async fn inspect_pair_inner<T: Send + 'static>(
     let inspect = async {
         let mut left_connection = None;
         let mut right_connection = None;
+        let mut journals: [Option<RecoveryInspectionJournal>; 2] = [None, None];
+        let mut cached_pages = 0u64;
+        let mut fetched_pages = 0u64;
         while let Some((side, request)) = inspector
             .next_read()
             .map_err(BrokerError::InvalidArgument)?
@@ -220,52 +341,83 @@ async fn inspect_pair_inner<T: Send + 'static>(
                 RecoverySide::Left => (left, &mut left_connection),
                 RecoverySide::Right => (right, &mut right_connection),
             };
-            let page = request_recovery_read_sequential_reusing(
-                config, command, replica, &request, deadline, connection,
-            )
-            .await?;
-            let page = RecoveryReadPage {
-                history_id: page.history_id,
-                source: request.source,
-                from: page.from,
-                next: page.next,
-                end: page.end,
-                snapshot_bytes: page.snapshot_bytes,
-                records: page
-                    .records
-                    .into_iter()
-                    .map(|record| RecoveryRecord {
-                        offset: record.offset,
-                        flags: record.flags,
-                        headers: record.headers,
-                        payload: record.payload,
+            let index = if side == RecoverySide::Left { 0 } else { 1 };
+            let cached = if let Some(root) = journal_root {
+                let root = root.to_path_buf();
+                let identity = RecoveryJournalIdentity {
+                    topic: command.topic.clone(),
+                    partition: command.partition.id(),
+                    group: command.group.clone(),
+                    stream: command.stream,
+                    replica: replica.node_id.clone(),
+                    seal: replica.seal.clone(),
+                };
+                let journal = journals[index].take();
+                let read_request = request.clone();
+                let (journal, page) =
+                    inspection_work(deadline, "inspection journal read", move || {
+                        let journal = match journal {
+                            Some(journal) => journal,
+                            None => RecoveryInspectionJournal::open(&root, identity)
+                                .map_err(|e| e.to_string())?,
+                        };
+                        let page = journal.read(&read_request).map_err(|e| e.to_string())?;
+                        Ok((journal, page))
                     })
-                    .collect(),
+                    .await?;
+                journals[index] = Some(journal);
+                page
+            } else {
+                None
             };
-            let permit = INSPECTION_CPU_SLOTS
-                .acquire()
-                .await
-                .map_err(|_| BrokerError::Unknown("inspection CPU admission closed".into()))?;
-            inspector = tokio::task::spawn_blocking(move || {
-                let _permit = permit;
-                inspector.accept_page(side, page)?;
-                Ok::<_, String>(inspector)
-            })
-            .await
-            .map_err(|e| BrokerError::Unknown(format!("recovery inspection worker failed: {e}")))?
-            .map_err(BrokerError::InvalidArgument)?;
+            let cache_hit = cached.is_some();
+            let page = if let Some(page) = cached {
+                cached_pages += 1;
+                page
+            } else {
+                fetched_pages += 1;
+                let page = request_recovery_read_sequential_reusing(
+                    config, command, replica, &request, deadline, connection,
+                )
+                .await?;
+                RecoveryReadPage {
+                    history_id: page.history_id,
+                    source: request.source,
+                    from: page.from,
+                    next: page.next,
+                    end: page.end,
+                    snapshot_bytes: page.snapshot_bytes,
+                    records: page
+                        .records
+                        .into_iter()
+                        .map(|record| RecoveryRecord {
+                            offset: record.offset,
+                            flags: record.flags,
+                            headers: record.headers,
+                            payload: record.payload,
+                        })
+                        .collect(),
+                }
+            };
+            let journal = journals[index].take();
+            let (next_inspector, journal) =
+                inspection_work(deadline, "inspection page", move || {
+                    if !cache_hit {
+                        if let Some(journal) = &journal {
+                            journal
+                                .append(&request, &page)
+                                .map_err(|e| format!("inspection journal append failed: {e}"))?;
+                        }
+                    }
+                    inspector.accept_page(side, page)?;
+                    Ok((inspector, journal))
+                })
+                .await?;
+            inspector = next_inspector;
+            journals[index] = journal;
         }
-        let permit = INSPECTION_CPU_SLOTS
-            .acquire()
-            .await
-            .map_err(|_| BrokerError::Unknown("inspection CPU admission closed".into()))?;
-        let (evidence, artifact) = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            finish(*inspector)
-        })
-        .await
-        .map_err(|e| BrokerError::Unknown(format!("recovery digest worker failed: {e}")))?
-        .map_err(BrokerError::InvalidArgument)?;
+        let (evidence, artifact) =
+            inspection_work(deadline, "inspection finish", move || finish(*inspector)).await?;
         for (source, log) in [
             ("messages", &evidence.messages),
             ("events", &evidence.events),
@@ -285,7 +437,7 @@ async fn inspect_pair_inner<T: Send + 'static>(
         tracing::info!(left_replica=left.node_id,right_replica=right.node_id,
             topic=command.topic,partition=command.partition.id(),group=command.group.as_deref(),
             messages=?evidence.messages,events=?evidence.events,references=?evidence.references,queue_replay=?evidence.queue_replay,remaining_proofs=?evidence.remaining_proofs,
-            pages=evidence.pages,records=evidence.records,bytes=evidence.bytes,
+            pages=evidence.pages,records=evidence.records,bytes=evidence.bytes,cached_pages,fetched_pages,
             "sealed history inspection complete; unresolved proofs remain explicit");
         Ok((
             ProtocolRecoveryPairInspection {
@@ -296,9 +448,13 @@ async fn inspect_pair_inner<T: Send + 'static>(
             artifact,
         ))
     };
-    tokio::time::timeout(deadline, inspect).await.map_err(|_| {
-        BrokerError::Unknown(
-            "recovery pair inspection deadline elapsed; partial evidence discarded".into(),
-        )
-    })?
+    if journal_root.is_some() {
+        inspect.await
+    } else {
+        tokio::time::timeout(deadline, inspect).await.map_err(|_| {
+            BrokerError::Unknown(
+                "recovery pair inspection deadline elapsed, partial evidence discarded".into(),
+            )
+        })?
+    }
 }

@@ -7,6 +7,7 @@ use crate::{
 };
 use std::sync::{Arc, Mutex};
 pub use stroma_core::recovery_inspection as inspection;
+pub use stroma_core::recovery_journal as journal;
 pub use stroma_core::recovery_budget::{RecoveryBudget, RecoveryBudgetExceeded};
 pub use stroma_core::recovery_replay as replay;
 pub use stroma_core::{
