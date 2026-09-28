@@ -73,6 +73,59 @@ async fn transfer(
     .await
     .map_err(err)
 }
+async fn completed_snapshot(
+    config: &ProtocolOwnerPeerResolverConfig, plan: &QueueRecoveryPlan, node: &str,
+) -> Result<Vec<u8>, String> {
+    use fibril_broker::recovery::snapshot::{MAX_RECOVERY_SNAPSHOT_BYTES, SNAPSHOT_CHUNK_BYTES};
+    let total = plan.snapshot_bytes();
+    if total == 0 || total > MAX_RECOVERY_SNAPSHOT_BYTES as u64 { return Err("selected snapshot exceeds retained-state byte admission".into()); }
+    let bytes = if total <= 16 * 1024 * 1024 {
+        let Reply::Snapshot(bytes) = transfer(config, plan, node, Operation::Snapshot).await? else {
+            return Err("invalid completed snapshot reply".into());
+        };
+        bytes
+    } else {
+        let mut bytes = Vec::with_capacity(total as usize);
+        while (bytes.len() as u64) < total {
+            let from = bytes.len() as u64;
+            let Reply::SnapshotChunk { from: actual, bytes: chunk } = transfer(config, plan, node,
+                Operation::SnapshotRead { from, max_bytes: SNAPSHOT_CHUNK_BYTES as u32 }).await? else {
+                return Err("invalid completed snapshot chunk reply".into());
+            };
+            if actual != from || chunk.is_empty() || chunk.len() > SNAPSHOT_CHUNK_BYTES || from + chunk.len() as u64 > total {
+                return Err("completed snapshot chunk differs from selected bounds".into());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        bytes
+    };
+    plan.verify_snapshot(&bytes)?;
+    Ok(bytes)
+}
+
+async fn begin_target(
+    config: &ProtocolOwnerPeerResolverConfig, plan: &QueueRecoveryPlan, node: &str, snapshot: &[u8],
+) -> Result<Reply, String> {
+    use fibril_broker::recovery::snapshot::SNAPSHOT_CHUNK_BYTES;
+    plan.verify_snapshot(snapshot)?;
+    if snapshot.len() <= 16 * 1024 * 1024 {
+        return transfer(config, plan, node, Operation::Begin { snapshot: snapshot.to_vec() }).await;
+    }
+    let Reply::SnapshotProgress(mut from) = transfer(config, plan, node, Operation::SnapshotProgress).await? else {
+        return Err("invalid snapshot transfer progress reply".into());
+    };
+    if from > plan.snapshot_bytes() { return Err("snapshot transfer progress exceeds selected length".into()); }
+    while from < plan.snapshot_bytes() {
+        let end = (from as usize + SNAPSHOT_CHUNK_BYTES).min(snapshot.len());
+        let Reply::SnapshotProgress(next) = transfer(config, plan, node, Operation::SnapshotAppend {
+            from, bytes: snapshot[from as usize..end].to_vec(),
+        }).await? else { return Err("invalid snapshot append progress reply".into()); };
+        if next != end as u64 { return Err("snapshot append made unexpected progress".into()); }
+        from = next;
+    }
+    transfer(config, plan, node, Operation::BeginTransferredSnapshot).await
+}
+
 fn source_report(plan: &QueueRecoveryPlan) -> Result<BrokerSealedReplica, String> {
     let h = plan.source_history().ok_or("plan source absent")?.clone();
     Ok(BrokerSealedReplica {
@@ -272,11 +325,11 @@ async fn recover_queue_attempt(
     let mut completed_source = None;
     let mut snapshot = None;
     for node in &members {
-        if let Ok(Reply::Snapshot(bytes)) = timing
+        if let Ok(bytes) = timing
             .stage(
                 "probe_snapshot",
                 node,
-                transfer(config, &plan, node, Operation::Snapshot),
+                completed_snapshot(config, &plan, node),
             )
             .await
         {
@@ -489,14 +542,7 @@ async fn prepare_target(
                 .stage(
                     "begin_target",
                     node,
-                    transfer(
-                        config,
-                        &plan,
-                        node,
-                        Operation::Begin {
-                            snapshot: snapshot.to_vec(),
-                        },
-                    ),
+                    begin_target(config, plan, node, snapshot),
                 )
                 .await?
             else {

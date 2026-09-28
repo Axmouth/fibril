@@ -31,6 +31,7 @@ pub(crate) struct RecordedQueueSelection {
     pub(crate) message_head: u64,
     pub(crate) message_next: u64,
     pub(crate) snapshot_digest: [u8; 32],
+    pub(crate) snapshot_bytes: u64,
     pub(crate) state_digest: [u8; 32],
     pub(crate) live_payload_digest: [u8; 32],
     pub(crate) witnesses: BTreeMap<String, [u8; 32]>,
@@ -211,6 +212,7 @@ impl RecoveryWitnessSet {
             message_head: source.message_head(),
             message_next,
             snapshot_digest: source.snapshot_digest(),
+            snapshot_bytes: source.state_snapshot().len() as u64,
             state_digest: source.evidence().lease_normalized_state_digest,
             live_payload_digest: source.evidence().live_payload_digest.unwrap(),
             witnesses: reports

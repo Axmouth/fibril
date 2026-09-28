@@ -769,6 +769,19 @@ impl StromaEngine {
             .await
     }
 
+    pub async fn transfer_queue_recovery_snapshot(
+        &self, spec: QueueRecoveryStageSpec, chunk: Option<(u64, Vec<u8>)>,
+    ) -> Result<u64, StromaError> {
+        self.inner.transfer_queue_recovery_snapshot(spec, chunk).await
+    }
+
+    pub async fn open_queue_recovery_stage_from_snapshot(
+        &self, spec: QueueRecoveryStageSpec, limits: RecoveryStageLimits,
+        seal: crate::recovery::RecoverySealRequest,
+    ) -> Result<QueueRecoveryStage, StromaError> {
+        self.inner.open_queue_recovery_stage_from_snapshot(spec, limits, seal).await
+    }
+
     pub async fn resume_queue_recovery_stage(
         &self,
         spec: QueueRecoveryStageSpec,

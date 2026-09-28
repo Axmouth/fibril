@@ -261,3 +261,5 @@ mod tests {
         broker.shutdown().await;
     }
 }
+
+pub use stroma_core::recovery_snapshot as snapshot;

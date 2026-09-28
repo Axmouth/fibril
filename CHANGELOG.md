@@ -12,6 +12,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Breaking changes
 
+- Queue recovery plans bind the exact snapshot byte length. The internal recovery
+  protocol adds resumable snapshot chunks and storage keeps a separate raw
+  artifact. Pending plans and private stages from previous builds are incompatible.
+  Upgrade participating brokers together. Client message frames are unchanged.
+
 - Work queues use a single ordered storage log. The combined-queue and
   unordered-application experiment features are removed. Use a fresh storage
   root when upgrading from the previous queue format. Stream storage retains

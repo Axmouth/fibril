@@ -180,7 +180,7 @@ async fn inspect_source_artifact(
     deadline: std::time::Duration,
     journal_root: Option<&std::path::Path>,
 ) -> Result<RecoveryQueueStateArtifact, BrokerError> {
-    if max_artifact_bytes == 0 || max_artifact_bytes > 16 * 1024 * 1024 {
+    if max_artifact_bytes == 0 || max_artifact_bytes > fibril_broker::recovery::snapshot::MAX_RECOVERY_SNAPSHOT_BYTES {
         return Err(BrokerError::InvalidArgument(
             "invalid recovery artifact limit".into(),
         ));

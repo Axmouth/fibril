@@ -39,6 +39,16 @@ pub enum QueueRecoveryOperation {
         snapshot: Vec<u8>,
     },
     Resume,
+    SnapshotProgress,
+    SnapshotAppend {
+        from: u64,
+        bytes: Vec<u8>,
+    },
+    BeginTransferredSnapshot,
+    SnapshotRead {
+        from: u64,
+        max_bytes: u32,
+    },
     Append {
         page: RecoveryReadPage,
     },
@@ -61,6 +71,8 @@ pub struct QueueRecoveryRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum QueueRecoveryReply {
     Progress(u64),
+    SnapshotProgress(u64),
+    SnapshotChunk { from: u64, bytes: Vec<u8> },
     Complete(QueueRecoveryStageReceipt),
     Installed(QueueRecoveryLocalReceipt),
     Snapshot(Vec<u8>),
@@ -127,8 +139,44 @@ impl Broker<StromaEngine> {
             if current.as_ref().is_some_and(|s| s.spec != authority.spec) {
                 current.take();
             }
+            if matches!(
+                request.operation,
+                QueueRecoveryOperation::SnapshotProgress
+                    | QueueRecoveryOperation::SnapshotAppend { .. }
+            ) {
+                // An open stage owns storage admission. Its immutable
+                // artifact is already durable, so matching transfer retries can
+                // report the full length without opening a second storage task.
+                if current.is_some() {
+                    if let QueueRecoveryOperation::SnapshotAppend { from, bytes } =
+                        &request.operation
+                    {
+                        let stage = &current.as_ref().unwrap().stage;
+                        let saved = stage
+                            .snapshot_chunk(*from, bytes.len())
+                            .await
+                            .map_err(error)?;
+                        if saved != *bytes {
+                            return Err(error("conflicting snapshot chunk retry"));
+                        }
+                    }
+                    return Ok(QueueRecoveryReply::SnapshotProgress(
+                        authority.spec.snapshot_bytes,
+                    ));
+                }
+                let chunk = match request.operation {
+                    QueueRecoveryOperation::SnapshotAppend { from, bytes } => Some((from, bytes)),
+                    _ => None,
+                };
+                return engine
+                    .transfer_queue_recovery_snapshot(authority.spec, chunk)
+                    .await
+                    .map(QueueRecoveryReply::SnapshotProgress)
+                    .map_err(error);
+            }
             if let QueueRecoveryOperation::Begin { snapshot } = &request.operation {
                 if snapshot.len() > 16 * 1024 * 1024
+                    || snapshot.len() as u64 != authority.spec.snapshot_bytes
                     || *blake3::hash(snapshot).as_bytes() != authority.spec.snapshot_digest
                 {
                     return Err(error("recovery snapshot differs from plan"));
@@ -141,6 +189,15 @@ impl Broker<StromaEngine> {
                             .open_queue_recovery_stage_reusing(
                                 authority.spec.clone(),
                                 snapshot.clone(),
+                                Default::default(),
+                                authority.seal.clone(),
+                            )
+                            .await
+                    }
+                    QueueRecoveryOperation::BeginTransferredSnapshot => {
+                        engine
+                            .open_queue_recovery_stage_from_snapshot(
+                                authority.spec.clone(),
                                 Default::default(),
                                 authority.seal.clone(),
                             )
@@ -161,7 +218,9 @@ impl Broker<StromaEngine> {
             let outcome = async {
                 let stage = &current.as_ref().unwrap().stage;
                 match request.operation {
-                    QueueRecoveryOperation::Begin { .. } | QueueRecoveryOperation::Resume => {
+                    QueueRecoveryOperation::Begin { .. }
+                    | QueueRecoveryOperation::Resume
+                    | QueueRecoveryOperation::BeginTransferredSnapshot => {
                         Ok(QueueRecoveryReply::Progress(stage.next_offset().await))
                     }
                     QueueRecoveryOperation::Append { page } => Ok(QueueRecoveryReply::Progress(
@@ -170,9 +229,25 @@ impl Broker<StromaEngine> {
                     QueueRecoveryOperation::Finish => Ok(QueueRecoveryReply::Complete(
                         stage.finish().await.map_err(error)?,
                     )),
-                    QueueRecoveryOperation::Snapshot => Ok(QueueRecoveryReply::Snapshot(
-                        stage.completed_snapshot().await.map_err(error)?,
-                    )),
+                    QueueRecoveryOperation::Snapshot => {
+                        if authority.spec.snapshot_bytes > 16 * 1024 * 1024 {
+                            return Err(error("snapshot requires chunked transfer"));
+                        }
+                        Ok(QueueRecoveryReply::Snapshot(
+                            stage.completed_snapshot().await.map_err(error)?,
+                        ))
+                    }
+                    QueueRecoveryOperation::SnapshotRead { from, max_bytes } => {
+                        Ok(QueueRecoveryReply::SnapshotChunk {
+                            from,
+                            bytes: stage
+                                .completed_snapshot_chunk(from, max_bytes as usize)
+                                .await
+                                .map_err(error)?,
+                        })
+                    }
+                    QueueRecoveryOperation::SnapshotProgress
+                    | QueueRecoveryOperation::SnapshotAppend { .. } => unreachable!(),
                     QueueRecoveryOperation::Read {
                         from,
                         max_records,

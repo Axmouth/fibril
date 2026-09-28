@@ -66,6 +66,7 @@ impl QueueRecoveryPlan {
             event_next: s.event_next,
             message_digest: source.message_digest,
             snapshot_digest: s.snapshot_digest,
+            snapshot_bytes: s.snapshot_bytes,
             state_digest: s.state_digest,
             live_payload_digest: s.live_payload_digest,
         };
@@ -114,6 +115,20 @@ impl QueueRecoveryPlan {
     pub fn source_history(&self) -> Option<&RetainedHistoryIdentity> {
         self.witnesses.get(&self.selected.source_node)
     }
+    pub fn verify_snapshot(&self, bytes: &[u8]) -> Result<(), String> {
+        if bytes.len() as u64 != self.selected.snapshot_bytes
+            || blake3::hash(bytes).as_bytes() != &self.selected.snapshot_digest
+        {
+            return Err("snapshot differs from selected artifact".into());
+        }
+        Ok(())
+    }
+    pub fn snapshot_bytes(&self) -> u64 {
+        self.selected.snapshot_bytes
+    }
+    pub fn snapshot_digest(&self) -> [u8; 32] {
+        self.selected.snapshot_digest
+    }
     pub fn event_next(&self) -> u64 {
         self.selected.event_next
     }
@@ -140,6 +155,7 @@ impl QueueRecoveryPlan {
             || evidence.message_next != self.message_next()
             || artifact.message_head() != self.selected.message_head
             || artifact.snapshot_digest() != self.selected.snapshot_digest
+            || artifact.state_snapshot().len() as u64 != self.selected.snapshot_bytes
             || evidence.lease_normalized_state_digest != self.selected.state_digest
             || evidence.live_payload_digest != Some(self.selected.live_payload_digest)
         {
@@ -394,9 +410,13 @@ impl GanglionCoordination {
         for _ in 0..8 {
             let snapshot = self.node.committed_snapshot();
             if crate::recovery_candidate::assignment(&snapshot, pending)
-                .map_err(error)?.owner != self.node_id
+                .map_err(error)?
+                .owner
+                != self.node_id
             {
-                return Err(error("only the current recovery candidate may persist intent"));
+                return Err(error(
+                    "only the current recovery candidate may persist intent",
+                ));
             }
             let proposed = QueueRecoveryPlan::proposed(&snapshot, pending, witnesses, selection)
                 .map_err(error)?;
