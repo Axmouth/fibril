@@ -12,6 +12,18 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Breaking changes
 
+- The data directory uses layout version 2. It holds a `fibril-node` marker
+  with the node id and the subdirectories `node/` (setup marker, config
+  overlay, cluster secret and TLS material), `coordination/`, `storage/` and
+  `cache/`. Data directories from earlier builds are refused at startup, with
+  no migration. Start from an empty data directory, and place a
+  pre-generated `cluster.secret` in `node/`. A configured coordination
+  directory gets its own marker bound to the raft node id.
+
+- The internal follower checkpoint install operations 86 and 87 are retired.
+  A follower below the owner's retained history recovers only through
+  coordinated queue reseeding, which requires an enrolled history binding.
+
 - Queue recovery plans bind the exact snapshot byte length. The internal recovery
   protocol adds resumable snapshot chunks and storage keeps a separate raw
   artifact. Pending plans and private stages from previous builds are incompatible.
