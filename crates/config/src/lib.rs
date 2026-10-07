@@ -7,6 +7,10 @@ use std::{
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
+pub mod node_layout;
+
+pub use node_layout::NodeLayout;
+
 pub type ConfigResult<T> = Result<T, ConfigError>;
 
 #[derive(Debug, thiserror::Error)]

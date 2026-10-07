@@ -1409,6 +1409,7 @@ name = "fibril-config"
 version = "0.4.0"
 dependencies = [
  "clap",
+ "keratin-log",
  "serde",
  "thiserror 2.0.18",
  "toml",
