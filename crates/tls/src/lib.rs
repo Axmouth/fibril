@@ -1,5 +1,5 @@
 //! Broker TLS material: operator-supplied PEM files or per-deployment
-//! material generated under the data dir.
+//! material generated in the node dir (`<data_dir>/node`).
 //!
 //! Fibril never ships certificates. The generated path follows the
 //! Elasticsearch 8 pattern: a per-deployment CA and server certificate are
@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use fibril_config::node_layout::{self, FileMode};
 use sha2::{Digest, Sha256};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -23,12 +24,7 @@ pub use fibril_config::{ClientAuthMode, TlsMode};
 pub use tokio_rustls;
 pub use tokio_rustls::{TlsAcceptor as RustlsAcceptor, TlsConnector};
 
-/// Directory under the data dir holding generated material.
-pub const GENERATED_TLS_DIR: &str = "tls";
-/// Directory under the data dir holding operator material uploaded through
-/// first-boot setup, kept apart from the generated dir so the
-/// partial-material check there stays meaningful.
-pub const PROVIDED_TLS_DIR: &str = "tls-provided";
+pub use fibril_config::node_layout::{GENERATED_TLS_DIR, PROVIDED_TLS_DIR};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TlsSetupError {
@@ -178,23 +174,24 @@ impl rustls::server::ResolvesServerCert for ReloadableCertResolver {
 
 /// Client-certificate policy for the server build: the mode plus where the
 /// client CA lives. `ca_path` unset falls back to the generated
-/// `<data_dir>/tls/ca.pem`.
+/// `<node_dir>/tls/ca.pem`.
 #[derive(Debug, Clone, Default)]
 pub struct ClientAuthPolicy {
     pub mode: ClientAuthMode,
     pub ca_path: Option<PathBuf>,
 }
 
-/// Build the broker TLS acceptor for the configured mode. `extra_sans` adds
+/// Build the broker TLS acceptor for the configured mode. `node_dir` is the
+/// directory holding generated material (`<data_dir>/node`). `extra_sans` adds
 /// hostnames or IPs (typically the advertise hosts) to a generated server
 /// certificate on top of the localhost set. Client certificates are not
 /// requested; use [`build_server_tls_with_client_auth`] for that.
 pub fn build_server_tls(
     mode: &TlsMode,
-    data_dir: &Path,
+    node_dir: &Path,
     extra_sans: &[String],
 ) -> Result<Option<ServerTls>, TlsSetupError> {
-    build_server_tls_with_client_auth(mode, data_dir, extra_sans, &ClientAuthPolicy::default())
+    build_server_tls_with_client_auth(mode, node_dir, extra_sans, &ClientAuthPolicy::default())
 }
 
 /// [`build_server_tls`] with a client-certificate policy: `request` verifies
@@ -202,7 +199,7 @@ pub fn build_server_tls(
 /// clients, `require` rejects certless clients in the handshake.
 pub fn build_server_tls_with_client_auth(
     mode: &TlsMode,
-    data_dir: &Path,
+    node_dir: &Path,
     extra_sans: &[String],
     client_auth: &ClientAuthPolicy,
 ) -> Result<Option<ServerTls>, TlsSetupError> {
@@ -220,7 +217,7 @@ pub fn build_server_tls_with_client_auth(
             TlsMaterialSource::Provided,
         ),
         TlsMode::AutoSelfSigned => {
-            let dir = data_dir.join(GENERATED_TLS_DIR);
+            let dir = node_dir.join(GENERATED_TLS_DIR);
             ensure_generated_material(&dir, extra_sans)?;
             let files = GeneratedFiles::new(&dir);
             let ca_fingerprint = ca_fingerprint(&files.ca_pem)?;
@@ -247,7 +244,7 @@ pub fn build_server_tls_with_client_auth(
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let builder = RustlsServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()?;
-    let config = match client_verifier(client_auth, data_dir)? {
+    let config = match client_verifier(client_auth, node_dir)? {
         Some(verifier) => builder.with_client_cert_verifier(verifier),
         None => builder.with_no_client_auth(),
     }
@@ -269,19 +266,19 @@ pub fn build_server_tls_with_client_auth(
 /// error.
 fn client_verifier(
     policy: &ClientAuthPolicy,
-    data_dir: &Path,
+    node_dir: &Path,
 ) -> Result<Option<Arc<dyn rustls::server::danger::ClientCertVerifier>>, TlsSetupError> {
     if policy.mode == ClientAuthMode::Off {
         return Ok(None);
     }
-    let generated_ca = data_dir.join(GENERATED_TLS_DIR).join("ca.pem");
+    let generated_ca = node_dir.join(GENERATED_TLS_DIR).join("ca.pem");
     let ca_path = match &policy.ca_path {
         Some(path) => path.clone(),
         None if generated_ca.exists() => generated_ca,
         None => {
             return Err(TlsSetupError::InvalidUploadedMaterial {
                 detail: "tls.client_auth needs a client CA: set tls.client_ca_path or use \
-                         generated material so <data_dir>/tls/ca.pem exists"
+                         generated material so <data_dir>/node/tls/ca.pem exists"
                     .to_string(),
             });
         }
@@ -527,25 +524,34 @@ pub fn ensure_generated_material(dir: &Path, extra_sans: &[String]) -> Result<()
 }
 
 fn write_public(path: &Path, contents: &[u8]) -> Result<(), TlsSetupError> {
-    fs::write(path, contents).map_err(|source| TlsSetupError::WriteMaterial {
-        path: path.to_path_buf(),
-        source,
-    })
+    write_material(path, contents, FileMode::Public)
 }
 
 fn write_secret(path: &Path, contents: &[u8]) -> Result<(), TlsSetupError> {
-    write_public(path, contents)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|source| {
-            TlsSetupError::WriteMaterial {
-                path: path.to_path_buf(),
-                source,
-            }
-        })?;
+    write_material(path, contents, FileMode::Secret)
+}
+
+fn write_material(path: &Path, contents: &[u8], mode: FileMode) -> Result<(), TlsSetupError> {
+    node_layout::write_file_atomic(path, contents, mode).map_err(|source| {
+        TlsSetupError::WriteMaterial {
+            path: path.to_path_buf(),
+            source,
+        }
+    })
+}
+
+/// Create `dir` if missing and make the new entry durable in its parent.
+fn create_dir_synced(dir: &Path) -> Result<(), TlsSetupError> {
+    if dir.is_dir() {
+        return Ok(());
     }
-    Ok(())
+    let write_err = |source| TlsSetupError::WriteMaterial {
+        path: dir.to_path_buf(),
+        source,
+    };
+    fs::create_dir_all(dir).map_err(write_err)?;
+    node_layout::fsync_dir(dir).map_err(write_err)?;
+    node_layout::fsync_dir(&node_layout::parent_dir(dir)).map_err(write_err)
 }
 
 fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, TlsSetupError> {
@@ -586,15 +592,15 @@ fn load_key(path: &Path) -> Result<PrivateKeyDer<'static>, TlsSetupError> {
 
 /// Build the TLS connector for outbound peer connections (replication and
 /// coordination dials). Trust resolution: an explicit peer CA file, else the
-/// deployment's generated `<data_dir>/tls/ca.pem` when present, else OS
+/// deployment's generated `<node_dir>/tls/ca.pem` when present, else OS
 /// roots. Peer certificates are verified against the peer's host name, the
 /// standard server verification - node membership is authenticated
 /// separately by the cluster secret inside the session.
 pub fn build_peer_connector(
     peer_ca_path: Option<&Path>,
-    data_dir: &Path,
+    node_dir: &Path,
 ) -> Result<tokio_rustls::TlsConnector, TlsSetupError> {
-    build_peer_connector_with_identity(peer_ca_path, data_dir, None)
+    build_peer_connector_with_identity(peer_ca_path, node_dir, None)
 }
 
 /// [`build_peer_connector`] presenting a client certificate, for dialing
@@ -602,10 +608,10 @@ pub fn build_peer_connector(
 /// key paths, typically the node's own server leaf.
 pub fn build_peer_connector_with_identity(
     peer_ca_path: Option<&Path>,
-    data_dir: &Path,
+    node_dir: &Path,
     identity: Option<(&Path, &Path)>,
 ) -> Result<tokio_rustls::TlsConnector, TlsSetupError> {
-    let generated_ca = data_dir.join(GENERATED_TLS_DIR).join("ca.pem");
+    let generated_ca = node_dir.join(GENERATED_TLS_DIR).join("ca.pem");
     let ca_path = match peer_ca_path {
         Some(path) => Some(path.to_path_buf()),
         None if generated_ca.exists() => Some(generated_ca),
@@ -649,10 +655,10 @@ pub fn build_peer_connector_with_identity(
 }
 
 /// Validate uploaded PEM text (a certificate chain and its private key) and
-/// store it under `<data_dir>/tls-provided` with a 0600 key. The pair is
+/// store it under `<node_dir>/tls-provided` with a 0600 key. The pair is
 /// proven to load as a working rustls config before anything is written.
 pub fn store_provided_material(
-    data_dir: &Path,
+    node_dir: &Path,
     cert_pem: &str,
     key_pem: &str,
 ) -> Result<(PathBuf, PathBuf), TlsSetupError> {
@@ -677,11 +683,8 @@ pub fn store_provided_material(
         detail: format!("certificate and key do not form a working TLS config: {err}"),
     })?;
 
-    let dir = data_dir.join(PROVIDED_TLS_DIR);
-    fs::create_dir_all(&dir).map_err(|source| TlsSetupError::WriteMaterial {
-        path: dir.clone(),
-        source,
-    })?;
+    let dir = node_dir.join(PROVIDED_TLS_DIR);
+    create_dir_synced(&dir)?;
     let cert_path = dir.join("server.pem");
     let key_path = dir.join("server.key");
     write_public(&cert_path, cert_pem.as_bytes())?;

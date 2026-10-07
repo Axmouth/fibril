@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use fibril_client::{ClientOptions, NewMessage, QueueConfig};
-use fibril_config::ServerConfig;
+use fibril_config::{NodeLayout, ServerConfig, node_layout};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Parser)]
@@ -96,8 +96,9 @@ struct UserRemoveArgs {
 
 #[derive(Debug, Subcommand)]
 enum SecretCommand {
-    /// Generate the cluster shared secret at <data_dir>/cluster.secret (kept
-    /// as is when it already exists). Every node holds the same secret, so
+    /// Generate the cluster shared secret at <data_dir>/node/cluster.secret
+    /// (kept as is when it already exists). A fresh data dir is initialized
+    /// for the configured node id first. Every node holds the same secret, so
     /// copy this file (or its value) to the other nodes.
     Generate(SecretGenerateArgs),
 }
@@ -118,7 +119,7 @@ struct SecretGenerateArgs {
 #[derive(Debug, Subcommand)]
 enum CertCommand {
     /// Generate per-deployment TLS material (CA + server certificate) under
-    /// <data_dir>/tls, the same material tls.auto_self_signed generates on
+    /// <data_dir>/node/tls, the same material tls.auto_self_signed generates on
     /// first boot. Existing complete material is kept as is; a directory
     /// holding only the CA pair (copied from another node, or with the
     /// server pair removed for rotation) gets a server certificate minted
@@ -127,7 +128,7 @@ enum CertCommand {
     /// Print the SHA-256 fingerprint of the first certificate in a PEM file.
     Fingerprint(CertFingerprintArgs),
     /// Issue a client certificate from the deployment CA under
-    /// <data_dir>/tls. The identity becomes the certificate's name and, on
+    /// <data_dir>/node/tls. The identity becomes the certificate's name and, on
     /// brokers with tls.client_auth, authenticates connections as the user
     /// of the same name without a password.
     Issue(CertIssueArgs),
@@ -140,7 +141,7 @@ struct CertIssueArgs {
     identity: String,
 
     /// Data directory holding the deployment CA (material under
-    /// <data_dir>/tls). Defaults to the configured server.data_dir.
+    /// <data_dir>/node/tls). Defaults to the configured server.data_dir.
     #[arg(long)]
     data_dir: Option<std::path::PathBuf>,
 
@@ -152,7 +153,7 @@ struct CertIssueArgs {
 
 #[derive(Debug, clap::Args)]
 struct CertGenerateArgs {
-    /// Data directory to generate under (material goes to <data_dir>/tls).
+    /// Data directory to generate under (material goes to <data_dir>/node/tls).
     /// Defaults to the configured server.data_dir.
     #[arg(long)]
     data_dir: Option<std::path::PathBuf>,
@@ -165,7 +166,7 @@ struct CertGenerateArgs {
 
 #[derive(Debug, clap::Args)]
 struct CertFingerprintArgs {
-    /// PEM file holding the certificate (e.g. <data_dir>/tls/ca.pem).
+    /// PEM file holding the certificate (e.g. <data_dir>/node/tls/ca.pem).
     path: std::path::PathBuf,
 }
 
@@ -467,9 +468,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Secret { command } => match command {
             SecretCommand::Generate(args) => {
                 let data_dir = args.data_dir.unwrap_or(config.server.data_dir);
-                std::fs::create_dir_all(&data_dir)
-                    .with_context(|| format!("failed to create {}", data_dir.display()))?;
-                let path = data_dir.join(fibril_config::CLUSTER_SECRET_FILE);
+                let layout = NodeLayout::open_or_init(&data_dir, &config.coordination.node_id)?;
+                let path = layout.cluster_secret();
                 let secret = if path.exists() {
                     println!(
                         "Cluster secret already exists at {}, keeping it.",
@@ -484,20 +484,18 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     getrandom::getrandom(&mut bytes)
                         .map_err(|err| anyhow::anyhow!("failed to gather entropy: {err}"))?;
                     let secret: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-                    std::fs::write(&path, format!("{secret}\n"))
-                        .with_context(|| format!("failed to write {}", path.display()))?;
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-                            .with_context(|| format!("failed to chmod {}", path.display()))?;
-                    }
+                    node_layout::write_file_atomic(
+                        &path,
+                        format!("{secret}\n").as_bytes(),
+                        node_layout::FileMode::Secret,
+                    )
+                    .with_context(|| format!("failed to write {}", path.display()))?;
                     println!("Cluster secret written to {} (0600).", path.display());
                     secret
                 };
                 println!();
                 println!("Give every node the same secret:");
-                println!("  copy this file to each node's data dir, or set");
+                println!("  copy this file to each node's <data_dir>/node, or set");
                 println!("  FIBRIL_CLUSTER_SECRET / coordination.secret_path there.");
                 if args.show {
                     println!();
@@ -510,9 +508,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Cert { command } => match command {
             CertCommand::Generate(args) => {
                 let data_dir = args.data_dir.unwrap_or(config.server.data_dir);
+                let layout = NodeLayout::open_or_init(&data_dir, &config.coordination.node_id)?;
                 let tls = fibril_tls::build_server_tls(
                     &fibril_config::TlsMode::AutoSelfSigned,
-                    &data_dir,
+                    &layout.node(),
                     &args.sans,
                 )?
                 .context("auto_self_signed mode always yields material")?;
@@ -539,7 +538,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
             CertCommand::Issue(args) => {
                 let data_dir = args.data_dir.unwrap_or(config.server.data_dir);
-                let tls_dir = data_dir.join(fibril_tls::GENERATED_TLS_DIR);
+                let tls_dir = NodeLayout::new(data_dir).generated_tls();
                 let (cert_pem, key_pem) =
                     fibril_tls::issue_client_certificate(&tls_dir, &args.identity)?;
                 let out_dir = args

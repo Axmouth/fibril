@@ -46,7 +46,8 @@ use fibril_broker::{
 };
 use fibril_config::{
     ConfigError, CoordinationMode, GanglionAssignmentDurabilityMode,
-    GanglionAssignmentDurabilitySection, RecoveryMismatchMode, ServerConfig,
+    GanglionAssignmentDurabilitySection, NodeLayout, RecoveryMismatchMode, ServerConfig,
+    node_layout::{self, FileMode, NodeLayoutError},
 };
 use fibril_coordination_ganglion::{
     ClientTopology, ClusterRuntimeSettingsUpdateOutcome, ControllerStatus, ForwardedWritePolicy,
@@ -173,6 +174,8 @@ pub struct GanglionBrokerTaskHandles {
 
 #[derive(Debug, thiserror::Error)]
 pub enum FibrilServerError {
+    #[error("data dir: {0}")]
+    NodeLayout(#[from] NodeLayoutError),
     #[error("failed to open storage engine: {0}")]
     Storage(#[source] StromaError),
     #[error(transparent)]
@@ -210,7 +213,7 @@ pub enum FibrilServerError {
         "coordination.mode = ganglion requires a cluster secret for node-to-node \
          authentication. Generate one with fibrilctl secret generate and give every \
          node the same value via FIBRIL_CLUSTER_SECRET, coordination.secret_path, or \
-         <data_dir>/cluster.secret"
+         <data_dir>/node/cluster.secret"
     )]
     MissingClusterSecret,
     #[error("user store: {0}")]
@@ -646,14 +649,14 @@ fn peer_connector_from_config(
             key_path,
         } => Some((cert_path, key_path)),
         fibril_config::TlsMode::AutoSelfSigned => {
-            let dir = config.server.data_dir.join(tls::GENERATED_TLS_DIR);
+            let dir = config.node_layout().generated_tls();
             Some((dir.join("server.pem"), dir.join("server.key")))
         }
         fibril_config::TlsMode::Disabled => None,
     };
     Ok(fibril_tls::build_peer_connector_with_identity(
         config.tls.peer_ca_path.as_deref(),
-        &config.server.data_dir,
+        &config.node_layout().node(),
         identity
             .as_ref()
             .map(|(cert, key)| (cert.as_path(), key.as_path())),
@@ -676,11 +679,7 @@ pub async fn open_tcp_ganglion_parts(
         CoordinationMode::Static => Ok(None),
         CoordinationMode::Ganglion => {
             let section = &config.coordination.ganglion;
-            let data_dir = if section.data_dir.as_os_str().is_empty() {
-                config.server.data_dir.join("coordination")
-            } else {
-                section.data_dir.clone()
-            };
+            let data_dir = config.coordination_data_dir();
 
             let consensus_config = consensus_config_from_config(config)?;
             let wire_format: WireFormat = section
@@ -1488,18 +1487,14 @@ pub fn declare_coordinator_for_ganglion(parts: &TcpGanglionParts) -> Arc<dyn Dec
 /// completed-setup marker. The broker listener stays down throughout, so no
 /// plaintext traffic can precede the choice. With tls already configured
 /// explicitly there is nothing to decide, so the marker is written directly.
-async fn run_first_boot_setup(config: &ServerConfig) -> Result<(), FibrilServerError> {
-    let data_dir = config.server.data_dir.clone();
-    std::fs::create_dir_all(&data_dir).map_err(|err| {
-        FibrilServerError::TlsSetup(fibril_tls::TlsSetupError::WriteMaterial {
-            path: data_dir.clone(),
-            source: err,
-        })
-    })?;
+async fn run_first_boot_setup(
+    config: &ServerConfig,
+    layout: &NodeLayout,
+) -> Result<(), FibrilServerError> {
     if config.tls != fibril_config::TlsSection::default()
         && config.auth != fibril_config::AuthSection::default()
     {
-        write_setup_marker(&data_dir)?;
+        write_setup_marker(layout)?;
         tracing::info!(
             "setup mode: tls and auth are already configured explicitly, marking setup complete"
         );
@@ -1512,16 +1507,16 @@ async fn run_first_boot_setup(config: &ServerConfig) -> Result<(), FibrilServerE
     tracing::info!(
         "FIRST-BOOT SETUP: the broker is not serving yet. Open http://{bind}/ to choose \
          how connections are secured (generate TLS material, supply a certificate, or \
-         continue without TLS). The choice persists in {} and {} under the data dir; \
-         delete the marker and boot with setup mode to run this again",
-        fibril_config::CONFIG_OVERLAY_FILE,
-        fibril_config::SETUP_MARKER_FILE,
+         continue without TLS). The choice persists in {} and {}; delete the marker \
+         and boot with setup mode to run this again",
+        layout.config_overlay().display(),
+        layout.setup_marker().display(),
     );
 
     let sans = tls::san_hosts_from_advertise(&config.broker_advertise_addresses());
-    let apply_dir = data_dir.clone();
+    let apply_layout = layout.clone();
     let apply: fibril_admin::setup::ApplySetup = Arc::new(move |submission| {
-        apply_setup_submission(&apply_dir, &sans, submission).map_err(|err| err.to_string())
+        apply_setup_submission(&apply_layout, &sans, submission).map_err(|err| err.to_string())
     });
     let applied = fibril_admin::setup::run_setup_server(bind, apply)
         .await
@@ -1531,7 +1526,7 @@ async fn run_first_boot_setup(config: &ServerConfig) -> Result<(), FibrilServerE
 }
 
 fn apply_setup_submission(
-    data_dir: &std::path::Path,
+    layout: &NodeLayout,
     sans: &[String],
     submission: fibril_admin::setup::SetupSubmission,
 ) -> Result<fibril_admin::setup::SetupApplied, FibrilServerError> {
@@ -1541,7 +1536,11 @@ fn apply_setup_submission(
     let tls_summary = match submission.tls {
         TlsSetupChoice::AutoSelfSigned => {
             let built =
-                tls::build_server_tls(&fibril_config::TlsMode::AutoSelfSigned, data_dir, sans)?
+                tls::build_server_tls(
+                    &fibril_config::TlsMode::AutoSelfSigned,
+                    &layout.node(),
+                    sans,
+                )?
                     .ok_or_else(|| {
                         FibrilServerError::TlsSetup(
                             fibril_tls::TlsSetupError::InvalidUploadedMaterial {
@@ -1571,7 +1570,7 @@ fn apply_setup_submission(
         }
         TlsSetupChoice::Provided { cert_pem, key_pem } => {
             let (cert_path, key_path) =
-                fibril_tls::store_provided_material(data_dir, &cert_pem, &key_pem)?;
+                fibril_tls::store_provided_material(&layout.node(), &cert_pem, &key_pem)?;
             overlay_tls.enabled = true;
             overlay_tls.cert_path = Some(cert_path.clone());
             overlay_tls.key_path = Some(key_path);
@@ -1602,16 +1601,16 @@ fn apply_setup_submission(
             ClusterSecretChoice::Generate => generate_cluster_secret(),
             ClusterSecretChoice::Provided(value) => value,
         };
-        write_cluster_secret(data_dir, &secret)?;
-        summary.push("Cluster secret written to the data dir.".to_string());
+        write_cluster_secret(layout, &secret)?;
+        summary.push("Cluster secret written to the node dir.".to_string());
     }
 
     let overlay = fibril_config::ConfigOverlay {
         tls: Some(overlay_tls),
         auth: overlay_auth,
     };
-    write_config_overlay(data_dir, &overlay)?;
-    write_setup_marker(data_dir)?;
+    write_config_overlay(layout, &overlay)?;
+    write_setup_marker(layout)?;
     Ok(SetupApplied {
         summary: summary.join(" "),
     })
@@ -1626,48 +1625,43 @@ fn generate_cluster_secret() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn write_cluster_secret(data_dir: &std::path::Path, secret: &str) -> Result<(), FibrilServerError> {
-    let path = data_dir.join(fibril_config::CLUSTER_SECRET_FILE);
-    std::fs::write(&path, format!("{secret}\n")).map_err(|source| {
-        FibrilServerError::TlsSetup(fibril_tls::TlsSetupError::WriteMaterial {
-            path: path.clone(),
-            source,
-        })
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(
-            |source| {
-                FibrilServerError::TlsSetup(fibril_tls::TlsSetupError::WriteMaterial {
-                    path: path.clone(),
-                    source,
-                })
-            },
-        )?;
-    }
-    Ok(())
+fn write_cluster_secret(layout: &NodeLayout, secret: &str) -> Result<(), FibrilServerError> {
+    write_node_file(
+        &layout.cluster_secret(),
+        format!("{secret}\n").as_bytes(),
+        FileMode::Secret,
+    )
 }
 
 fn write_config_overlay(
-    data_dir: &std::path::Path,
+    layout: &NodeLayout,
     overlay: &fibril_config::ConfigOverlay,
 ) -> Result<(), FibrilServerError> {
-    overlay
-        .write(data_dir)
-        .map_err(FibrilServerError::TlsConfig)
+    overlay.write(layout).map_err(FibrilServerError::TlsConfig)
 }
 
-fn write_setup_marker(data_dir: &std::path::Path) -> Result<(), FibrilServerError> {
-    let path = data_dir.join(fibril_config::SETUP_MARKER_FILE);
+fn write_setup_marker(layout: &NodeLayout) -> Result<(), FibrilServerError> {
     let stamp = format!("completed_at_ms = {}\n", fibril_util::unix_millis());
-    std::fs::write(&path, stamp).map_err(|source| {
-        FibrilServerError::TlsSetup(fibril_tls::TlsSetupError::WriteMaterial { path, source })
+    write_node_file(&layout.setup_marker(), stamp.as_bytes(), FileMode::Public)
+}
+
+fn write_node_file(
+    path: &std::path::Path,
+    contents: &[u8],
+    mode: FileMode,
+) -> Result<(), FibrilServerError> {
+    node_layout::write_file_atomic(path, contents, mode).map_err(|source| {
+        FibrilServerError::TlsSetup(fibril_tls::TlsSetupError::WriteMaterial {
+            path: path.to_path_buf(),
+            source,
+        })
     })
 }
 
 pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilServerError> {
     let mut config = config;
+    // Validate or create the data dir before anything reads or writes in it.
+    let layout = NodeLayout::open_or_init(&config.server.data_dir, &config.coordination.node_id)?;
     // The setup-owned overlay layers below explicit config: it applies only
     // when file/env/CLI left the tls section untouched.
     config
@@ -1745,7 +1739,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         })?,
     );
     let engine = StromaEngine::open_with_runtime(
-        &config.server.data_dir,
+        &layout.storage(),
         StromaKeratinConfig {
             message_log: keratin_message_cfg,
             event_log: keratin_event_cfg,
@@ -1756,11 +1750,8 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     .await
     .map_err(FibrilServerError::Storage)?;
 
-    // Queue storage lives directly in the data dir and only initializes in an
-    // empty directory. Open it before first-boot setup writes its marker,
-    // overlay, TLS material or cluster secret there.
     if config.setup_pending() {
-        run_first_boot_setup(&config).await?;
+        run_first_boot_setup(&config, &layout).await?;
         config
             .apply_setup_overlay()
             .map_err(FibrilServerError::TlsConfig)?;
@@ -1769,7 +1760,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
 
     let local_storage_settings = fibril_broker::local_storage_settings::LocalStorageSettings::load(
         config.coordination.node_id.clone(),
-        config.server.data_dir.clone(),
+        layout.storage(),
         config.storage.keratin.segment_preallocate_bytes,
         engine
             .global_store()
@@ -1840,7 +1831,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     }
     let server_tls = tls::build_server_tls_with_client_auth(
         &config.tls.mode().map_err(FibrilServerError::TlsConfig)?,
-        &config.server.data_dir,
+        &layout.node(),
         &tls_sans,
         &tls::ClientAuthPolicy {
             mode: config.tls.client_auth,
