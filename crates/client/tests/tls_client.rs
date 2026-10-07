@@ -70,7 +70,7 @@ async fn client_certificate_connects_without_password() {
         }];
     })
     .await;
-    let tls_dir = data_dir.join("tls");
+    let tls_dir = data_dir.join("node").join("tls");
     let (cert_pem, key_pem) =
         fibril::tls::issue_client_certificate(&tls_dir, "svc-a").expect("issue cert");
     let cert_path = tls_dir.join("svc-a.pem");
@@ -113,7 +113,7 @@ async fn certless_client_gets_the_required_certificate_error() {
         config.tls.client_auth = fibril_config::ClientAuthMode::Require;
     })
     .await;
-    let ca_pem = data_dir.join("tls").join("ca.pem");
+    let ca_pem = data_dir.join("node").join("tls").join("ca.pem");
 
     let err = ClientOptions::new()
         .auth("fibril", "fibril")
@@ -133,7 +133,7 @@ async fn certless_client_gets_the_required_certificate_error() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tls_client_publishes_over_ca_path_trust() {
     let (addr, data_dir, server) = boot_server("ca-path", true).await;
-    let ca_pem = data_dir.join("tls").join("ca.pem");
+    let ca_pem = data_dir.join("node").join("tls").join("ca.pem");
 
     let client = ClientOptions::new()
         .auth("fibril", "fibril")
@@ -163,7 +163,7 @@ async fn tls_client_publishes_over_ca_path_trust() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tls_client_connects_with_fingerprint_pin() {
     let (addr, data_dir, server) = boot_server("pin", true).await;
-    let ca_pem = data_dir.join("tls").join("ca.pem");
+    let ca_pem = data_dir.join("node").join("tls").join("ca.pem");
     let fingerprint = fibril::tls::ca_fingerprint(&ca_pem).expect("fingerprint");
 
     let client = ClientOptions::new()

@@ -12,6 +12,9 @@
 #
 #   docker compose -f compose.viz.example.yaml down -v
 #
+# The broker refuses to start on a data volume written with an older data
+# layout. Remove the volume as above to start fresh.
+#
 # The visualizer shares the broker's network namespace and connects over
 # loopback (the default credentials are loopback-only). This is a single
 # standalone broker (no clustering), so every partition is owned by the one broker.

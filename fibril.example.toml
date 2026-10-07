@@ -1,4 +1,7 @@
 [server]
+# Node root. Holds the fibril-node marker plus node/, coordination/, storage/
+# and cache/. First boot needs a missing or empty directory (lost+found is
+# allowed), later boots need the same coordination.node_id.
 data_dir = "server_data"
 
 [broker.listener]
@@ -19,10 +22,10 @@ enabled = false
 username = "fibril"
 # password = "change-me"
 
-# First-boot setup: with mode = true and no completed-setup marker in the
-# data dir, the server serves only a localhost setup page (choose generated
+# First-boot setup: with mode = true and no completed-setup marker in
+# <data_dir>/node, the server serves only a localhost setup page (choose generated
 # TLS, supply a certificate, or explicitly skip) and the broker starts after
-# the choice. Delete <data_dir>/setup_complete to run setup again.
+# the choice. Delete <data_dir>/node/setup_complete to run setup again.
 [setup]
 mode = false
 
@@ -43,7 +46,7 @@ enabled = false
 # Supply your own PEM files:
 # cert_path = "/etc/fibril/tls/server.pem"
 # key_path = "/etc/fibril/tls/server.key"
-# Or generate per-deployment material under <data_dir>/tls on first boot:
+# Or generate per-deployment material under <data_dir>/node/tls on first boot:
 # auto_self_signed = true
 # The admin dashboard serves HTTPS from the same material when TLS is
 # enabled. Opt it out when a reverse proxy terminates TLS for the dashboard:
@@ -52,7 +55,7 @@ enabled = false
 # service mesh or tunnel already encrypts inter-broker traffic:
 # inter_broker = false
 # CA that peer certificates chain to. Unset falls back to the generated
-# <data_dir>/tls/ca.pem, then OS roots:
+# <data_dir>/node/tls/ca.pem, then OS roots:
 # peer_ca_path = "/etc/fibril/tls/ca.pem"
 # Client certificates as credentials: "request" verifies a presented
 # certificate (certless clients still password-auth), "require" rejects

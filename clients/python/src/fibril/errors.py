@@ -174,7 +174,7 @@ class TlsCertificateUntrustedError(FibrilError):
         super().__init__(
             f"broker certificate verification failed: {detail}. Trust the broker "
             "CA via with_tls_ca_path(...) (generated deployments write "
-            "<data_dir>/tls/ca.pem) or pin with_tls_ca_fingerprint(...) from the "
+            "<data_dir>/node/tls/ca.pem) or pin with_tls_ca_fingerprint(...) from the "
             "broker startup log"
         )
 

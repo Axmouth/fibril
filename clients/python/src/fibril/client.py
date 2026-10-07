@@ -71,7 +71,7 @@ class TlsOptions:
     """
 
     #: PEM file with the CA certificate(s) to trust, e.g. the broker's
-    #: generated ``<data_dir>/tls/ca.pem``.
+    #: generated ``<data_dir>/node/tls/ca.pem``.
     ca_path: Optional[str] = None
     #: SHA-256 fingerprint of the broker CA (or server) certificate, as
     #: printed in the broker startup log. Hex digits, colons optional.
@@ -166,7 +166,7 @@ class ClientOptions:
 
     def with_tls_ca_path(self, ca_path: str) -> "ClientOptions":
         """TLS trusting the CA certificate(s) in a PEM file, e.g. the broker's
-        generated ``<data_dir>/tls/ca.pem``."""
+        generated ``<data_dir>/node/tls/ca.pem``."""
         return replace(self, tls=replace(self.tls or TlsOptions(), ca_path=str(ca_path)))
 
     def with_tls_ca_fingerprint(self, ca_fingerprint: str) -> "ClientOptions":

@@ -37,6 +37,9 @@ COPY --from=builder /app/target/release/fibrilctl /usr/local/bin/fibrilctl
 COPY --from=builder /app/target/release/fibril-tui-example /usr/local/bin/fibril-tui-example
 COPY --from=builder /app/target/release/fibril-demo /usr/local/bin/fibril-demo
 
+# Node data dir (server.data_dir). It must start empty, and later boots need the
+# same coordination.node_id. Node files such as the cluster secret and TLS
+# material live in /app/server_data/node.
 VOLUME ["/app/server_data"]
 EXPOSE 9876 8081
 

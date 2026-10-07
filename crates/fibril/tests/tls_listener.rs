@@ -185,7 +185,7 @@ async fn tls_listener_serves_hello_over_generated_material() {
     let server = boot_server("hello", true).await;
     let (addr, data_dir) = (server.broker_addr, server.data_dir.clone());
     let server = server.handle;
-    let ca_pem = data_dir.join("tls").join("ca.pem");
+    let ca_pem = data_dir.join("node").join("tls").join("ca.pem");
     assert!(ca_pem.exists(), "generated CA missing at {ca_pem:?}");
 
     let connector = tls_connector(Some(&ca_pem));
@@ -269,7 +269,7 @@ async fn https_get_status_line<S: tokio::io::AsyncRead + tokio::io::AsyncWrite +
 async fn admin_dashboard_serves_https_from_the_same_material() {
     let booted = boot_server("admin-https", true).await;
     wait_for_port(booted.admin_addr).await;
-    let ca_pem = booted.data_dir.join("tls").join("ca.pem");
+    let ca_pem = booted.data_dir.join("node").join("tls").join("ca.pem");
 
     let connector = tls_connector(Some(&ca_pem));
     let tcp = TcpStream::connect(booted.admin_addr)
@@ -344,7 +344,7 @@ async fn plaintext_peer_dial_names_a_tls_owner() {
 async fn metrics_scrape_works_over_admin_https() {
     let booted = boot_server("metrics-https", true).await;
     wait_for_port(booted.admin_addr).await;
-    let ca_pem = booted.data_dir.join("tls").join("ca.pem");
+    let ca_pem = booted.data_dir.join("node").join("tls").join("ca.pem");
 
     let connector = tls_connector(Some(&ca_pem));
     let tcp = TcpStream::connect(booted.admin_addr)
@@ -431,7 +431,7 @@ async fn certificate_reload_rotates_the_leaf_under_load() {
     })
     .await;
     wait_for_port(booted.admin_addr).await;
-    let tls_dir = booted.data_dir.join("tls");
+    let tls_dir = booted.data_dir.join("node").join("tls");
     let ca_pem = tls_dir.join("ca.pem");
 
     let client = fibril_client::ClientOptions::new()
@@ -523,7 +523,7 @@ async fn client_certificate_identity_authenticates_without_auth_frame() {
     })
     .await;
     wait_for_port(booted.admin_addr).await;
-    let tls_dir = booted.data_dir.join("tls");
+    let tls_dir = booted.data_dir.join("node").join("tls");
 
     // The user the certificate will claim.
     let created = reqwest::Client::new()
@@ -543,7 +543,7 @@ async fn client_certificate_identity_authenticates_without_auth_frame() {
         std::fs::write(&key_path, key_pem).expect("write key");
         fibril::tls::build_peer_connector_with_identity(
             None,
-            &booted.data_dir,
+            &booted.data_dir.join("node"),
             Some((&cert_path, &key_path)),
         )
         .expect("connector")
@@ -586,7 +586,7 @@ async fn require_client_auth_gates_certless_clients() {
         config.tls.admin_enabled = Some(false);
     })
     .await;
-    let tls_dir = booted.data_dir.join("tls");
+    let tls_dir = booted.data_dir.join("node").join("tls");
     let ca_pem = tls_dir.join("ca.pem");
 
     let certless = tls_connector(Some(&ca_pem));
@@ -612,7 +612,7 @@ async fn require_client_auth_gates_certless_clients() {
     std::fs::write(&key_path, key_pem).expect("write key");
     let with_cert = fibril::tls::build_peer_connector_with_identity(
         None,
-        &booted.data_dir,
+        &booted.data_dir.join("node"),
         Some((&cert_path, &key_path)),
     )
     .expect("connector");
@@ -764,9 +764,9 @@ async fn first_boot_setup_auto_flow_then_normal_reboot() {
     let data_dir = server.data_dir.clone();
 
     // The choice persists, and the broker comes up serving TLS.
-    assert!(data_dir.join("setup_complete").exists());
-    assert!(data_dir.join("config-overlay.toml").exists());
-    let ca_pem = data_dir.join("tls").join("ca.pem");
+    assert!(data_dir.join("node").join("setup_complete").exists());
+    assert!(data_dir.join("node").join("config-overlay.toml").exists());
+    let ca_pem = data_dir.join("node").join("tls").join("ca.pem");
     let connector = tls_connector(Some(&ca_pem));
     let tcp = TcpStream::connect(server.broker_addr)
         .await
@@ -798,7 +798,7 @@ async fn first_boot_setup_auto_flow_then_normal_reboot() {
 async fn first_boot_setup_skip_records_the_choice_and_stays_plaintext() {
     let server = run_setup_flow("setup-skip", "mode=skip").await;
 
-    assert!(server.data_dir.join("setup_complete").exists());
+    assert!(server.data_dir.join("node").join("setup_complete").exists());
     let mut stream = TcpStream::connect(server.broker_addr)
         .await
         .expect("tcp connect");
@@ -817,13 +817,13 @@ async fn first_boot_setup_creates_admin_user_and_cluster_secret() {
     let data_dir = server.data_dir.clone();
     let handle = server.handle;
 
-    // The cluster secret landed in the data dir.
-    assert!(data_dir.join("cluster.secret").exists());
+    // The cluster secret landed in the node dir.
+    assert!(data_dir.join("node").join("cluster.secret").exists());
 
     // The seeded admin user works remotely (would be rejected if it were the
     // loopback-only default), proving the overlay auth section applied.
     use fibril_client::ClientOptions;
-    let ca_pem = data_dir.join("tls").join("ca.pem");
+    let ca_pem = data_dir.join("node").join("tls").join("ca.pem");
     let client = ClientOptions::new()
         .auth("ops", "setup-pass")
         .tls_ca_path(&ca_pem)

@@ -7,6 +7,10 @@ use std::{
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
+pub mod node_layout;
+
+pub use node_layout::NodeLayout;
+
 pub type ConfigResult<T> = Result<T, ConfigError>;
 
 #[derive(Debug, thiserror::Error)]
@@ -242,9 +246,9 @@ pub struct SetupSection {
     pub mode: bool,
 }
 
-/// File name of the completed-setup marker under the data dir.
+/// File name of the completed-setup marker under `<data_dir>/node`.
 pub const SETUP_MARKER_FILE: &str = "setup_complete";
-/// File name of the setup-owned config overlay under the data dir.
+/// File name of the setup-owned config overlay under `<data_dir>/node`.
 pub const CONFIG_OVERLAY_FILE: &str = "config-overlay.toml";
 
 /// The subset of config a completed setup may own. Only sections listed here
@@ -257,21 +261,39 @@ pub struct ConfigOverlay {
 }
 
 impl ConfigOverlay {
-    /// Persist under the data dir for boot to layer below explicit config.
-    pub fn write(&self, data_dir: &Path) -> ConfigResult<()> {
-        let path = data_dir.join(CONFIG_OVERLAY_FILE);
+    /// Persist in the node dir for boot to layer below explicit config. The
+    /// overlay can embed seed passwords, so it is owner-only.
+    pub fn write(&self, layout: &NodeLayout) -> ConfigResult<()> {
+        let path = layout.config_overlay();
         let encoded = toml::to_string_pretty(self)?;
-        std::fs::write(&path, encoded).map_err(|source| ConfigError::WriteFile { path, source })
+        node_layout::write_file_atomic(&path, encoded.as_bytes(), node_layout::FileMode::Secret)
+            .map_err(|source| ConfigError::WriteFile { path, source })
     }
 }
 
 impl ServerConfig {
-    /// Layer the setup-owned overlay from the data dir below explicit config:
+    /// Paths of this node's data dir. Does no I/O.
+    pub fn node_layout(&self) -> NodeLayout {
+        NodeLayout::new(&self.server.data_dir)
+    }
+
+    /// Ganglion data dir: `coordination.ganglion.data_dir` when set, else the
+    /// default under the data dir.
+    pub fn coordination_data_dir(&self) -> PathBuf {
+        let configured = &self.coordination.ganglion.data_dir;
+        if configured.as_os_str().is_empty() {
+            self.node_layout().coordination()
+        } else {
+            configured.clone()
+        }
+    }
+
+    /// Layer the setup-owned overlay from the node dir below explicit config:
     /// an overlay section applies only when file/env/CLI left that section at
     /// its default, so explicit config always wins. Returns whether the tls
     /// section came from the overlay.
     pub fn apply_setup_overlay(&mut self) -> ConfigResult<bool> {
-        let path = self.server.data_dir.join(CONFIG_OVERLAY_FILE);
+        let path = self.node_layout().config_overlay();
         let input = match std::fs::read_to_string(&path) {
             Ok(input) => input,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -296,9 +318,9 @@ impl ServerConfig {
         Ok(applied)
     }
 
-    /// Whether the completed-setup marker exists under the data dir.
+    /// Whether the completed-setup marker exists in the node dir.
     pub fn setup_marker_exists(&self) -> bool {
-        self.server.data_dir.join(SETUP_MARKER_FILE).exists()
+        self.node_layout().setup_marker().exists()
     }
 
     /// Whether this boot should enter first-boot setup mode.
@@ -307,7 +329,7 @@ impl ServerConfig {
     }
 
     /// Resolve the cluster shared secret: `FIBRIL_CLUSTER_SECRET` env, then
-    /// `coordination.secret_path`, then the `<data_dir>/cluster.secret`
+    /// `coordination.secret_path`, then the `<data_dir>/node/cluster.secret`
     /// convention file. Trimmed so a trailing newline in a mounted secret
     /// file does not change the value.
     pub fn resolve_cluster_secret(&self) -> ConfigResult<Option<String>> {
@@ -316,7 +338,7 @@ impl ServerConfig {
         }
         let candidates = [
             self.coordination.secret_path.clone(),
-            Some(self.server.data_dir.join(CLUSTER_SECRET_FILE)),
+            Some(self.node_layout().cluster_secret()),
         ];
         for path in candidates.into_iter().flatten() {
             match std::fs::read_to_string(&path) {
@@ -344,7 +366,7 @@ impl ServerConfig {
     }
 }
 
-/// File name of the cluster shared secret under the data dir (the
+/// File name of the cluster shared secret under `<data_dir>/node` (the
 /// convention location fibrilctl secret generate and setup mode write).
 pub const CLUSTER_SECRET_FILE: &str = "cluster.secret";
 
@@ -1098,7 +1120,7 @@ pub struct TlsSection {
     /// PEM private key for the certificate.
     pub key_path: Option<PathBuf>,
     /// Generate a per-deployment CA and server certificate under
-    /// `<server.data_dir>/tls` on first boot instead of supplying PEMs. The
+    /// `<server.data_dir>/node/tls` on first boot instead of supplying PEMs. The
     /// CA fingerprint is printed at startup so clients can pin or trust it.
     /// Unverified self-signed material defeats passive snooping only.
     pub auto_self_signed: bool,
@@ -1109,7 +1131,7 @@ pub struct TlsSection {
     /// service mesh or tunnel already encrypts inter-broker traffic.
     pub inter_broker: Option<bool>,
     /// PEM file with the CA that peer server certificates chain to. Unset
-    /// falls back to `<data_dir>/tls/ca.pem` when present, then OS roots.
+    /// falls back to `<data_dir>/node/tls/ca.pem` when present, then OS roots.
     pub peer_ca_path: Option<PathBuf>,
     /// Client-certificate policy on the TLS listeners: `off` (no client
     /// certs), `request` (a presented certificate is verified and its
@@ -1118,7 +1140,7 @@ pub struct TlsSection {
     /// clients).
     pub client_auth: ClientAuthMode,
     /// PEM file with the CA that client certificates chain to. Unset falls
-    /// back to the generated `<data_dir>/tls/ca.pem`.
+    /// back to the generated `<data_dir>/node/tls/ca.pem`.
     pub client_ca_path: Option<PathBuf>,
 }
 
@@ -1192,7 +1214,7 @@ impl TlsSection {
                 "tls.enabled = true but no certificate source is configured. \
                  Either set tls.cert_path and tls.key_path to your PEM files, or \
                  set tls.auto_self_signed = true to generate per-deployment \
-                 material under <data_dir>/tls on first boot. See \
+                 material under <data_dir>/node/tls on first boot. See \
                  https://fibril.sh/configuration/ for both paths",
             )),
             _ => Err(ConfigError::validation(
@@ -1220,7 +1242,7 @@ pub struct CoordinationSection {
     /// Cluster shared secret file. Every node holds the same secret and
     /// node-to-node connections authenticate with it (never with a user
     /// account). Resolution order: `FIBRIL_CLUSTER_SECRET` env, this path,
-    /// then `<data_dir>/cluster.secret` if present. Required in ganglion
+    /// then `<data_dir>/node/cluster.secret` if present. Required in ganglion
     /// mode.
     pub secret_path: Option<PathBuf>,
     pub ganglion: GanglionCoordinationSection,
@@ -2845,9 +2867,9 @@ mod tests {
             std::process::id(),
             fastrand_like_seed()
         ));
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir.join(node_layout::NODE_DIR)).unwrap();
         std::fs::write(
-            dir.join(CONFIG_OVERLAY_FILE),
+            NodeLayout::new(&dir).config_overlay(),
             "[tls]\nenabled = true\nauto_self_signed = true\n",
         )
         .unwrap();
@@ -2890,7 +2912,8 @@ mod tests {
         assert!(!config.setup_pending());
         config.setup.mode = true;
         assert!(config.setup_pending());
-        std::fs::write(dir.join(SETUP_MARKER_FILE), "").unwrap();
+        std::fs::create_dir_all(dir.join(node_layout::NODE_DIR)).unwrap();
+        std::fs::write(NodeLayout::new(&dir).setup_marker(), "").unwrap();
         assert!(!config.setup_pending());
 
         let _ = std::fs::remove_dir_all(dir);

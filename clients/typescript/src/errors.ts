@@ -209,7 +209,7 @@ export class TlsCertificateUntrustedError extends FibrilError {
     super(
       `broker certificate verification failed: ${detail}. Trust the broker ` +
         "CA via withTlsCaPath(...) (generated deployments write " +
-        "<data_dir>/tls/ca.pem) or pin withTlsCaFingerprint(...) from the " +
+        "<data_dir>/node/tls/ca.pem) or pin withTlsCaFingerprint(...) from the " +
         "broker startup log",
     );
   }
