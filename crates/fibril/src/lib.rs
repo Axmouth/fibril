@@ -1673,13 +1673,6 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     config
         .apply_setup_overlay()
         .map_err(FibrilServerError::TlsConfig)?;
-    if config.setup_pending() {
-        run_first_boot_setup(&config).await?;
-        config
-            .apply_setup_overlay()
-            .map_err(FibrilServerError::TlsConfig)?;
-    }
-    let config = config;
 
     let metrics = Metrics::new(3 * 60 * 60);
     let keratin_default = KeratinConfig::default();
@@ -1762,6 +1755,18 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     )
     .await
     .map_err(FibrilServerError::Storage)?;
+
+    // Queue storage lives directly in the data dir and only initializes in an
+    // empty directory. Open it before first-boot setup writes its marker,
+    // overlay, TLS material or cluster secret there.
+    if config.setup_pending() {
+        run_first_boot_setup(&config).await?;
+        config
+            .apply_setup_overlay()
+            .map_err(FibrilServerError::TlsConfig)?;
+    }
+    let config = config;
+
     let local_storage_settings = fibril_broker::local_storage_settings::LocalStorageSettings::load(
         config.coordination.node_id.clone(),
         config.server.data_dir.clone(),
