@@ -622,6 +622,68 @@ async fn open_test_engine() -> (StromaEngine, TempDir) {
     (engine, dir)
 }
 
+/// Queues keep payloads in the event log, so the message lane of an owner read
+/// is always an empty batch at offset 0. Returns the lane epoch.
+fn assert_empty_message_lane(messages: &OwnerReplicationRead<Message>) -> u64 {
+    let OwnerReplicationRead::Batch(batch) = messages else {
+        panic!("queue message lane must not require a checkpoint: {messages:?}");
+    };
+    assert_eq!(batch.requested_offset, 0);
+    assert_eq!(batch.next_offset, 0);
+    assert!(batch.records.is_empty());
+    batch.epoch
+}
+
+/// Single-log queues accept a checkpoint reset only for an explicitly
+/// authorized learner generation. These tests have no coordination layer, so
+/// they prepare one directly with a fixed binding and intent.
+async fn prepare_test_queue_learner(
+    broker: &Broker<StromaEngine>,
+    topic: &str,
+    group: Option<&str>,
+) -> fibril_broker::queue_engine::PreparedStorageHistory {
+    broker
+        .engine()
+        .prepare_queue_learner_storage(
+            topic,
+            0,
+            group,
+            fibril_broker::queue_engine::StorageHistoryBinding {
+                resource_incarnation: [1; 16],
+                accepted_history: [2; 16],
+                writer_session: [3; 16],
+            },
+            [4; 32],
+        )
+        .await
+        .unwrap()
+}
+
+fn assert_unauthorized_checkpoint_reset_refused<T: std::fmt::Debug>(
+    result: Result<T, BrokerError>,
+) {
+    let err = result.expect_err("an unauthorized checkpoint reset must be refused");
+    assert!(
+        err.to_string().contains("excluded learner authorization"),
+        "unexpected checkpoint reset error: {err}"
+    );
+}
+
+/// Published payloads in a queue event batch, keyed by their event offset,
+/// which is also the message id.
+fn event_payloads(batch: &OwnerReplicationBatch<stroma_core::StromaEvent>) -> Vec<(Offset, Vec<u8>)> {
+    batch
+        .records
+        .iter()
+        .filter_map(|(offset, event)| match event {
+            stroma_core::StromaEvent::PayloadEnqueue { payload, .. } => {
+                Some((*offset, payload.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn static_ownership_rejects_publisher_for_unowned_queue() {
     let (broker, _dir) =
@@ -1699,7 +1761,8 @@ async fn refresh_follower_keeps_replication_worker_progress() {
         Some(LocalAssignmentRole::Follower),
         Some(LocalAssignmentRole::Follower),
     );
-    assert!(before.message_next_offset > 0);
+    // Queue payloads ride in the event log, so only the event cursor moves.
+    assert_eq!(before.message_next_offset, 0);
     assert!(before.event_next_offset > 0);
     refresh.previous = Some(PartitionAssignment::new(
         queue.clone(),
@@ -1758,8 +1821,9 @@ async fn refresh_follower_keeps_replication_worker_progress() {
     let BrokerFollowerReplicationApply::Applied(stale) = stale else {
         panic!("unexpected checkpoint requirement")
     };
+    assert_eq!(stale.message_log, None);
     assert!(matches!(
-        stale.message_log,
+        stale.event_log,
         Some(
             fibril_broker::queue_engine::ReplicatedAppendOutcome::StaleEpoch {
                 current_epoch: 1,
@@ -1767,7 +1831,6 @@ async fn refresh_follower_keeps_replication_worker_progress() {
             }
         )
     ));
-    assert_eq!(stale.event_log, None);
 
     owner.shutdown().await;
     follower.shutdown().await;
@@ -2198,19 +2261,25 @@ async fn epoch_fenced_follower_rejects_stale_owner_batches() {
     let BrokerFollowerReplicationApply::Applied(apply) = outcome else {
         panic!("expected apply outcome, got {outcome:?}");
     };
+    assert_eq!(apply.message_log, None, "queues have no separate payload lane: {apply:?}");
     assert!(
         matches!(
-            apply.message_log,
+            apply.event_log,
             Some(ReplicatedAppendOutcome::StaleEpoch {
                 current_epoch: 2,
                 attempted_epoch: 0,
             })
         ),
-        "stale-epoch message batch must be rejected: {apply:?}"
+        "stale-epoch payload batch must be rejected: {apply:?}"
     );
     assert_eq!(
-        apply.event_log, None,
-        "event batch must not append after stale message batch rejection: {apply:?}"
+        follower
+            .engine()
+            .queue_replication_next_offsets(topic, 0, None)
+            .await
+            .unwrap(),
+        (0, 0),
+        "nothing from the stale batch may be appended"
     );
 
     // The owner reaches the fenced epoch (e.g. it holds the new assignment):
@@ -2237,8 +2306,16 @@ async fn epoch_fenced_follower_rejects_stale_owner_batches() {
         panic!("expected apply outcome, got {outcome:?}");
     };
     assert!(
-        matches!(apply.message_log, Some(ReplicatedAppendOutcome::Applied(_))),
+        matches!(apply.event_log, Some(ReplicatedAppendOutcome::Applied(_))),
         "fenced-epoch batch must apply: {apply:?}"
+    );
+    assert_eq!(
+        follower
+            .engine()
+            .queue_replication_next_offsets(topic, 0, None)
+            .await
+            .unwrap(),
+        (0, 1)
     );
 
     owner.shutdown().await;
@@ -2293,7 +2370,7 @@ async fn catch_up_rejects_stale_append_without_recording_ready_state() {
     assert!(matches!(
         err,
         BrokerError::InvalidReplicationProgress {
-            stream: "message",
+            stream: "event",
             ..
         }
     ));
@@ -2308,12 +2385,12 @@ async fn catch_up_rejects_stale_append_without_recording_ready_state() {
     assert_eq!(queue.state.ready_count, 0);
 
     let not_promoted = follower
-        .promote_replication_follower_if_caught_up(topic, Partition::new(0), None, 1, 1)
+        .promote_replication_follower_if_caught_up(topic, Partition::new(0), None, 0, 1)
         .await
         .unwrap();
     assert!(matches!(
         not_promoted,
-        QueuePromotionOutcome::MessageLogBehind {
+        QueuePromotionOutcome::EventLogBehind {
             local_next_offset: 0,
             expected_next_offset: 1,
         }
@@ -2619,16 +2696,17 @@ async fn demote_owner_to_follower_requeues_broker_tracked_deliveries() {
             "transition-demote-inflight",
             Partition::new(0),
             Some("workers"),
-            1,
+            0,
             2,
         )
         .await
         .expect("demoted queue should be promotable after local requeue");
+    // The payload record (offset 0) and the delivery record share the event log.
     assert!(
         matches!(
             promoted,
             QueuePromotionOutcome::Promoted {
-                message_next_offset: 1,
+                message_next_offset: 0,
                 event_next_offset: 2,
                 ..
             }
@@ -2844,14 +2922,7 @@ async fn owner_replication_read_returns_published_records() {
         .await
         .unwrap();
 
-    let OwnerReplicationRead::Batch(messages) = records.messages else {
-        panic!("expected message records, got checkpoint required");
-    };
-    assert_eq!(messages.requested_offset, 0);
-    assert_eq!(messages.next_offset, 1);
-    assert_eq!(messages.records.len(), 1);
-    assert_eq!(messages.records[0].0, 0);
-    assert_eq!(messages.records[0].1.payload, b"hello replication");
+    assert_empty_message_lane(&records.messages);
 
     let OwnerReplicationRead::Batch(events) = records.events else {
         panic!("expected event records, got checkpoint required");
@@ -2859,6 +2930,7 @@ async fn owner_replication_read_returns_published_records() {
     assert_eq!(events.requested_offset, 0);
     assert_eq!(events.next_offset, 1);
     assert_eq!(events.records.len(), 1);
+    assert_eq!(event_payloads(&events), vec![(0, b"hello replication".to_vec())]);
 
     broker.shutdown().await;
 }
@@ -2930,13 +3002,13 @@ async fn owner_replication_long_poll_wakes_after_publish() {
         .expect("long-poll read should wake after publish")
         .unwrap()
         .unwrap();
-    let OwnerReplicationRead::Batch(messages) = records.messages else {
-        panic!("expected message records, got checkpoint required");
+    assert_empty_message_lane(&records.messages);
+    let OwnerReplicationRead::Batch(events) = records.events else {
+        panic!("expected event records, got checkpoint required");
     };
-    assert_eq!(messages.requested_offset, message_from);
-    assert_eq!(messages.next_offset, message_from + 1);
-    assert_eq!(messages.records.len(), 1);
-    assert_eq!(messages.records[0].1.payload, b"wake follower");
+    assert_eq!(events.requested_offset, event_from);
+    assert_eq!(events.next_offset, event_from + 1);
+    assert_eq!(event_payloads(&events), vec![(event_from, b"wake follower".to_vec())]);
 
     broker.shutdown().await;
 }
@@ -3152,17 +3224,14 @@ async fn cold_owner_materializes_at_cached_assignment_epoch() {
         .await
         .unwrap();
 
-    let OwnerReplicationRead::Batch(messages) = records.messages else {
-        panic!("expected message records, got checkpoint required");
-    };
-    assert_eq!(messages.epoch, 7);
-    assert_eq!(messages.records.len(), 1);
+    assert_eq!(assert_empty_message_lane(&records.messages), 7);
 
     let OwnerReplicationRead::Batch(events) = records.events else {
         panic!("expected event records, got checkpoint required");
     };
     assert_eq!(events.epoch, 7);
     assert_eq!(events.records.len(), 1);
+    assert_eq!(event_payloads(&events), vec![(0, b"epoch-seven".to_vec())]);
 
     broker.shutdown().await;
 }
@@ -3376,23 +3445,24 @@ async fn publishes_route_to_independent_partition_logs() {
                 )
                 .await
                 .unwrap();
-            let OwnerReplicationRead::Batch(messages) = records.messages else {
-                panic!("expected message records for partition {partition}");
+            assert_empty_message_lane(&records.messages);
+            let OwnerReplicationRead::Batch(events) = records.events else {
+                panic!("expected event records for partition {partition}");
             };
-            messages
+            events
         }
     };
 
     let part0 = read_partition(Partition::new(0)).await;
     assert_eq!(part0.next_offset, 1, "partition 0 has one message");
-    assert_eq!(part0.records.len(), 1);
-    assert_eq!(part0.records[0].1.payload, b"p0-a");
+    assert_eq!(event_payloads(&part0), vec![(0, b"p0-a".to_vec())]);
 
     let part1 = read_partition(Partition::new(1)).await;
     assert_eq!(part1.next_offset, 2, "partition 1 has two messages");
-    assert_eq!(part1.records.len(), 2);
-    assert_eq!(part1.records[0].1.payload, b"p1-a");
-    assert_eq!(part1.records[1].1.payload, b"p1-b");
+    assert_eq!(
+        event_payloads(&part1),
+        vec![(0, b"p1-a".to_vec()), (1, b"p1-b".to_vec())]
+    );
 
     broker.shutdown().await;
 }
@@ -3688,7 +3758,7 @@ async fn broker_replication_read_applies_to_follower_and_promotes() {
     assert_eq!(
         promotion,
         QueuePromotionOutcome::Promoted {
-            message_next_offset: 2,
+            message_next_offset: 0,
             event_next_offset: 2,
             applied_event_offset: Some(1),
         }
@@ -3712,6 +3782,8 @@ async fn broker_replication_read_applies_to_follower_and_promotes() {
         .expect("second replicated message should deliver after promotion");
     assert_eq!(first.message.payload, b"first");
     assert_eq!(second.message.payload, b"second");
+    // Message ids are the owner's event offsets.
+    assert_eq!((first.message.offset, second.message.offset), (0, 1));
 
     owner.shutdown().await;
     follower.shutdown().await;
@@ -4000,41 +4072,61 @@ async fn broker_state_checkpoint_export_installs_then_messages_catch_up() {
         .export_owner_state_checkpoint("checkpoint", Partition::new(0), None)
         .await
         .unwrap();
+    assert!(checkpoint.combined_log);
     assert_eq!(checkpoint.message_checkpoint_offset, 0);
-    assert_eq!(checkpoint.message_next_offset, 2);
+    assert_eq!(checkpoint.message_next_offset, 0);
     assert_eq!(checkpoint.event_next_offset, 2);
     assert_eq!(checkpoint.applied_event_offset, 1);
+    // Both live payloads are still referenced, so backfill starts at the
+    // first payload record.
+    assert_eq!(checkpoint.event_start_offset, 0);
 
+    let install = FollowerStateCheckpointInstall {
+        combined_log: checkpoint.combined_log,
+        event_start_offset: checkpoint.event_start_offset,
+        message_epoch: checkpoint.message_epoch,
+        event_epoch: checkpoint.event_epoch,
+        message_next_offset: checkpoint.message_checkpoint_offset,
+        event_next_offset: checkpoint.event_next_offset,
+        applied_event_offset: checkpoint.applied_event_offset,
+        state_snapshot: checkpoint.state_snapshot,
+    };
+    let receipt = prepare_test_queue_learner(&follower, "checkpoint", None).await;
     follower
         .become_replication_follower("checkpoint", Partition::new(0), None)
         .await
         .unwrap();
+    assert_unauthorized_checkpoint_reset_refused(
+        follower
+            .install_follower_state_checkpoint(
+                "checkpoint",
+                Partition::new(0),
+                None,
+                install.clone(),
+            )
+            .await,
+    );
     follower
-        .install_follower_state_checkpoint(
-            "checkpoint",
-            Partition::new(0),
-            None,
-            FollowerStateCheckpointInstall {
-                combined_log: checkpoint.combined_log,
-                event_start_offset: checkpoint.event_start_offset,
-                message_epoch: checkpoint.message_epoch,
-                event_epoch: checkpoint.event_epoch,
-                message_next_offset: checkpoint.message_checkpoint_offset,
-                event_next_offset: checkpoint.event_next_offset,
-                applied_event_offset: checkpoint.applied_event_offset,
-                state_snapshot: checkpoint.state_snapshot,
-            },
-        )
+        .engine()
+        .install_queue_learner_checkpoint(receipt, install)
         .await
         .unwrap();
+    assert!(
+        follower
+            .engine()
+            .verify_queue_learner_caught_up("checkpoint", 0, None, 0, 0, 2)
+            .await
+            .is_err(),
+        "installed state is incomplete until its payloads are backfilled"
+    );
 
     let records = owner
         .read_owner_replication_records(
             "checkpoint",
             Partition::new(0),
             None,
-            checkpoint.message_checkpoint_offset,
-            checkpoint.event_next_offset,
+            0,
+            checkpoint.event_start_offset,
             10,
             10,
             usize::MAX,
@@ -4053,6 +4145,11 @@ async fn broker_state_checkpoint_export_installs_then_messages_catch_up() {
         .await
         .unwrap();
     assert!(matches!(apply, BrokerFollowerReplicationApply::Applied(_)));
+    follower
+        .engine()
+        .verify_queue_learner_caught_up("checkpoint", 0, None, 0, 0, 2)
+        .await
+        .unwrap();
 
     let promotion = follower
         .promote_replication_follower_if_caught_up(
@@ -4067,7 +4164,7 @@ async fn broker_state_checkpoint_export_installs_then_messages_catch_up() {
     assert_eq!(
         promotion,
         QueuePromotionOutcome::Promoted {
-            message_next_offset: 2,
+            message_next_offset: 0,
             event_next_offset: 2,
             applied_event_offset: Some(1),
         }
@@ -4091,6 +4188,7 @@ async fn broker_state_checkpoint_export_installs_then_messages_catch_up() {
         .expect("second checkpointed message should deliver after promotion");
     assert_eq!(first.message.payload, b"first");
     assert_eq!(second.message.payload, b"second");
+    assert_eq!((first.message.offset, second.message.offset), (0, 1));
 
     owner.shutdown().await;
     follower.shutdown().await;
@@ -4249,21 +4347,21 @@ async fn broker_replication_catch_up_loop_handles_multiple_passes() {
         outcome,
         BrokerReplicationCatchUp::CaughtUp(BrokerReplicationCatchUpProgress {
             iterations: 4,
-            applied_message_records: 5,
+            applied_message_records: 0,
             applied_event_records: 5,
-            message_next_offset: 5,
+            message_next_offset: 0,
             event_next_offset: 5,
         })
     );
 
     let promotion = follower
-        .promote_replication_follower_if_caught_up("multi-pass", Partition::new(0), None, 5, 5)
+        .promote_replication_follower_if_caught_up("multi-pass", Partition::new(0), None, 0, 5)
         .await
         .unwrap();
     assert!(matches!(
         promotion,
         QueuePromotionOutcome::Promoted {
-            message_next_offset: 5,
+            message_next_offset: 0,
             event_next_offset: 5,
             applied_event_offset: Some(4),
         }
@@ -4280,10 +4378,11 @@ async fn broker_replication_catch_up_loop_handles_multiple_passes() {
         .await
         .unwrap();
     let mut payloads = Vec::new();
-    for _ in 0..5 {
+    for expected_offset in 0..5 {
         let msg = recv_with_timeout(&mut sub, 1000)
             .await
             .expect("replicated message should deliver after promotion");
+        assert_eq!(msg.message.offset, expected_offset);
         payloads.push(msg.message.payload);
     }
     assert_eq!(
@@ -4350,9 +4449,9 @@ async fn checkpoint_aware_catch_up_preserves_normal_catch_up_path() {
         outcome,
         BrokerReplicationCatchUp::CaughtUp(BrokerReplicationCatchUpProgress {
             iterations: 3,
-            applied_message_records: 3,
+            applied_message_records: 0,
             applied_event_records: 3,
-            message_next_offset: 3,
+            message_next_offset: 0,
             event_next_offset: 3,
         })
     );
@@ -4362,7 +4461,7 @@ async fn checkpoint_aware_catch_up_preserves_normal_catch_up_path() {
 }
 
 #[tokio::test]
-async fn checkpoint_aware_catch_up_repairs_overlapping_local_prefix() {
+async fn checkpoint_aware_catch_up_refuses_unauthorized_reset_of_overlapping_prefix() {
     let (owner, _owner_dir) = open_test_broker().await;
     let (follower, _follower_dir) = open_test_broker().await;
     let topic = "checkpoint-overlap";
@@ -4414,67 +4513,78 @@ async fn checkpoint_aware_catch_up_repairs_overlapping_local_prefix() {
         reply.await.unwrap().unwrap();
     }
 
-    let outcome = follower
-        .catch_up_replication_follower_from_owner_with_checkpoint(
-            &owner,
-            topic,
-            partition,
-            None,
-            ReplicationResourceKind::Queue,
-            BrokerReplicationCatchUpOptions {
-                max_messages_per_read: 10,
-                max_events_per_read: 10,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-
-    let BrokerReplicationCatchUp::CaughtUp(progress) = outcome else {
-        panic!("overlapping prefix should be repaired by checkpoint install");
-    };
-    assert_eq!(progress.message_next_offset, 3);
-    assert_eq!(progress.event_next_offset, 3);
-
-    let promotion = follower
-        .promote_replication_follower_if_caught_up(topic, partition, None, 3, 3)
-        .await
-        .unwrap();
-    assert!(matches!(
-        promotion,
-        QueuePromotionOutcome::Promoted {
-            message_next_offset: 3,
-            event_next_offset: 3,
-            applied_event_offset: Some(2),
-        }
-    ));
-
-    let mut sub = follower
-        .subscribe(
-            topic,
-            partition,
-            None,
-            Uuid::now_v7(),
-            ConsumerConfig { prefetch: 3 },
-        )
-        .await
-        .unwrap();
-    let mut payloads = Vec::new();
-    for _ in 0..3 {
-        payloads.push(
-            recv_with_timeout(&mut sub, 1000)
-                .await
-                .expect("checkpoint-repaired message should deliver")
-                .message
-                .payload,
-        );
-    }
+    // The overlapping prefix needs a checkpoint reset. Without a bound
+    // history there is no authority for it, so the reset fails closed and the
+    // local records stay untouched.
+    assert_unauthorized_checkpoint_reset_refused(
+        follower
+            .catch_up_replication_follower_from_owner_with_checkpoint(
+                &owner,
+                topic,
+                partition,
+                None,
+                ReplicationResourceKind::Queue,
+                BrokerReplicationCatchUpOptions {
+                    max_messages_per_read: 10,
+                    max_events_per_read: 10,
+                    ..Default::default()
+                },
+            )
+            .await,
+    );
     assert_eq!(
-        payloads,
+        follower
+            .engine()
+            .queue_replication_next_offsets(topic, 0, None)
+            .await
+            .unwrap(),
+        (0, 1)
+    );
+
+    // Unbound local storage has no verified history baseline, so it cannot
+    // become a learner either. The divergent replica stays a follower that is
+    // refused promotion, and the owner history is unaffected.
+    assert!(
+        follower
+            .engine()
+            .prepare_queue_learner_storage(
+                topic,
+                0,
+                None,
+                fibril_broker::queue_engine::StorageHistoryBinding {
+                    resource_incarnation: [1; 16],
+                    accepted_history: [2; 16],
+                    writer_session: [3; 16],
+                },
+                [4; 32],
+            )
+            .await
+            .is_err()
+    );
+    let promotion = follower
+        .promote_replication_follower_if_caught_up(topic, partition, None, 0, 3)
+        .await
+        .unwrap();
+    assert_eq!(
+        promotion,
+        QueuePromotionOutcome::EventLogBehind {
+            local_next_offset: 1,
+            expected_next_offset: 3,
+        }
+    );
+    let records = owner
+        .read_owner_replication_records(topic, partition, None, 0, 0, 10, 10, usize::MAX, 0)
+        .await
+        .unwrap();
+    let OwnerReplicationRead::Batch(events) = records.events else {
+        panic!("owner history should stay readable");
+    };
+    assert_eq!(
+        event_payloads(&events),
         vec![
-            b"owner one".to_vec(),
-            b"owner two".to_vec(),
-            b"owner three".to_vec(),
+            (0, b"owner one".to_vec()),
+            (1, b"owner two".to_vec()),
+            (2, b"owner three".to_vec()),
         ]
     );
 
@@ -4728,9 +4838,9 @@ async fn follower_worker_tick_records_catch_up_progress() {
         BrokerReplicationCatchUp::IterationLimit {
             progress: BrokerReplicationCatchUpProgress {
                 iterations: 1,
-                applied_message_records: 1,
+                applied_message_records: 0,
                 applied_event_records: 1,
-                message_next_offset: 1,
+                message_next_offset: 0,
                 event_next_offset: 1,
             },
         }
@@ -4740,14 +4850,14 @@ async fn follower_worker_tick_records_catch_up_progress() {
             .follower_replication_worker_snapshot("worker-tick", Partition::new(0), Some("workers"))
             .await,
         Some(FollowerReplicationWorkerState {
-            message_next_offset: 1,
+            message_next_offset: 0,
             event_next_offset: 1,
             status: FollowerReplicationWorkerStatus::PendingRetry,
             last_progress: Some(BrokerReplicationCatchUpProgress {
                 iterations: 1,
-                applied_message_records: 1,
+                applied_message_records: 0,
                 applied_event_records: 1,
-                message_next_offset: 1,
+                message_next_offset: 0,
                 event_next_offset: 1,
             }),
             next_delay_ms: cfg.retry_poll_ms,
@@ -4763,8 +4873,11 @@ async fn follower_worker_tick_records_catch_up_progress() {
     assert_eq!(worker.group.as_deref(), Some("workers"));
     assert!(!worker.busy);
     assert_eq!(
-        worker.state.as_ref().map(|state| state.message_next_offset),
-        Some(1)
+        worker
+            .state
+            .as_ref()
+            .map(|state| (state.message_next_offset, state.event_next_offset)),
+        Some((0, 1))
     );
 
     owner.shutdown().await;
@@ -6408,9 +6521,13 @@ async fn delayed_publish_with_elapsed_deadline_records_an_ordinary_enqueue() {
     ).await.unwrap().await.unwrap().unwrap();
     let OwnerReplicationRead::Batch(events) = broker.engine()
         .read_owner_event_records("elapsed", 0, None, 0, 100).await.unwrap() else { panic!("event batch") };
-    assert!(events.records.iter().any(|(_, event)| matches!(event, stroma_core::StromaEvent::EnqueueMany { .. })));
+    // The payload record itself is the enqueue. An elapsed deadline must not
+    // leave a not_before on it.
+    assert!(events.records.iter().any(|(_, event)| matches!(event,
+        stroma_core::StromaEvent::PayloadEnqueue { not_before: None, payload, .. } if payload == b"ready")));
     assert!(!events.records.iter().any(|(_, event)| matches!(event,
-        stroma_core::StromaEvent::EnqueueDelayed { .. }
+        stroma_core::StromaEvent::PayloadEnqueue { not_before: Some(_), .. }
+        | stroma_core::StromaEvent::EnqueueDelayed { .. }
         | stroma_core::StromaEvent::EnqueueDelayedMany { .. }
         | stroma_core::StromaEvent::ActivateDelayed { .. }
     )));
@@ -7389,7 +7506,10 @@ async fn global_dlq_policy_routes_exhausted_message_to_global_target()
     assert_eq!(dlq_msg.message.topic, "_dlq.source");
     assert_eq!(dlq_msg.message.offset, 0);
     assert_eq!(dlq_msg.message.payload, b"poison");
-    assert_dlq_metadata(&dlq_msg, "source", "0", "0", "retries_exhausted");
+    // The declaration record occupies an event offset, so the message id is
+    // whatever offset the source consumer observed.
+    let source_offset = msg.message.offset.to_string();
+    assert_dlq_metadata(&dlq_msg, "source", &source_offset, "0", "retries_exhausted");
 
     assert!(recv_with_timeout(&mut source, 100).await.is_none());
 
@@ -7468,7 +7588,8 @@ async fn dlq_replay_copies_message_back_to_source_without_system_headers()
     let dlq_msg = recv_with_timeout(&mut dlq, 2_000)
         .await
         .expect("message should be copied to global DLQ target");
-    assert_dlq_metadata(&dlq_msg, "source", "0", "0", "retries_exhausted");
+    let source_offset = msg.message.offset.to_string();
+    assert_dlq_metadata(&dlq_msg, "source", &source_offset, "0", "retries_exhausted");
 
     let report = replay_engine
         .replay_dead_letters("_dlq.source", None, &[dlq_msg.message.offset])
@@ -7592,10 +7713,12 @@ async fn global_dlq_metadata_reports_retry_count_after_requeues()
         )
         .await?;
 
+    let mut source_offsets = Vec::new();
     for _ in 0..3 {
         let msg = recv_with_timeout(&mut source, 2_000)
             .await
             .expect("source message should be delivered until retry exhaustion");
+        source_offsets.push(msg.message.offset);
         source
             .settle(SettleRequest {
                 settle_type: SettleType::Nack {
@@ -7621,7 +7744,10 @@ async fn global_dlq_metadata_reports_retry_count_after_requeues()
         .expect("message should be copied to global DLQ target");
 
     assert_eq!(dlq_msg.message.payload, b"poison");
-    assert_dlq_metadata(&dlq_msg, "source", "0", "2", "retries_exhausted");
+    // Every redelivery keeps the original message id.
+    assert!(source_offsets.iter().all(|offset| *offset == source_offsets[0]));
+    let source_offset = source_offsets[0].to_string();
+    assert_dlq_metadata(&dlq_msg, "source", &source_offset, "2", "retries_exhausted");
     assert!(recv_with_timeout(&mut source, 100).await.is_none());
 
     broker.shutdown_graceful().await;
@@ -8686,11 +8812,19 @@ async fn ignored_settlements_preserve_owner_tags_and_drain_pending_accounting() 
         broker.wait_for_pending_settles().await;
         // Durable completion enqueues state application; express state reads
         // can overtake it. Wait for the actor to observe all accepted ACKs.
+        // Acks occupy event offsets too, so the drained frontier is anywhere
+        // past the last message id rather than exactly one past it.
+        let drained = deliveries
+            .iter()
+            .map(|message| message.message.offset)
+            .max()
+            .unwrap()
+            + 1;
         while broker
             .partition_lowest_unsettled_offset("settle-ownership", Partition::ZERO, None)
             .await
             .unwrap()
-            != 3
+            < drained
         {
             tokio::task::yield_now().await;
         }
@@ -8774,6 +8908,7 @@ async fn queue_dependency_boundary(prefix: u64) {
             .await
             .unwrap();
     }
+    assert_eq!(event_from, prefix);
     let mut items = Vec::new();
     let mut completions = Vec::new();
     for id in 0..2u8 {
@@ -8823,33 +8958,32 @@ async fn queue_dependency_boundary(prefix: u64) {
         .become_replication_follower(topic, Partition::new(0), None)
         .await
         .unwrap();
-    // Real owner-read path, including event-frontier capping. Only the first
-    // new payload fits; its EnqueueMany also requires the second payload.
+    // Each published item is its own payload record, so the batch occupies
+    // event offsets prefix and prefix + 1. Its dependency covers both records.
+    assert_eq!(
+        (dependency.message_next, dependency.event_next),
+        (prefix + 2, prefix + 2)
+    );
+    // Real owner-read path. Only the first new payload record fits.
     let records = owner
         .read_owner_replication_records(
             topic,
             Partition::new(0),
             None,
-            prefix,
+            0,
             event_from,
-            1,
             2048,
+            1,
             8 * 1024 * 1024,
             0,
         )
         .await
         .unwrap();
-    let (messages, events) = match (&records.messages, &records.events) {
-        (OwnerReplicationRead::Batch(m), OwnerReplicationRead::Batch(e)) => {
-            (m.records.len(), e.records.len())
-        }
-        _ => panic!("fresh logs must not need checkpoints"),
+    assert_empty_message_lane(&records.messages);
+    let OwnerReplicationRead::Batch(events) = &records.events else {
+        panic!("fresh logs must not need checkpoints");
     };
-    assert_eq!(messages, 1);
-    assert_eq!(
-        events, 0,
-        "EnqueueMany crosses the returned payload frontier"
-    );
+    assert_eq!(event_payloads(events), vec![(prefix, vec![0; 64])]);
     let outcome = follower
         .apply_replicated_stream_batch(topic, Partition::new(0), None, records)
         .await
@@ -8861,7 +8995,7 @@ async fn queue_dependency_boundary(prefix: u64) {
     else {
         panic!("expected durable apply")
     };
-    assert_eq!((message_next, event_next), (prefix + 1, event_from));
+    assert_eq!((message_next, event_next), (0, prefix + 1));
     owner.record_follower_replication_progress(
         topic,
         Partition::new(0),
@@ -8873,49 +9007,35 @@ async fn queue_dependency_boundary(prefix: u64) {
     let confirm =
         owner.await_queue_replication_confirm(topic, Partition::new(0), None, prefix, dependency);
     tokio::pin!(confirm);
+    // Recovery cannot keep only part of one publish batch, so covering the
+    // first record alone must not confirm it.
     assert!(
         tokio::time::timeout(Duration::from_millis(30), &mut confirm)
             .await
             .is_err(),
-        "payload alone must not confirm"
+        "a partial publish batch must not confirm"
     );
-    // An event-only report from a different follower cannot combine with b's payload.
+    // A message-lane coordinate is not payload progress for a queue.
     owner.record_follower_replication_progress(
         topic,
         Partition::new(0),
         None,
         "follower-c",
+        dependency.message_next,
         prefix,
-        dependency.event_next,
     );
     assert!(
         tokio::time::timeout(Duration::from_millis(30), &mut confirm)
             .await
             .is_err(),
-        "two incomplete replicas must not combine"
-    );
-    // Even when the enqueue record arrives first, its entire payload batch is
-    // required: recovery cannot retain only half of one EnqueueMany record.
-    owner.record_follower_replication_progress(
-        topic,
-        Partition::new(0),
-        None,
-        "follower-b",
-        message_next,
-        dependency.event_next,
-    );
-    assert!(
-        tokio::time::timeout(Duration::from_millis(30), &mut confirm)
-            .await
-            .is_err(),
-        "an indivisible enqueue cannot confirm a partial payload batch"
+        "a message-lane report must not confirm a queue publish"
     );
     let suffix = owner
         .read_owner_replication_records(
             topic,
             Partition::new(0),
             None,
-            message_next,
+            0,
             event_next,
             2048,
             2048,
@@ -8935,6 +9055,7 @@ async fn queue_dependency_boundary(prefix: u64) {
     else {
         panic!("expected durable suffix")
     };
+    assert_eq!(event_next, dependency.event_next);
     owner.record_follower_replication_progress(
         topic,
         Partition::new(0),
@@ -8997,15 +9118,25 @@ async fn replication_progress_sessions_fence_reset_reconnect_and_assignment() {
         message_epoch: 1,
         event_epoch: 1,
     };
-    broker.record_replication_session_progress(&first, 8, 2);
-    broker.record_replication_session_progress(&first, 2, 8);
+    // Queue payloads live in the event log, so the event frontier is the only
+    // coordinate that proves payload coverage. A later report after a reset
+    // replaces the earlier frontier instead of keeping its maximum.
+    broker.record_replication_session_progress(&first, 8, 8);
+    broker.record_replication_session_progress(&first, 0, 2);
     let wait = broker.await_queue_replication_confirm(topic, part, None, 3, dep);
     tokio::pin!(wait);
     assert!(
         tokio::time::timeout(Duration::from_millis(20), &mut wait)
             .await
             .is_err(),
-        "reset must replace both coordinates, not combine their maxima"
+        "reset must replace the reported frontier, not keep its maximum"
+    );
+    broker.record_replication_session_progress(&first, 99, 2);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut wait)
+            .await
+            .is_err(),
+        "a message-lane coordinate cannot stand in for queue payload progress"
     );
     let second = broker
         .begin_replication_progress_session(topic, part, None, "b", 1)
@@ -9093,7 +9224,9 @@ async fn queue_visibility_waits_for_enqueue_on_the_payload_replica() {
                 .queue_durable_frontiers(topic, 0, None)
                 .await
                 .unwrap();
-            if d.message_next == 1 {
+            // The payload record is also the enqueue, so the event frontier
+            // alone tracks publication.
+            if d.event_next == 1 {
                 break d;
             }
             tokio::task::yield_now().await;
@@ -9101,15 +9234,17 @@ async fn queue_visibility_waits_for_enqueue_on_the_payload_replica() {
     })
     .await
     .unwrap();
+    assert_eq!(dep.message_next, 0);
+    // A message-lane coordinate does not prove the payload record replicated.
     broker.record_follower_replication_progress(topic, part, None, "b", 1, 0);
-    broker.record_follower_replication_progress(topic, part, None, "c", 0, dep.event_next);
+    broker.record_follower_replication_progress(topic, part, None, "c", 1, 0);
     assert!(recv_with_timeout(&mut sub, 30).await.is_none());
     assert!(
         tokio::time::timeout(Duration::from_millis(30), &mut confirmed)
             .await
             .is_err()
     );
-    broker.record_follower_replication_progress(topic, part, None, "b", 1, dep.event_next);
+    broker.record_follower_replication_progress(topic, part, None, "b", 0, dep.event_next);
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(1), confirmed)
             .await
@@ -9196,7 +9331,7 @@ async fn durable_batch_wakes_replication_while_earlier_confirm_waits() {
                 .queue_durable_frontiers(topic, 0, None)
                 .await
                 .unwrap();
-            if d.message_next == 1 {
+            if d.event_next == 1 {
                 break d;
             }
             tokio::task::yield_now().await;
@@ -9204,6 +9339,7 @@ async fn durable_batch_wakes_replication_while_earlier_confirm_waits() {
     })
     .await
     .unwrap();
+    assert_eq!(initial.message_next, 0);
     assert!(
         tokio::time::timeout(Duration::from_millis(30), &mut first)
             .await
@@ -9249,15 +9385,11 @@ async fn durable_batch_wakes_replication_while_earlier_confirm_waits() {
         .expect("locally durable B must wake the follower while A awaits its replica")
         .unwrap()
         .unwrap();
-    let OwnerReplicationRead::Batch(messages) = records.messages else {
-        panic!("message checkpoint");
-    };
+    assert_empty_message_lane(&records.messages);
     let OwnerReplicationRead::Batch(events) = records.events else {
         panic!("event checkpoint");
     };
-    assert_eq!(messages.next_offset, 2);
-    assert_eq!(messages.records.len(), 1);
-    assert_eq!(messages.records[0].1.payload, vec![2]);
+    assert_eq!(event_payloads(&events), vec![(1, vec![2])]);
     assert!(events.next_offset > initial.event_next);
     assert!(
         tokio::time::timeout(Duration::from_millis(30), &mut first)
@@ -9270,7 +9402,7 @@ async fn durable_batch_wakes_replication_while_earlier_confirm_waits() {
             .is_err()
     );
 
-    broker.record_follower_replication_progress(topic, part, None, "b", 2, events.next_offset);
+    broker.record_follower_replication_progress(topic, part, None, "b", 0, events.next_offset);
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(1), first)
             .await

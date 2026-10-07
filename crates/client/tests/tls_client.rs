@@ -95,7 +95,9 @@ async fn client_certificate_connects_without_password() {
         .publish_confirmed(NewMessage::raw(b"cert identity".to_vec()))
         .await
         .expect("confirmed publish with certificate identity");
-    assert_eq!(offset, 0);
+    // Queue message ids are event-log offsets. The declare record holds
+    // offset 0, so the first publish after it lands at 1.
+    assert_eq!(offset, 1);
 
     client.shutdown().await;
     server.abort();
@@ -150,7 +152,9 @@ async fn tls_client_publishes_over_ca_path_trust() {
         .publish_confirmed(NewMessage::raw(b"over tls".to_vec()))
         .await
         .expect("confirmed publish over TLS");
-    assert_eq!(offset, 0);
+    // Queue message ids are event-log offsets. The declare record holds
+    // offset 0, so the first publish after it lands at 1.
+    assert_eq!(offset, 1);
 
     client.shutdown().await;
     server.abort();
@@ -253,7 +257,9 @@ async fn control_plaintext_publish_same_harness() {
         .publish_confirmed(NewMessage::raw(b"plain".to_vec()))
         .await
         .expect("confirmed publish plaintext");
-    assert_eq!(offset, 0);
+    // Queue message ids are event-log offsets. The declare record holds
+    // offset 0, so the first publish after it lands at 1.
+    assert_eq!(offset, 1);
     client.shutdown().await;
     server.abort();
 }

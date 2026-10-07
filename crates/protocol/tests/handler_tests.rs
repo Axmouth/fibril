@@ -32,14 +32,14 @@ use fibril_protocol::v1::{
     HelloOk, Nack, Op, PROTOCOL_V1, Publish, PublishDelayed, QueueDlqPolicy, QueueTopologyEntry,
     ReasonCode, ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult,
     ReconcileSubscription, ReplicationApply, ReplicationApplyOk, ReplicationCheckpointExport,
-    ReplicationCheckpointExportOk, ReplicationCheckpointInstall, ReplicationCheckpointInstallOk,
+    ReplicationCheckpointExportOk, ReplicationCheckpointInstall,
     ReplicationCheckpointRequired, ReplicationEventApplyBatch, ReplicationEventRead,
     ReplicationEventRecord, ReplicationMessageApplyBatch, ReplicationMessageRead,
     ReplicationMessageRecord, ReplicationRead, ReplicationReadOk, ReplicationStateCheckpoint,
     ResumeIdentity, ResumeOutcome, StreamDurability, StreamRetention, StreamStart, Subscribe,
     SubscribeOk, SubscribeStream, SubscriptionClosed, TopologyOk, TopologyRequest,
     TopologyUpdateAck,
-    frame::{Frame, ProtoCodec},
+    frame::Frame,
     handler::{
         ClientTopologySource, ConnectionSettings, DeclareCoordinator, ProtocolConnectionError,
         TopologyAdoptionTracker, handle_connection,
@@ -57,7 +57,6 @@ use fibril_util::{StaticAuthHandler, unix_millis};
 use futures::{SinkExt, StreamExt};
 use stroma_core::{KeratinConfig, SnapshotConfig, StromaEvent, StromaKeratinConfig, TempDir};
 use tokio::net::{TcpListener, TcpStream};
-use tokio_util::codec::Framed;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -303,6 +302,7 @@ async fn start_checkpoint_required_owner_server(
     checkpoint: ReplicationStateCheckpoint,
     message_records: Vec<ReplicationMessageRecord>,
     event_records: Vec<ReplicationEventRecord>,
+    exports: Arc<std::sync::atomic::AtomicUsize>,
 ) -> (SocketAddr, tokio::task::JoinHandle<anyhow::Result<()>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -380,6 +380,7 @@ async fn start_checkpoint_required_owner_server(
                     }
                     x if x == Op::ReplicationCheckpointExport as u16 => {
                         let _: ReplicationCheckpointExport = try_decode(&frame)?;
+                        exports.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         conn.send(try_encode(
                             Op::ReplicationCheckpointExportOk,
                             frame.request_id,
@@ -614,6 +615,54 @@ async fn framed_publish(
     let frame = recv_frame(framed).await;
     assert_eq!(frame.opcode, Op::PublishOk as u16);
     assert_eq!(frame.request_id, request_id);
+}
+
+/// Fixed identity for replicas that hold one accepted queue history.
+fn test_storage_history_binding() -> stroma_core::StorageHistoryBinding {
+    stroma_core::StorageHistoryBinding {
+        resource_incarnation: [1; 16],
+        accepted_history: [2; 16],
+        writer_session: [3; 16],
+    }
+}
+
+/// Queue publishes are payload-carrying records in the queue event log. The
+/// containing event offset is the message id, so this returns (id, payload).
+fn queue_publishes(events: &OwnerReplicationRead<StromaEvent>) -> Vec<(u64, Vec<u8>)> {
+    let OwnerReplicationRead::Batch(batch) = events else {
+        panic!("expected event batch, got {events:?}");
+    };
+    batch
+        .records
+        .iter()
+        .filter_map(|(offset, event)| match event {
+            StromaEvent::PayloadEnqueue { payload, .. } => Some((*offset, payload.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Wire form of `queue_publishes` for raw replication read replies.
+fn wire_queue_publishes(records: &[ReplicationEventRecord]) -> Vec<(u64, Vec<u8>)> {
+    records
+        .iter()
+        .filter_map(|record| match StromaEvent::decode(&record.payload).unwrap() {
+            StromaEvent::PayloadEnqueue { payload, .. } => Some((record.offset, payload)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Queues keep no separate message log, so the message lane of a queue
+/// replication read is always an empty batch.
+fn assert_empty_queue_message_lane(messages: &OwnerReplicationRead<stroma_core::Message>) {
+    match messages {
+        OwnerReplicationRead::Batch(batch) => {
+            assert!(batch.records.is_empty(), "queue message lane carried records");
+            assert_eq!(batch.next_offset, 0);
+        }
+        other => panic!("unexpected queue message lane read: {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -1781,10 +1830,7 @@ async fn replication_read_returns_owner_log_records() {
 
     match response.messages {
         ReplicationMessageRead::Batch { records, .. } => {
-            assert_eq!(records.len(), 1);
-            assert_eq!(records[0].offset, 0);
-            assert_eq!(records[0].flags, 0);
-            assert_eq!(records[0].payload, b"replicated-payload".to_vec());
+            assert!(records.is_empty(), "queues keep no separate message log");
         }
         ReplicationMessageRead::CheckpointRequired(required) => {
             panic!("unexpected message checkpoint requirement: {required:?}");
@@ -1793,9 +1839,11 @@ async fn replication_read_returns_owner_log_records() {
 
     match response.events {
         ReplicationEventRead::Batch { records, .. } => {
-            assert!(!records.is_empty());
             assert_eq!(records[0].offset, 0);
-            assert!(!records[0].payload.is_empty());
+            assert_eq!(
+                wire_queue_publishes(&records),
+                vec![(0, b"replicated-payload".to_vec())]
+            );
         }
         ReplicationEventRead::CheckpointRequired(required) => {
             panic!("unexpected event checkpoint requirement: {required:?}");
@@ -1856,10 +1904,13 @@ async fn replication_apply_writes_follower_log_records() {
         open_node_connection_for_broker(ConnectionSettings::new(Some(60)), broker, dir).await;
     node_handshake(&mut framed).await;
 
-    let event_payload = StromaEvent::Enqueue {
-        off: 0,
-        retries: 0,
+    // The publish record carries its own payload and its event offset is the
+    // message id.
+    let event_payload = StromaEvent::PayloadEnqueue {
+        not_before: None,
         expire_at: None,
+        headers: Vec::new(),
+        payload: b"replicated-follower-payload".to_vec(),
     }
     .encode()
     .unwrap();
@@ -1872,15 +1923,7 @@ async fn replication_apply_writes_follower_log_records() {
                     topic: "replication.apply.tcp".into(),
                     group: None,
                     partition: Partition::new(0),
-                    messages: Some(ReplicationMessageApplyBatch {
-                        epoch: 0,
-                        records: vec![ReplicationMessageRecord {
-                            offset: 0,
-                            flags: 0,
-                            headers: Vec::new(),
-                            payload: b"replicated-follower-payload".to_vec(),
-                        }],
-                    }),
+                    messages: None,
                     events: Some(ReplicationEventApplyBatch {
                         epoch: 0,
                         records: vec![ReplicationEventRecord {
@@ -1899,7 +1942,7 @@ async fn replication_apply_writes_follower_log_records() {
     assert_eq!(frame.opcode, Op::ReplicationApplyOk as u16);
     assert_eq!(frame.request_id, 2);
     let response: ReplicationApplyOk = try_decode(&frame).unwrap();
-    assert!(response.messages_applied);
+    assert!(!response.messages_applied);
     assert!(response.events_applied);
 
     let promoted = broker
@@ -1907,7 +1950,7 @@ async fn replication_apply_writes_follower_log_records() {
             "replication.apply.tcp",
             Partition::new(0),
             None,
-            1,
+            0,
             1,
         )
         .await
@@ -1915,7 +1958,7 @@ async fn replication_apply_writes_follower_log_records() {
     assert_eq!(
         promoted,
         QueuePromotionOutcome::Promoted {
-            message_next_offset: 1,
+            message_next_offset: 0,
             event_next_offset: 1,
             applied_event_offset: Some(0),
         }
@@ -2034,22 +2077,24 @@ async fn replication_read_and_apply_compose_for_manual_catch_up() {
         ProtocolReplicationCatchUp::CaughtUp(
             fibril_protocol::v1::replication::ProtocolReplicationCatchUpProgress {
                 iterations: 2,
-                applied_message_records: 2,
+                // Both publishes travel in the event log. The message lane
+                // stays empty for queues.
+                applied_message_records: 0,
                 applied_event_records: 2,
-                message_next_offset: 2,
+                message_next_offset: 0,
                 event_next_offset: 2,
             }
         )
     );
 
     let promoted = follower_broker
-        .promote_replication_follower_if_caught_up(topic, Partition::new(0), group.as_deref(), 2, 2)
+        .promote_replication_follower_if_caught_up(topic, Partition::new(0), group.as_deref(), 0, 2)
         .await
         .unwrap();
     assert_eq!(
         promoted,
         QueuePromotionOutcome::Promoted {
-            message_next_offset: 2,
+            message_next_offset: 0,
             event_next_offset: 2,
             applied_event_offset: Some(1),
         }
@@ -2092,15 +2137,11 @@ async fn protocol_owner_replication_peer_reads_owner_records() {
         .await
         .unwrap();
 
-    let OwnerReplicationRead::Batch(messages) = records.messages else {
-        panic!("expected message batch");
-    };
-    assert_eq!(messages.requested_offset, 0);
-    assert_eq!(messages.next_offset, 1);
-    assert_eq!(messages.records.len(), 1);
-    assert_eq!(messages.records[0].0, 0);
-    assert_eq!(messages.records[0].1.payload, b"peer-replicated-payload");
-
+    assert_empty_queue_message_lane(&records.messages);
+    assert_eq!(
+        queue_publishes(&records.events),
+        vec![(0, b"peer-replicated-payload".to_vec())]
+    );
     let OwnerReplicationRead::Batch(events) = records.events else {
         panic!("expected event batch");
     };
@@ -2133,8 +2174,10 @@ async fn protocol_owner_replication_peer_exports_checkpoint() {
         .await
         .unwrap();
 
+    // The payload lives at event offset 0, so the event frontier alone
+    // covers it and the message lane stays empty.
     assert_eq!(checkpoint.message_checkpoint_offset, 0);
-    assert_eq!(checkpoint.message_next_offset, 1);
+    assert_eq!(checkpoint.message_next_offset, 0);
     assert_eq!(checkpoint.event_next_offset, 1);
     assert_eq!(checkpoint.applied_event_offset, 0);
     assert!(!checkpoint.state_snapshot.is_empty());
@@ -2239,11 +2282,11 @@ async fn static_protocol_owner_peer_resolver_reads_from_owner_node() {
         .await
         .unwrap();
 
-    let OwnerReplicationRead::Batch(messages) = records.messages else {
-        panic!("expected message batch");
-    };
-    assert_eq!(messages.records.len(), 1);
-    assert_eq!(messages.records[0].1.payload, b"resolver-payload");
+    assert_empty_queue_message_lane(&records.messages);
+    assert_eq!(
+        queue_publishes(&records.events),
+        vec![(0, b"resolver-payload".to_vec())]
+    );
 
     drop(peer);
     resolver.close_all().await;
@@ -2532,10 +2575,8 @@ async fn static_protocol_owner_peer_resolver_can_authenticate() {
         .await
         .unwrap();
 
-    let OwnerReplicationRead::Batch(messages) = records.messages else {
-        panic!("expected message batch");
-    };
-    assert_eq!(messages.records[0].1.payload, b"auth-payload");
+    assert_empty_queue_message_lane(&records.messages);
+    assert_eq!(queue_publishes(&records.events), vec![(0, b"auth-payload".to_vec())]);
 
     drop(peer);
     drop(resolver);
@@ -2632,10 +2673,8 @@ async fn owner_peer_replication_works_over_tls() {
         .await
         .unwrap();
 
-    let OwnerReplicationRead::Batch(messages) = records.messages else {
-        panic!("expected message batch");
-    };
-    assert_eq!(messages.records[0].1.payload, b"tls-payload");
+    assert_empty_queue_message_lane(&records.messages);
+    assert_eq!(queue_publishes(&records.events), vec![(0, b"tls-payload".to_vec())]);
 
     drop(peer);
     drop(resolver);
@@ -3003,7 +3042,7 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
 
     // Phase 3: the watcher promotes the follower at its local tails and the
     // broker serves as owner — verified by a successful new publish.
-    tokio::time::timeout(Duration::from_secs(10), async {
+    let post_failover_id = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if fibril_broker::broker::QueueOwnership::owns_queue(
                 coordination.as_ref(),
@@ -3026,8 +3065,8 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
                         )
                         .await;
                     if let Ok(reply) = reply {
-                        if reply.await.unwrap().is_ok() {
-                            break;
+                        if let Ok(id) = reply.await.unwrap() {
+                            break id;
                         }
                     }
                 }
@@ -3038,14 +3077,21 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
     .await
     .expect("promoted follower must accept owner traffic after failover");
 
-    // The promoted log continued from exactly the replicated tails.
+    // The promoted log continued from exactly the replicated tail. The new
+    // publish takes the first event offset after the replicated history, so
+    // nothing was lost or duplicated across the failover.
+    assert_eq!(owner_checkpoint.message_next_offset, 0);
+    assert_eq!(
+        post_failover_id, owner_checkpoint.event_next_offset,
+        "the post-failover publish id follows the replicated history"
+    );
     let promoted_checkpoint = follower_broker
         .export_owner_state_checkpoint(topic, Partition::new(0), None)
         .await
         .unwrap();
     assert_eq!(
-        promoted_checkpoint.message_next_offset,
-        owner_checkpoint.message_next_offset + 1,
+        promoted_checkpoint.event_next_offset,
+        owner_checkpoint.event_next_offset + 1,
         "exactly the replicated history plus the post-failover publish"
     );
 
@@ -3359,8 +3405,13 @@ async fn follower_worker_loop_catches_up_over_static_protocol_resolver() {
     server_task.await.unwrap().unwrap();
 }
 
-#[tokio::test]
-async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn follower_worker_loop_refuses_unauthorized_checkpoint_reset_for_queue() {
+    // Queues keep payloads in the event log, so a checkpoint replaces the
+    // only copy of the replica's history. Only an excluded learner with a
+    // fresh authorization may install one. A worker with a history-less
+    // assignment must fail closed: it asks for the checkpoint, the install is
+    // refused, and the follower keeps its log and never reports caught up.
     let topic = "replication.resolver.checkpoint";
     let group = Some("workers".to_string());
     let (owner_broker, _owner_dir) = open_test_broker().await;
@@ -3389,6 +3440,7 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
         .export_owner_state_checkpoint(topic, Partition::new(0), group.as_deref())
         .await
         .unwrap();
+    assert!(owner_checkpoint.combined_log);
     let owner_records = owner_broker
         .read_owner_replication_records(
             topic,
@@ -3403,22 +3455,10 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
         )
         .await
         .unwrap();
-    let OwnerReplicationRead::Batch(messages) = owner_records.messages else {
-        panic!("expected owner message batch");
-    };
+    assert_empty_queue_message_lane(&owner_records.messages);
     let OwnerReplicationRead::Batch(events) = owner_records.events else {
         panic!("expected owner event batch");
     };
-    let message_records = messages
-        .records
-        .into_iter()
-        .map(|(offset, message)| ReplicationMessageRecord {
-            offset,
-            flags: message.flags,
-            headers: message.headers,
-            payload: message.payload,
-        })
-        .collect::<Vec<_>>();
     let event_records = events
         .records
         .into_iter()
@@ -3439,8 +3479,10 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
         applied_event_offset: owner_checkpoint.applied_event_offset,
         state_snapshot: owner_checkpoint.state_snapshot.clone(),
     };
+    let exports = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let (addr, server_task) =
-        start_checkpoint_required_owner_server(checkpoint, message_records, event_records).await;
+        start_checkpoint_required_owner_server(checkpoint, Vec::new(), event_records, exports.clone())
+            .await;
     let resolver = StaticProtocolOwnerPeerResolver::new(HashMap::from([(
         "owner-a".to_string(),
         addr.to_string(),
@@ -3463,31 +3505,30 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
     let cfg = FollowerReplicationWorkerConfig {
         allow_checkpoint_install: true,
         checkpoint_retry_poll_ms: 1,
+        retry_poll_ms: 1,
         caught_up_poll_ms: 60_000,
         ..Default::default()
     };
 
     let observer = async {
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                let state = follower_broker
-                    .follower_replication_worker_snapshot(
-                        topic,
-                        Partition::new(0),
-                        group.as_deref(),
-                    )
-                    .await;
-                if state
-                    .as_ref()
-                    .is_some_and(|state| state.status == FollowerReplicationWorkerStatus::CaughtUp)
-                {
-                    break;
-                }
+        // Several refused attempts show the refusal is stable across retries.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while exports.load(std::sync::atomic::Ordering::SeqCst) < 3 {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("follower worker should install checkpoint and catch up");
+        .expect("follower worker should keep requesting the owner checkpoint");
+        let state = follower_broker
+            .follower_replication_worker_snapshot(topic, Partition::new(0), group.as_deref())
+            .await
+            .expect("follower worker state should exist");
+        assert_ne!(
+            state.status,
+            FollowerReplicationWorkerStatus::CaughtUp,
+            "a refused checkpoint must not look caught up"
+        );
+        assert_eq!((state.message_next_offset, state.event_next_offset), (0, 0));
         shutdown.cancel();
     };
     let loop_task = follower_broker.run_follower_replication_worker_loop(
@@ -3498,26 +3539,20 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
         shutdown.clone(),
     );
     let (_, loop_outcome) = tokio::join!(observer, loop_task);
+    assert!(matches!(
+        loop_outcome.unwrap(),
+        FollowerReplicationWorkerLoopExit::Cancelled { .. }
+    ));
 
-    let worker_state = follower_broker
-        .follower_replication_worker_snapshot(topic, Partition::new(0), group.as_deref())
-        .await
-        .expect("follower worker state should exist after checkpoint loop");
+    // The follower log was neither reset nor advanced, so it cannot be
+    // promoted at the owner's frontier.
     assert_eq!(
-        worker_state.message_next_offset,
-        owner_checkpoint.message_next_offset
-    );
-    assert_eq!(
-        worker_state.event_next_offset,
-        owner_checkpoint.event_next_offset
-    );
-
-    let FollowerReplicationWorkerLoopExit::Cancelled { ticks } = loop_outcome.unwrap() else {
-        panic!("follower worker loop should exit by cancellation");
-    };
-    assert!(
-        ticks >= 1,
-        "worker should perform at least one checkpoint-aware catch-up tick"
+        follower_broker
+            .engine()
+            .queue_replication_next_offsets(topic, 0, group.as_deref())
+            .await
+            .unwrap(),
+        (0, 0)
     );
     let promoted = follower_broker
         .promote_replication_follower_if_caught_up(
@@ -3529,13 +3564,9 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
         )
         .await
         .unwrap();
-    assert_eq!(
-        promoted,
-        QueuePromotionOutcome::Promoted {
-            message_next_offset: owner_checkpoint.message_next_offset,
-            event_next_offset: owner_checkpoint.event_next_offset,
-            applied_event_offset: Some(owner_checkpoint.applied_event_offset),
-        }
+    assert!(
+        matches!(promoted, QueuePromotionOutcome::EventLogBehind { local_next_offset: 0, .. }),
+        "{promoted:?}"
     );
 
     resolver.close_all().await;
@@ -5235,18 +5266,29 @@ async fn replication_checkpoint_export_install_composes_with_catch_up() {
         )
         .await
         .unwrap();
+    // A queue checkpoint replaces the only log holding its payloads, so the
+    // plain install request is refused unless an excluded learner was freshly
+    // authorized for it. The refusal must leave the follower untouched.
+    assert!(export.checkpoint.combined_log);
+    assert_eq!(export.checkpoint.message_next_offset, 0);
+    assert_eq!(export.checkpoint.event_next_offset, 2);
     let frame = recv_frame(&mut follower_framed).await;
-    assert_eq!(frame.opcode, Op::ReplicationCheckpointInstallOk as u16);
-    let install: ReplicationCheckpointInstallOk = try_decode(&frame).unwrap();
-    assert_eq!(
-        install.event_next_offset,
-        export.checkpoint.event_next_offset
+    assert_eq!(frame.opcode, Op::Error as u16);
+    let error: ErrorMsg = try_decode(&frame).unwrap();
+    assert!(
+        error.message.contains("excluded learner authorization"),
+        "{error:?}"
     );
     assert_eq!(
-        install.applied_event_offset,
-        export.checkpoint.applied_event_offset
+        follower_broker
+            .engine()
+            .queue_replication_next_offsets(topic, 0, group.as_deref())
+            .await
+            .unwrap(),
+        (0, 0)
     );
 
+    // Ordinary catch-up still reaches the exported frontier.
     let outcome = catch_up_replication_over_protocol(
         &mut owner_framed,
         &mut follower_framed,
@@ -5254,17 +5296,23 @@ async fn replication_checkpoint_export_install_composes_with_catch_up() {
         Partition::new(0),
         group.as_deref(),
         ProtocolReplicationCatchUpOptions {
-            message_from: export.checkpoint.message_checkpoint_offset,
-            event_from: export.checkpoint.event_next_offset,
             max_messages_per_read: 10,
             max_events_per_read: 10,
             max_iterations: 2,
+            request_id_start: 10,
             ..Default::default()
         },
     )
     .await
     .unwrap();
-    assert!(matches!(outcome, ProtocolReplicationCatchUp::CaughtUp(_)));
+    let ProtocolReplicationCatchUp::CaughtUp(progress) = outcome else {
+        panic!("expected caught up, got {outcome:?}");
+    };
+    assert_eq!(progress.message_next_offset, 0);
+    assert_eq!(
+        progress.event_next_offset,
+        export.checkpoint.event_next_offset
+    );
 
     let promoted = follower_broker
         .promote_replication_follower_if_caught_up(
@@ -5341,17 +5389,18 @@ async fn replication_checkpoint_install_rejects_delayed_old_epoch_without_erasin
         )
         .await
         .unwrap();
+    // Queue checkpoints only install through an authorized excluded learner,
+    // which is refused before the epoch check is reached here. The stale
+    // response must still be rejected without touching either record.
     let frame = recv_frame(&mut framed).await;
     assert_eq!(
         frame.opcode,
         Op::Error as u16,
         "stale checkpoint must be rejected"
     );
-    let error: ErrorMsg = try_decode(&frame).unwrap();
-    assert!(error.message.contains("epoch"), "{error:?}");
 
     let promoted = broker
-        .promote_replication_follower_if_caught_up(topic, Partition::new(0), None, 2, 2)
+        .promote_replication_follower_if_caught_up(topic, Partition::new(0), None, 0, 2)
         .await
         .unwrap();
     assert!(
@@ -5362,12 +5411,12 @@ async fn replication_checkpoint_install_rejects_delayed_old_epoch_without_erasin
         .read_owner_replication_records(topic, Partition::new(0), None, 0, 0, 10, 10, usize::MAX, 0)
         .await
         .unwrap();
-    let OwnerReplicationRead::Batch(messages) = records.messages else {
-        panic!("messages lost")
-    };
-    assert_eq!(messages.records.len(), 2);
-    assert_eq!(messages.records[0].1.payload, b"first");
-    assert_eq!(messages.records[1].1.payload, b"newer");
+    assert_empty_queue_message_lane(&records.messages);
+    assert_eq!(
+        queue_publishes(&records.events),
+        vec![(0, b"first".to_vec()), (1, b"newer".to_vec())],
+        "messages lost"
+    );
     drop(framed);
     task.await.unwrap().unwrap();
 }
@@ -5917,11 +5966,13 @@ async fn exhausted_message_routes_to_global_dlq_over_tcp() {
             .map(String::as_str),
         Some("source")
     );
+    // The source offset is the message id, which is the event-log offset of
+    // the publish record. The queue declaration occupies an earlier offset.
     assert_eq!(
         dlq.headers
             .get("stroma.dlq.source_offset")
             .map(String::as_str),
-        Some("0")
+        Some(source.offset.to_string().as_str())
     );
     assert_eq!(
         dlq.headers
@@ -6980,6 +7031,18 @@ async fn recovery_seal_requires_node_auth_and_exact_committed_authority_over_tcp
         fence_epoch: command.fence_epoch,
     };
     let (engine, mut dir) = open_test_engine().await;
+    // Single-log queue storage carries its history binding, and sealing reads
+    // it back as evidence. Bind the empty replica before any records arrive.
+    engine
+        .initialize_empty_storage_history(
+            &request.topic,
+            0,
+            None,
+            stroma_core::PartitionKind::Queue,
+            test_storage_history_binding(),
+        )
+        .await
+        .unwrap();
     let broker = Broker::new_with_ownership(
         engine.clone(),
         BrokerConfig::default(),
@@ -7000,17 +7063,18 @@ async fn recovery_seal_requires_node_auth_and_exact_committed_authority_over_tcp
             &request.topic,
             0,
             None,
-            Some(stroma_core::ReplicatedMessageBatch {
+            None,
+            Some(stroma_core::ReplicatedEventBatch {
                 epoch: pending.previous.epoch,
                 first_offset: 0,
-                records: vec![stroma_core::Message {
-                    flags: 0,
+                events: vec![StromaEvent::PayloadEnqueue {
+                    not_before: None,
+                    expire_at: None,
                     headers: vec![],
                     payload: b"sealed-wire-body".to_vec(),
                 }],
                 durability: None,
             }),
-            None,
         )
         .await
         .unwrap();
@@ -7095,11 +7159,23 @@ async fn recovery_seal_requires_node_auth_and_exact_committed_authority_over_tcp
             assert_eq!(sealed.replica_id, "b");
             assert_eq!(sealed.transition, request.transition);
             assert_eq!(sealed.fence_epoch, request.fence_epoch);
-            assert_eq!(sealed.history_version, 1);
+            assert_eq!(sealed.history_version, 2);
+            assert_eq!(
+                sealed.storage_history.as_ref().map(|h| (
+                    h.resource_incarnation,
+                    h.accepted_history,
+                    h.writer_session
+                )),
+                Some(([1; 16], [2; 16], [3; 16]))
+            );
+            assert!(sealed.combined_log);
+            assert_eq!((sealed.message_head, sealed.message_next), (0, 0));
+            assert_eq!((sealed.event_head, sealed.event_next), (0, 1));
+            // Source 1 is the event log, which carries queue payloads.
             let valid = fibril_protocol::v1::RecoveryRead {
                 seal: request.clone(),
                 history_id: sealed.history_id,
-                source: 0,
+                source: 1,
                 from: 0,
                 max_records: 1,
                 max_bytes: 1024,
@@ -7122,7 +7198,11 @@ async fn recovery_seal_requires_node_auth_and_exact_committed_authority_over_tcp
                 .unwrap();
             let page: fibril_protocol::v1::RecoveryReadOk =
                 try_decode(&recv_frame(&mut conn).await).unwrap();
-            assert_eq!(page.records[0].payload, b"sealed-wire-body");
+            assert_eq!(page.records[0].offset, 0);
+            assert!(matches!(
+                StromaEvent::decode(&page.records[0].payload).unwrap(),
+                StromaEvent::PayloadEnqueue { payload, .. } if payload == b"sealed-wire-body"
+            ));
             conn.send(try_encode(Op::RecoverySeal, 5, &request).unwrap())
                 .await
                 .unwrap();
@@ -7216,8 +7296,12 @@ async fn recovery_seal_requires_node_auth_and_exact_committed_authority_over_tcp
             )
             .await
             .unwrap();
-            if source == fibril_broker::recovery::RecoveryReadSource::Messages {
-                assert_eq!(page.records[0].payload, b"sealed-wire-body");
+            if source == fibril_broker::recovery::RecoveryReadSource::Events {
+                assert_eq!(page.records.len(), 1);
+                assert!(matches!(
+                    StromaEvent::decode(&page.records[0].payload).unwrap(),
+                    StromaEvent::PayloadEnqueue { payload, .. } if payload == b"sealed-wire-body"
+                ));
                 assert_eq!(page.next, 1);
             } else {
                 assert!(page.records.is_empty());
@@ -7572,10 +7656,11 @@ async fn owner_peer_reauthenticates_after_transport_loss() {
         )
         .await
         .unwrap();
-    let OwnerReplicationRead::Batch(messages) = records.messages else {
-        panic!("expected records")
-    };
-    assert_eq!(messages.records[0].1.payload, b"after-reconnect");
+    assert_empty_queue_message_lane(&records.messages);
+    assert_eq!(
+        queue_publishes(&records.events),
+        vec![(0, b"after-reconnect".to_vec())]
+    );
     peer.close().await;
     server.await.unwrap().unwrap();
     broker.shutdown().await;
@@ -7699,6 +7784,17 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
     let mut nodes = HashMap::new();
     for (index, id) in ["b", "c"].into_iter().enumerate() {
         let (engine, dir) = open_test_engine().await;
+        // Both replicas hold copies of one accepted queue history.
+        engine
+            .initialize_empty_storage_history(
+                &command.topic,
+                0,
+                None,
+                stroma_core::PartitionKind::Queue,
+                test_storage_history_binding(),
+            )
+            .await
+            .unwrap();
         let broker = Broker::new_with_ownership(
             engine.clone(),
             BrokerConfig::default(),
@@ -7714,51 +7810,37 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
             )
             .await
             .unwrap();
+        // Both replicas share four events: two payload-carrying publishes,
+        // a lease and an ack. Replica c also retains a later publish that b
+        // never received, so the two retained histories differ only after the
+        // common prefix. With checkpoints, b snapshots one event earlier than c.
+        let payload = |i: u8, expire_at| stroma_core::StromaEvent::PayloadEnqueue {
+            not_before: None,
+            expire_at,
+            headers: vec![],
+            payload: vec![i],
+        };
+        let shared = vec![
+            payload(0, None),
+            payload(1, Some(500)),
+            stroma_core::StromaEvent::MarkInflight {
+                off: 0,
+                deadline: 300,
+            },
+            stroma_core::StromaEvent::Ack { off: 0 },
+        ];
+        let first = if checkpoints { index + 3 } else { 4 };
         engine
             .apply_replicated_queue_batch(
                 &command.topic,
                 0,
                 None,
-                Some(stroma_core::ReplicatedMessageBatch {
-                    epoch: pending.previous.epoch,
-                    first_offset: 0,
-                    durability: None,
-                    records: (0..index + 2)
-                        .map(|i| stroma_core::Message {
-                            flags: 0,
-                            headers: vec![],
-                            payload: vec![i as u8],
-                        })
-                        .collect(),
-                }),
+                None,
                 Some(stroma_core::ReplicatedEventBatch {
                     epoch: pending.previous.epoch,
                     first_offset: 0,
                     durability: None,
-                    events: vec![
-                        stroma_core::StromaEvent::EnqueueMany {
-                            reqs: vec![
-                                stroma_core::EnqueueEventMeta {
-                                    off: 0,
-                                    retries: 0,
-                                    expire_at: None,
-                                },
-                                stroma_core::EnqueueEventMeta {
-                                    off: 1,
-                                    retries: 2,
-                                    expire_at: Some(500),
-                                },
-                            ],
-                        },
-                        stroma_core::StromaEvent::MarkInflight {
-                            off: 0,
-                            deadline: 300,
-                        },
-                        stroma_core::StromaEvent::Ack { off: 0 },
-                    ]
-                    .into_iter()
-                    .take(if checkpoints { index + 2 } else { 3 })
-                    .collect(),
+                    events: shared[..first].to_vec(),
                 }),
             )
             .await
@@ -7768,23 +7850,27 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
                 .snapshot_partition(&command.topic, 0, None)
                 .await
                 .unwrap();
-            if index == 0 {
-                engine
-                    .apply_replicated_queue_batch(
-                        &command.topic,
-                        0,
-                        None,
-                        None,
-                        Some(stroma_core::ReplicatedEventBatch {
-                            epoch: pending.previous.epoch,
-                            first_offset: 2,
-                            durability: None,
-                            events: vec![stroma_core::StromaEvent::Ack { off: 0 }],
-                        }),
-                    )
-                    .await
-                    .unwrap();
-            }
+        }
+        let mut suffix = shared[first..].to_vec();
+        if index == 1 {
+            suffix.push(payload(2, None));
+        }
+        if !suffix.is_empty() {
+            engine
+                .apply_replicated_queue_batch(
+                    &command.topic,
+                    0,
+                    None,
+                    None,
+                    Some(stroma_core::ReplicatedEventBatch {
+                        epoch: pending.previous.epoch,
+                        first_offset: first as u64,
+                        durability: None,
+                        events: suffix,
+                    }),
+                )
+                .await
+                .unwrap();
         }
         seals.push(
             broker
@@ -7843,22 +7929,25 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
     )
     .await
     .unwrap();
+    // Queues retain no separate message log, so that lane has nothing to compare.
     assert_eq!(
         report.evidence.messages.overlap,
-        RecoveryOverlap::Matching { from: 0, next: 2 }
+        RecoveryOverlap::NoSharedRecords
     );
     assert_eq!(
         report.evidence.events.overlap,
-        RecoveryOverlap::Matching { from: 0, next: 3 }
+        RecoveryOverlap::Matching { from: 0, next: 4 }
     );
-    assert_eq!(report.evidence.records, 11);
+    // Four retained events from b and five from c. The empty message lanes
+    // contribute nothing.
+    assert_eq!(report.evidence.records, 9);
     assert!(
         report
             .evidence
             .remaining_proofs
             .contains(&RecoveryProofRequirement::CommonOriginAndInstalledLineage)
     );
-    for target in [0, 3] {
+    for target in [0, 4] {
         let replay =
             fibril_protocol::v1::recovery_inspection::inspect_recovery_pair_with_queue_replay(
                 &config,
@@ -7875,8 +7964,11 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
         let [left, right] = replay.evidence.queue_replay.unwrap();
         assert_eq!(left.event_next, target);
         assert_eq!(left.state_digest, right.state_digest);
-        assert_eq!(left.required_message_next, if target == 0 { 0 } else { 2 });
-        assert_ne!(left.message_digest, right.message_digest);
+        // Every replayed event offset is a message id or a settled state
+        // record, so the payload prefix the state needs reaches the target.
+        assert_eq!(left.required_message_next, target);
+        assert_eq!(right.required_message_next, target);
+        assert_ne!(left.payload_log.digest, right.payload_log.digest);
         assert_ne!(left.history_id, right.history_id);
     }
     if checkpoints {
@@ -7887,7 +7979,7 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
                 &seals[0],
                 &seals[1],
                 limits,
-                3,
+                4,
                 Default::default(),
                 1024 * 1024,
                 Duration::from_secs(10),
@@ -7895,15 +7987,15 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
             .await
             .unwrap();
         let [left, right] = result.evidence.queue_replay.unwrap();
-        assert_eq!(left.checkpoint_event_next, Some(2));
-        assert_eq!(right.checkpoint_event_next, Some(3));
+        assert_eq!(left.checkpoint_event_next, Some(3));
+        assert_eq!(right.checkpoint_event_next, Some(4));
         assert_eq!(
             left.lease_normalized_state_digest,
             right.lease_normalized_state_digest
         );
         assert_eq!(left.live_payload_digest, right.live_payload_digest);
         assert!(left.live_payload_digest.is_some());
-        assert_ne!(left.message_digest, right.message_digest);
+        assert_ne!(left.payload_log.digest, right.payload_log.digest);
         let artifact = fibril_protocol::v1::recovery_inspection::inspect_recovery_source_artifact(
             &config,
             &command,
@@ -7937,7 +8029,10 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
     )
     .await
     .unwrap_err();
-    assert!(error.to_string().contains("page budget"));
+    assert!(
+        error.to_string().contains("inspection_pages budget exhausted"),
+        "{error}"
+    );
     assert!(
         inspect_recovery_pair(
             &config,
@@ -7970,7 +8065,8 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
                 fence_epoch: command.fence_epoch,
             },
             history_id: seals[0].seal.history.id,
-            source: 0,
+            // The event log is the only retained queue log.
+            source: 1,
             from: 0,
             max_records: 1,
             max_bytes: 1024,
@@ -8004,14 +8100,17 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
         })
         .await
         .expect("disconnect must release sequential admission");
-        tokio::time::sleep(Duration::from_secs(11)).await;
-        let mut next = request.clone();
-        next.from = 1;
-        sessions[0]
-            .send(try_encode(Op::RecoveryReadSequential, 52, &next).unwrap())
+        // A live cursor refuses to repeat a page it already returned.
+        sessions[1]
+            .send(try_encode(Op::RecoveryReadSequential, 52, &request).unwrap())
             .await
             .unwrap();
-        assert_eq!(recv_frame(&mut sessions[0]).await.opcode, Op::Error as u16);
+        assert_eq!(recv_frame(&mut sessions[1]).await.opcode, Op::Error as u16);
+        tokio::time::sleep(Duration::from_secs(11)).await;
+        // A live cursor already past the first page rejects a repeated read
+        // of it. Reading the first page again shows idle expiry released the
+        // cursor. A fresh cursor may also resume mid-log, so a later offset
+        // would not prove this.
         sessions[0]
             .send(try_encode(Op::RecoveryReadSequential, 53, &request).unwrap())
             .await
@@ -8020,6 +8119,8 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
             recv_frame(&mut sessions[0]).await.opcode,
             Op::RecoveryReadOk as u16
         );
+        let mut next = request.clone();
+        next.from = 1;
         next.seal.transition[0] ^= 1;
         sessions[0]
             .send(try_encode(Op::RecoveryReadSequential, 54, &next).unwrap())
@@ -8698,10 +8799,11 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
     let records = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let records = peer.read_owner_replication_records_fenced("initial-wire", Partition::new(0), None, 0, 0, 8, 8, 65536, 20, Some(1)).await.unwrap();
-            if matches!(&records.messages, OwnerReplicationRead::Batch(batch) if !batch.records.is_empty())
-                && matches!(&records.events, OwnerReplicationRead::Batch(batch) if !batch.records.is_empty()) { break records; }
+            if !queue_publishes(&records.events).is_empty() { break records; }
         }
     }).await.unwrap();
+    assert_empty_queue_message_lane(&records.messages);
+    assert_eq!(queue_publishes(&records.events), vec![(0, b"activated-history".to_vec())]);
     assert!(matches!(
         confirmed.try_recv(),
         Err(tokio::sync::oneshot::error::TryRecvError::Empty)
@@ -8716,11 +8818,13 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
         )
         .await
         .unwrap();
+    // The empty message lane stays at zero. The event cursor reports the
+    // follower's durable copy of the publish.
     peer.read_owner_replication_records_fenced(
         "initial-wire",
         Partition::new(0),
         None,
-        1,
+        0,
         1,
         8,
         8,
@@ -8788,7 +8892,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
                     "initial-wire",
                     Partition::new(0),
                     None,
-                    1,
+                    0,
                     1,
                     65536,
                     Arc::new(|| fibril_broker::replication::StreamApplyTunables {
@@ -9086,7 +9190,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
                             None,
                             ReplicationResourceKind::Queue,
                             BrokerReplicationCatchUpOptions {
-                                message_from: 2,
+                                message_from: 0,
                                 event_from: 2,
                                 ..Default::default()
                             }
@@ -9133,7 +9237,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
                 "initial-wire",
                 Partition::new(0),
                 None,
-                3,
+                0,
                 3,
                 8,
                 8,
@@ -9209,7 +9313,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
                     "initial-wire",
                     Partition::new(0),
                     None,
-                    3,
+                    0,
                     3,
                     8,
                     8,
@@ -9355,7 +9459,8 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
         sealed.seal.history.storage_history.as_ref().unwrap(),
         &quorum.reports["b"].storage
     );
-    assert_eq!((sealed.seal.message_next, sealed.seal.event_next), (2, 2));
+    // Two publishes in the event log and an empty message lane.
+    assert_eq!((sealed.seal.message_next, sealed.seal.event_next), (0, 2));
     let mut witnesses = fibril_coordination_ganglion::recovery_witnesses::RecoveryWitnessSet::new(
         &providers[0].consensus_node().committed_snapshot(),
         &pending,
@@ -9434,7 +9539,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
         )
         .unwrap();
     assert_eq!(chosen.source_node(), "b");
-    assert_eq!((chosen.event_next(), chosen.message_next()), (2, 2));
+    assert_eq!((chosen.event_next(), chosen.message_next()), (2, 0));
     assert!(
         providers[0]
             .persist_queue_recovery_plan(&pending, &witnesses, &chosen)
@@ -9459,7 +9564,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
     .await
     .unwrap();
     assert_eq!(plan.source_node(), "b");
-    assert_eq!((plan.event_next(), plan.message_next()), (2, 2));
+    assert_eq!((plan.event_next(), plan.message_next()), (2, 0));
     assert_ne!(plan.binding(), &decision.binding);
     assert_eq!(
         providers[2].queue_recovery_plan(&pending).unwrap(),
@@ -9478,6 +9583,13 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
     );
     // A proposed replica receives the selected state and native-log payloads in
     // non-serving staging. The old source stays sealed and readable throughout.
+    // Queue payloads come from the source's event log.
+    let payload_log = plan.source_history().unwrap().payload_log();
+    assert_eq!(
+        payload_log.source,
+        fibril_broker::recovery::RecoveryReadSource::Events
+    );
+    assert_eq!(payload_log.next, 2);
     let stage = retry_metadata(|| {
         providers[2].open_local_queue_recovery_stage(
             &plan,
@@ -9487,7 +9599,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
         )
     })
     .await;
-    while stage.next_offset().await < plan.message_next() {
+    while stage.next_offset().await < payload_log.next {
         let reply = fibril_protocol::v1::replication::request_recovery_read(
             &config,
             &command,
@@ -9495,7 +9607,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
             &fibril_broker::recovery::RecoveryReadRequest {
                 seal: sealed.seal.request.clone(),
                 history_id: sealed.seal.history.id,
-                source: fibril_broker::recovery::RecoveryReadSource::Messages,
+                source: payload_log.source,
                 from: stage.next_offset().await,
                 max_records: 1,
                 max_bytes: 65536,
@@ -9507,7 +9619,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
         stage
             .append(fibril_broker::recovery::RecoveryReadPage {
                 history_id: reply.history_id,
-                source: fibril_broker::recovery::RecoveryReadSource::Messages,
+                source: payload_log.source,
                 from: reply.from,
                 next: reply.next,
                 end: reply.end,
@@ -9528,7 +9640,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
     }
     let staged = stage.finish().await.unwrap();
     assert_eq!(staged.plan, plan.digest().unwrap());
-    assert_eq!((staged.event_next, staged.message_next), (2, 2));
+    assert_eq!((staged.event_next, staged.message_next), (2, 0));
     assert!(
         providers[2]
             .admit_local_initial_history(&decision, &engines[2])
@@ -9859,17 +9971,21 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
     let records=tokio::time::timeout(Duration::from_secs(10),async {
         loop {
             let records=recovered_peer.read_owner_replication_records_fenced("initial-wire",Partition::new(0),None,plan.message_next(),plan.event_next(),8,8,65536,20,Some(2)).await.unwrap();
-            if matches!(&records.messages,OwnerReplicationRead::Batch(batch) if !batch.records.is_empty()) && matches!(&records.events,OwnerReplicationRead::Batch(batch) if !batch.records.is_empty()) {break records}
+            if !queue_publishes(&records.events).is_empty() {break records}
         }
     }).await.unwrap();
+    assert_empty_queue_message_lane(&records.messages);
+    // The recovered owner continues the selected history: the next publish
+    // takes the first event offset after the recovered prefix.
+    assert_eq!(
+        queue_publishes(&records.events),
+        vec![(plan.event_next(), b"after recovered activation".to_vec())]
+    );
     assert!(matches!(
         new_confirm.try_recv(),
         Err(tokio::sync::oneshot::error::TryRecvError::Empty)
     ));
-    let message_next = match &records.messages {
-        OwnerReplicationRead::Batch(batch) => batch.records.last().unwrap().0 + 1,
-        _ => unreachable!(),
-    };
+    let message_next = 0;
     let event_next = match &records.events {
         OwnerReplicationRead::Batch(batch) => batch.records.last().unwrap().0 + 1,
         _ => unreachable!(),
@@ -9914,14 +10030,11 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
         recovered
     );
     retry_metadata(|| providers[1].admit_local_queue_recovery(&recovered, &engines[1])).await;
-    assert_eq!(
-        engines[1]
-            .queue_durable_frontiers("initial-wire", 0, None)
-            .await
-            .unwrap()
-            .message_next,
-        3
-    );
+    let durable = engines[1]
+        .queue_durable_frontiers("initial-wire", 0, None)
+        .await
+        .unwrap();
+    assert_eq!((durable.message_next, durable.event_next), (0, 3));
     // Seal the recovered generation under a second transition. Its authority
     // comes from the recovered quorum, rather than the old initial assignment.
     let again = persist_pending(&providers, &resource, recovered.digest().unwrap(), "b").await;
@@ -10029,7 +10142,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
             "initial-wire",
             Partition::new(0),
             None,
-            1,
+            0,
             1,
             8,
             8,
