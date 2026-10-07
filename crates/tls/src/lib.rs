@@ -443,11 +443,82 @@ fn generated_plan(
     }
 }
 
+/// Staging directories next to the generated dir. Material is built in
+/// `tmp`, and a finished set waits in `next` while the old dir moves to
+/// `prev`. Hidden names keep them apart from real node entries.
+struct StagingDirs {
+    tmp: PathBuf,
+    next: PathBuf,
+    prev: PathBuf,
+}
+
+impl StagingDirs {
+    fn new(dir: &Path) -> Self {
+        let parent = node_layout::parent_dir(dir);
+        let name = dir
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| GENERATED_TLS_DIR.to_string());
+        Self {
+            tmp: parent.join(format!(".{name}.tmp")),
+            next: parent.join(format!(".{name}.next")),
+            prev: parent.join(format!(".{name}.prev")),
+        }
+    }
+}
+
+/// Finish or undo a material swap a crash interrupted, so `dir` holds one
+/// complete set (or nothing) before the presence check runs.
+///
+/// `tmp` is never complete as far as recovery knows, so it is dropped. A
+/// `next` dir is only created from a finished set: it is promoted when `dir`
+/// is gone (the crash hit between moving the old dir out and moving the new
+/// one in) and dropped otherwise. `prev` is dropped once `dir` exists again.
+fn recover_generated_dir(dir: &Path) -> Result<(), TlsSetupError> {
+    let staging = StagingDirs::new(dir);
+    let parent = node_layout::parent_dir(dir);
+    let mut changed = false;
+    if staging.tmp.exists() {
+        remove_dir_all(&staging.tmp)?;
+        changed = true;
+    }
+    if staging.next.exists() {
+        if dir.exists() {
+            remove_dir_all(&staging.next)?;
+        } else {
+            rename(&staging.next, dir)?;
+        }
+        changed = true;
+    }
+    if staging.prev.exists() {
+        if dir.exists() {
+            remove_dir_all(&staging.prev)?;
+        } else {
+            rename(&staging.prev, dir)?;
+        }
+        changed = true;
+    }
+    if changed {
+        sync_dir(&parent)?;
+    }
+    Ok(())
+}
+
 /// Generate the CA and server certificate if the directory holds none, mint
 /// a server certificate when only a shared CA pair is present, and reuse
 /// complete material as is. Partial material is refused rather than guessed
 /// at.
+///
+/// New material is written into a staging directory next to `dir` and moved
+/// into place with a rename, so a crash never leaves a partial set in `dir`.
 pub fn ensure_generated_material(dir: &Path, extra_sans: &[String]) -> Result<(), TlsSetupError> {
+    let parent = node_layout::parent_dir(dir);
+    fs::create_dir_all(&parent).map_err(|source| TlsSetupError::WriteMaterial {
+        path: parent.clone(),
+        source,
+    })?;
+    recover_generated_dir(dir)?;
+
     let files = GeneratedFiles::new(dir);
     let plan = generated_plan(
         files.ca_pem.exists(),
@@ -459,7 +530,10 @@ pub fn ensure_generated_material(dir: &Path, extra_sans: &[String]) -> Result<()
         dir: dir.to_path_buf(),
     })?;
 
-    let (ca_cert, ca_key) = match plan {
+    let staging = StagingDirs::new(dir);
+    // The CA files are carried over byte for byte when minting, so an
+    // operator-copied CA stays exactly as supplied.
+    let (ca_cert, ca_key, ca_pem, ca_key_pem) = match plan {
         GeneratedPlan::Reuse => return Ok(()),
         GeneratedPlan::GenerateAll => {
             let ca_key = rcgen::KeyPair::generate()?;
@@ -469,14 +543,9 @@ pub fn ensure_generated_material(dir: &Path, extra_sans: &[String]) -> Result<()
                 .distinguished_name
                 .push(rcgen::DnType::CommonName, "Fibril per-deployment CA");
             let ca_cert = ca_params.self_signed(&ca_key)?;
-
-            fs::create_dir_all(dir).map_err(|source| TlsSetupError::WriteMaterial {
-                path: dir.to_path_buf(),
-                source,
-            })?;
-            write_public(&files.ca_pem, ca_cert.pem().as_bytes())?;
-            write_secret(&files.ca_key, ca_key.serialize_pem().as_bytes())?;
-            (ca_cert, ca_key)
+            let ca_pem = ca_cert.pem();
+            let ca_key_pem = ca_key.serialize_pem();
+            (ca_cert, ca_key, ca_pem, ca_key_pem)
         }
         GeneratedPlan::MintServerFromCa => {
             let ca_pem = fs::read_to_string(&files.ca_pem).map_err(|source| {
@@ -493,11 +562,11 @@ pub fn ensure_generated_material(dir: &Path, extra_sans: &[String]) -> Result<()
             })?;
             let ca_key = rcgen::KeyPair::from_pem(&ca_key_pem)?;
             // Rebuild an issuer from the stored CA. Only the issuer name and
-            // signing key matter for the minted certificate; the stored
+            // signing key matter for the minted certificate. The stored
             // ca.pem keeps being the one served and fingerprinted.
             let ca_cert =
                 rcgen::CertificateParams::from_ca_cert_pem(&ca_pem)?.self_signed(&ca_key)?;
-            (ca_cert, ca_key)
+            (ca_cert, ca_key, ca_pem, ca_key_pem)
         }
     };
 
@@ -518,9 +587,69 @@ pub fn ensure_generated_material(dir: &Path, extra_sans: &[String]) -> Result<()
         .push(rcgen::DnType::CommonName, "fibril-broker");
     let server_cert = server_params.signed_by(&server_key, &ca_cert, &ca_key)?;
 
-    write_public(&files.server_pem, server_cert.pem().as_bytes())?;
-    write_secret(&files.server_key, server_key.serialize_pem().as_bytes())?;
+    // Build the complete set in the staging dir first.
+    fs::create_dir(&staging.tmp).map_err(|source| TlsSetupError::WriteMaterial {
+        path: staging.tmp.clone(),
+        source,
+    })?;
+    let staged = GeneratedFiles::new(&staging.tmp);
+    write_public(&staged.ca_pem, ca_pem.as_bytes())?;
+    write_secret(&staged.ca_key, ca_key_pem.as_bytes())?;
+    write_public(&staged.server_pem, server_cert.pem().as_bytes())?;
+    write_secret(&staged.server_key, server_key.serialize_pem().as_bytes())?;
+    sync_dir(&staging.tmp)?;
+
+    match plan {
+        GeneratedPlan::GenerateAll => {
+            // An empty dir counts as no material. Rename cannot replace a
+            // directory on every platform, so it goes first. A crash right
+            // after leaves no dir and a tmp that recovery drops, which
+            // regenerates from scratch.
+            if dir.exists() {
+                fs::remove_dir(dir).map_err(|source| TlsSetupError::WriteMaterial {
+                    path: dir.to_path_buf(),
+                    source,
+                })?;
+            }
+            rename(&staging.tmp, dir)?;
+            sync_dir(&parent)?;
+        }
+        GeneratedPlan::MintServerFromCa => {
+            // The CA-only dir is replaced in three renames. `next` marks the
+            // new set as complete, so recovery can finish the swap if a crash
+            // lands between moving the old dir out and the new one in.
+            rename(&staging.tmp, &staging.next)?;
+            sync_dir(&parent)?;
+            rename(dir, &staging.prev)?;
+            rename(&staging.next, dir)?;
+            sync_dir(&parent)?;
+            remove_dir_all(&staging.prev)?;
+            sync_dir(&parent)?;
+        }
+        GeneratedPlan::Reuse => {}
+    }
     Ok(())
+}
+
+fn rename(from: &Path, to: &Path) -> Result<(), TlsSetupError> {
+    fs::rename(from, to).map_err(|source| TlsSetupError::WriteMaterial {
+        path: to.to_path_buf(),
+        source,
+    })
+}
+
+fn remove_dir_all(path: &Path) -> Result<(), TlsSetupError> {
+    fs::remove_dir_all(path).map_err(|source| TlsSetupError::WriteMaterial {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn sync_dir(path: &Path) -> Result<(), TlsSetupError> {
+    node_layout::fsync_dir(path).map_err(|source| TlsSetupError::WriteMaterial {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 fn write_public(path: &Path, contents: &[u8]) -> Result<(), TlsSetupError> {
@@ -844,6 +973,104 @@ mod tests {
                 "matrix case ({ca_pem}, {ca_key}, {server_pem}, {server_key})"
             );
         }
+    }
+
+    fn entries(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .expect("read dir")
+            .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn interrupted_generation_leaves_no_partial_tls_dir() {
+        // A crash while building the staging dir leaves it half written and
+        // no tls/ at all. The next run drops the staging dir and generates a
+        // complete set.
+        let node = temp_dir("interrupted");
+        let staging = StagingDirs::new(&node.join(GENERATED_TLS_DIR));
+        fs::create_dir(&staging.tmp).expect("tmp");
+        fs::write(staging.tmp.join("ca.pem"), "half written").expect("partial");
+        assert!(!node.join(GENERATED_TLS_DIR).exists());
+
+        build_server_tls(&TlsMode::AutoSelfSigned, &node, &[])
+            .expect("generate after crash")
+            .expect("enabled");
+        assert_eq!(entries(&node), [GENERATED_TLS_DIR]);
+        assert_eq!(
+            entries(&node.join(GENERATED_TLS_DIR)),
+            ["ca.key", "ca.pem", "server.key", "server.pem"]
+        );
+    }
+
+    #[test]
+    fn interrupted_mint_swap_is_finished_on_the_next_run() {
+        let source = temp_dir("swap-source");
+        build_server_tls(&TlsMode::AutoSelfSigned, &source, &[])
+            .expect("generate")
+            .expect("enabled");
+        let complete = source.join(GENERATED_TLS_DIR);
+        let fp = ca_fingerprint(&complete.join("ca.pem")).expect("fp");
+
+        // Crash after the old CA-only dir moved to prev and before the
+        // finished set moved from next into place.
+        let node = temp_dir("swap");
+        let dir = node.join(GENERATED_TLS_DIR);
+        let staging = StagingDirs::new(&dir);
+        fs::create_dir(&staging.prev).expect("prev");
+        fs::copy(complete.join("ca.pem"), staging.prev.join("ca.pem")).expect("ca");
+        fs::copy(complete.join("ca.key"), staging.prev.join("ca.key")).expect("key");
+        fs::create_dir(&staging.next).expect("next");
+        for name in ["ca.pem", "ca.key", "server.pem", "server.key"] {
+            fs::copy(complete.join(name), staging.next.join(name)).expect("copy");
+        }
+
+        let tls = build_server_tls(&TlsMode::AutoSelfSigned, &node, &[])
+            .expect("recover")
+            .expect("enabled");
+        let TlsMaterialSource::Generated { ca_fingerprint, .. } = &tls.source else {
+            panic!("expected generated source");
+        };
+        assert_eq!(ca_fingerprint, &fp);
+        assert_eq!(entries(&node), [GENERATED_TLS_DIR]);
+        assert_eq!(
+            fs::read(dir.join("server.pem")).expect("leaf"),
+            fs::read(complete.join("server.pem")).expect("source leaf"),
+            "the finished set from next is promoted, not regenerated"
+        );
+    }
+
+    #[test]
+    fn unfinished_next_is_dropped_while_the_old_dir_is_in_place() {
+        // Crash after the finished set reached next but before the CA-only
+        // dir moved out. The CA-only dir is still authoritative, so next is
+        // dropped and a fresh leaf is minted from the same CA.
+        let source = temp_dir("next-source");
+        build_server_tls(&TlsMode::AutoSelfSigned, &source, &[])
+            .expect("generate")
+            .expect("enabled");
+        let complete = source.join(GENERATED_TLS_DIR);
+
+        let node = temp_dir("next");
+        let dir = node.join(GENERATED_TLS_DIR);
+        fs::create_dir(&dir).expect("dir");
+        fs::copy(complete.join("ca.pem"), dir.join("ca.pem")).expect("ca");
+        fs::copy(complete.join("ca.key"), dir.join("ca.key")).expect("key");
+        let staging = StagingDirs::new(&dir);
+        fs::create_dir(&staging.next).expect("next");
+        fs::write(staging.next.join("server.pem"), "stale").expect("stale");
+
+        build_server_tls(&TlsMode::AutoSelfSigned, &node, &[])
+            .expect("mint")
+            .expect("enabled");
+        assert_eq!(entries(&node), [GENERATED_TLS_DIR]);
+        assert_eq!(
+            fs::read(dir.join("ca.key")).expect("ca key"),
+            fs::read(complete.join("ca.key")).expect("source ca key"),
+            "the copied CA is kept byte for byte"
+        );
     }
 
     #[test]
