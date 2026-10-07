@@ -1538,12 +1538,9 @@ fn apply_setup_submission(
     let mut overlay_tls = fibril_config::TlsSection::default();
     let tls_summary = match submission.tls {
         TlsSetupChoice::AutoSelfSigned => {
+            let node_dir = layout.node();
             let built =
-                tls::build_server_tls(
-                    &fibril_config::TlsMode::AutoSelfSigned,
-                    &layout.node(),
-                    sans,
-                )?
+                tls::build_server_tls(&fibril_config::TlsMode::AutoSelfSigned, &node_dir, sans)?
                     .ok_or_else(|| {
                         FibrilServerError::TlsSetup(
                             fibril_tls::TlsSetupError::InvalidUploadedMaterial {

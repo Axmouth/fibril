@@ -156,7 +156,10 @@ pub enum NodeLayoutError {
 
 type Result<T> = std::result::Result<T, NodeLayoutError>;
 
-fn io_err<'a>(action: &'static str, path: &'a Path) -> impl FnOnce(io::Error) -> NodeLayoutError + 'a {
+fn io_err<'a>(
+    action: &'static str,
+    path: &'a Path,
+) -> impl FnOnce(io::Error) -> NodeLayoutError + 'a {
     move |source| NodeLayoutError::Io {
         action,
         path: path.to_path_buf(),
@@ -309,7 +312,12 @@ impl NodeLayout {
         }
 
         expect_kind(&self.marker(), false)?;
-        for dir in [self.node(), self.coordination(), self.storage(), self.cache()] {
+        for dir in [
+            self.node(),
+            self.coordination(),
+            self.storage(),
+            self.cache(),
+        ] {
             if dir.exists() {
                 expect_kind(&dir, true)?;
             }
@@ -747,7 +755,10 @@ mod tests {
         NodeLayout::open_or_init(&root, "n").unwrap();
         fs::create_dir(root.join("events")).unwrap();
         let err = NodeLayout::open_or_init(&root, "n").unwrap_err();
-        assert!(matches!(err, NodeLayoutError::UnknownEntries { .. }), "{err}");
+        assert!(
+            matches!(err, NodeLayoutError::UnknownEntries { .. }),
+            "{err}"
+        );
         assert!(err.to_string().contains("events"));
         let _ = fs::remove_dir_all(root);
     }
@@ -813,7 +824,13 @@ mod tests {
         fs::remove_dir(root.join(STORAGE_DIR)).unwrap();
         let err = NodeLayout::open_or_init(&root, "n").unwrap_err();
         assert!(
-            matches!(err, NodeLayoutError::MissingEntry { entry: STORAGE_DIR, .. }),
+            matches!(
+                err,
+                NodeLayoutError::MissingEntry {
+                    entry: STORAGE_DIR,
+                    ..
+                }
+            ),
             "{err}"
         );
         let _ = fs::remove_dir_all(root);
