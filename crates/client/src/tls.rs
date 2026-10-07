@@ -30,7 +30,7 @@ use fibril_util::net::TcpStream;
 #[derive(Debug, Clone, Default)]
 pub struct TlsClientOptions {
     /// PEM file with the CA certificate(s) to trust, e.g. the broker's
-    /// generated `<data_dir>/tls/ca.pem`.
+    /// generated `<data_dir>/node/tls/ca.pem`.
     pub ca_path: Option<PathBuf>,
     /// SHA-256 fingerprint of the broker CA (or server) certificate, as
     /// printed in the broker startup log. Hex digits, colons optional.

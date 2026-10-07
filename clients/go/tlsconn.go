@@ -21,7 +21,7 @@ import (
 // TLSOptions configures a TLS connection to the broker.
 type TLSOptions struct {
 	// CAFile is a PEM file of CA certificate(s) to trust (e.g. the broker's
-	// generated <data_dir>/tls/ca.pem). Empty uses the OS trust store.
+	// generated <data_dir>/node/tls/ca.pem). Empty uses the OS trust store.
 	CAFile string
 	// CAFingerprint pins the broker certificate by its SHA-256 fingerprint (hex,
 	// colons optional). Pinning replaces the CA trust store: the broker is

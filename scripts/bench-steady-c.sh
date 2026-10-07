@@ -25,9 +25,11 @@ data_dir="$(mktemp -d)"
 log_file="${LOG_FILE:-$data_dir/steady.log}"
 results_file="${RESULTS_FILE:-$data_dir/steady-results.txt}"
 memory_file="$data_dir/server-rss-kib.txt"
-# Where the started server keeps its segments (defaults to the work dir). Point it
-# at a specific device (e.g. an nvme scratch mount) to benchmark that storage.
-server_data_dir="${SERVER_DATA_DIR:-$data_dir}"
+# Where the started server keeps its data (defaults to a subdir of the work dir,
+# which also holds logs and results). Point it at a specific device (e.g. an
+# nvme scratch mount) to benchmark that storage. The server only accepts an
+# empty dir or an existing data dir of the same node.
+server_data_dir="${SERVER_DATA_DIR:-$data_dir/server-data}"
 # Optional server config file (e.g. to set storage.keratin.segment_preallocate_bytes).
 server_config="${SERVER_CONFIG:-}"
 bench_args=()

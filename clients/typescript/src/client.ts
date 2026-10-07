@@ -66,7 +66,7 @@ function normalizeGroup(group: string | null): string | null {
 export interface TlsOptions {
   /**
    * PEM file with the CA certificate(s) to trust, e.g. the broker's
-   * generated `<data_dir>/tls/ca.pem`.
+   * generated `<data_dir>/node/tls/ca.pem`.
    */
   caPath?: string;
   /**
@@ -279,7 +279,7 @@ export class ClientOptions {
 
   /**
    * Return a copy with TLS enabled, trusting the CA certificate(s) in a PEM
-   * file, e.g. the broker's generated `<data_dir>/tls/ca.pem`.
+   * file, e.g. the broker's generated `<data_dir>/node/tls/ca.pem`.
    */
   withTlsCaPath(caPath: string): ClientOptions {
     return this.#copy({ tls: { ...(this.tls ?? {}), caPath } });

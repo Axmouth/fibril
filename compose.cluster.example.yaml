@@ -15,6 +15,9 @@
 #
 #   docker compose -f compose.cluster.example.yaml down -v
 #
+# A broker refuses to start on a data volume written with an older data
+# layout. Remove the volumes as above to start fresh.
+#
 # Clustering is experimental and not yet production-ready high availability.
 
 x-broker: &broker

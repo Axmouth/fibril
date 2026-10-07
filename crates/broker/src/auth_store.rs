@@ -478,7 +478,7 @@ impl fibril_util::AuthHandler for StoreAuthHandler {
                     "this node has no cluster secret configured. Generate one with \
                      fibrilctl secret generate and distribute the same secret to \
                      every node (FIBRIL_CLUSTER_SECRET, coordination.secret_path, \
-                     or <data_dir>/cluster.secret)",
+                     or <data_dir>/node/cluster.secret)",
                 ),
             };
         }

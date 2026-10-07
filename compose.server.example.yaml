@@ -9,6 +9,8 @@ services:
     ports:
       - "9876:9876"
       - "8081:8081"
+    # The data dir. The server refuses a volume written with an older data
+    # layout. Remove it with `docker compose down -v` to start fresh.
     volumes:
       - fibril-server-data:/app/server_data
     healthcheck:

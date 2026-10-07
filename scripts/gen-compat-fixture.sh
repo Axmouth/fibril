@@ -89,7 +89,16 @@ SRV_PID=""
 echo "==> archiving the data dir"
 # Exclude the keratin lock files: they are process-held runtime state, not part
 # of the durable format, and a stale one only adds noise.
-tar -czf "$ARCHIVE" --exclude='.keratin.lock' -C "$RUN_DIR" data
+#
+# The compat test opens the archive as a Stroma root. Brokers with the node
+# layout (a fibril-node marker at the data dir root) keep that root in
+# storage/, so only that subdir is archived, still under the name data.
+if [[ -f "$DATA_DIR/fibril-node" ]]; then
+  tar -czf "$ARCHIVE" --exclude='.keratin.lock' -C "$DATA_DIR" \
+    --transform 's,^storage,data,' storage
+else
+  tar -czf "$ARCHIVE" --exclude='.keratin.lock' -C "$RUN_DIR" data
+fi
 
 echo "wrote $ARCHIVE"
 echo "wrote $MANIFEST"

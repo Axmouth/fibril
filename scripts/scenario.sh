@@ -150,7 +150,7 @@ fi
 echo
 echo "Dashboard: $(admin_url)/admin  (Activity: $(admin_url)/admin/activity)"
 if [[ "$TLS" == true ]]; then
-  echo "TLS material: $RUN_DIR/node-1/tls  (issue a client cert: target/release/fibrilctl cert issue <user> --data-dir $RUN_DIR/node-1)"
+  echo "TLS material: $RUN_DIR/node-1/node/tls  (issue a client cert: target/release/fibrilctl cert issue <user> --data-dir $RUN_DIR/node-1)"
 fi
 echo "Running scenario: $SCENARIO"
 echo

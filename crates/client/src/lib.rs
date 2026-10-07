@@ -252,7 +252,7 @@ pub enum FibrilError {
     /// problem, distinct from a transport mismatch.
     #[error(
         "broker certificate verification failed: {msg}. Trust the broker CA via \
-         .tls_ca_path(...) (generated deployments write <data_dir>/tls/ca.pem) or pin \
+         .tls_ca_path(...) (generated deployments write <data_dir>/node/tls/ca.pem) or pin \
          .tls_ca_fingerprint(...) from the broker startup log"
     )]
     TlsCertificateUntrusted { msg: String },
@@ -5452,7 +5452,7 @@ impl ClientOptions {
     }
 
     /// Return a copy with TLS enabled, trusting the CA certificate(s) in a
-    /// PEM file, e.g. the broker's generated `<data_dir>/tls/ca.pem`.
+    /// PEM file, e.g. the broker's generated `<data_dir>/node/tls/ca.pem`.
     pub fn tls_ca_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
         let mut tls = self.tls.take().unwrap_or_default();
         tls.ca_path = Some(path.into());
