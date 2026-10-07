@@ -680,6 +680,9 @@ pub async fn open_tcp_ganglion_parts(
         CoordinationMode::Ganglion => {
             let section = &config.coordination.ganglion;
             let data_dir = config.coordination_data_dir();
+            // Ganglion keeps no record of which raft member wrote its files,
+            // so the marker is checked before it opens them.
+            node_layout::prepare_coordination_dir(&data_dir, section.raft_node_id)?;
 
             let consensus_config = consensus_config_from_config(config)?;
             let wire_format: WireFormat = section
@@ -2959,6 +2962,48 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn coordination_dir_of_another_raft_member_refuses_startup() {
+        let root = temp_root("coordination-mismatch");
+        let coordination_dir = root.join("coordination");
+        node_layout::prepare_coordination_dir(&coordination_dir, 2).expect("mark for raft 2");
+
+        let coordination_addr = free_loopback_addr();
+        let mut config = ServerConfig::default();
+        config.server.data_dir = root.join("data");
+        config.coordination.mode = CoordinationMode::Ganglion;
+        config.coordination.ganglion.raft_node_id = 1;
+        config.coordination.ganglion.listen = coordination_addr;
+        config
+            .coordination
+            .ganglion
+            .peers
+            .insert("1".into(), coordination_addr.to_string());
+        config.coordination.ganglion.data_dir = coordination_dir.clone();
+
+        let Err(error) = open_tcp_ganglion_parts(&config, None).await else {
+            panic!("a coordination dir marked for raft 2 must refuse raft 1");
+        };
+        assert!(
+            matches!(
+                error,
+                FibrilServerError::NodeLayout(NodeLayoutError::CoordinationForeignNode {
+                    found: 2,
+                    expected: 1,
+                    ..
+                })
+            ),
+            "{error}"
+        );
+        // Ganglion never opened the directory.
+        let entries: Vec<_> = std::fs::read_dir(&coordination_dir)
+            .expect("read coordination dir")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(entries, [node_layout::COORDINATION_MARKER_FILE]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn tcp_ganglion_bootstrap_exposes_declare_coordinator() {
         let root = temp_root("tcp-ganglion-bootstrap");
         let coordination_addr = free_loopback_addr();
@@ -2983,6 +3028,12 @@ mod tests {
             .await
             .expect("start ganglion")
             .expect("ganglion parts");
+        // The configured dir outside the data dir carries the marker too.
+        assert!(
+            root.join("coordination")
+                .join(node_layout::COORDINATION_MARKER_FILE)
+                .is_file()
+        );
         parts
             .coordination
             .consensus_node()
