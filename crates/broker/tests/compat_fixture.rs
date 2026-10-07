@@ -8,11 +8,12 @@
 //! change broke the on-disk format for an older data dir - the guarantee the
 //! fixtures exist to hold.
 //!
-//! Queue storage moved to a single ordered log after v0.4.0, a deliberate format
-//! break with no migration. Fixtures from releases before that break are listed
-//! in `PRE_SINGLE_LOG_TAGS` and must be refused with the unsupported-layout
-//! error, without the open touching the old data. Every other fixture must open
-//! and recover as described above.
+//! Queue storage moved to a single ordered log and then to the version 2
+//! storage layout after v0.4.0, deliberate format breaks with no migration.
+//! Fixtures from releases before those breaks are listed in
+//! `PRE_LAYOUT_V2_TAGS` and must be refused with the older-layout error,
+//! without the open touching the old data. Every other fixture must open and
+//! recover as described above.
 //!
 //! Regenerate the current release's fixture with:
 //!   scripts/gen-compat-fixture.sh <tag>
@@ -28,11 +29,10 @@ use fibril_broker::storage::Partition;
 use stroma_core::{KeratinConfig, SnapshotConfig, StromaKeratinConfig, TempDir, test_dir};
 use uuid::Uuid;
 
-/// Releases whose data dirs use the queue layout from before single-log storage.
-const PRE_SINGLE_LOG_TAGS: &[&str] = &["v0.4.0"];
+/// Releases whose data dirs use a storage layout from before layout version 2.
+const PRE_LAYOUT_V2_TAGS: &[&str] = &["v0.4.0"];
 
-const UNSUPPORTED_LAYOUT: &str =
-    "single-log queue storage requires a fresh root, older layouts are unsupported";
+const UNSUPPORTED_LAYOUT: &str = "older Stroma storage layout that this version cannot open";
 
 fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
@@ -115,14 +115,14 @@ async fn golden_data_dirs_open_on_the_current_broker() {
         let data_dir = dir.root.join("data");
 
         let tag = manifest["tag"].as_str().expect("manifest names its tag");
-        if PRE_SINGLE_LOG_TAGS.contains(&tag) {
+        if PRE_LAYOUT_V2_TAGS.contains(&tag) {
             let before = tree(&data_dir);
             let err = match open_engine_at(&data_dir).await {
-                Ok(_) => panic!("{name}: a pre-single-log data dir must be refused"),
+                Ok(_) => panic!("{name}: a data dir from before layout version 2 must be refused"),
                 Err(err) => err,
             };
             assert!(
-                matches!(&err, stroma_core::StromaError::InvalidArgument(msg) if msg == UNSUPPORTED_LAYOUT),
+                matches!(&err, stroma_core::StromaError::InvalidArgument(msg) if msg.contains(UNSUPPORTED_LAYOUT)),
                 "{name}: expected the unsupported-layout error, got {err:?}"
             );
             assert_eq!(

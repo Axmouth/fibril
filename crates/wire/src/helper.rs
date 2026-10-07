@@ -161,16 +161,6 @@ pub fn try_encode<T: Serialize + Any>(op: Op, req_id: u64, msg: &T) -> ProtocolR
                 wire::encode_replication_checkpoint_export_ok(req_id, msg)
             })
         }
-        Op::ReplicationCheckpointInstall => {
-            encode_typed(msg, "ReplicationCheckpointInstall", |msg| {
-                wire::encode_replication_checkpoint_install(req_id, msg)
-            })
-        }
-        Op::ReplicationCheckpointInstallOk => {
-            encode_typed(msg, "ReplicationCheckpointInstallOk", |msg| {
-                wire::encode_replication_checkpoint_install_ok(req_id, msg)
-            })
-        }
         Op::Topology => encode_typed(msg, "TopologyRequest", |msg| {
             wire::encode_topology_request(req_id, msg)
         }),
@@ -344,16 +334,6 @@ pub fn try_decode<T: for<'de> Deserialize<'de> + Any>(frame: &Frame) -> Protocol
                 .map_err(wire_decode_error)
                 .and_then(cast_decoded)
         }
-        x if x == Op::ReplicationCheckpointInstall as u16 => {
-            wire::decode_replication_checkpoint_install(frame)
-                .map_err(wire_decode_error)
-                .and_then(cast_decoded)
-        }
-        x if x == Op::ReplicationCheckpointInstallOk as u16 => {
-            wire::decode_replication_checkpoint_install_ok(frame)
-                .map_err(wire_decode_error)
-                .and_then(cast_decoded)
-        }
         x if x == Op::Topology as u16 => wire::decode_topology_request(frame)
             .map_err(wire_decode_error)
             .and_then(cast_decoded),
@@ -508,8 +488,7 @@ mod tests {
         QueueTopologyEntry, ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult,
         ReconcileServer, ReconcileSubscription, ReconcileSubscriptionResult, Redirect,
         ReplicationApply, ReplicationApplyOk, ReplicationCheckpointExport,
-        ReplicationCheckpointExportOk, ReplicationCheckpointInstall,
-        ReplicationCheckpointInstallOk, ReplicationCheckpointRequired, ReplicationEventApplyBatch,
+        ReplicationCheckpointExportOk, ReplicationCheckpointRequired, ReplicationEventApplyBatch,
         ReplicationEventRead, ReplicationEventRecord, ReplicationMessageApplyBatch,
         ReplicationMessageRead, ReplicationMessageRecord, ReplicationRead, ReplicationReadOk,
         ReplicationStateCheckpoint, ResumeIdentity, ResumeOutcome, Subscribe, SubscribeOk,
@@ -988,49 +967,6 @@ mod tests {
         assert_eq!(frame.opcode, Op::ReplicationCheckpointExportOk as u16);
         assert_eq!(
             try_decode::<ReplicationCheckpointExportOk>(&frame).unwrap(),
-            msg
-        );
-    }
-
-    #[test]
-    fn replication_checkpoint_install_roundtrips() {
-        let msg = ReplicationCheckpointInstall {
-            topic: "orders".into(),
-            group: Some("workers".into()),
-            partition: Partition::new(3),
-            checkpoint: ReplicationStateCheckpoint {
-                combined_log: true,
-                event_start_offset: 10,
-                message_epoch: 3,
-                event_epoch: 3,
-                message_checkpoint_offset: 0,
-                message_next_offset: 0,
-                event_next_offset: 30,
-                applied_event_offset: 29,
-                state_snapshot: b"snapshot".to_vec(),
-            },
-        };
-
-        let frame = try_encode(Op::ReplicationCheckpointInstall, 21, &msg).unwrap();
-        assert_eq!(frame.opcode, Op::ReplicationCheckpointInstall as u16);
-        assert_eq!(
-            try_decode::<ReplicationCheckpointInstall>(&frame).unwrap(),
-            msg
-        );
-    }
-
-    #[test]
-    fn replication_checkpoint_install_ok_roundtrips() {
-        let msg = ReplicationCheckpointInstallOk {
-            message_next_offset: 10,
-            event_next_offset: 30,
-            applied_event_offset: 29,
-        };
-
-        let frame = try_encode(Op::ReplicationCheckpointInstallOk, 22, &msg).unwrap();
-        assert_eq!(frame.opcode, Op::ReplicationCheckpointInstallOk as u16);
-        assert_eq!(
-            try_decode::<ReplicationCheckpointInstallOk>(&frame).unwrap(),
             msg
         );
     }

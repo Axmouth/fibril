@@ -659,16 +659,6 @@ async fn prepare_test_queue_learner(
         .unwrap()
 }
 
-fn assert_unauthorized_checkpoint_reset_refused<T: std::fmt::Debug>(
-    result: Result<T, BrokerError>,
-) {
-    let err = result.expect_err("an unauthorized checkpoint reset must be refused");
-    assert!(
-        err.to_string().contains("excluded learner authorization"),
-        "unexpected checkpoint reset error: {err}"
-    );
-}
-
 /// Published payloads in a queue event batch, keyed by their event offset,
 /// which is also the message id.
 fn event_payloads(batch: &OwnerReplicationBatch<stroma_core::StromaEvent>) -> Vec<(Offset, Vec<u8>)> {
@@ -4096,16 +4086,6 @@ async fn broker_state_checkpoint_export_installs_then_messages_catch_up() {
         .become_replication_follower("checkpoint", Partition::new(0), None)
         .await
         .unwrap();
-    assert_unauthorized_checkpoint_reset_refused(
-        follower
-            .install_follower_state_checkpoint(
-                "checkpoint",
-                Partition::new(0),
-                None,
-                install.clone(),
-            )
-            .await,
-    );
     follower
         .engine()
         .install_queue_learner_checkpoint(receipt, install)

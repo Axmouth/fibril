@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use crate::storage::Offset;
 use async_trait::async_trait;
@@ -460,6 +464,19 @@ pub trait StreamStore: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct StromaEngine {
     inner: Arc<Stroma>,
+    // Disposable recovery inspection downloads. Kept outside the Stroma root,
+    // which refuses entries it does not own.
+    recovery_inspection_root: Arc<PathBuf>,
+}
+
+/// Default recovery inspection cache for a Stroma root at `<data_dir>/storage`:
+/// `<data_dir>/cache/recovery-inspection`.
+fn default_recovery_inspection_root(stroma_root: &Path) -> PathBuf {
+    stroma_root
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join("cache")
+        .join("recovery-inspection")
 }
 
 #[async_trait]
@@ -559,8 +576,23 @@ impl StreamStore for StromaEngine {
 
 impl StromaEngine {
     /// Local tentative recovery downloads. These files carry no serving authority.
-    pub fn recovery_inspection_journal_root(&self) -> std::path::PathBuf {
-        self.inner.root().join("recovery-inspection")
+    pub fn recovery_inspection_journal_root(&self) -> PathBuf {
+        self.recovery_inspection_root.as_ref().clone()
+    }
+
+    /// Use `root` for recovery inspection downloads instead of the default
+    /// `cache/recovery-inspection` next to the Stroma root.
+    pub fn with_recovery_inspection_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.recovery_inspection_root = Arc::new(root.into());
+        self
+    }
+
+    fn from_stroma(stroma: Stroma) -> Self {
+        let recovery_inspection_root = Arc::new(default_recovery_inspection_root(&stroma.root()));
+        Self {
+            inner: Arc::new(stroma),
+            recovery_inspection_root,
+        }
     }
 
     pub async fn open(
@@ -569,9 +601,7 @@ impl StromaEngine {
         snap_cfg: SnapshotConfig,
     ) -> Result<Self, StromaError> {
         let stroma = Stroma::open(root, keratin_cfg, snap_cfg).await?;
-        Ok(Self {
-            inner: Arc::new(stroma),
-        })
+        Ok(Self::from_stroma(stroma))
     }
 
     pub async fn open_with_runtime(
@@ -581,9 +611,7 @@ impl StromaEngine {
         runtime: Arc<LogRuntimeSettings>,
     ) -> Result<Self, StromaError> {
         let stroma = Stroma::open_with_runtime(root, keratin_cfg, snap_cfg, runtime).await?;
-        Ok(Self {
-            inner: Arc::new(stroma),
-        })
+        Ok(Self::from_stroma(stroma))
     }
 
     /// Explicit initial-history primitive. The caller must authorize all three
@@ -661,6 +689,7 @@ impl StromaEngine {
                     .prepare_queue_reseed_storage(receipt, intent)
                     .await?,
             ),
+            recovery_inspection_root: self.recovery_inspection_root.clone(),
         })
     }
 
@@ -978,18 +1007,6 @@ impl StromaEngine {
     ) -> Result<OwnerStateCheckpoint, StromaError> {
         self.inner
             .export_owner_state_checkpoint(tp, part, group)
-            .await
-    }
-
-    pub async fn install_follower_state_checkpoint(
-        &self,
-        tp: &str,
-        part: u32,
-        group: Option<&str>,
-        install: FollowerStateCheckpointInstall,
-    ) -> Result<FollowerStateCheckpointInstallOutcome, StromaError> {
-        self.inner
-            .install_follower_state_checkpoint(tp, part, group, install)
             .await
     }
 

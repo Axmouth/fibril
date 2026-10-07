@@ -671,7 +671,7 @@ async fn three_node_owner_loss_with_history(
     let mut addresses = HashMap::new();
     for (i, id) in ["a", "b", "c"].iter().enumerate() {
         let engine = StromaEngine::open(
-            root.join(format!("data-{id}")),
+            root.join(format!("data-{id}")).join("storage"),
             StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
             SnapshotConfig::default(),
         )
@@ -916,7 +916,7 @@ async fn three_node_owner_loss_with_history(
                             .unwrap();
                         providers[2] = Arc::new(GanglionCoordination::new("c", node));
                         let engine = StromaEngine::open(
-                            root.join("data-c"),
+                            root.join("data-c").join("storage"),
                             StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
                             SnapshotConfig::default(),
                         )
@@ -1493,7 +1493,7 @@ async fn three_node_owner_loss_with_history(
             let _ = (&mut listeners[1]).await;
             brokers[1].shutdown().await;
             for (i, id) in [(1, "b"), (2, "c")] {
-                let engine = StromaEngine::open(root.join(format!("data-{id}")),
+                let engine = StromaEngine::open(root.join(format!("data-{id}")).join("storage"),
                     StromaKeratinConfig::from_message_log(KeratinConfig::test_default()), SnapshotConfig::default()).await.unwrap();
                 let broker = Broker::new_with_ownership(engine, BrokerConfig::default(), None, providers[i].clone());
                 let (address, listener) = serve_test_broker(broker.clone()).await;
@@ -1561,7 +1561,7 @@ async fn three_node_owner_loss_with_history(
             // A returning old owner must use the non-voting learner path. Its
             // old bytes cannot grant admission into the newly recovered history.
             let rejoin_started = Instant::now();
-            let engine = StromaEngine::open(root.join("data-a"),
+            let engine = StromaEngine::open(root.join("data-a").join("storage"),
                 StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
                 SnapshotConfig::default()).await.unwrap();
             let broker = Broker::new_with_ownership(engine, BrokerConfig::default(), None, providers[0].clone());

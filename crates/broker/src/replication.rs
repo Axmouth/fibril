@@ -22,8 +22,7 @@ use stroma_core::{Message, OwnerReplicationRead, StromaEvent};
 use crate::broker::{Broker, BrokerConfig, BrokerError, FOLLOWER_STREAM_BUFFER_BATCHES, QueueKey};
 use crate::coordination::PartitionAssignment;
 use crate::queue_engine::{
-    FollowerStateCheckpointInstall, FollowerStateCheckpointInstallOutcome, KDurability,
-    OwnerStateCheckpoint, QueueEngine, QueuePromotionOutcome, ReplicatedAppendOutcome,
+    KDurability, OwnerStateCheckpoint, QueueEngine, QueuePromotionOutcome, ReplicatedAppendOutcome,
     ReplicatedEventBatch, ReplicatedMessageBatch, ReplicatedQueueApplyOutcome, StromaEngine,
 };
 
@@ -2339,19 +2338,6 @@ impl Broker<StromaEngine> {
         Ok(self
             .engine
             .export_owner_state_checkpoint(topic, partition.id(), group)
-            .await?)
-    }
-
-    pub async fn install_follower_state_checkpoint(
-        &self,
-        topic: &str,
-        partition: Partition,
-        group: Option<&str>,
-        install: FollowerStateCheckpointInstall,
-    ) -> Result<FollowerStateCheckpointInstallOutcome, BrokerError> {
-        Ok(self
-            .engine
-            .install_follower_state_checkpoint(topic, partition.id(), group, install)
             .await?)
     }
 

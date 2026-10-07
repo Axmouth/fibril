@@ -83,9 +83,9 @@ pub enum Op {
     ReplicationApplyOk = 83,
     ReplicationCheckpointExport = 84,
     ReplicationCheckpointExportOk = 85,
-    ReplicationCheckpointInstall = 86,
-    ReplicationCheckpointInstallOk = 87,
 
+    // 86 and 87 carried an unauthorized follower checkpoint install. They are
+    // retired and must not be reused.
     /// Cluster-peer recovery control; automatic dispatch is not enabled.
     RecoverySeal = 88,
     RecoverySealOk = 89,
@@ -856,21 +856,6 @@ pub struct ReplicationStateCheckpoint {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReplicationCheckpointExportOk {
     pub checkpoint: ReplicationStateCheckpoint,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReplicationCheckpointInstall {
-    pub topic: String,
-    pub group: Option<String>,
-    pub partition: Partition,
-    pub checkpoint: ReplicationStateCheckpoint,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReplicationCheckpointInstallOk {
-    pub message_next_offset: u64,
-    pub event_next_offset: u64,
-    pub applied_event_offset: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

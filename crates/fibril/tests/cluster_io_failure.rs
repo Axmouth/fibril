@@ -127,7 +127,7 @@ async fn run_case(all: bool, after_sync: bool) {
     let mut addresses = HashMap::new();
     for (i, id) in ["a", "b", "c"].iter().enumerate() {
         let engine = StromaEngine::open(
-            root.join(format!("data-{id}")),
+            root.join(format!("data-{id}")).join("storage"),
             StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
             SnapshotConfig::default(),
         )
@@ -294,7 +294,7 @@ async fn run_case(all: bool, after_sync: bool) {
             n
         );
     }
-    let path = segment_path(&root.join("data-a"), "events");
+    let path = segment_path(&root.join("data-a").join("storage"), "log");
     let fault_kind = if after_sync {
         keratin_log::io_fault_injection::Fault::FsyncAfterSuccess
     } else {
@@ -476,7 +476,7 @@ async fn run_case(all: bool, after_sync: bool) {
     eprintln!("STAGE metadata reopened");
     let restarted = Arc::new(GanglionCoordination::new("a", node));
     let engine = StromaEngine::open(
-        root.join("data-a"),
+        root.join("data-a").join("storage"),
         StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
         SnapshotConfig::default(),
     )

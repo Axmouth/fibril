@@ -32,13 +32,12 @@ use fibril_protocol::v1::{
     HelloOk, Nack, Op, PROTOCOL_V1, Publish, PublishDelayed, QueueDlqPolicy, QueueTopologyEntry,
     ReasonCode, ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult,
     ReconcileSubscription, ReplicationApply, ReplicationApplyOk, ReplicationCheckpointExport,
-    ReplicationCheckpointExportOk, ReplicationCheckpointInstall,
-    ReplicationCheckpointRequired, ReplicationEventApplyBatch, ReplicationEventRead,
-    ReplicationEventRecord, ReplicationMessageApplyBatch, ReplicationMessageRead,
-    ReplicationMessageRecord, ReplicationRead, ReplicationReadOk, ReplicationStateCheckpoint,
-    ResumeIdentity, ResumeOutcome, StreamDurability, StreamRetention, StreamStart, Subscribe,
-    SubscribeOk, SubscribeStream, SubscriptionClosed, TopologyOk, TopologyRequest,
-    TopologyUpdateAck,
+    ReplicationCheckpointExportOk, ReplicationCheckpointRequired, ReplicationEventApplyBatch,
+    ReplicationEventRead, ReplicationEventRecord, ReplicationMessageApplyBatch,
+    ReplicationMessageRead, ReplicationMessageRecord, ReplicationRead, ReplicationReadOk,
+    ReplicationStateCheckpoint, ResumeIdentity, ResumeOutcome, StreamDurability, StreamRetention,
+    StreamStart, Subscribe, SubscribeOk, SubscribeStream, SubscriptionClosed, TopologyOk,
+    TopologyRequest, TopologyUpdateAck,
     frame::Frame,
     handler::{
         ClientTopologySource, ConnectionSettings, DeclareCoordinator, ProtocolConnectionError,
@@ -5203,7 +5202,7 @@ async fn declare_uses_coordinator_effective_count() {
 }
 
 #[tokio::test]
-async fn replication_checkpoint_export_install_composes_with_catch_up() {
+async fn replication_checkpoint_export_composes_with_catch_up() {
     let topic = "replication.checkpoint.tcp";
     let group = Some("workers".to_string());
     let (mut owner_framed, owner_task, _owner_dir) = open_node_connection().await;
@@ -5258,45 +5257,11 @@ async fn replication_checkpoint_export_install_composes_with_catch_up() {
         .await;
     node_handshake(&mut follower_framed).await;
 
-    follower_framed
-        .send(
-            try_encode(
-                Op::ReplicationCheckpointInstall,
-                5,
-                &ReplicationCheckpointInstall {
-                    topic: topic.into(),
-                    group: group.clone(),
-                    partition: Partition::new(0),
-                    checkpoint: export.checkpoint.clone(),
-                },
-            )
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    // A queue checkpoint replaces the only log holding its payloads, so the
-    // plain install request is refused unless an excluded learner was freshly
-    // authorized for it. The refusal must leave the follower untouched.
     assert!(export.checkpoint.combined_log);
     assert_eq!(export.checkpoint.message_next_offset, 0);
     assert_eq!(export.checkpoint.event_next_offset, 2);
-    let frame = recv_frame(&mut follower_framed).await;
-    assert_eq!(frame.opcode, Op::Error as u16);
-    let error: ErrorMsg = try_decode(&frame).unwrap();
-    assert!(
-        error.message.contains("excluded learner authorization"),
-        "{error:?}"
-    );
-    assert_eq!(
-        follower_broker
-            .engine()
-            .queue_replication_next_offsets(topic, 0, group.as_deref())
-            .await
-            .unwrap(),
-        (0, 0)
-    );
 
-    // Ordinary catch-up still reaches the exported frontier.
+    // Ordinary catch-up reaches the exported frontier.
     let outcome = catch_up_replication_over_protocol(
         &mut owner_framed,
         &mut follower_framed,
@@ -5345,88 +5310,6 @@ async fn replication_checkpoint_export_install_composes_with_catch_up() {
     drop(follower_framed);
     owner_task.await.unwrap().unwrap();
     follower_task.await.unwrap().unwrap();
-}
-
-#[tokio::test]
-async fn replication_checkpoint_install_rejects_delayed_old_epoch_without_erasing_data() {
-    let topic = "checkpoint.delayed.epoch";
-    let (broker, dir) = open_test_broker().await;
-    let (mut framed, task, _dir, broker) =
-        open_node_connection_for_broker(ConnectionSettings::new(Some(60)), broker, dir).await;
-    node_handshake(&mut framed).await;
-    framed_publish(&mut framed, 2, topic, None, b"first").await;
-    framed
-        .send(
-            try_encode(
-                Op::ReplicationCheckpointExport,
-                3,
-                &ReplicationCheckpointExport {
-                    topic: topic.into(),
-                    group: None,
-                    partition: Partition::new(0),
-                },
-            )
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    let frame = recv_frame(&mut framed).await;
-    let old: ReplicationCheckpointExportOk = try_decode(&frame).unwrap();
-    assert_eq!(old.checkpoint.message_epoch, 0);
-
-    // A checkpoint response from epoch 0 arrives after new data and the epoch-1
-    // assignment fence. It must not erase either log or replace queue state.
-    framed_publish(&mut framed, 4, topic, None, b"newer").await;
-    broker
-        .become_replication_follower_with_epoch(topic, Partition::new(0), None, 1)
-        .await
-        .unwrap();
-    framed
-        .send(
-            try_encode(
-                Op::ReplicationCheckpointInstall,
-                5,
-                &ReplicationCheckpointInstall {
-                    topic: topic.into(),
-                    group: None,
-                    partition: Partition::new(0),
-                    checkpoint: old.checkpoint,
-                },
-            )
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    // Queue checkpoints only install through an authorized excluded learner,
-    // which is refused before the epoch check is reached here. The stale
-    // response must still be rejected without touching either record.
-    let frame = recv_frame(&mut framed).await;
-    assert_eq!(
-        frame.opcode,
-        Op::Error as u16,
-        "stale checkpoint must be rejected"
-    );
-
-    let promoted = broker
-        .promote_replication_follower_if_caught_up(topic, Partition::new(0), None, 0, 2)
-        .await
-        .unwrap();
-    assert!(
-        matches!(promoted, QueuePromotionOutcome::Promoted { .. }),
-        "{promoted:?}"
-    );
-    let records = broker
-        .read_owner_replication_records(topic, Partition::new(0), None, 0, 0, 10, 10, usize::MAX, 0)
-        .await
-        .unwrap();
-    assert_empty_queue_message_lane(&records.messages);
-    assert_eq!(
-        queue_publishes(&records.events),
-        vec![(0, b"first".to_vec()), (1, b"newer".to_vec())],
-        "messages lost"
-    );
-    drop(framed);
-    task.await.unwrap().unwrap();
 }
 
 #[tokio::test]
@@ -7410,7 +7293,6 @@ async fn assert_replication_controls_forbidden(conn: &mut Conn) {
         Op::StreamReplicationRead,
         Op::ReplicationApply,
         Op::ReplicationCheckpointExport,
-        Op::ReplicationCheckpointInstall,
         Op::ReplicationStreamStart,
         Op::ReplicationStreamProgress,
         Op::ReplicationStreamReset,

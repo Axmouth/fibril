@@ -26,10 +26,9 @@ use fibril_broker::{
         SettleType,
     },
     queue_engine::{
-        DLQDiscardPolicyWire, DeclareMeta, FollowerStateCheckpointInstall, GlobalDLQ, Message,
-        MessageContentType, MessageHeaders, OwnerReplicationBatch, OwnerReplicationRead,
-        OwnerStateCheckpoint, QueueEngine, RetentionConfig, StreamStore, StromaEngine, StromaError,
-        StromaEvent,
+        DLQDiscardPolicyWire, DeclareMeta, GlobalDLQ, Message, MessageContentType, MessageHeaders,
+        OwnerReplicationBatch, OwnerReplicationRead, OwnerStateCheckpoint, QueueEngine,
+        RetentionConfig, StreamStore, StromaEngine, StromaError, StromaEvent,
     },
     stream::{
         StreamChannel, StreamDurability as BrokerStreamDurability, StreamFilter, StreamRecord,
@@ -835,21 +834,6 @@ fn to_replication_state_checkpoint(checkpoint: OwnerStateCheckpoint) -> Replicat
         event_epoch: checkpoint.event_epoch,
         message_checkpoint_offset: checkpoint.message_checkpoint_offset,
         message_next_offset: checkpoint.message_next_offset,
-        event_next_offset: checkpoint.event_next_offset,
-        applied_event_offset: checkpoint.applied_event_offset,
-        state_snapshot: checkpoint.state_snapshot,
-    }
-}
-
-fn to_follower_state_checkpoint_install(
-    checkpoint: ReplicationStateCheckpoint,
-) -> FollowerStateCheckpointInstall {
-    FollowerStateCheckpointInstall {
-        combined_log: checkpoint.combined_log,
-        event_start_offset: checkpoint.event_start_offset,
-        message_epoch: checkpoint.message_epoch,
-        event_epoch: checkpoint.event_epoch,
-        message_next_offset: checkpoint.message_checkpoint_offset,
         event_next_offset: checkpoint.event_next_offset,
         applied_event_offset: checkpoint.applied_event_offset,
         state_snapshot: checkpoint.state_snapshot,
@@ -3100,7 +3084,6 @@ where
             || x == Op::StreamReplicationRead as u16
             || x == Op::ReplicationApply as u16
             || x == Op::ReplicationCheckpointExport as u16
-            || x == Op::ReplicationCheckpointInstall as u16
             || x == Op::ReplicationStreamStart as u16
             || x == Op::ReplicationStreamProgress as u16
             || x == Op::ReplicationStreamReset as u16
@@ -3882,56 +3865,6 @@ where
                         frame_tx_high_prio
                             .send(try_encode(
                                 Op::ReplicationCheckpointExportOk,
-                                frame.request_id,
-                                &response,
-                            )?)
-                            .await?;
-                    }
-                    Err(err) => {
-                        let (code, message) = broker_error_response(&err);
-                        send_error_response_and_count(
-                            &frame_tx_high_prio,
-                            &metrics,
-                            frame.request_id,
-                            code,
-                            message,
-                        )
-                        .await;
-                    }
-                }
-            }
-
-            // -------- REPLICATION CHECKPOINT INSTALL -----------------------
-            x if x == Op::ReplicationCheckpointInstall as u16 => {
-                let install: ReplicationCheckpointInstall = decode_or_400!(
-                    frame,
-                    frame_tx_high_prio,
-                    metrics,
-                    ReplicationCheckpointInstall
-                );
-                let topic = install.topic.clone();
-                let group = install.group.clone();
-                let partition = install.partition;
-                let checkpoint = to_follower_state_checkpoint_install(install.checkpoint);
-
-                match broker
-                    .install_follower_state_checkpoint(
-                        &topic,
-                        partition,
-                        group.as_deref(),
-                        checkpoint,
-                    )
-                    .await
-                {
-                    Ok(outcome) => {
-                        let response = ReplicationCheckpointInstallOk {
-                            message_next_offset: outcome.message_next_offset,
-                            event_next_offset: outcome.event_next_offset,
-                            applied_event_offset: outcome.applied_event_offset,
-                        };
-                        frame_tx_high_prio
-                            .send(try_encode(
-                                Op::ReplicationCheckpointInstallOk,
                                 frame.request_id,
                                 &response,
                             )?)

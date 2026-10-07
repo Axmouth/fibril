@@ -1744,8 +1744,9 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
             fibril_broker::local_storage_settings::LocalStorageError::Invalid(e.to_string())
         })?,
     );
+    let data_dir = std::path::Path::new(&config.server.data_dir);
     let engine = StromaEngine::open_with_runtime(
-        &config.server.data_dir,
+        data_dir.join("storage"),
         StromaKeratinConfig {
             message_log: keratin_message_cfg,
             event_log: keratin_event_cfg,
@@ -1754,11 +1755,12 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         log_runtime.clone(),
     )
     .await
-    .map_err(FibrilServerError::Storage)?;
+    .map_err(FibrilServerError::Storage)?
+    .with_recovery_inspection_root(data_dir.join("cache").join("recovery-inspection"));
 
-    // Queue storage lives directly in the data dir and only initializes in an
-    // empty directory. Open it before first-boot setup writes its marker,
-    // overlay, TLS material or cluster secret there.
+    // Queue storage lives in `storage/` under the data dir and only
+    // initializes an empty directory. Open it before first-boot setup writes
+    // its marker, overlay, TLS material or cluster secret.
     if config.setup_pending() {
         run_first_boot_setup(&config).await?;
         config

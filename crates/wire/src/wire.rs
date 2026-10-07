@@ -11,14 +11,14 @@ use crate::{
     QueueTopologyEntry, ReasonCode, ReconcileAction, ReconcileClient, ReconcilePolicy,
     ReconcileResult, ReconcileServer, ReconcileSubscription, ReconcileSubscriptionResult, Redirect,
     ReplicationApply, ReplicationApplyOk, ReplicationCheckpointExport,
-    ReplicationCheckpointExportOk, ReplicationCheckpointInstall, ReplicationCheckpointInstallOk,
-    ReplicationCheckpointRequired, ReplicationEventApplyBatch, ReplicationEventRead,
-    ReplicationEventRecord, ReplicationMessageApplyBatch, ReplicationMessageRead,
-    ReplicationMessageRecord, ReplicationRead, ReplicationReadOk, ReplicationStateCheckpoint,
-    ReplicationStreamEnd, ReplicationStreamProgress, ReplicationStreamReset,
-    ReplicationStreamStart, ResumeIdentity, ResumeOutcome, StreamDurability, StreamRetention,
-    StreamStart, StreamTopologyEntry, Subscribe, SubscribeOk, SubscribeStream, SubscriptionClosed,
-    TopologyOk, TopologyRequest, TopologyUpdateAck, frame::Frame,
+    ReplicationCheckpointExportOk, ReplicationCheckpointRequired, ReplicationEventApplyBatch,
+    ReplicationEventRead, ReplicationEventRecord, ReplicationMessageApplyBatch,
+    ReplicationMessageRead, ReplicationMessageRecord, ReplicationRead, ReplicationReadOk,
+    ReplicationStateCheckpoint, ReplicationStreamEnd, ReplicationStreamProgress,
+    ReplicationStreamReset, ReplicationStreamStart, ResumeIdentity, ResumeOutcome,
+    StreamDurability, StreamRetention, StreamStart, StreamTopologyEntry, Subscribe, SubscribeOk,
+    SubscribeStream, SubscriptionClosed, TopologyOk, TopologyRequest, TopologyUpdateAck,
+    frame::Frame,
 };
 
 pub type WireResult<T> = Result<T, WireError>;
@@ -1212,72 +1212,6 @@ pub fn decode_replication_checkpoint_export_ok(
     let checkpoint = reader.replication_state_checkpoint()?;
     reader.finish()?;
     Ok(ReplicationCheckpointExportOk { checkpoint })
-}
-
-pub fn encode_replication_checkpoint_install(
-    request_id: u64,
-    install: &ReplicationCheckpointInstall,
-) -> WireResult<Frame> {
-    let mut out = payload_builder(b"FCI1");
-    put_queue_key(
-        &mut out,
-        &install.topic,
-        install.partition,
-        install.group.as_deref(),
-    )?;
-    put_replication_state_checkpoint(&mut out, &install.checkpoint)?;
-    Ok(frame(
-        Op::ReplicationCheckpointInstall,
-        request_id,
-        out.freeze(),
-    ))
-}
-
-pub fn decode_replication_checkpoint_install(
-    frame: &Frame,
-) -> WireResult<ReplicationCheckpointInstall> {
-    expect_op(frame, Op::ReplicationCheckpointInstall)?;
-    let mut reader = Reader::new(&frame.payload);
-    reader.expect_magic(b"FCI1", "replication checkpoint install")?;
-    let (topic, partition, group) = reader.queue_key()?;
-    let checkpoint = reader.replication_state_checkpoint()?;
-    reader.finish()?;
-    Ok(ReplicationCheckpointInstall {
-        topic,
-        group,
-        partition,
-        checkpoint,
-    })
-}
-
-pub fn encode_replication_checkpoint_install_ok(
-    request_id: u64,
-    ok: &ReplicationCheckpointInstallOk,
-) -> WireResult<Frame> {
-    let mut out = payload_builder(b"FCK1");
-    out.put_u64(ok.message_next_offset);
-    out.put_u64(ok.event_next_offset);
-    out.put_u64(ok.applied_event_offset);
-    Ok(frame(
-        Op::ReplicationCheckpointInstallOk,
-        request_id,
-        out.freeze(),
-    ))
-}
-
-pub fn decode_replication_checkpoint_install_ok(
-    frame: &Frame,
-) -> WireResult<ReplicationCheckpointInstallOk> {
-    expect_op(frame, Op::ReplicationCheckpointInstallOk)?;
-    let mut reader = Reader::new(&frame.payload);
-    reader.expect_magic(b"FCK1", "replication checkpoint install ok")?;
-    let ok = ReplicationCheckpointInstallOk {
-        message_next_offset: reader.u64()?,
-        event_next_offset: reader.u64()?,
-        applied_event_offset: reader.u64()?,
-    };
-    reader.finish()?;
-    Ok(ok)
 }
 
 fn put_publish_common(out: &mut BytesMut, publish: &Publish) -> WireResult<()> {
@@ -3533,10 +3467,7 @@ pub fn history_replication_owner_is_receiver(opcode: u16) -> WireResult<bool> {
     {
         return Ok(true);
     }
-    if [Op::ReplicationApply, Op::ReplicationCheckpointInstall]
-        .iter()
-        .any(|op| *op as u16 == opcode)
-    {
+    if opcode == Op::ReplicationApply as u16 {
         return Ok(false);
     }
     Err(WireError::InvalidRecordSequence(
@@ -3620,7 +3551,6 @@ pub fn replication_resource_prefix(
         x if x == Op::StreamReplicationRead as u16 => b"FSQ1",
         x if x == Op::ReplicationApply as u16 => b"FRA1",
         x if x == Op::ReplicationCheckpointExport as u16 => b"FCE1",
-        x if x == Op::ReplicationCheckpointInstall as u16 => b"FCI1",
         x if x == Op::ReplicationStreamStart as u16 => b"FSS1",
         _ => return Ok(None),
     };
