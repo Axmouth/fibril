@@ -2851,99 +2851,48 @@ impl Broker<StromaEngine> {
             ));
         }
 
-        let mut options = options;
-        for checkpoint_attempts in 0..=1 {
-            let outcome = self
-                .catch_up_replication_follower_from_owner(
-                    owner, topic, partition, group, kind, options,
-                )
-                .await?;
+        let outcome = self
+            .catch_up_replication_follower_from_owner(
+                owner, topic, partition, group, kind, options,
+            )
+            .await?;
+        let BrokerReplicationCatchUp::CheckpointRequired { .. } = &outcome else {
+            return Ok(outcome);
+        };
 
-            let BrokerReplicationCatchUp::CheckpointRequired {
-                progress,
-                messages,
-                events,
-            } = outcome
-            else {
-                return Ok(outcome);
-            };
-
-            if checkpoint_attempts == 1 {
-                return Ok(BrokerReplicationCatchUp::CheckpointRequired {
-                    progress,
-                    messages,
-                    events,
-                });
-            }
-
-            let assignment = self
-                .assignment_cache
-                .get(&QueueKey {
-                    tp: topic.into(),
-                    part: partition,
-                    group: group.map(str::to_owned),
-                })
-                .map(|a| a.clone());
-            if let Some(assignment) = assignment.filter(|a| a.history.is_some()) {
+        // A follower below the owner's retained history can only be rebuilt
+        // through a coordinated reseed, which requires an admitted history
+        // binding. Without one there is no safe local reset, so the worker
+        // reports the requirement and backs off on the checkpoint poll.
+        let assignment = self
+            .assignment_cache
+            .get(&QueueKey {
+                tp: topic.into(),
+                part: partition,
+                group: group.map(str::to_owned),
+            })
+            .map(|a| a.clone());
+        match assignment.filter(|a| a.history.is_some()) {
+            Some(assignment) => {
                 self.ownership
                     .request_queue_reseed(topic, partition, group, assignment.epoch)
                     .await
                     .map_err(BrokerError::Unknown)?;
-                return Err(BrokerError::Unknown(
-                    "retained history exhausted; coordinated queue re-seeding requested".into(),
-                ));
+                tracing::info!(
+                    topic,
+                    partition = partition.id(),
+                    group,
+                    "retained history exhausted, coordinated reseed requested"
+                );
             }
-            let checkpoint = owner
-                .export_owner_state_checkpoint(topic, partition, group)
-                .await?;
-            tracing::warn!(
-                topic, partition = partition.id(), group,
-                message_requirement = ?messages, event_requirement = ?events,
-                message_epoch = checkpoint.message_epoch, event_epoch = checkpoint.event_epoch,
-                message_next_offset = checkpoint.message_checkpoint_offset,
-                event_next_offset = checkpoint.event_next_offset,
-                applied_event_offset = checkpoint.applied_event_offset,
-                "replication checkpoint installation starting"
-            );
-            self.install_follower_state_checkpoint(
-                topic,
-                partition,
-                group,
-                FollowerStateCheckpointInstall {
-                    combined_log: checkpoint.combined_log,
-                    event_start_offset: checkpoint.event_start_offset,
-                    message_epoch: checkpoint.message_epoch,
-                    event_epoch: checkpoint.event_epoch,
-                    message_next_offset: checkpoint.message_checkpoint_offset,
-                    event_next_offset: checkpoint.event_next_offset,
-                    applied_event_offset: checkpoint.applied_event_offset,
-                    state_snapshot: checkpoint.state_snapshot,
-                },
-            )
-            .await?;
-            tracing::info!(
+            None => tracing::warn!(
                 topic,
                 partition = partition.id(),
                 group,
-                message_epoch = checkpoint.message_epoch,
-                event_epoch = checkpoint.event_epoch,
-                message_next_offset = checkpoint.message_checkpoint_offset,
-                event_next_offset = checkpoint.event_next_offset,
-                applied_event_offset = checkpoint.applied_event_offset,
-                "replication checkpoint installed; follower catch-up will resume"
-            );
-
-            options.message_from = checkpoint.message_checkpoint_offset;
-            options.event_from = checkpoint.event_start_offset;
+                "retained history exhausted and no admitted history binding, follower cannot be reseeded"
+            ),
         }
-
-        tracing::error!(
-            topic,
-            partition = partition.id(),
-            group,
-            "checkpoint-aware catch-up loop reached an unreachable state"
-        );
-        unreachable!("checkpoint_attempts loop always returns");
+        Ok(outcome)
     }
 
     pub async fn run_follower_replication_worker_once(

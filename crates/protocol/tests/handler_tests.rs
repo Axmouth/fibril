@@ -3406,12 +3406,13 @@ async fn follower_worker_loop_catches_up_over_static_protocol_resolver() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn follower_worker_loop_refuses_unauthorized_checkpoint_reset_for_queue() {
+async fn follower_worker_loop_reports_checkpoint_requirement_without_history() {
     // Queues keep payloads in the event log, so a checkpoint replaces the
     // only copy of the replica's history. Only an excluded learner with a
-    // fresh authorization may install one. A worker with a history-less
-    // assignment must fail closed: it asks for the checkpoint, the install is
-    // refused, and the follower keeps its log and never reports caught up.
+    // fresh authorization may install one, through coordinated reseeding. A
+    // worker with a history-less assignment must fail closed without asking
+    // the owner for a checkpoint: it reports the requirement, keeps its log
+    // and never reports caught up.
     let topic = "replication.resolver.checkpoint";
     let group = Some("workers".to_string());
     let (owner_broker, _owner_dir) = open_test_broker().await;
@@ -3511,23 +3512,30 @@ async fn follower_worker_loop_refuses_unauthorized_checkpoint_reset_for_queue() 
     };
 
     let observer = async {
-        // Several refused attempts show the refusal is stable across retries.
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while exports.load(std::sync::atomic::Ordering::SeqCst) < 3 {
+        let state = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(state) = follower_broker
+                    .follower_replication_worker_snapshot(
+                        topic,
+                        Partition::new(0),
+                        group.as_deref(),
+                    )
+                    .await
+                    && matches!(
+                        state.status,
+                        FollowerReplicationWorkerStatus::CheckpointRequired { .. }
+                    )
+                {
+                    return state;
+                }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("follower worker should keep requesting the owner checkpoint");
-        let state = follower_broker
-            .follower_replication_worker_snapshot(topic, Partition::new(0), group.as_deref())
-            .await
-            .expect("follower worker state should exist");
-        assert_ne!(
-            state.status,
-            FollowerReplicationWorkerStatus::CaughtUp,
-            "a refused checkpoint must not look caught up"
-        );
+        .expect("follower worker should report the checkpoint requirement");
+        // Several more retries must still never pause the owner for an export.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!((state.message_next_offset, state.event_next_offset), (0, 0));
         shutdown.cancel();
     };

@@ -4514,23 +4514,26 @@ async fn checkpoint_aware_catch_up_refuses_unauthorized_reset_of_overlapping_pre
     }
 
     // The overlapping prefix needs a checkpoint reset. Without a bound
-    // history there is no authority for it, so the reset fails closed and the
-    // local records stay untouched.
-    assert_unauthorized_checkpoint_reset_refused(
-        follower
-            .catch_up_replication_follower_from_owner_with_checkpoint(
-                &owner,
-                topic,
-                partition,
-                None,
-                ReplicationResourceKind::Queue,
-                BrokerReplicationCatchUpOptions {
-                    max_messages_per_read: 10,
-                    max_events_per_read: 10,
-                    ..Default::default()
-                },
-            )
-            .await,
+    // history there is no authority for it, so catch-up only reports the
+    // requirement and the local records stay untouched.
+    let outcome = follower
+        .catch_up_replication_follower_from_owner_with_checkpoint(
+            &owner,
+            topic,
+            partition,
+            None,
+            ReplicationResourceKind::Queue,
+            BrokerReplicationCatchUpOptions {
+                max_messages_per_read: 10,
+                max_events_per_read: 10,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, BrokerReplicationCatchUp::CheckpointRequired { .. }),
+        "{outcome:?}"
     );
     assert_eq!(
         follower
