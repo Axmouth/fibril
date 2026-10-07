@@ -174,7 +174,7 @@ pub struct GanglionBrokerTaskHandles {
 
 #[derive(Debug, thiserror::Error)]
 pub enum FibrilServerError {
-    #[error("data dir: {0}")]
+    #[error(transparent)]
     NodeLayout(#[from] NodeLayoutError),
     #[error("failed to open storage engine: {0}")]
     Storage(#[source] StromaError),
