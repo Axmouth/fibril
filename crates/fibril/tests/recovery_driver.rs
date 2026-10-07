@@ -1706,7 +1706,8 @@ async fn admitted_replica_reseed(
 ) {
     use fibril_broker::{
         broker::{
-            BrokerOwnerReplicationPeer, BrokerReplicationCatchUpOptions, ReplicationResourceKind,
+            BrokerOwnerReplicationPeer, BrokerReplicationCatchUp, BrokerReplicationCatchUpOptions,
+            ReplicationResourceKind,
         },
         coordination::CoordinationSnapshot,
     };
@@ -1903,12 +1904,11 @@ async fn admitted_replica_reseed(
                 max_wait_ms: 0,
             },
         )
-        .await;
+        .await
+        .unwrap();
     assert!(
-        exhausted
-            .unwrap_err()
-            .to_string()
-            .contains("coordinated queue re-seeding requested")
+        matches!(exhausted, BrokerReplicationCatchUp::CheckpointRequired { .. }),
+        "{exhausted:?}"
     );
     let intent = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
