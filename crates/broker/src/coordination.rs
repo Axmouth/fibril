@@ -89,10 +89,11 @@ impl PartitionAssignment {
             && now.binding == old.binding
             && now.owner == old.owner
             && now.blocked_local_replica == old.blocked_local_replica
-            && old
-                .replicas
-                .iter()
-                .all(|(id, instance)| now.replicas.get(id) == Some(instance))
+            && now.replicas.get(&now.owner) == old.replicas.get(&old.owner)
+            // A follower may be re-admitted under a new process and storage
+            // instance. Its slot in the eligible set stays, so the write
+            // contract holds. Only that follower's own sessions end.
+            && old.replicas.keys().all(|id| now.replicas.contains_key(id))
     }
 
     /// Transport proof is narrower than the queue's unchanged write contract.
@@ -102,7 +103,8 @@ impl PartitionAssignment {
             && self.is_followed_by(follower)
             && match (&self.history, &previous.history) {
                 (Some(now), Some(old)) => {
-                    now.replica_generations.get(follower) == old.replica_generations.get(follower)
+                    now.replicas.get(follower) == old.replicas.get(follower)
+                        && now.replica_generations.get(follower) == old.replica_generations.get(follower)
                         && now.replica_generations.get(&now.owner) == old.replica_generations.get(&old.owner)
                 }
                 (None, None) => true,

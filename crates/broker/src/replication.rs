@@ -4749,7 +4749,7 @@ mod queue_dependency_tests {
                 3 => {
                     Arc::make_mut(bad.history.as_mut().unwrap())
                         .replicas
-                        .get_mut("b")
+                        .get_mut("a")
                         .unwrap()
                         .storage = [9; 16]
                 }
@@ -4757,6 +4757,86 @@ mod queue_dependency_tests {
             }
             assert!(!bad.preserves_replication_contract(&before));
         }
+        // A follower re-admitted under a new instance keeps the contract, but
+        // proof from its earlier sessions is gone. Other sessions keep theirs.
+        let mut rebound = after.clone();
+        Arc::make_mut(rebound.history.as_mut().unwrap())
+            .replicas
+            .get_mut("b")
+            .unwrap()
+            .storage = [9; 16];
+        assert!(rebound.preserves_replication_contract(&after));
+        assert!(!rebound.preserves_replication_session(&after, "b"));
+        assert!(rebound.preserves_replication_session(&after, "c"));
+        let mut dropped = after.clone();
+        Arc::make_mut(dropped.history.as_mut().unwrap()).replicas.remove("b");
+        assert!(!dropped.preserves_replication_contract(&after));
+        broker.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn restarted_follower_counts_only_after_readmission_under_its_new_process() {
+        let dir = stroma_core::test_dir!("restarted_follower_readmission");
+        let engine = StromaEngine::open(
+            &dir.root,
+            stroma_core::StromaKeratinConfig::from_message_log(
+                stroma_core::KeratinConfig::test_default(),
+            ),
+            stroma_core::SnapshotConfig::default(),
+        )
+        .await
+        .unwrap();
+        let broker = Broker::new(engine, BrokerConfig::default(), None);
+        let key = QueueKey { tp: "q".into(), part: 0.into(), group: None };
+        // Three copies, majority: the owner plus one follower confirm.
+        let mut assignment = accepted_assignment();
+        assignment.durability = crate::coordination::ReplicationDurabilityPolicy::MajorityDurable;
+        broker.cache_queue_assignment(&assignment);
+        let before = assignment.clone();
+        let old_c = broker
+            .begin_replication_progress_session("q", 0.into(), None, ReplicationResourceKind::Queue, "c", 1)
+            .unwrap();
+        let b = broker
+            .begin_replication_progress_session("q", 0.into(), None, ReplicationResourceKind::Queue, "b", 1)
+            .unwrap();
+        let gate = broker.replication_confirm_gate();
+        let wait = gate.await_dependency(&key, 0, Some(commit(1)), Some(before.clone()));
+        tokio::pin!(wait);
+        assert!(futures::poll!(&mut wait).is_pending());
+
+        // c restarted: suspended until re-admitted. Its old session is dead.
+        let history = Arc::make_mut(assignment.history.as_mut().unwrap());
+        history.suspended_replicas.insert("c".into());
+        broker.cache_queue_assignment(&assignment);
+        broker.record_replication_session_progress(&old_c, DurableProgress::Queue { next: 10 });
+        assert!(futures::poll!(&mut wait).is_pending(), "suspended c cannot confirm");
+        assert!(
+            broker
+                .begin_replication_progress_session("q", 0.into(), None, ReplicationResourceKind::Queue, "c", 1)
+                .is_none()
+        );
+
+        // Re-admission names the new process and storage. The waiting publish
+        // keeps its contract, and stale progress from c's old process still
+        // does not count.
+        let history = Arc::make_mut(assignment.history.as_mut().unwrap());
+        history.suspended_replicas.remove("c");
+        history.replicas.insert(
+            "c".into(),
+            crate::history_replication::ReplicaHistoryInstance { process: [7; 16], storage: [8; 16] },
+        );
+        broker.cache_queue_assignment(&assignment);
+        broker.record_replication_session_progress(&old_c, DurableProgress::Queue { next: 10 });
+        assert!(futures::poll!(&mut wait).is_pending(), "old c session stays fenced");
+        let new_c = broker
+            .begin_replication_progress_session("q", 0.into(), None, ReplicationResourceKind::Queue, "c", 1)
+            .unwrap();
+        broker.record_replication_session_progress(&new_c, DurableProgress::Queue { next: 10 });
+        tokio::time::timeout(Duration::from_secs(1), wait).await.unwrap().unwrap();
+        // b's session opened before the re-admission still reports.
+        broker.record_replication_session_progress(&b, DurableProgress::Queue { next: 3 });
+        let reported = broker.follower_replication_progress("q", 0.into(), None);
+        assert!(reported.contains(&("b".into(), queue(3))), "{reported:?}");
         broker.shutdown().await;
     }
 
