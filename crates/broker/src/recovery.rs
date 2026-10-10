@@ -11,7 +11,7 @@ pub use stroma_core::recovery_inspection as inspection;
 pub use stroma_core::recovery_journal as journal;
 pub use stroma_core::recovery_replay as replay;
 pub use stroma_core::{
-    QueueLogLayout, RecoveryReadPage, RecoveryReadRequest, RecoveryReadSource, RecoveryRecord,
+    RecoveryReadPage, RecoveryReadRequest, RecoveryReadSource, RecoveryRecord,
     RecoverySealRequest, RecoverySequentialRead, RetainedHistoryIdentity, RetainedLog,
     RetainedLogs, SealedReplicaFrontiers,
 };

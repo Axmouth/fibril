@@ -328,7 +328,6 @@ async fn inspection_download_resumes_over_tcp_then_revalidates_without_source() 
             topic: command.topic.clone(),
             partition: command.partition.id(),
             group: command.group.clone(),
-            stream: false,
             replica: sealed.node_id.clone(),
             seal: sealed.seal.clone(),
         },

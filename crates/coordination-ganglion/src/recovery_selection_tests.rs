@@ -114,7 +114,6 @@ fn inspect(a: &TestSource, b: &TestSource, target: Option<u64>) -> RecoveryPairI
         "q",
         0,
         None,
-        false,
         a.report.seal.clone(),
         b.report.seal.clone(),
         Default::default(),

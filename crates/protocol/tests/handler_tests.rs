@@ -7605,6 +7605,21 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
         .await
         .is_err()
     );
+    // A stream command is refused even when the seals are queue histories.
+    let error = inspect_recovery_pair(
+        &config,
+        &fibril_broker::recovery::RecoverySealCommand {
+            stream: true,
+            ..command.clone()
+        },
+        &seals[0],
+        &seals[1],
+        limits,
+        Duration::from_secs(10),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("queue resources only"), "{error}");
 
     if !checkpoints {
         // Two bounded cursors may remain idle. Disconnect and idle expiry must
@@ -8369,8 +8384,8 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
         .apply_follower_queue_records("initial-wire", Partition::new(0), None, records)
         .await
         .unwrap();
-    // The empty message lane stays at zero. The event cursor reports the
-    // follower's durable copy of the publish.
+    // Reading from offset 1 reports the follower's durable copy of the
+    // publish, which releases the confirm.
     peer.read_owner_queue_records_fenced("initial-wire", Partition::new(0), None, 1, 8, 65536, 0, Some(1))
     .await
     .unwrap();
@@ -9470,7 +9485,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
         new_confirm.try_recv(),
         Err(tokio::sync::oneshot::error::TryRecvError::Empty)
     ));
-    let event_next = match &records {
+    let log_next = match &records {
         OwnerReplicationRead::Batch(batch) => batch.records.last().unwrap().0 + 1,
         _ => unreachable!(),
     };
@@ -9483,7 +9498,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
             "initial-wire",
             Partition::new(0),
             None,
-            event_next,
+            log_next,
             8,
             65536,
             0,

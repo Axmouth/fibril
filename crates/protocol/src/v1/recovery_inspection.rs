@@ -76,10 +76,23 @@ fn source_queue_next(source: &BrokerSealedReplica) -> Result<u64, BrokerError> {
         .ok_or_else(|| BrokerError::InvalidArgument("source artifact requires a queue seal".into()))
 }
 
+/// Inspection compares queue histories only. The inspector checks the seal
+/// histories, and this keeps a stream command from being answered with queue
+/// seals.
+fn refuse_stream_command(command: &RecoverySealCommand) -> Result<(), BrokerError> {
+    if command.stream {
+        return Err(BrokerError::InvalidArgument(
+            "recovery inspection supports queue resources only".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn journal_identity(
     command: &RecoverySealCommand,
     source: &BrokerSealedReplica,
 ) -> Result<RecoveryJournalIdentity, BrokerError> {
+    refuse_stream_command(command)?;
     if source.seal.request.transition != command.transition
         || source.seal.request.fence_epoch != command.fence_epoch
     {
@@ -91,7 +104,6 @@ fn journal_identity(
         topic: command.topic.clone(),
         partition: command.partition.id(),
         group: command.group.clone(),
-        stream: command.stream,
         replica: source.node_id.clone(),
         seal: source.seal.clone(),
     })
@@ -246,7 +258,7 @@ pub async fn inspect_recovery_pair_with_queue_replay(
     left: &BrokerSealedReplica,
     right: &BrokerSealedReplica,
     limits: RecoveryInspectionLimits,
-    event_next: u64,
+    next: u64,
     replay_limits: RecoveryReplayLimits,
     deadline: std::time::Duration,
 ) -> Result<ProtocolRecoveryPairInspection, BrokerError> {
@@ -256,7 +268,7 @@ pub async fn inspect_recovery_pair_with_queue_replay(
         left,
         right,
         limits,
-        Some((event_next, replay_limits, None)),
+        Some((next, replay_limits, None)),
         deadline,
     )
     .await
@@ -271,7 +283,7 @@ pub async fn inspect_recovery_pair_with_checkpoints(
     left: &BrokerSealedReplica,
     right: &BrokerSealedReplica,
     limits: RecoveryInspectionLimits,
-    event_next: u64,
+    next: u64,
     replay_limits: RecoveryReplayLimits,
     max_checkpoint_bytes: u32,
     deadline: std::time::Duration,
@@ -282,7 +294,7 @@ pub async fn inspect_recovery_pair_with_checkpoints(
         left,
         right,
         limits,
-        Some((event_next, replay_limits, Some(max_checkpoint_bytes))),
+        Some((next, replay_limits, Some(max_checkpoint_bytes))),
         deadline,
     )
     .await
@@ -459,6 +471,7 @@ async fn inspect_pair_inner<T: Send + 'static>(
             "recovery inspection requires distinct contacted replicas".into(),
         ));
     }
+    refuse_stream_command(command)?;
     for replica in [left, right] {
         if replica.seal.request.transition != command.transition
             || replica.seal.request.fence_epoch != command.fence_epoch
@@ -472,7 +485,6 @@ async fn inspect_pair_inner<T: Send + 'static>(
         &command.topic,
         command.partition.id(),
         command.group.as_deref(),
-        command.stream,
         left.seal.clone(),
         right.seal.clone(),
         limits,

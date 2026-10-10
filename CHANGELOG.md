@@ -12,6 +12,14 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Breaking changes
 
+- Queues finish the move to one replicated log. The broker no longer
+  re-exports `QueueLogLayout`, and recovery inspection journals no longer
+  record a `stream` flag, so journal and phase caches from earlier builds are
+  rebuilt rather than reused. Recovery inspection refuses a stream command
+  itself instead of relying on the seal histories. Recovery stages written by
+  earlier builds are refused, so an in-flight recovery must be restarted
+  after upgrading.
+
 - Queue recovery coordination records one queue log position. Recorded
   source selections carry `next` instead of event and message tails, and
   their digest tag moves to `fibril-queue-recovery-selection-v2`. Recovery

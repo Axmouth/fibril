@@ -1859,7 +1859,7 @@ fn durable_publish_unconfirmed_while_replica_partitioned() {
 /// head advances to offset 3. A fresh follower starts from offset 0, which is now
 /// below the owner's head, so the owner answers CheckpointRequired. With
 /// checkpoint install enabled the follower installs the owner's state checkpoint
-/// and resumes at the tail. Reaching CaughtUp at message_next 6 is only possible
+/// and resumes at the tail. Reaching CaughtUp at next offset 6 is only possible
 /// via the checkpoint install: offsets 0..3 no longer exist to tail-replay.
 #[test]
 fn follower_installs_checkpoint_after_owner_truncates() {
@@ -1958,7 +1958,7 @@ fn follower_installs_checkpoint_after_owner_truncates() {
         .await
         .expect("follower installs a checkpoint and catches up to the owner tail");
 
-        // Reaching the owner tail (message_next 6) is only possible via the
+        // Reaching the owner tail (next offset 6) is only possible via the
         // checkpoint install: offsets 0..3 were truncated and cannot be replayed.
 
         resolver.close_all().await;
