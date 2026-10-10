@@ -48,7 +48,7 @@ label the simulated state. Allocator/THP repeats remain evidence-driven follow-u
 
 ## Medium-term directions
 
-These four directions follow the immediate rounds. They are exploration and
+These directions follow the immediate rounds. They are exploration and
 product targets, with implementation scope and acceptance refined individually.
 
 ### Ordering across partitioned queues
@@ -82,6 +82,22 @@ while retaining direct owner routing where reachable. Define advertisement scope
 authentication, failure/retry outcomes, loop prevention and bounded forwarding.
 Overlapping topology groups and arbitrary multi-hop routing remain later options
 that require a concrete deployment use case.
+
+### MCP server and agent integration
+
+Add a Model Context Protocol (MCP) server for structured, read-only inspection of
+queues, replication, recovery evidence and settings adoption. Return bounded
+results with observation times, explicit unknowns and links to relevant dashboard
+views. Reuse typed operations, validation and authorization across the dashboard,
+CLI and MCP interface, with shared diagnostic definitions.
+
+Extend the interface with scoped, audited administrative actions after the
+read-only surface is validated. Explore Python and TypeScript integrations for
+agent task submission, progress and results, with explicit confirmation, retry,
+idempotency and cancellation contracts. Use a small ingestion pipeline example
+to assess a client-side graph layer and integration with existing agent frameworks.
+Keep workflow state and external side-effect guarantees explicit. Validate the
+experience with worker interruption and recovery, alongside ordinary service work.
 
 ## Path to 1.0
 
