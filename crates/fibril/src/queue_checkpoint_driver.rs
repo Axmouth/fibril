@@ -157,7 +157,7 @@ pub(crate) fn spawn(
                         now,
                         jitter_ms,
                         activity.local_append_bytes,
-                        activity.event_epoch,
+                        activity.epoch,
                     )
                 });
                 schedule.observe(
@@ -165,11 +165,11 @@ pub(crate) fn spawn(
                     now,
                     status.certificate,
                     activity.local_append_bytes,
-                    activity.event_epoch,
+                    activity.epoch,
                 );
                 let event_delta = activity
-                    .event_next
-                    .saturating_sub(status.event_next.unwrap_or(activity.event_head));
+                    .next
+                    .saturating_sub(status.next.unwrap_or(activity.head));
                 let reason = schedule.reason(now, event_delta, activity.local_append_bytes);
                 let start = provider.replication_node_id() == Some(status.owner.as_str())
                     && !status.in_progress

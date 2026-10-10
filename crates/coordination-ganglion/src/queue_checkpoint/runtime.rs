@@ -55,13 +55,11 @@ impl Attempt {
                 .ok_or("checkpoint pin node not admitted")?;
             if pin.attempt != self.id()?
                 || pin.storage != storage(&self.context, instance)?
-                || pin.event_epoch != epoch
-                || pin.message_epoch != epoch
+                || pin.epoch != epoch
             {
                 return Err(format!(
-                    "checkpoint pin differs from accepted storage or epoch: node={node}, epochs=({},{}), expected={epoch}, attempt_matches={}, storage_matches={}",
-                    pin.message_epoch,
-                    pin.event_epoch,
+                    "checkpoint pin differs from accepted storage or epoch: node={node}, epoch={}, expected={epoch}, attempt_matches={}, storage_matches={}",
+                    pin.epoch,
                     pin.attempt == self.id()?,
                     pin.storage == storage(&self.context, instance)?
                 ));
@@ -69,11 +67,7 @@ impl Attempt {
         }
         if let Some(target) = &self.target {
             if self.pins.len() != self.context.replicas.len()
-                || self.pins.values().any(|p| {
-                    target.log_layout != p.log_layout || target.event_next < p.event_next
-                        || target.message_next < p.message_next
-                        || target.message_head < p.message_head
-                })
+                || self.pins.values().any(|p| !cut_covers_pin(target, p))
             {
                 return Err("checkpoint cut does not cover every pinned base".into());
             }
@@ -100,6 +94,14 @@ impl Attempt {
         }
         Ok(())
     }
+}
+/// The cut covers each pin's applied boundary and physical log tail, which are
+/// different offsets in the one queue log, and stays above its payload floor.
+fn cut_covers_pin(target: &QueueCheckpointTarget, pin: &QueueCheckpointPin) -> bool {
+    target.next >= pin.applied_next
+        && target.next >= pin.log_next
+        && target.payload_head >= pin.payload_head
+        && target.payload_head <= target.next
 }
 fn key(resource: &ResourceIdentity) -> Result<String, String> {
     Ok(format!(
@@ -135,14 +137,12 @@ fn storage(
 }
 fn empty_contents() -> QueueCheckpointContents {
     QueueCheckpointContents {
-        log_layout: Default::default(),
-        event_next: 0,
-        message_head: 0,
-        message_next: 0,
-        required_message_next: 0,
+        next: 0,
+        payload_head: 0,
+        required_next: 0,
         snapshot_digest: [0; 32],
         state_digest: [0; 32],
-        message_digest: [0; 32],
+        payload_digest: [0; 32],
         live_payload_digest: [0; 32],
     }
 }
@@ -446,17 +446,18 @@ impl GanglionCoordination {
             if history.owner != self.node_id || attempt.pins.len() != history.replicas.len() {
                 return Ok(false);
             }
-            let event = attempt.pins.values().map(|p| p.event_next).max().unwrap();
-            let head = attempt.pins.values().map(|p| p.message_head).max().unwrap();
-            let tail = attempt.pins.values().map(|p| p.message_next).max().unwrap();
+            // Applied boundaries never exceed log tails, so the largest tail
+            // covers every pin on both counts.
+            let tail = attempt.pins.values().map(|p| p.log_next.max(p.applied_next)).max().unwrap();
+            let head = attempt.pins.values().map(|p| p.payload_head).max().unwrap();
             next.target = Some(
                 engine
-                    .queue_checkpoint_target(local, event, head, tail)
+                    .queue_checkpoint_target(local, tail, head)
                     .await
                     .map_err(|e| e.to_string())?,
             );
             if before.active.as_ref().is_some_and(|active| {
-                next.target.as_ref().unwrap().event_next <= active.proposal.contents.event_next
+                next.target.as_ref().unwrap().next <= active.proposal.contents.next
             }) {
                 let idle = State {
                     active: before.active.clone(),
@@ -543,7 +544,7 @@ impl GanglionCoordination {
             tracing::info!(
                 topic = resource.name,
                 partition = resource.partition,
-                event_next = published.proposal.as_ref().unwrap().contents.event_next,
+                next = published.proposal.as_ref().unwrap().contents.next,
                 replicas = published.receipts.len(),
                 "queue checkpoint committed by all admitted replicas"
             );
@@ -554,7 +555,7 @@ impl GanglionCoordination {
                 topic = resource.name,
                 partition = resource.partition,
                 node = self.node_id,
-                event_next = published.proposal.as_ref().unwrap().contents.event_next,
+                next = published.proposal.as_ref().unwrap().contents.next,
                 "queue checkpoint installed with durable retention"
             );
         }
@@ -575,7 +576,7 @@ pub struct QueueCheckpointStatus {
     pub attempt_age_ms: Option<u64>,
     pub owner: String,
     pub in_progress: bool,
-    pub event_next: Option<u64>,
+    pub next: Option<u64>,
     pub certificate: Option<[u8; 32]>,
     pub pins: usize,
     pub receipts: usize,
@@ -605,7 +606,7 @@ impl GanglionCoordination {
             attempt_age_ms: attempt.map(|a| crate::unix_millis_now().saturating_sub(a.started_ms)),
             owner: history.owner.clone(),
             in_progress: attempt.is_some_and(|a| !a.committed || a.installed.len() != a.context.replicas.len()),
-            event_next: active.map(|a| a.proposal.contents.event_next),
+            next: active.map(|a| a.proposal.contents.next),
             certificate: active.map(QueueCheckpointEvidence::digest).transpose()?,
             pins: attempt.map_or(0, |a| a.pins.len()),
             receipts: attempt.map_or(0, |a| a.receipts.len()),
@@ -613,5 +614,45 @@ impl GanglionCoordination {
             admitted: history.replicas.len(),
             failed: attempt.and_then(|a| a.failed.clone()),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fibril_broker::queue_engine::StorageHistoryBinding;
+
+    #[test]
+    fn cut_must_cover_pin_log_tail_applied_boundary_and_payload_floor() {
+        let pin = QueueCheckpointPin {
+            attempt: [7; 32],
+            storage: PreparedStorageHistory {
+                topic: "q".into(),
+                partition: 0,
+                group: None,
+                stream: false,
+                binding: StorageHistoryBinding {
+                    resource_incarnation: [1; 16],
+                    accepted_history: [2; 16],
+                    writer_session: [3; 16],
+                },
+                storage_instance: [4; 16],
+            },
+            epoch: 1,
+            applied_next: 10,
+            payload_head: 4,
+            log_next: 14,
+            required_next: 9,
+            snapshot_digest: [5; 32],
+            state_digest: [6; 32],
+        };
+        let covers = |next, payload_head| {
+            cut_covers_pin(&QueueCheckpointTarget { next, payload_head }, &pin)
+        };
+        assert!(covers(14, 4));
+        assert!(!covers(13, 4), "cut between applied boundary and log tail");
+        assert!(!covers(9, 4), "cut below applied boundary");
+        assert!(!covers(14, 3), "payload floor below pin floor");
+        assert!(!covers(14, 15), "payload floor above cut");
     }
 }

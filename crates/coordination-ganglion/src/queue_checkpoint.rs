@@ -124,7 +124,7 @@ impl QueueCheckpointProposal {
     }
 
     pub fn digest(&self) -> Result<[u8; 32], String> {
-        digest(b"fibril-queue-checkpoint-proposal-v1\0", self)
+        digest(b"fibril-queue-checkpoint-proposal-v2\0", self)
     }
 
     pub fn contents(&self) -> &QueueCheckpointContents {
@@ -173,10 +173,8 @@ impl QueueCheckpointProposal {
             || self.owner != old.owner
             || self.replicas != old.replicas
             || self.candidate == old.candidate
-            || self.contents.log_layout != old.contents.log_layout
-            || self.contents.event_next <= old.contents.event_next
-            || self.contents.message_next < old.contents.message_next
-            || self.contents.message_head < old.contents.message_head
+            || self.contents.next <= old.contents.next
+            || self.contents.payload_head < old.contents.payload_head
         {
             return Err("checkpoint replacement regresses or changes its accepted lineage".into());
         }
@@ -211,7 +209,7 @@ impl QueueCheckpointEvidence {
     }
 
     pub fn digest(&self) -> Result<[u8; 32], String> {
-        digest(b"fibril-queue-checkpoint-evidence-v1\0", self)
+        digest(b"fibril-queue-checkpoint-evidence-v2\0", self)
     }
 
     fn validate_agreement(&self, snapshot: &CoordinationSnapshot) -> Result<(), String> {

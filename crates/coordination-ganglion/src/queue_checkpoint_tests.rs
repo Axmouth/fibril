@@ -5,16 +5,14 @@ mod checkpoint_agreement {
         QueueCheckpointProposal, QueueCheckpointReceipt,
     };
 
-    fn contents(event_next: u64) -> QueueCheckpointContents {
+    fn contents(next: u64) -> QueueCheckpointContents {
         QueueCheckpointContents {
-            log_layout: Default::default(),
-            event_next,
-            message_head: 0,
-            message_next: 5,
-            required_message_next: 4,
+            next,
+            payload_head: 0,
+            required_next: next.saturating_sub(1),
             snapshot_digest: [11; 32],
             state_digest: [12; 32],
-            message_digest: [13; 32],
+            payload_digest: [13; 32],
             live_payload_digest: [14; 32],
         }
     }
@@ -50,11 +48,11 @@ mod checkpoint_agreement {
     }
 
     #[test]
-    fn checkpoint_receipt_cannot_change_payload_layout() {
+    fn checkpoint_receipt_cannot_change_payload_floor() {
         let (snapshot, _, _) = activated();
         let proposal = proposal(&snapshot, 5);
         let mut bad = receipt(&proposal, "a");
-        bad.contents.log_layout = fibril_broker::recovery::QueueLogLayout::Combined;
+        bad.contents.payload_head = 1;
         let mut agreement = QueueCheckpointAgreement::new(&snapshot, proposal).unwrap();
         assert!(agreement.record(&snapshot, "a", bad).is_err());
     }
@@ -145,14 +143,14 @@ mod checkpoint_agreement {
                 1 => bad.instance.process = [90; 16],
                 2 => bad.instance.storage = [91; 16],
                 3 => bad.proposal = [92; 32],
-                4 => bad.contents.event_next += 1,
-                5 => bad.contents.message_next += 1,
-                6 => bad.contents.message_head += 1,
-                7 => bad.contents.required_message_next -= 1,
+                4 => bad.contents.next += 1,
+                5 => bad.contents.payload_head += 1,
+                6 => bad.contents.required_next -= 1,
+                7 => bad.contents.required_next += 1,
                 8 => bad.contents.state_digest = [93; 32],
                 9 => bad.contents.snapshot_digest = [94; 32],
                 10 => bad.contents.live_payload_digest = [95; 32],
-                _ => bad.contents.message_digest = [96; 32],
+                _ => bad.contents.payload_digest = [96; 32],
             }
             let mut agreement = QueueCheckpointAgreement::new(&snapshot, proposal.clone()).unwrap();
             for node in ["a", "b"] {
@@ -189,14 +187,14 @@ mod checkpoint_agreement {
     }
 
     #[test]
-    fn checkpoint_zero_is_an_exact_exclusive_boundary_and_offsets_are_independent() {
+    fn checkpoint_zero_is_an_exact_exclusive_boundary_and_bounds_stay_within_the_cut() {
         let (snapshot, decision, _) = activated();
-        for (event_next, message_next, required_message_next) in
-            [(0, 0, 0), (1, 100, 99), (100, 1, 1)]
+        for (next, payload_head, required_next) in
+            [(0, 0, 0), (1, 1, 1), (100, 0, 99), (100, 100, 100)]
         {
-            let mut content = contents(event_next);
-            content.message_next = message_next;
-            content.required_message_next = required_message_next;
+            let mut content = contents(next);
+            content.payload_head = payload_head;
+            content.required_next = required_next;
             let proposal = QueueCheckpointProposal::new(
                 &snapshot,
                 &decision.incarnation.resource,
@@ -211,9 +209,9 @@ mod checkpoint_agreement {
         }
         for (head, next, required) in [(6, 5, 4), (0, 5, 6)] {
             let mut content = contents(0);
-            content.message_head = head;
-            content.message_next = next;
-            content.required_message_next = required;
+            content.payload_head = head;
+            content.next = next;
+            content.required_next = required;
             assert!(QueueCheckpointProposal::new(
                 &snapshot,
                 &decision.incarnation.resource,
@@ -226,7 +224,7 @@ mod checkpoint_agreement {
     }
 
     #[test]
-    fn checkpoint_replacement_advances_events_and_preserves_lineage_and_payload_bounds() {
+    fn checkpoint_replacement_advances_the_cut_and_preserves_lineage_and_payload_floor() {
         let (snapshot, decision, _) = activated();
         let old = complete(&snapshot, proposal(&snapshot, 10), None);
         let next = QueueCheckpointProposal::new(
@@ -247,9 +245,9 @@ mod checkpoint_agreement {
             let mut content = contents(11);
             let mut candidate = [10; 16];
             match mutation {
-                0 => content.event_next = 10,
-                1 => content.event_next = 9,
-                2 => content.message_next = 4,
+                0 => content.next = 10,
+                1 => content.next = 9,
+                2 => content.next = 0,
                 _ => candidate = [9; 16],
             }
             assert!(QueueCheckpointProposal::new(
@@ -262,7 +260,7 @@ mod checkpoint_agreement {
             .is_err());
         }
         let mut content = contents(10);
-        content.message_head = 2;
+        content.payload_head = 2;
         let with_head = QueueCheckpointProposal::new(
             &snapshot,
             &decision.incarnation.resource,

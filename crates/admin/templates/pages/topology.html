@@ -250,15 +250,15 @@ function renderSummary(data) {
     const rows = entries.map(entry => {
       const r = entry.resource || {}, status = entry.status || {}, local = entry.local_activity;
       const label = `${r.name || "?"} / ${r.partition ?? "?"}${r.group ? ` / ${r.group}` : ""}`;
-      const suffix = local && status.event_next != null ? Math.max(0, local.event_next - status.event_next) : "—";
-      const retained = local ? Math.max(0, local.message_next - local.message_head) : "—";
+      const suffix = local && status.next != null ? Math.max(0, local.next - status.next) : "—";
+      const retained = local ? Math.max(0, local.next - local.head) : "—";
       const age = status.age_ms == null ? "—" : `${(status.age_ms / 1000).toFixed(1)} s`;
       const progress = entry.error || status.failed || (status.in_progress
         ? `Building: ${status.receipts}/${status.admitted} proofs, ${status.installed}/${status.admitted} installed`
         : status.certificate ? "Agreed" : "Waiting");
-      return `<tr>${[label, status.event_next ?? "—", age, suffix, retained, progress].map(v => `<td>${escapeHtml(v)}</td>`).join("")}</tr>`;
+      return `<tr>${[label, status.next ?? "—", age, suffix, retained, progress].map(v => `<td>${escapeHtml(v)}</td>`).join("")}</tr>`;
     }).join("");
-    target.innerHTML = `<table><thead><tr><th>Queue / partition</th><th>Event cut</th><th>Age</th><th>Local suffix events</th><th>Local retained messages</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`
+    target.innerHTML = `<table><thead><tr><th>Queue / partition</th><th>Cut</th><th>Age</th><th>Local suffix records</th><th>Local retained records</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`
       + (checkpoints.truncated ? `<p>Showing ${entries.length} of ${escapeHtml(checkpoints.total)} checkpoint records.</p>` : "");
   }
 

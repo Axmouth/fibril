@@ -12,6 +12,13 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Breaking changes
 
+- Agreed queue checkpoint records in coordination describe one log. Pins
+  carry one epoch, the applied boundary, the payload floor and the log tail,
+  and cuts carry `next` and `payload_head`. Proposal and evidence digests
+  move to `-v2`, so in-flight checkpoint records from earlier builds are
+  refused. The checkpoint status reports `next` instead of `event_next`, and
+  the topology page shows the cut and retained records from one log.
+
 - Queue storage moves to Stroma layout version 3. Learner checkpoint installs
   and queue reseed completion records hold single queue log offsets. Storage
   directories from earlier builds are refused at startup, with no migration.

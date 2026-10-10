@@ -749,8 +749,8 @@ impl StromaEngine {
     pub async fn begin_queue_checkpoint_pin(&self, storage: PreparedStorageHistory, attempt: [u8; 32]) -> Result<QueueCheckpointBase, StromaError> {
         self.inner.begin_queue_checkpoint_pin(storage, attempt).await
     }
-    pub async fn queue_checkpoint_target(&self, storage: PreparedStorageHistory, event: u64, head: u64, next: u64) -> Result<QueueCheckpointTarget, StromaError> {
-        self.inner.queue_checkpoint_target(storage, event, head, next).await
+    pub async fn queue_checkpoint_target(&self, storage: PreparedStorageHistory, minimum_next: u64, minimum_payload_head: u64) -> Result<QueueCheckpointTarget, StromaError> {
+        self.inner.queue_checkpoint_target(storage, minimum_next, minimum_payload_head).await
     }
     pub async fn build_queue_checkpoint_capsule(&self, pin: QueueCheckpointPin, target: QueueCheckpointTarget, limits: QueueCheckpointBuildLimits) -> Result<QueueCheckpointCapsule, StromaError> {
         self.inner.build_queue_checkpoint_capsule(pin, target, limits).await
