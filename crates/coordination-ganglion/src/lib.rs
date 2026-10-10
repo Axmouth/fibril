@@ -703,6 +703,49 @@ fn parse_applied_tail(raw: &str, stream: bool) -> Option<u64> {
     }
 }
 
+/// Registered nodes whose heartbeat is not fresh. The controller startup
+/// grace waits for this list to empty before it moves any owner.
+fn startup_grace_missing(
+    committed: &ganglion_core::CoordinationSnapshot,
+    live: &HashMap<String, NodeInfo>,
+) -> Vec<String> {
+    let mut missing: Vec<String> = committed
+        .nodes
+        .keys()
+        .filter(|node| !live.contains_key(*node))
+        .cloned()
+        .collect();
+    missing.sort();
+    missing
+}
+
+/// Keep every existing assignment's owner and followers. A node missing from
+/// the live set may still be booting, so nothing moves away from it. Nodes the
+/// planner chose, its owner pick included, only fill slots up to the target.
+fn hold_existing_placements(
+    committed: &ganglion_core::CoordinationSnapshot,
+    desired: &mut ganglion_core::CoordinationSnapshot,
+    target_followers: impl Fn(&ganglion_core::ResourceIdentity) -> usize,
+) {
+    for (resource, planned) in desired.assignments.iter_mut() {
+        let Some(current) = committed.assignments.get(resource) else {
+            continue;
+        };
+        let target = target_followers(resource);
+        let mut followers = current.followers.clone();
+        for candidate in planned.followers.iter().chain(std::iter::once(&planned.owner)) {
+            if followers.len() >= target {
+                break;
+            }
+            if *candidate != current.owner && !followers.contains(candidate) {
+                followers.push(candidate.clone());
+            }
+        }
+        planned.owner = current.owner.clone();
+        planned.followers = followers;
+    }
+}
+
 /// Node label carrying the broker's last heartbeat (unix milliseconds, broker
 /// clock). Liveness compares against the controller's clock — TTLs must
 /// absorb clock skew and election gaps (see ganglion FAILURE_MODES.md §4b.6).
@@ -975,6 +1018,9 @@ pub struct ControllerConfig {
     /// election + retry time (ganglion FAILURE_MODES §4b.6).
     pub liveness_ttl: std::time::Duration,
     pub max_cas_retries: usize,
+    /// After winning leadership, move no owner until every registered node
+    /// heartbeats fresh or this long has passed. Zero disables the grace.
+    pub startup_grace: std::time::Duration,
 }
 
 impl Default for ControllerConfig {
@@ -988,6 +1034,7 @@ impl Default for ControllerConfig {
             tick: std::time::Duration::from_millis(2000),
             liveness_ttl: std::time::Duration::from_millis(9000),
             max_cas_retries: 8,
+            startup_grace: std::time::Duration::from_secs(30),
         }
     }
 }
@@ -1004,6 +1051,9 @@ pub struct ControllerStatus {
     /// Holds and pending recoveries that need an operator decision.
     pub attention: Vec<operator_override::RecoveryAttention>,
     pub eager_suspects: Vec<eager_failover::EagerSuspect>,
+    /// Set while the startup grace keeps owners in place after this node
+    /// became leader: the registered nodes without a fresh heartbeat.
+    pub startup_grace_waiting_for: Vec<String>,
 }
 
 /// Controller-iteration failure surface.
@@ -2448,6 +2498,10 @@ impl GanglionCoordination {
             let mut detector = eager_failover::Detector::default();
             let mut previous_suspects = std::collections::BTreeSet::new();
             let mut previous_attention = Vec::new();
+            // When this node won leadership, and whether the startup grace
+            // has ended for that term.
+            let mut leader_since: Option<std::time::Instant> = None;
+            let mut grace_over = false;
             loop {
                 let queues = provider.registered_queues();
                 let streams = provider.registered_streams();
@@ -2464,6 +2518,28 @@ impl GanglionCoordination {
                     _ => Default::default(),
                 };
                 let active = provider.node.is_leader().await;
+                if !active {
+                    leader_since = None;
+                    grace_over = false;
+                } else if leader_since.is_none() {
+                    leader_since = Some(std::time::Instant::now());
+                }
+                let waiting_for: Vec<String> = if active && !grace_over {
+                    let missing = startup_grace_missing(&provider.node.committed_snapshot(), &live);
+                    if missing.is_empty()
+                        || leader_since.is_some_and(|since| since.elapsed() >= config.startup_grace)
+                    {
+                        grace_over = true;
+                        if !missing.is_empty() {
+                            tracing::warn!(?missing, "controller startup grace expired; owners may move off nodes without a fresh heartbeat");
+                        }
+                        Vec::new()
+                    } else {
+                        missing
+                    }
+                } else {
+                    Vec::new()
+                };
                 provider.node.set_monitor_idle_peer_connections(
                     active && policy.eager_failover && policy.eager_failover_grace_ms == 0,
                 );
@@ -2497,7 +2573,7 @@ impl GanglionCoordination {
                     Ok(provider.node.is_leader().await.then(|| provider.snapshot()))
                 } else {
                     provider
-                        .control_iteration(
+                        .plan_and_commit(
                             planner.as_ref(),
                             &queues,
                             &stream_planner,
@@ -2507,12 +2583,14 @@ impl GanglionCoordination {
                             config.default_durability,
                             &live,
                             config.max_cas_retries,
+                            !waiting_for.is_empty(),
                         )
                         .await
                 };
 
                 if let Ok(mut status) = status.write() {
                     status.eager_suspects = suspects;
+                    status.startup_grace_waiting_for = waiting_for;
                     match outcome {
                         Ok(Some(snapshot)) => {
                             status.active = true;
@@ -2879,6 +2957,65 @@ impl GanglionCoordination {
         live_nodes: &HashMap<String, NodeInfo>,
         max_retries: usize,
     ) -> Result<Option<CoordinationSnapshot>, ControlError> {
+        self.plan_and_commit(
+            planner,
+            queues,
+            stream_planner,
+            streams,
+            target_followers,
+            stream_replication_factor,
+            default_durability,
+            live_nodes,
+            max_retries,
+            false,
+        )
+        .await
+    }
+
+    /// `control_iteration` during the controller startup grace: every
+    /// existing assignment keeps its owner and current followers, and only
+    /// gains followers for empty slots. New resources are placed normally.
+    pub async fn control_iteration_in_startup_grace(
+        &self,
+        planner: &dyn PartitionPlacementPolicy,
+        queues: &[QueueIdentity],
+        stream_planner: &dyn StreamPlacementPolicy,
+        streams: &[StreamIdentity],
+        target_followers: usize,
+        stream_replication_factor: usize,
+        default_durability: ReplicationDurabilityPolicy,
+        live_nodes: &HashMap<String, NodeInfo>,
+        max_retries: usize,
+    ) -> Result<Option<CoordinationSnapshot>, ControlError> {
+        self.plan_and_commit(
+            planner,
+            queues,
+            stream_planner,
+            streams,
+            target_followers,
+            stream_replication_factor,
+            default_durability,
+            live_nodes,
+            max_retries,
+            true,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn plan_and_commit(
+        &self,
+        planner: &dyn PartitionPlacementPolicy,
+        queues: &[QueueIdentity],
+        stream_planner: &dyn StreamPlacementPolicy,
+        streams: &[StreamIdentity],
+        target_followers: usize,
+        stream_replication_factor: usize,
+        default_durability: ReplicationDurabilityPolicy,
+        live_nodes: &HashMap<String, NodeInfo>,
+        max_retries: usize,
+        hold_owners: bool,
+    ) -> Result<Option<CoordinationSnapshot>, ControlError> {
         if !self.node.is_leader().await {
             return Ok(None);
         }
@@ -2954,7 +3091,7 @@ impl GanglionCoordination {
                     nodes: placement_nodes.clone(),
                     streams: streams.to_vec(),
                     existing: fibril_committed.stream_assignments,
-                    target_followers: stream_target_followers,
+                    target_followers: stream_target_followers.clone(),
                     generation: committed.generation + 1,
                 })
                 .map_err(ControlError::Planning)?
@@ -3035,6 +3172,18 @@ impl GanglionCoordination {
                     }
                     None => {}
                 }
+            }
+
+            if hold_owners {
+                hold_existing_placements(&committed, &mut desired, |resource| {
+                    match to_fibril_stream(resource) {
+                        Some(stream) => stream_target_followers
+                            .get(stream.topic.as_ref() as &str)
+                            .copied()
+                            .unwrap_or(0),
+                        None => target_followers,
+                    }
+                });
             }
 
             desired.generation = committed.generation + 1;
@@ -4644,6 +4793,8 @@ mod tests {
                 tick: Duration::from_millis(100),
                 liveness_ttl: Duration::from_millis(900),
                 max_cas_retries: 8,
+                // The dead owner never returns; skip the startup wait.
+                startup_grace: Duration::ZERO,
                 ..Default::default()
             },
         );
@@ -5347,6 +5498,202 @@ mod tests {
             .shutdown()
             .await
             .expect("shutdown");
+    }
+
+    /// During the startup grace an existing assignment keeps its owner and
+    /// followers even when they look dead, followers still fill empty slots,
+    /// and new resources are still placed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn startup_grace_keeps_owners_but_fills_and_places() {
+        let router = InProcessRouter::new();
+        let raft_node = RaftMetadataNode::start(1, default_raft_config().unwrap(), &router)
+            .await
+            .unwrap();
+        raft_node
+            .initialize(BTreeMap::from([(1u64, ganglion_openraft::openraft::BasicNode::new("n1"))]))
+            .await
+            .unwrap();
+        raft_node.wait_for_leader(1, Duration::from_secs(10)).await.unwrap();
+        let provider = GanglionCoordination::new("a", raft_node);
+        let info = |id: &str| NodeInfo {
+            node_id: id.into(),
+            broker_addr: "127.0.0.1:9000".into(),
+            admin_addr: None,
+        };
+        for id in ["a", "b", "c"] {
+            provider.register_self(&info(id)).await.unwrap();
+        }
+        provider
+            .declare_stream("ticks", 1, STREAM_DURABILITY_EPHEMERAL, Default::default(), None)
+            .await
+            .unwrap();
+        let stream = StreamIdentity::new("ticks", Partition::new(0));
+        provider.register_stream(&stream).await.unwrap();
+        let queue = QueueIdentity::new("orders", Partition::new(0), None);
+        provider.register_legacy_queue(&queue).await.unwrap();
+        let live = |ids: &[&str]| -> HashMap<String, NodeInfo> {
+            ids.iter().map(|id| (id.to_string(), info(id))).collect()
+        };
+        let first = provider
+            .control_iteration(
+                &fibril_broker::coordination::DeterministicPartitionPlacement,
+                &provider.registered_queues(),
+                &DeterministicStreamPlacement,
+                &provider.registered_streams(),
+                1,
+                1,
+                ReplicationDurabilityPolicy::LocalDurable,
+                &live(&["a", "b", "c"]),
+                8,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let stream_before = first.stream_assignment_for("ticks", Partition::new(0)).unwrap().clone();
+        let queue_before = first.assignment_for("orders", Partition::new(0), None).unwrap().clone();
+        assert_eq!(stream_before.owner, "a");
+        assert_eq!(queue_before.followers, vec!["b"]);
+
+        // "a" and "b" look dead while booting. The grace keeps the stream on
+        // "a" and the queue's follower "b", adds a second follower slot, and
+        // still places a fresh queue.
+        let fresh = QueueIdentity::new("fresh", Partition::new(0), None);
+        provider.register_legacy_queue(&fresh).await.unwrap();
+        let held = provider
+            .control_iteration_in_startup_grace(
+                &fibril_broker::coordination::DeterministicPartitionPlacement,
+                &provider.registered_queues(),
+                &DeterministicStreamPlacement,
+                &provider.registered_streams(),
+                2,
+                1,
+                ReplicationDurabilityPolicy::LocalDurable,
+                &live(&["c"]),
+                8,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(held.stream_assignment_for("ticks", Partition::new(0)), Some(&stream_before));
+        let queue_now = held.assignment_for("orders", Partition::new(0), None).unwrap();
+        assert_eq!(queue_now.owner, queue_before.owner);
+        assert_eq!(queue_now.followers, vec!["b", "c"]);
+        assert_eq!(held.assignment_for("fresh", Partition::new(0), None).unwrap().owner, "c");
+
+        // Without the grace the ephemeral stream leaves its missing owner.
+        let moved = provider
+            .control_iteration(
+                &fibril_broker::coordination::DeterministicPartitionPlacement,
+                &provider.registered_queues(),
+                &DeterministicStreamPlacement,
+                &provider.registered_streams(),
+                2,
+                1,
+                ReplicationDurabilityPolicy::LocalDurable,
+                &live(&["c"]),
+                8,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(moved.stream_assignment_for("ticks", Partition::new(0)).unwrap().owner, "c");
+        provider.consensus_node().shutdown().await.unwrap();
+    }
+
+    /// The controller loop applies the grace after winning leadership and
+    /// ends it once the configured time passes without the missing node.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn controller_waits_out_the_startup_grace_for_a_missing_node() {
+        let router = InProcessRouter::new();
+        let raft_node = RaftMetadataNode::start(1, default_raft_config().unwrap(), &router)
+            .await
+            .unwrap();
+        raft_node
+            .initialize(BTreeMap::from([(1u64, ganglion_openraft::openraft::BasicNode::new("n1"))]))
+            .await
+            .unwrap();
+        raft_node.wait_for_leader(1, Duration::from_secs(10)).await.unwrap();
+        let provider = std::sync::Arc::new(GanglionCoordination::new("broker-b", raft_node));
+        let info = |id: &str| NodeInfo {
+            node_id: id.into(),
+            broker_addr: "127.0.0.1:9000".into(),
+            admin_addr: None,
+        };
+        for id in ["broker-a", "broker-b"] {
+            provider.register_self(&info(id)).await.unwrap();
+        }
+        provider
+            .declare_stream("ticks", 1, STREAM_DURABILITY_EPHEMERAL, Default::default(), None)
+            .await
+            .unwrap();
+        provider
+            .register_stream(&StreamIdentity::new("ticks", Partition::new(0)))
+            .await
+            .unwrap();
+        let placed = provider
+            .control_iteration(
+                &fibril_broker::coordination::DeterministicPartitionPlacement,
+                &[],
+                &DeterministicStreamPlacement,
+                &provider.registered_streams(),
+                0,
+                0,
+                ReplicationDurabilityPolicy::LocalDurable,
+                &provider.live_nodes(Duration::from_secs(30)),
+                8,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(placed.stream_assignment_for("ticks", Partition::new(0)).unwrap().owner, "broker-a");
+
+        // broker-a stops heartbeating, broker-b keeps beating.
+        let beat = {
+            let provider = provider.clone();
+            tokio::spawn(async move {
+                loop {
+                    let _ = provider.register_self(&info("broker-b")).await;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let grace = Duration::from_millis(1500);
+        let started = std::time::Instant::now();
+        let (controller, status) = provider.spawn_controller(
+            std::sync::Arc::new(fibril_broker::coordination::DeterministicPartitionPlacement),
+            ControllerConfig {
+                target_followers: 0,
+                stream_replication_factor: 0,
+                tick: Duration::from_millis(50),
+                liveness_ttl: Duration::from_millis(300),
+                startup_grace: grace,
+                ..Default::default()
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let owner = provider
+                    .snapshot()
+                    .stream_assignment_for("ticks", Partition::new(0))
+                    .unwrap()
+                    .owner
+                    .clone();
+                if owner == "broker-b" {
+                    break;
+                }
+                if started.elapsed() > Duration::from_millis(300) {
+                    assert_eq!(status.read().unwrap().startup_grace_waiting_for, vec!["broker-a"]);
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("owner moves once the grace expires");
+        assert!(started.elapsed() >= grace, "moved before the grace ended");
+        controller.abort();
+        beat.abort();
+        provider.consensus_node().shutdown().await.unwrap();
     }
 
     /// A replicated stream ownership change parks forever because automatic

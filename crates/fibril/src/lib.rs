@@ -814,6 +814,7 @@ pub async fn open_tcp_ganglion_parts(
                     tick: Duration::from_millis(section.controller_tick_ms),
                     liveness_ttl: Duration::from_millis(section.liveness_ttl_ms),
                     max_cas_retries: 8,
+                    startup_grace: Duration::from_millis(section.controller_startup_grace_ms),
                 },
             );
 

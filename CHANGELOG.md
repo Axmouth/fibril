@@ -113,6 +113,14 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- Controller startup grace. After a node becomes the coordination leader it
+  moves no partition owner until every registered node has a fresh heartbeat
+  or `coordination.ganglion.controller_startup_grace_ms` (default 30000, 0
+  disables) expires, so a whole-cluster restart does not move partitions
+  away from a node that boots a few seconds late. Followers still fill empty
+  slots and new partitions are still placed. The controller status shows the
+  nodes it waits for under `startup_grace_waiting_for`.
+
 - `fibrilctl admin recovery withdraw` and `POST /admin/api/recovery/withdraw`
   remove a pending recovery that no automatic stage has acted on, such as a
   stream request that automatic recovery never resolves. Requests against a

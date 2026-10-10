@@ -1326,6 +1326,15 @@ pub struct GanglionCoordinationSection {
     /// cannot stall a cutover forever (publish version-fencing remains the
     /// correctness backstop). Default 30s.
     pub repartition_adoption_timeout_ms: u64,
+    /// Controller: after a node becomes the coordination leader, it moves no
+    /// partition owner until every node registered in the committed snapshot
+    /// has a fresh heartbeat or this grace expires (milliseconds). This keeps
+    /// a whole-cluster restart from moving partitions away from a node that
+    /// is still booting. Followers are still added to empty slots and new
+    /// partitions are still placed. A registered node that never returns
+    /// delays owner failover after each leader change by up to this long.
+    /// 0 disables the grace. Default 30s.
+    pub controller_startup_grace_ms: u64,
 }
 
 impl Default for GanglionCoordinationSection {
@@ -1346,6 +1355,7 @@ impl Default for GanglionCoordinationSection {
             controller_tick_ms: 2000,
             liveness_ttl_ms: 9000,
             repartition_adoption_timeout_ms: 30_000,
+            controller_startup_grace_ms: 30_000,
         }
     }
 }
@@ -2298,6 +2308,7 @@ mod tests {
             [coordination.ganglion]
             heartbeat_interval_ms = 3000
             liveness_ttl_ms = 12000
+            controller_startup_grace_ms = 45000
 
             [coordination.ganglion.raft]
             heartbeat_interval_ms = 300
@@ -2390,7 +2401,16 @@ mod tests {
         assert_eq!(config.runtime_seed.replication.isr_timeout_ms, 26);
         assert_eq!(config.coordination.ganglion.heartbeat_interval_ms, 3000);
         assert_eq!(config.coordination.ganglion.liveness_ttl_ms, 12000);
+        assert_eq!(config.coordination.ganglion.controller_startup_grace_ms, 45000);
         assert!(config.runtime_locks.idle_queue_cleanup);
+    }
+
+    #[test]
+    fn controller_startup_grace_defaults_to_thirty_seconds() {
+        assert_eq!(
+            GanglionCoordinationSection::default().controller_startup_grace_ms,
+            30_000
+        );
     }
 
     #[test]
