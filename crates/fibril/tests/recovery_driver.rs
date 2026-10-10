@@ -2028,3 +2028,564 @@ async fn admitted_replica_reseed(
         brokers[i].engine().verify_queue_learner_caught_up("q", 0, None, 1, 6).await.unwrap();
     }
 }
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FollowerRestart {
+    /// c restarts with its data intact.
+    Intact,
+    /// c restarts with an empty data directory.
+    Wiped,
+    /// b and c restart together.
+    BothFollowers,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restarted_follower_keeps_queue_serving_and_rejoins_without_recovery() {
+    follower_restart(FollowerRestart::Intact).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wiped_follower_rejoins_through_learner_admission_as_a_new_instance() {
+    follower_restart(FollowerRestart::Wiped).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_restarted_followers_hold_publishes_until_they_rejoin() {
+    follower_restart(FollowerRestart::BothFollowers).await;
+}
+
+struct RestartNode {
+    provider: Arc<GanglionCoordination>,
+    broker: Arc<Broker<StromaEngine>>,
+    listener: tokio::task::JoinHandle<()>,
+    server: Option<ganglion::TcpRaftServer>,
+    driver: Option<tokio::task::JoinHandle<()>>,
+}
+
+const RESTART_IDS: [&str; 3] = ["a", "b", "c"];
+
+async fn start_restart_node(
+    root: &std::path::Path,
+    index: usize,
+    listen: String,
+) -> (ganglion::RaftMetadataNode, ganglion::TcpRaftServer) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match ganglion::RaftMetadataNode::start_durable_tcp(
+                index as u64 + 1,
+                ganglion::default_raft_config().unwrap(),
+                listen.as_str(),
+                root.join(format!("metadata-{}", RESTART_IDS[index])),
+            )
+            .await
+            {
+                Ok(started) => break started,
+                Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        }
+    })
+    .await
+    .unwrap()
+}
+
+async fn open_restart_broker(
+    root: &std::path::Path,
+    index: usize,
+    node: ganglion::RaftMetadataNode,
+    server: ganglion::TcpRaftServer,
+    config: &mut ProtocolOwnerPeerResolverConfig,
+) -> RestartNode {
+    let id = RESTART_IDS[index];
+    let provider = Arc::new(GanglionCoordination::new(id, node));
+    let engine = StromaEngine::open(
+        root.join(format!("data-{id}")).join("storage"),
+        StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+        SnapshotConfig::default(),
+    )
+    .await
+    .unwrap();
+    let broker =
+        Broker::new_with_ownership(engine, BrokerConfig::default(), None, provider.clone());
+    let (address, listener) = serve_test_broker(broker.clone()).await;
+    config.nodes.insert(id.into(), address);
+    RestartNode { provider, broker, listener, server: Some(server), driver: None }
+}
+
+async fn register_restart_node(nodes: &[RestartNode], index: usize, address: &str) {
+    let id = RESTART_IDS[index];
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match nodes[index]
+                .provider
+                .register_self(&fibril_broker::coordination::NodeInfo {
+                    node_id: id.into(),
+                    broker_addr: address.into(),
+                    admin_addr: None,
+                })
+                .await
+            {
+                Ok(()) => break,
+                Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+
+fn restart_process(node: &RestartNode, id: &str) -> Option<String> {
+    node.provider
+        .consensus_node()
+        .committed_snapshot()
+        .nodes
+        .get(id)
+        .and_then(|n| n.labels.get(fibril_coordination_ganglion::HISTORY_PROCESS_LABEL).cloned())
+}
+
+async fn apply_restart_transitions(nodes: &[RestartNode]) {
+    for (i, node) in nodes.iter().enumerate() {
+        for result in node
+            .broker
+            .apply_assignment_snapshot_transitions(
+                RESTART_IDS[i],
+                &fibril_broker::coordination::CoordinationSnapshot::default(),
+                &node.provider.snapshot(),
+            )
+            .await
+        {
+            result.unwrap();
+        }
+    }
+}
+
+/// Run the controller with placement held, as during the startup grace, so
+/// only process changes can request recovery.
+async fn restart_controller_pass(nodes: &[RestartNode], config: &ProtocolOwnerPeerResolverConfig) {
+    use fibril_broker::coordination::{
+        DeterministicPartitionPlacement, DeterministicStreamPlacement, NodeInfo,
+        ReplicationDurabilityPolicy,
+    };
+    let live: HashMap<String, NodeInfo> = RESTART_IDS
+        .iter()
+        .map(|id| {
+            (
+                id.to_string(),
+                NodeInfo { node_id: id.to_string(), broker_addr: config.nodes[*id].clone(), admin_addr: None },
+            )
+        })
+        .collect();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            for node in nodes {
+                if !node.provider.consensus_node().is_leader().await {
+                    continue;
+                }
+                if let Ok(Some(_)) = node
+                    .provider
+                    .control_iteration_in_startup_grace(
+                        &DeterministicPartitionPlacement,
+                        &node.provider.registered_queues(),
+                        &DeterministicStreamPlacement,
+                        &node.provider.registered_streams(),
+                        2,
+                        0,
+                        ReplicationDurabilityPolicy::MajorityDurable,
+                        &live,
+                        8,
+                    )
+                    .await
+                {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+/// Catch follower `index` up to `target` through an ordinary reporting
+/// session, which the owner counts toward confirms.
+async fn restart_follow(
+    nodes: &[RestartNode],
+    config: &ProtocolOwnerPeerResolverConfig,
+    index: usize,
+    target: u64,
+) -> fibril_protocol::v1::replication::ProtocolOwnerReplicationPeer {
+    let id = RESTART_IDS[index];
+    let assignment = nodes[0]
+        .provider
+        .snapshot()
+        .assignment_for("q", Partition::new(0), None)
+        .unwrap()
+        .clone();
+    let peer = fibril_protocol::v1::replication::connect_protocol_owner_peer(
+        config.nodes["a"].clone(),
+        config.auth.as_ref(),
+        None,
+        "restart-test",
+        "1",
+    )
+    .await
+    .unwrap()
+    .with_reporter(id)
+    .with_history_session(
+        assignment
+            .history
+            .as_ref()
+            .unwrap()
+            .session("q", Partition::new(0), None, false, id, "a")
+            .unwrap(),
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let engine = nodes[index].broker.engine();
+            let from = engine.queue_replication_next_offset("q", 0, None).await.unwrap();
+            if from >= target {
+                break;
+            }
+            nodes[index]
+                .broker
+                .catch_up_queue_follower(
+                    &peer,
+                    "q",
+                    Partition::new(0),
+                    None,
+                    fibril_broker::broker::QueueCatchUpOptions {
+                        from,
+                        max_records_per_read: 4096,
+                        max_bytes_per_read: 16 * 1024 * 1024,
+                        max_iterations: 16,
+                        max_wait_ms: 0,
+                    },
+                )
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    peer
+}
+
+async fn restart_publish(
+    publisher: &fibril_broker::broker::PublisherHandle,
+    n: u64,
+) -> tokio::sync::oneshot::Receiver<Result<u64, fibril_broker::broker::BrokerError>> {
+    publisher
+        .publish(n.to_le_bytes().to_vec(), unix_millis(), unix_millis(), None, Default::default(), None)
+        .await
+        .unwrap()
+}
+
+async fn follower_restart(case: FollowerRestart) {
+    let root = std::path::Path::new(env!("CARGO_WORKSPACE_DIR"))
+        .join("test_data")
+        .join(format!("fibril-follower-restart-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let _fixture = keratin_log::util::TempDir { root: root.clone() };
+    let resource = ganglion_core::ResourceIdentity::new("fibril/queue", "q", 0, None::<String>);
+    let mut config = ProtocolOwnerPeerResolverConfig::new(HashMap::new()).with_auth("@node", "secret");
+
+    // Three brokers, each with its own metadata node.
+    let mut started = Vec::new();
+    for index in 0..3 {
+        started.push(start_restart_node(&root, index, "127.0.0.1:0".into()).await);
+    }
+    started[0]
+        .0
+        .initialize(
+            started
+                .iter()
+                .enumerate()
+                .map(|(i, (_, s))| {
+                    (i as u64 + 1, ganglion::openraft::BasicNode::new(s.local_addr().to_string()))
+                })
+                .collect(),
+        )
+        .await
+        .unwrap();
+    started[0].0.wait_for_any_leader(Duration::from_secs(10)).await.unwrap();
+    let mut nodes = Vec::new();
+    for (index, (node, server)) in started.into_iter().enumerate() {
+        nodes.push(open_restart_broker(&root, index, node, server, &mut config).await);
+    }
+    for index in 0..3 {
+        let address = config.nodes[RESTART_IDS[index]].clone();
+        register_restart_node(&nodes, index, &address).await;
+    }
+    nodes[0]
+        .provider
+        .register_queue(&fibril_broker::coordination::QueueIdentity::new("q", Partition::new(0), None))
+        .await
+        .unwrap();
+    // Owner a, followers b and c, majority: W = 2.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            for node in &nodes {
+                let consensus = node.provider.consensus_node();
+                if !consensus.is_leader().await {
+                    continue;
+                }
+                let mut state = consensus.committed_snapshot();
+                if !state.resources.contains(&resource) {
+                    continue;
+                }
+                let generation = state.generation;
+                let mut assignment = ganglion_core::PartitionAssignment::new(
+                    resource.clone(),
+                    "a",
+                    vec!["b".into(), "c".into()],
+                    1,
+                );
+                assignment.durability = ganglion_core::ReplicationDurabilityPolicy::MajorityDurable;
+                state.assignments.insert(resource.clone(), assignment);
+                state.generation += 1;
+                if consensus.write_snapshot_guarded(generation, state).await.is_ok() {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    nodes[0].driver = Some(fibril::recovery_driver::spawn(
+        nodes[0].provider.clone(),
+        nodes[0].broker.clone(),
+        config.clone(),
+    ));
+    tokio::time::timeout(Duration::from_secs(40), async {
+        loop {
+            if nodes.iter().all(|n| n.provider.local_initial_history_admissions().is_ok_and(|a| a.len() == 1))
+                && nodes[0].provider.local_initial_history_admissions().unwrap().iter().all(|(_, p)| {
+                    nodes[0].broker.engine().verify_admitted_storage_history(p).is_ok()
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    for index in 1..3 {
+        let decision = nodes[index].provider.local_initial_history_admissions().unwrap()[0].0.clone();
+        nodes[index]
+            .provider
+            .admit_local_initial_history(&decision, &nodes[index].broker.engine())
+            .await
+            .unwrap();
+    }
+    apply_restart_transitions(&nodes).await;
+    let original = nodes[0]
+        .provider
+        .snapshot()
+        .assignment_for("q", Partition::new(0), None)
+        .unwrap()
+        .clone();
+    let original_history = original.history.clone().unwrap();
+    assert_eq!(original_history.replicas.len(), 3);
+    let publisher = nodes[0].broker.get_publisher("q", Partition::new(0), &None).await.unwrap();
+    let mut next = 0u64;
+    let mut b_peer = None;
+    while next < 4 {
+        let confirm = restart_publish(&publisher, next).await;
+        let b = restart_follow(&nodes, &config, 1, next + 1).await;
+        let c = restart_follow(&nodes, &config, 2, next + 1).await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), confirm).await.unwrap().unwrap().unwrap(),
+            next
+        );
+        b_peer = Some(b);
+        drop(c);
+        next += 1;
+    }
+
+    // Restart the followers, keeping or wiping their data.
+    let restarting: &[usize] = if case == FollowerRestart::BothFollowers { &[1, 2] } else { &[2] };
+    if case == FollowerRestart::BothFollowers {
+        b_peer = None;
+    }
+    let mut old_processes = HashMap::new();
+    let mut listen = HashMap::new();
+    for &index in restarting {
+        old_processes.insert(index, restart_process(&nodes[0], RESTART_IDS[index]).unwrap());
+        let server = nodes[index].server.take().unwrap();
+        listen.insert(index, server.local_addr().to_string());
+        nodes[index].listener.abort();
+        nodes[index].broker.shutdown().await;
+        nodes[index].provider.consensus_node().shutdown().await.unwrap();
+        server.shutdown();
+    }
+    for &index in restarting {
+        let (node, server) = start_restart_node(&root, index, listen[&index].clone()).await;
+        nodes[index] =
+            open_restart_broker_after_wipe(&root, index, node, server, &mut config, case == FollowerRestart::Wiped)
+                .await;
+    }
+    for &index in restarting {
+        let address = config.nodes[RESTART_IDS[index]].clone();
+        register_restart_node(&nodes, index, &address).await;
+    }
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while restarting.iter().any(|i| {
+            nodes.iter().any(|n| restart_process(n, RESTART_IDS[*i]) == Some(old_processes[i].clone()))
+        }) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    // The controller requests no recovery. The queue keeps its epoch and
+    // history, and the restarted followers are suspended, not removed.
+    restart_controller_pass(&nodes, &config).await;
+    apply_restart_transitions(&nodes).await;
+    assert!(nodes[0].provider.pending_recoveries().unwrap().is_empty());
+    let suspended = nodes[0]
+        .provider
+        .snapshot()
+        .assignment_for("q", Partition::new(0), None)
+        .unwrap()
+        .clone();
+    assert_eq!(suspended.epoch, original.epoch);
+    let history = suspended.history.clone().unwrap();
+    assert_eq!(history.activation, original_history.activation);
+    assert_eq!(history.replicas, original_history.replicas);
+    for &index in restarting {
+        let id = RESTART_IDS[index];
+        assert!(!suspended.is_followed_by(id), "{id} must not count before re-admission");
+        assert!(history.session("q", Partition::new(0), None, false, id, "a").is_err());
+    }
+    assert!(suspended.is_owned_by("a"));
+
+    if case == FollowerRestart::BothFollowers {
+        // Only the owner counts, so W = 2 cannot be met. The publish waits
+        // and then fails its confirm instead of confirming early.
+        let confirm = restart_publish(&publisher, next).await;
+        let outcome = tokio::time::timeout(Duration::from_secs(15), confirm).await.unwrap().unwrap();
+        assert!(outcome.is_err(), "confirmed without a second counted copy: {outcome:?}");
+        next += 1;
+    } else {
+        // b still counts: confirms keep flowing while c is suspended.
+        let confirm = restart_publish(&publisher, next).await;
+        let b = restart_follow(&nodes, &config, 1, next + 1).await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), confirm).await.unwrap().unwrap().unwrap(),
+            next
+        );
+        b_peer = Some(b);
+        next += 1;
+    }
+    drop(b_peer);
+
+    // The restarted followers rejoin through learner admission, one at a time.
+    for &index in restarting {
+        nodes[index].driver = Some(fibril::recovery_driver::spawn(
+            nodes[index].provider.clone(),
+            nodes[index].broker.clone(),
+            config.clone(),
+        ));
+    }
+    tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            restart_controller_pass(&nodes, &config).await;
+            assert!(nodes[0].provider.pending_recoveries().unwrap().is_empty());
+            let current = nodes[0].provider.snapshot();
+            let assignment = current.assignment_for("q", Partition::new(0), None).unwrap();
+            if restarting.iter().all(|i| assignment.is_followed_by(RESTART_IDS[*i])) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let rejoined = nodes[0]
+        .provider
+        .snapshot()
+        .assignment_for("q", Partition::new(0), None)
+        .unwrap()
+        .clone();
+    assert_eq!(rejoined.epoch, original.epoch);
+    assert!(rejoined.preserves_replication_contract(&original));
+    let history = rejoined.history.clone().unwrap();
+    assert_eq!(history.activation, original_history.activation);
+    assert_eq!(history.replicas.len(), 3);
+    assert_eq!(history.replicas["a"], original_history.replicas["a"]);
+    for &index in restarting {
+        let id = RESTART_IDS[index];
+        let process = uuid::Uuid::parse_str(&restart_process(&nodes[0], id).unwrap()).unwrap();
+        assert_eq!(history.replicas[id].process, *process.as_bytes());
+        assert_ne!(history.replicas[id], original_history.replicas[id]);
+    }
+
+    // A rejoined follower counts again. Only c follows this publish.
+    for driver in nodes.iter_mut().filter_map(|n| n.driver.take()) {
+        driver.abort();
+    }
+    apply_restart_transitions(&nodes).await;
+    let confirm = restart_publish(&publisher, next).await;
+    let c = restart_follow(&nodes, &config, 2, next + 1).await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), confirm).await.unwrap().unwrap().unwrap(),
+        next
+    );
+    drop(c);
+
+    // An owner restart still fences the queue for recovery.
+    if case == FollowerRestart::Intact {
+        let server = nodes[0].server.take().unwrap();
+        let listen = server.local_addr().to_string();
+        let old_process = restart_process(&nodes[1], "a").unwrap();
+        drop(publisher);
+        nodes[0].listener.abort();
+        nodes[0].broker.shutdown().await;
+        nodes[0].provider.consensus_node().shutdown().await.unwrap();
+        server.shutdown();
+        let (node, server) = start_restart_node(&root, 0, listen).await;
+        nodes[0] = open_restart_broker(&root, 0, node, server, &mut config).await;
+        let address = config.nodes["a"].clone();
+        register_restart_node(&nodes, 0, &address).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while nodes.iter().any(|n| restart_process(n, "a") == Some(old_process.clone())) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        restart_controller_pass(&nodes, &config).await;
+        assert_eq!(nodes[1].provider.pending_recoveries().unwrap().len(), 1);
+    } else {
+        drop(publisher);
+    }
+
+    for node in nodes {
+        if let Some(driver) = node.driver {
+            driver.abort();
+        }
+        node.listener.abort();
+        node.broker.shutdown().await;
+        node.provider.consensus_node().shutdown().await.unwrap();
+        if let Some(server) = node.server {
+            server.shutdown();
+        }
+    }
+}
+
+async fn open_restart_broker_after_wipe(
+    root: &std::path::Path,
+    index: usize,
+    node: ganglion::RaftMetadataNode,
+    server: ganglion::TcpRaftServer,
+    config: &mut ProtocolOwnerPeerResolverConfig,
+    wipe: bool,
+) -> RestartNode {
+    if wipe {
+        std::fs::remove_dir_all(root.join(format!("data-{}", RESTART_IDS[index]))).unwrap();
+    }
+    open_restart_broker(root, index, node, server, config).await
+}
