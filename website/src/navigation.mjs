@@ -211,6 +211,10 @@ export const sidebar = [
             label: "Recovery continuation and handoff",
             slug: "development/recovery-continuation",
           },
+          {
+            label: "Live rebalancing",
+            slug: "development/rebalancing-design",
+          },
         ],
       },
       {

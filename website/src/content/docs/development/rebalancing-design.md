@@ -1,0 +1,214 @@
+---
+title: Live rebalancing and replica moves
+description: Proposed learner-based replica moves, planned owner handoff and a load score for placement.
+---
+
+This design note records proposed work. None of it is implemented. Current
+placement is described in [clustering](/concepts/clustering/), recovery in
+[failover and recovery](/reliability/recovery-sealing/), and cooperative owner
+handoff in [recovery continuation](/development/recovery-continuation/).
+
+## Goals
+
+- Use new or idle nodes without stopping the queues that move onto them.
+- Move a follower copy without a recovery fence. The queue keeps serving while
+  the new copy catches up.
+- Never drop a copy that might be needed to preserve a confirmed message.
+- Reuse the same mechanism for returning replicas, replication factor
+  increases, replacing a lost follower and drain.
+- Pace moves so rebalancing never competes with recovery or saturates disks.
+
+Queues come first. Streams need their own seal and selection path before any
+of this applies to them.
+
+## Current foundation and gaps
+
+| Piece | State |
+| --- | --- |
+| Learner admission | A follower absent from the accepted history catches up from a checkpoint and the log tail, then is admitted without changing owner, epoch or write requirement |
+| History binding | The accepted history names the exact process and storage instance of each replica |
+| Reseed | Revokes and re-admits one replica inside the same history |
+| Recovery candidate handoff | Swaps the recovery driver within a fixed proposed set |
+| Drain | Moves a node's partitions away, but through a full crash-style recovery |
+| Load signals | Publish and delivery rates ride heartbeat labels, owned counts are known |
+
+Gaps:
+
+- Any follower change on an activated queue creates a pending recovery, which
+  closes serving until seal, inspection and install finish.
+- The write requirement is computed from the full assignment. Adding a copy to
+  `followers` raises it for majority policies while the new copy cannot report
+  confirm progress yet.
+- There is no safe replica removal and no rebalancer policy.
+
+## Learners and the confirm contract
+
+An assignment gains a separate `learners` list next to `followers`. Learners
+replicate from the owner but never count toward confirms and never change the
+write requirement W.
+
+During a move the write requirement comes from the configured replication
+factor, not from the number of copies currently assigned. A queue configured for
+three copies with a majority policy needs two acknowledged copies whether it
+currently has three or four.
+
+The owner counts confirm progress only from the followers named in the committed
+assignment it is serving under. Changing who counts is always a guarded
+coordination write.
+
+## Moving a follower: two steps
+
+Moving the follower copy of one partition from node R to node T.
+
+### Step 0: add T as a learner
+
+One guarded write adds T to `learners`.
+
+Preconditions: no pending recovery for the partition, the assignment and
+activation match the committed ones, T has a registered process, and the sync
+budget allows another transfer to T.
+
+T catches up with the existing learner worker, from a checkpoint if the owner
+has truncated, then from the log tail. The queue keeps serving. When T has caught
+up, the existing admission path adds T's storage instance to the accepted
+history. The eligible set grows, so recovery needs more seals, which is the safe
+direction.
+
+### Step 1: swap who counts
+
+One guarded write moves T from `learners` to `followers` and marks R as
+`leaving`. From this write on, the owner counts confirms from the new set only,
+which includes T and excludes R. R keeps replicating, keeps its data and stays in
+the eligible recovery set.
+
+The owner records boundary B, its confirmed tail at the moment it switches to the
+new set. Everything below B was confirmed under the old set, so it is on W copies
+of the old set. At most one of those copies is R.
+
+Preconditions: T admitted and caught up close to the tail, no pending recovery.
+
+### Step 2: remove R
+
+Once T reports durable progress at or beyond B, one guarded write removes R from
+the assignment and the eligible set.
+
+Why this is safe: every message confirmed before the swap was on W copies of the
+old set. Without R that leaves at least W - 1 old copies, and T holds everything
+below B, so W copies remain in the new set. Every message confirmed after the
+swap was counted only from the new set. Recovery seals at least E - W + 1
+replicas of the new eligible set, which intersects every confirm set.
+
+Preconditions: T durable at or beyond B, no pending recovery, no other admission
+or removal in flight for the partition.
+
+### After removal
+
+R stops following but keeps its retained data for a grace period, the same way
+destroyed partitions go to `trash/`. A move that is abandoned, or a recovery
+that starts right after, can still use that copy. A later move back to R can
+start from it.
+
+### Aborts
+
+- A pending recovery for the partition cancels any move in progress. Learners are
+  dropped or stay learners, they never count. A move retries after the recovery
+  activates.
+- If T fails before step 1, drop the learner. Nothing about the confirm contract
+  changed.
+- If T fails between steps 1 and 2, R is still in the eligible set and still holds
+  its data. The partition behaves like any queue with a failed follower, and
+  recovery can use R.
+
+A joint confirm (a quorum in both the old and the new set during the swap, as in
+Raft joint consensus) would do the swap in one step. It needs more code in the
+confirm path, so it is left for later.
+
+## Moving an owner
+
+Owners move only by a planned handoff to an already admitted, caught-up replica,
+at a quiet point, as described in
+[recovery continuation](/development/recovery-continuation/). The old owner closes
+admission for state-changing work, drains in-flight work and reports a final
+boundary. One guarded write commits the new owner at epoch + 1 with a
+continuation certificate, so the new owner activates without seal or inspection.
+Failure before the commit cancels the handoff. Failure after it falls back to
+ordinary recovery.
+
+Follower moves come first in any plan because they are cheap and never interrupt
+serving. An owner move onto a node that is not yet a follower is a follower move
+followed by a handoff.
+
+## Load score
+
+Placement and rebalancing need a per-node score.
+
+Each node gets a small vector:
+
+| Dimension | Meaning |
+| --- | --- |
+| Owned partitions | Each costs serving and confirm work |
+| Followed partitions | Each costs replication and disk |
+| History weight | Sum over partitions of a saturating function of retained history, for example `h / (h + k)`, so a large history weighs more than a small one but one huge partition cannot dominate |
+| Traffic | Publish and delivery rates from heartbeat labels |
+| Sync load | Expected remaining bytes of transfers in progress to or from the node |
+
+Each dimension is divided by the node's capacity and combined with weights. The
+sync term is transient. It stops the planner from piling work onto a node that is
+still catching up.
+
+Move cost is kept separate from load. Copying a partition costs roughly linear
+in its history, so a target that already holds a retained copy of the partition
+is much cheaper and wins ties.
+
+Policy:
+
+- A node sheds load only when its score is above the cluster mean by a threshold,
+  and only toward nodes below the mean by a threshold.
+- A move must improve the spread by a minimum margin.
+- Hard limits on concurrent transfers per node and per cluster, separate from
+  the score. Recovery always takes priority over rebalancing.
+- Cooldowns per node and per partition, so a node that just received partitions
+  is not judged overloaded and drained again.
+- Rebalancing pauses while any recovery is pending.
+
+## Uses of the same mechanism
+
+| Situation | Steps |
+| --- | --- |
+| New empty node joins | Repeated follower moves under the sync budget, then owner handoffs |
+| Returning replica | Step 0 only, the node becomes a follower again without a fence |
+| Replication factor increase | Step 0 then promotion to follower, no removal |
+| Lost follower replaced | Step 0 on the replacement, then remove the lost copy once the threshold allows |
+| Drain | Planned owner handoff to an admitted follower, then follower moves off the node |
+
+## Operator surface
+
+- Pause and resume rebalancing cluster-wide.
+- Show moves in progress with phase, bytes remaining and blocking reason.
+- Request or cancel a specific move.
+- Report the score vector per node in the admin dashboard.
+
+## Implementation order
+
+1. `learners` list and W from the configured replication factor. Adding a
+   follower becomes step 0 instead of a recovery.
+2. Swap and removal writes with the boundary check, plus fault tests at every
+   write boundary.
+3. Transfer budget and move status in admin.
+4. Score, thresholds and the rebalancer loop.
+5. Planned owner handoff.
+6. Stream equivalents after stream recovery exists.
+
+## Precedents
+
+- Kafka partition reassignment adds new replicas, waits for them to join the
+  in-sync set, then removes old ones, with a replication throttle.
+- CockroachDB adds a non-voting learner, sends a snapshot, promotes it and then
+  removes the old voter. Its allocator rebalances against the mean with
+  thresholds.
+- TiKV PD scores stores by region size and free space and limits snapshot
+  traffic per store separately from the score.
+- Elasticsearch weighs shard counts and disk use and throttles concurrent
+  recoveries per node.
+- Kafka Cruise Control ranks hard and soft goals and searches for moves that
+  improve soft goals without breaking hard ones.
