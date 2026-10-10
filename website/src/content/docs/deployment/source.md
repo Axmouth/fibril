@@ -18,7 +18,8 @@ The current server binary:
 
 - listens for broker TCP traffic on `0.0.0.0:9876`
 - serves the early admin interface on `0.0.0.0:8081`
-- stores durable state under `server_data/`
+- stores durable state under `server_data/` (see the
+  [data directory layout](/configuration/#startup-fields))
 - uses development authentication defaults in the server binary (the
   built-in `fibril`/`fibril` credentials work from loopback only)
 
@@ -46,7 +47,9 @@ The image exposes:
 - `9876` for broker TCP traffic
 - `8081` for the admin surface
 
-Persistent data lives under `/app/server_data` in the container.
+Persistent data lives under `/app/server_data` in the container. Keep the
+volume for the life of the node, since it holds the node's identity marker,
+secrets and TLS material alongside the queue and stream data.
 
 The image also includes `fibrilctl` for operational commands. With Compose:
 

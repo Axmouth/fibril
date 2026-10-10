@@ -33,15 +33,29 @@ Generate one and give every node the same value:
 fibrilctl secret generate --show
 ```
 
-That writes `<data_dir>/cluster.secret` (mode `0600`) and prints the value.
+That writes `<data_dir>/node/cluster.secret` (mode `0600`) and prints the value.
+On a fresh data dir it first sets up the node layout using the configured
+`coordination.node_id`, so run it with the same config the node boots with.
 Distribute it however your platform distributes secrets:
 
-- copy the file to each node's data dir, or
+- copy the file to `<data_dir>/node/cluster.secret` on each node, or
 - set `FIBRIL_CLUSTER_SECRET` to the value, or
 - point `coordination.secret_path` at a mounted secret file.
 
+Startup refuses a data dir that holds files but no node layout, so a file
+copied into an empty directory makes it look foreign. Prepare the data dir
+first, then copy:
+
+1. Run `fibrilctl node init` on the node, with the same config (or
+   `--data-dir`) and `coordination.node_id` it will start with. It creates
+   the node layout and prints where each file goes. Running it again is safe.
+2. Copy the shared files into `<data_dir>/node/`: `cluster.secret`, and for a
+   shared generated CA `tls/ca.pem` and `tls/ca.key` (create `tls/` first).
+   Keep the secret and keys readable only by the server user (`chmod 600`).
+3. Start the server.
+
 Resolution order is `FIBRIL_CLUSTER_SECRET`, then `coordination.secret_path`,
-then the `<data_dir>/cluster.secret` file. User accounts never authenticate
+then the `<data_dir>/node/cluster.secret` file. User accounts never authenticate
 node-to-node connections, so rotating a user cannot wedge replication.
 
 ## TLS across nodes
@@ -55,7 +69,7 @@ trust. Two lanes:
 **Bring your own CA.** Issue each node a certificate from your CA, covering
 the node's broker advertise host and its coordination peer host in the
 subject alternative names. Point `tls.peer_ca_path` at the CA on every node
-(unset, it falls back to the generated `<data_dir>/tls/ca.pem` when present,
+(unset, it falls back to the generated `<data_dir>/node/tls/ca.pem` when present,
 then OS roots).
 
 **Shared generated CA.** Generate material on the first node, then copy only
@@ -63,10 +77,13 @@ the CA pair to each other node's TLS dir before its first boot:
 
 ```sh
 # On the first node (or ahead of time with fibrilctl cert generate):
-#   <data_dir>/tls/ca.pem  ca.key  server.pem  server.key
-# On every other node, before first boot:
-scp node1:<data_dir>/tls/ca.{pem,key} <data_dir>/tls/
+#   <data_dir>/node/tls/ca.pem  ca.key  server.pem  server.key
+# On every other node, after fibrilctl node init and before first start:
+scp node1:<data_dir>/node/tls/ca.{pem,key} <data_dir>/node/tls/
 ```
+
+As with the cluster secret, run `fibrilctl node init` on the receiving node
+before the copy (see [the cluster secret](#the-cluster-secret)).
 
 A node that finds only `ca.pem` + `ca.key` mints its own server certificate
 from that CA on boot, so the whole deployment shares one CA and one client
@@ -131,7 +148,7 @@ environment:
 ```
 
 With TLS enabled across several nodes, provision the shared CA pair into each
-node's `<data_dir>/tls` (see [TLS across nodes](#tls-across-nodes)) so the
+node's `<data_dir>/node/tls` (see [TLS across nodes](#tls-across-nodes)) so the
 generated leaves chain to one CA - or set `FIBRIL_TLS_INTER_BROKER: "false"`
 when something else encrypts the inter-broker path.
 

@@ -37,7 +37,7 @@ enabled = false
 # Supply your own PEM files:
 # cert_path = "/etc/fibril/tls/server.pem"
 # key_path = "/etc/fibril/tls/server.key"
-# Or generate per-deployment material under <data_dir>/tls on first boot:
+# Or generate per-deployment material under <data_dir>/node/tls on first boot:
 # auto_self_signed = true
 # The admin dashboard serves HTTPS from the same material when TLS is
 # enabled. Opt it out when a reverse proxy terminates TLS for the dashboard:
@@ -46,7 +46,7 @@ enabled = false
 # service mesh or tunnel already encrypts inter-broker traffic:
 # inter_broker = false
 # CA that peer certificates chain to. Unset falls back to the generated
-# <data_dir>/tls/ca.pem, then OS roots:
+# <data_dir>/node/tls/ca.pem, then OS roots:
 # peer_ca_path = "/etc/fibril/tls/ca.pem"
 
 [storage.keratin]
@@ -188,6 +188,34 @@ These fields are read on process start.
 
 Changing these generally requires restarting the server.
 
+`server.data_dir` is the root of everything a node keeps on disk:
+
+```text
+<data_dir>/
+  fibril-node     layout marker with the layout version and node id
+  node/           setup_complete, config-overlay.toml, cluster.secret,
+                  tls/ (generated material), tls-provided/ (setup uploads)
+  coordination/   default Ganglion data dir
+  storage/        queue and stream data
+  cache/          disposable, safe to delete while the node is stopped
+```
+
+A fresh data dir is missing, empty, or holds only `lost+found`, and Fibril
+creates the layout on first start. An existing data dir must carry a
+`fibril-node` marker with a known layout version and the configured
+`coordination.node_id`. Startup refuses a data dir with an older layout, one
+that belongs to a different node, or one with unknown top-level entries. There
+is no migration between layouts yet, so drain the node and start it on a new
+data dir instead. `coordination.ganglion.data_dir` defaults to
+`<data_dir>/coordination`, and Fibril keeps a marker there tied to the raft
+node id, so a coordination dir from another node is refused too.
+
+To place files such as `cluster.secret` or a shared CA before the first
+start, prepare the data dir with `fibrilctl node init` (it uses the same
+config and node id as the server), copy the files into `<data_dir>/node/`,
+then start the server. Copying files into an empty data dir without this
+step makes it look foreign and startup refuses it.
+
 `broker.listener.advertise` is the address (or addresses) the broker tells peers
 and clients to reach it on, separate from `bind`. This matters when `bind` is not
 itself dialable - the common case is binding `0.0.0.0` in a container, which a
@@ -240,7 +268,7 @@ node-level aggregates. See [monitoring](/deployment/monitoring/).
 `tls.enabled = true` serves TLS on the broker listener and the admin dashboard
 from one certificate. Supply PEM files with `tls.cert_path` and `tls.key_path`,
 or set `tls.auto_self_signed = true` to generate a per-deployment CA and server
-certificate under `<data_dir>/tls` on first boot. The CA fingerprint is printed
+certificate under `<data_dir>/node/tls` on first boot. The CA fingerprint is printed
 at startup so clients can pin or trust it - self-signed material a client does
 not verify defeats passive snooping only. Fibril never ships certificates.
 `tls.admin_enabled = false` keeps the dashboard on plain HTTP for deployments
@@ -255,7 +283,7 @@ whose certificates chain to one CA - see
 lane and the rotation runbook. Set it to `false` when a service mesh or
 tunnel already encrypts inter-broker traffic. `tls.peer_ca_path` names the CA
 peers are verified against, falling back to the generated
-`<data_dir>/tls/ca.pem` when present, then OS roots. The serving certificate
+`<data_dir>/node/tls/ca.pem` when present, then OS roots. The serving certificate
 and key reload live via `fibrilctl admin reload-tls` or
 `POST /admin/api/tls/reload`.
 
@@ -284,15 +312,15 @@ connections.
 The cluster shared secret authenticates node-to-node connections (replication)
 as a node principal, never as a user account, and is required in `ganglion`
 mode. Resolution order: `FIBRIL_CLUSTER_SECRET` (the value itself), then
-`coordination.secret_path`, then `<data_dir>/cluster.secret` if present -
+`coordination.secret_path`, then `<data_dir>/node/cluster.secret` if present -
 which is what `fibrilctl secret generate` writes. Every node holds the same
 secret.
 
 `setup.mode = true` arms first-boot setup: when the data dir holds no
-`setup_complete` marker, the server serves only a setup page on
+`node/setup_complete` marker, the server serves only a setup page on
 `127.0.0.1:<admin port>` and the broker listener stays down until the operator
 chooses generated TLS material, supplies a certificate, or explicitly
-continues without TLS. The choice is written to `<data_dir>/config-overlay.toml`,
+continues without TLS. The choice is written to `<data_dir>/node/config-overlay.toml`,
 which boot layers below explicit config, so anything set in the `tls` section
 by file, environment, or CLI always wins over a setup choice. Completion
 writes the marker and the broker starts in the same process. Deleting the
