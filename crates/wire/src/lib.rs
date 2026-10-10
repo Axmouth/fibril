@@ -1281,20 +1281,37 @@ pub struct RecoverySeal {
 /// Frozen retained content identity. This response is not a promotion certificate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoverySealOk {
-    pub combined_log: bool,
     pub replica_id: String,
     pub transition: [u8; 32],
     pub fence_epoch: u64,
     pub history_version: u32,
     pub storage_history: Option<RecoveryStorageHistory>,
     pub history_id: [u8; 32],
-    pub message_digest: [u8; 32],
-    pub event_digest: [u8; 32],
     pub snapshot_digest: Option<[u8; 32]>,
-    pub message_head: u64,
-    pub message_next: u64,
-    pub event_head: u64,
-    pub event_next: u64,
+    pub logs: RecoverySealLogs,
+}
+
+/// Retained bounds and content digest of one sealed log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryLogBounds {
+    pub head: u64,
+    pub next: u64,
+    pub digest: [u8; 32],
+}
+
+/// Sealed logs by resource kind. Wire tag 0 is a queue, 1 a stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RecoverySealLogs {
+    Queue(RecoveryLogBounds),
+    Stream {
+        records: RecoveryLogBounds,
+        cursor_events: RecoveryLogBounds,
+    },
+}
+impl RecoverySealLogs {
+    pub fn is_stream(&self) -> bool {
+        matches!(self, Self::Stream { .. })
+    }
 }
 
 /// Original storage identity carried by version-two retained-history receipts.
@@ -1310,7 +1327,8 @@ pub struct RecoveryStorageHistory {
 pub const MAX_RECOVERY_READ_REQUEST_BYTES: usize = 64 * 1024;
 pub const MAX_RECOVERY_READ_REPLY_BYTES: usize = 16 * 1024 * 1024 + 64 * 1024;
 
-/// Bounded read of a completed seal. Source: 0 messages, 1 events, 2 snapshot bytes.
+/// Bounded read of a completed seal. Source: 0 stream records (refused for a
+/// queue seal), 1 the queue log or stream cursor events, 2 snapshot bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoveryRead {
     pub seal: RecoverySeal,

@@ -34,6 +34,16 @@ pub struct QueueRecoveryPlan {
     binding: StorageHistoryBinding,
 }
 
+/// Digest of an empty retained log, which the stage spec still expects for
+/// the queue message lane. It goes away together with that spec field.
+fn empty_message_lane_digest() -> [u8; 32] {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"fibril-retained-log-v1\0");
+    hash.update(&0u64.to_be_bytes());
+    hash.update(&0u64.to_be_bytes());
+    *hash.finalize().as_bytes()
+}
+
 fn error(message: impl ToString) -> OpenraftAdapterError {
     OpenraftAdapterError::Storage(message.to_string())
 }
@@ -60,11 +70,11 @@ impl QueueRecoveryPlan {
             binding: self.binding.clone(),
             fence_epoch: assignment.epoch,
             source_history: s.source_history,
-            payload_log: source.payload_log(),
+            payload_log: source.payload_log().ok_or("recovery source is not a queue history")?,
             message_head: s.message_head,
             message_next: s.message_next,
             event_next: s.event_next,
-            message_digest: source.message_digest,
+            message_digest: empty_message_lane_digest(),
             snapshot_digest: s.snapshot_digest,
             snapshot_bytes: s.snapshot_bytes,
             state_digest: s.state_digest,
@@ -147,8 +157,8 @@ impl QueueRecoveryPlan {
     pub fn verify_artifact(&self, artifact: &RecoveryQueueStateArtifact) -> Result<(), String> {
         let evidence = artifact.evidence();
         let source = self.source_history().ok_or("recovery source is missing")?;
-        if evidence.log_layout != source.log_layout
-            || evidence.payload_log != source.payload_log()
+        if evidence.log_layout != fibril_broker::recovery::QueueLogLayout::Combined
+            || Some(&evidence.payload_log) != source.payload_log().as_ref()
             || evidence.version != 2
             || evidence.history_id != self.selected.source_history
             || evidence.event_next != self.event_next()
@@ -212,10 +222,6 @@ impl QueueRecoveryPlan {
                             transition: self.pending.transition_digest()?,
                             fence_epoch: self.pending.proposed.epoch,
                         },
-                        message_head: history.message_head,
-                        message_next: history.message_next,
-                        event_head: history.event_head,
-                        event_next: history.event_next,
                         history: history.clone(),
                     },
                 },
@@ -250,22 +256,25 @@ impl QueueRecoveryPlan {
             .witnesses
             .get(&selected.source_node)
             .ok_or("selected recovery source is absent from witnesses")?;
+        // Witness recording already refused stream histories for this queue
+        // transition, so every witness has one queue log.
+        let next = |history: &RetainedHistoryIdentity| history.queue_log().map(|log| log.next);
         if selected.transition != self.pending.transition_digest()?
             || selected.previous_activation != accepted.activation
             || selected.source_history != source.id
-            || selected.message_head != source.message_head
-            || selected.message_next != source.message_next
-            || selected.event_next != source.event_next
+            || selected.message_head != 0
+            || selected.message_next != 0
+            || Some(selected.event_next) != next(source)
             || selected.witnesses
                 != self
                     .witnesses
                     .iter()
                     .map(|(node, history)| (node.clone(), history.id))
                     .collect()
-            || self.witnesses.values().any(|history| {
-                history.event_next > selected.event_next
-                    || history.message_next > selected.message_next
-            })
+            || self
+                .witnesses
+                .values()
+                .any(|history| next(history).is_none_or(|next| next > selected.event_next))
         {
             return Err("recovery plan source differs from the verified witness selection".into());
         }

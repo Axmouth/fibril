@@ -2917,35 +2917,66 @@ pub fn decode_recovery_seal(frame: &Frame) -> WireResult<crate::RecoverySeal> {
     })
 }
 
+/// Structural rules shared by both directions: version one has no storage
+/// receipt and version two has one, a queue seal needs version two, and every
+/// log range is ordered. The resource kind is matched by the caller.
+fn valid_recovery_seal_ok(reply: &crate::RecoverySealOk) -> bool {
+    let ordered = |log: &crate::RecoveryLogBounds| log.head <= log.next;
+    matches!(
+        (reply.history_version, reply.storage_history.is_some()),
+        (1, false) | (2, true)
+    ) && match &reply.logs {
+        crate::RecoverySealLogs::Queue(log) => reply.history_version == 2 && ordered(log),
+        crate::RecoverySealLogs::Stream { records, cursor_events } => {
+            ordered(records) && ordered(cursor_events)
+        }
+    }
+}
+
+fn put_recovery_log(out: &mut BytesMut, log: &crate::RecoveryLogBounds) {
+    out.put_u64(log.head);
+    out.put_u64(log.next);
+    out.extend_from_slice(&log.digest);
+}
+
+fn read_recovery_log(r: &mut Reader<'_>) -> WireResult<crate::RecoveryLogBounds> {
+    Ok(crate::RecoveryLogBounds {
+        head: r.u64()?,
+        next: r.u64()?,
+        digest: r.take(32)?.try_into().unwrap(),
+    })
+}
+
 pub fn encode_recovery_seal_ok(
     request_id: u64,
     reply: &crate::RecoverySealOk,
 ) -> WireResult<Frame> {
-    if !matches!(
-        (reply.history_version, reply.storage_history.is_some()),
-        (1, false) | (2, true)
-    ) || (reply.combined_log && (reply.history_version != 2 || reply.message_head != 0 || reply.message_next != 0)) {
+    if !valid_recovery_seal_ok(reply) {
         return Err(WireError::InvalidRecordSequence(
-            "invalid sealed history layout, version or binding",
+            "invalid sealed history logs, version or binding",
         ));
     }
-    let mut out = payload_builder(b"RSO2");
-    put_bool(&mut out, reply.combined_log);
+    let mut out = payload_builder(b"RSO3");
     put_str(&mut out, &reply.replica_id)?;
     out.extend_from_slice(&reply.transition);
     out.put_u64(reply.fence_epoch);
     out.put_u32(reply.history_version);
     out.extend_from_slice(&reply.history_id);
-    out.extend_from_slice(&reply.message_digest);
-    out.extend_from_slice(&reply.event_digest);
     put_bool(&mut out, reply.snapshot_digest.is_some());
     if let Some(digest) = reply.snapshot_digest {
         out.extend_from_slice(&digest);
     }
-    out.put_u64(reply.message_head);
-    out.put_u64(reply.message_next);
-    out.put_u64(reply.event_head);
-    out.put_u64(reply.event_next);
+    match &reply.logs {
+        crate::RecoverySealLogs::Queue(log) => {
+            out.put_u8(0);
+            put_recovery_log(&mut out, log);
+        }
+        crate::RecoverySealLogs::Stream { records, cursor_events } => {
+            out.put_u8(1);
+            put_recovery_log(&mut out, records);
+            put_recovery_log(&mut out, cursor_events);
+        }
+    }
     if let Some(history) = &reply.storage_history {
         out.extend_from_slice(&history.resource_incarnation);
         out.extend_from_slice(&history.accepted_history);
@@ -2958,26 +2989,39 @@ pub fn encode_recovery_seal_ok(
 pub fn decode_recovery_seal_ok(frame: &Frame) -> WireResult<crate::RecoverySealOk> {
     expect_op(frame, Op::RecoverySealOk)?;
     let mut r = Reader::new(&frame.payload);
-    r.expect_magic(b"RSO2", "recovery seal response")?;
-    let mut reply = crate::RecoverySealOk {
-        combined_log: r.bool()?,
-        storage_history: None,
-        replica_id: r.str()?.to_owned(),
-        transition: r.take(32)?.try_into().unwrap(),
-        fence_epoch: r.u64()?,
-        history_version: r.u32()?,
-        history_id: r.take(32)?.try_into().unwrap(),
-        message_digest: r.take(32)?.try_into().unwrap(),
-        event_digest: r.take(32)?.try_into().unwrap(),
-        snapshot_digest: if r.bool()? {
-            Some(r.take(32)?.try_into().unwrap())
-        } else {
-            None
+    r.expect_magic(b"RSO3", "recovery seal response")?;
+    let replica_id = r.str()?.to_owned();
+    let transition = r.take(32)?.try_into().unwrap();
+    let fence_epoch = r.u64()?;
+    let history_version = r.u32()?;
+    let history_id = r.take(32)?.try_into().unwrap();
+    let snapshot_digest = if r.bool()? {
+        Some(r.take(32)?.try_into().unwrap())
+    } else {
+        None
+    };
+    let logs = match r.u8()? {
+        0 => crate::RecoverySealLogs::Queue(read_recovery_log(&mut r)?),
+        1 => crate::RecoverySealLogs::Stream {
+            records: read_recovery_log(&mut r)?,
+            cursor_events: read_recovery_log(&mut r)?,
         },
-        message_head: r.u64()?,
-        message_next: r.u64()?,
-        event_head: r.u64()?,
-        event_next: r.u64()?,
+        value => {
+            return Err(WireError::UnknownTag {
+                context: "recovery seal logs",
+                value,
+            });
+        }
+    };
+    let mut reply = crate::RecoverySealOk {
+        replica_id,
+        transition,
+        fence_epoch,
+        history_version,
+        storage_history: None,
+        history_id,
+        snapshot_digest,
+        logs,
     };
     match reply.history_version {
         1 => {}
@@ -2996,8 +3040,10 @@ pub fn decode_recovery_seal_ok(frame: &Frame) -> WireResult<crate::RecoverySealO
         }
     }
     r.finish()?;
-    if reply.combined_log && (reply.history_version != 2 || reply.message_head != 0 || reply.message_next != 0) {
-        return Err(WireError::InvalidRecordSequence("invalid combined history bounds or version"));
+    if !valid_recovery_seal_ok(&reply) {
+        return Err(WireError::InvalidRecordSequence(
+            "invalid sealed history logs, version or binding",
+        ));
     }
     Ok(reply)
 }
@@ -3623,25 +3669,27 @@ mod history_replication_tests {
 #[cfg(test)]
 mod bound_seal_tests {
     use super::*;
+    fn log(head: u64, next: u64, digest: u8) -> crate::RecoveryLogBounds {
+        crate::RecoveryLogBounds { head, next, digest: [digest; 32] }
+    }
+
     #[test]
-    fn sealed_history_layouts_roundtrip_and_require_complete_binding() {
+    fn sealed_history_logs_roundtrip_and_require_complete_binding() {
         let mut reply = crate::RecoverySealOk {
-            combined_log: false,
             replica_id: "b".into(),
             transition: [1; 32],
             fence_epoch: 8,
             history_version: 1,
             storage_history: None,
             history_id: [2; 32],
-            message_digest: [3; 32],
-            event_digest: [4; 32],
             snapshot_digest: None,
-            message_head: 0,
-            message_next: 7,
-            event_head: 0,
-            event_next: 9,
+            logs: crate::RecoverySealLogs::Stream {
+                records: log(0, 7, 3),
+                cursor_events: log(0, 9, 4),
+            },
         };
         let legacy = encode_recovery_seal_ok(1, &reply).unwrap();
+        assert_eq!(&legacy.payload[..4], b"RSO3");
         assert_eq!(decode_recovery_seal_ok(&legacy).unwrap(), reply);
         reply.history_version = 2;
         assert!(encode_recovery_seal_ok(1, &reply).is_err());
@@ -3654,28 +3702,46 @@ mod bound_seal_tests {
         let bound = encode_recovery_seal_ok(1, &reply).unwrap();
         assert_eq!(bound.payload.len(), legacy.payload.len() + 64);
         assert_eq!(decode_recovery_seal_ok(&bound).unwrap(), reply);
-        // A peer cannot tag a nonempty separate lane as combined.
-        let mut malformed = bound.clone();
-        let mut bytes = malformed.payload.to_vec();
-        bytes[4] = 1;
-        malformed.payload = bytes.into();
-        assert!(decode_recovery_seal_ok(&malformed).is_err());
         for size in 0..bound.payload.len() {
             let mut truncated = bound.clone();
             truncated.payload = truncated.payload.slice(..size);
             assert!(decode_recovery_seal_ok(&truncated).is_err());
         }
-        reply.combined_log = true;
-        assert!(encode_recovery_seal_ok(1, &reply).is_err());
-        reply.message_next = 0;
-        let combined = encode_recovery_seal_ok(1, &reply).unwrap();
-        assert_eq!(decode_recovery_seal_ok(&combined).unwrap(), reply);
-        let mut old_magic = combined.clone();
+        reply.logs = crate::RecoverySealLogs::Queue(log(2, 9, 4));
+        let queue = encode_recovery_seal_ok(1, &reply).unwrap();
+        assert_eq!(decode_recovery_seal_ok(&queue).unwrap(), reply);
+        // Logs tag sits after magic, replica id, transition, epoch, version,
+        // history id and the snapshot flag.
+        let tag = 4 + 4 + 1 + 32 + 8 + 4 + 32 + 1;
+        assert_eq!(queue.payload[tag], 0);
+        for value in [2u8, 255] {
+            let mut unknown = queue.clone();
+            let mut bytes = unknown.payload.to_vec();
+            bytes[tag] = value;
+            unknown.payload = bytes.into();
+            assert!(decode_recovery_seal_ok(&unknown).is_err());
+        }
+        // A queue seal tagged as a stream no longer parses as the same frame.
+        let mut retagged = queue.clone();
+        let mut bytes = retagged.payload.to_vec();
+        bytes[tag] = 1;
+        retagged.payload = bytes.into();
+        assert!(decode_recovery_seal_ok(&retagged).is_err());
+        let mut old_magic = queue.clone();
         let mut bytes = old_magic.payload.to_vec();
-        bytes[..4].copy_from_slice(b"RSO1");
+        bytes[..4].copy_from_slice(b"RSO2");
         old_magic.payload = bytes.into();
         assert!(decode_recovery_seal_ok(&old_magic).is_err());
+        // Queue seals need a version two storage receipt.
         reply.history_version = 1;
+        reply.storage_history = None;
+        assert!(encode_recovery_seal_ok(1, &reply).is_err());
+        // Inverted ranges are refused for either kind.
+        reply.history_version = 2;
+        reply.storage_history = decode_recovery_seal_ok(&bound).unwrap().storage_history;
+        reply.logs = crate::RecoverySealLogs::Queue(log(9, 2, 4));
+        assert!(encode_recovery_seal_ok(1, &reply).is_err());
+        reply.logs = crate::RecoverySealLogs::Stream { records: log(0, 1, 3), cursor_events: log(5, 4, 4) };
         assert!(encode_recovery_seal_ok(1, &reply).is_err());
     }
 }

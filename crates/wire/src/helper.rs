@@ -986,20 +986,17 @@ mod recovery_wire_tests {
         assert!(try_decode::<RecoverySeal>(&trailing).is_err());
         for snapshot_digest in [None, Some([22; 32])] {
             let response = RecoverySealOk {
-                combined_log: false,
                 storage_history: None,
                 replica_id: "b".into(),
                 transition: [19; 32],
                 fence_epoch: 8,
                 history_version: 1,
                 history_id: [2; 32],
-                message_digest: [3; 32],
-                event_digest: [4; 32],
                 snapshot_digest,
-                message_head: 0,
-                message_next: 2,
-                event_head: 0,
-                event_next: 1,
+                logs: crate::RecoverySealLogs::Stream {
+                    records: crate::RecoveryLogBounds { head: 0, next: 2, digest: [3; 32] },
+                    cursor_events: crate::RecoveryLogBounds { head: 0, next: 1, digest: [4; 32] },
+                },
             };
             let encoded = try_encode(Op::RecoverySealOk, 42, &response).unwrap();
             assert_eq!(try_decode::<RecoverySealOk>(&encoded).unwrap(), response);

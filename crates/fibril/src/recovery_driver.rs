@@ -185,10 +185,6 @@ fn source_report(plan: &QueueRecoveryPlan) -> Result<BrokerSealedReplica, String
                 transition: plan.pending().transition_digest()?,
                 fence_epoch: plan.pending().proposed.epoch,
             },
-            message_head: h.message_head,
-            message_next: h.message_next,
-            event_head: h.event_head,
-            event_next: h.event_next,
             history: h,
         },
     })
@@ -332,8 +328,7 @@ async fn recover_queue_attempt(
                         Err(error) => {
                             // Preserve the witness even if another source must
                             // supply payloads missing from this replica.
-                            tracing::warn!(node, message_next=report.seal.message_next,
-                                event_next=report.seal.event_next, %error,
+                            tracing::warn!(node, logs=?report.seal.history.logs, %error,
                                 "sealed replica cannot supply a complete recovery artifact");
                         }
                     }
@@ -590,7 +585,8 @@ async fn prepare_target(
     let payload_log = plan
         .source_history()
         .ok_or("recovery source is missing")?
-        .payload_log();
+        .payload_log()
+        .ok_or("recovery source is not a queue history")?;
     timing
         .stage("prepare_target", node, async {
             // Existing old storage must be durably fenced before replacement.
@@ -711,6 +707,7 @@ async fn read_source_page(
         .source_history()
         .ok_or("recovery source is missing")?
         .payload_log()
+        .ok_or("recovery source is not a queue history")?
         .source;
     let report = source_report(plan)?;
     let request = RecoveryReadRequest {

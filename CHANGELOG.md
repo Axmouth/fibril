@@ -12,6 +12,14 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Breaking changes
 
+- Internal op 89 `RecoverySealOk` carries the sealed logs by resource kind
+  (`RSO3`): one log for a queue, a record log and a cursor event log for a
+  stream. A reply whose logs do not match the requested kind is refused by
+  the seal client and by witness collection. Recovery read source 0 means
+  stream records and is refused for a queue seal. Sealed history ids from
+  earlier builds no longer verify, so in-flight recoveries must be restarted
+  after upgrading every broker together.
+
 - Agreed queue checkpoint records in coordination describe one log. Pins
   carry one epoch, the applied boundary, the payload floor and the log tail,
   and cuts carry `next` and `payload_head`. Proposal and evidence digests

@@ -12,7 +12,8 @@ pub use stroma_core::recovery_journal as journal;
 pub use stroma_core::recovery_replay as replay;
 pub use stroma_core::{
     QueueLogLayout, RecoveryReadPage, RecoveryReadRequest, RecoveryReadSource, RecoveryRecord,
-    RecoverySealRequest, RecoverySequentialRead, RetainedHistoryIdentity, SealedReplicaFrontiers,
+    RecoverySealRequest, RecoverySequentialRead, RetainedHistoryIdentity, RetainedLog,
+    RetainedLogs, SealedReplicaFrontiers,
 };
 use tokio::sync::watch;
 

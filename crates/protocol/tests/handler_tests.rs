@@ -6774,10 +6774,11 @@ async fn recovery_seal_requires_node_auth_and_exact_committed_authority_over_tcp
                 )),
                 Some(([1; 16], [2; 16], [3; 16]))
             );
-            assert!(sealed.combined_log);
-            assert_eq!((sealed.message_head, sealed.message_next), (0, 0));
-            assert_eq!((sealed.event_head, sealed.event_next), (0, 1));
-            // Source 1 is the event log, which carries queue payloads.
+            assert!(matches!(
+                sealed.logs,
+                fibril_protocol::v1::RecoverySealLogs::Queue(log) if (log.head, log.next) == (0, 1)
+            ));
+            // Source 1 is the queue log, which carries queue payloads.
             let valid = fibril_protocol::v1::RecoveryRead {
                 seal: request.clone(),
                 history_id: sealed.history_id,
@@ -6868,8 +6869,8 @@ async fn recovery_seal_requires_node_auth_and_exact_committed_authority_over_tcp
             .unwrap();
         task.await.unwrap().unwrap();
         for source in [
-            fibril_broker::recovery::RecoveryReadSource::Messages,
-            fibril_broker::recovery::RecoveryReadSource::Events,
+            fibril_broker::recovery::RecoveryReadSource::StreamRecords,
+            fibril_broker::recovery::RecoveryReadSource::Log,
             fibril_broker::recovery::RecoveryReadSource::Snapshot,
         ] {
             let (addr, task, returned, _) = start_protocol_listener_for_broker(
@@ -6900,9 +6901,16 @@ async fn recovery_seal_requires_node_auth_and_exact_committed_authority_over_tcp
                 &read,
                 Duration::from_secs(10),
             )
-            .await
-            .unwrap();
-            if source == fibril_broker::recovery::RecoveryReadSource::Events {
+            .await;
+            // A queue seal has no stream record log, so source 0 is refused
+            // rather than answered with an empty page.
+            if source == fibril_broker::recovery::RecoveryReadSource::StreamRecords {
+                assert!(page.is_err());
+                task.abort();
+                continue;
+            }
+            let page = page.unwrap();
+            if source == fibril_broker::recovery::RecoveryReadSource::Log {
                 assert_eq!(page.records.len(), 1);
                 assert!(matches!(
                     StromaEvent::decode(&page.records[0].payload).unwrap(),
@@ -7564,7 +7572,10 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
         .await
         .unwrap();
         assert_eq!(artifact.evidence().history_id, seals[0].seal.history.id);
-        assert_eq!(artifact.evidence().event_next, seals[0].seal.event_next);
+        assert_eq!(
+            artifact.evidence().event_next,
+            seals[0].seal.history.queue_log().unwrap().next
+        );
         assert_eq!(
             artifact.evidence().live_payload_digest,
             left.live_payload_digest
@@ -8944,8 +8955,8 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
         sealed.seal.history.storage_history.as_ref().unwrap(),
         &quorum.reports["b"].storage
     );
-    // Two publishes in the event log and an empty message lane.
-    assert_eq!((sealed.seal.message_next, sealed.seal.event_next), (0, 2));
+    // Two publishes in the single queue log.
+    assert_eq!(sealed.seal.history.queue_log().unwrap().next, 2);
     let mut witnesses = fibril_coordination_ganglion::recovery_witnesses::RecoveryWitnessSet::new(
         &providers[0].consensus_node().committed_snapshot(),
         &pending,
@@ -9068,11 +9079,11 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
     );
     // A proposed replica receives the selected state and native-log payloads in
     // non-serving staging. The old source stays sealed and readable throughout.
-    // Queue payloads come from the source's event log.
-    let payload_log = plan.source_history().unwrap().payload_log();
+    // Queue payloads come from the source's single log.
+    let payload_log = plan.source_history().unwrap().payload_log().unwrap();
     assert_eq!(
         payload_log.source,
-        fibril_broker::recovery::RecoveryReadSource::Events
+        fibril_broker::recovery::RecoveryReadSource::Log
     );
     assert_eq!(payload_log.next, 2);
     let stage = retry_metadata(|| {

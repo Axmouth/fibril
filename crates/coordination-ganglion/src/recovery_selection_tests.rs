@@ -52,67 +52,49 @@ fn selecting(
 
 struct TestSource {
     report: BrokerSealedReplica,
-    data: [Vec<RecoveryRecord>; 2],
+    data: Vec<RecoveryRecord>,
 }
+/// Sealed queue witness whose single log holds `log` from offset zero.
 fn source(
     pending: &promotion::PendingRecovery,
     quorum: &InitialHistoryPreparedQuorum,
     node: &str,
-    messages: u64,
-    events: Vec<StromaEvent>,
+    log: Vec<StromaEvent>,
 ) -> TestSource {
-    let data = [
-        (0..messages)
-            .map(|offset| RecoveryRecord {
-                offset,
-                flags: 0,
-                headers: vec![],
-                payload: vec![offset as u8],
-            })
-            .collect::<Vec<_>>(),
-        events
-            .into_iter()
-            .enumerate()
-            .map(|(offset, event)| RecoveryRecord {
-                offset: offset as u64,
-                flags: 0,
-                headers: vec![],
-                payload: event.encode().unwrap(),
-            })
-            .collect::<Vec<_>>(),
-    ];
-    let digest = |records: &[RecoveryRecord]| {
-        let mut h = blake3::Hasher::new();
-        h.update(b"fibril-retained-log-v1\0");
-        h.update(&0u64.to_be_bytes());
-        h.update(&(records.len() as u64).to_be_bytes());
-        for r in records {
-            h.update(&r.offset.to_be_bytes());
-            h.update(&r.flags.to_be_bytes());
-            h.update(&(r.headers.len() as u64).to_be_bytes());
-            h.update(&r.headers);
-            h.update(&(r.payload.len() as u64).to_be_bytes());
-            h.update(&r.payload);
-        }
-        *h.finalize().as_bytes()
-    };
+    let data = log
+        .into_iter()
+        .enumerate()
+        .map(|(offset, event)| RecoveryRecord {
+            offset: offset as u64,
+            flags: 0,
+            headers: vec![],
+            payload: event.encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let mut h = blake3::Hasher::new();
+    h.update(b"fibril-retained-log-v1\0");
+    h.update(&0u64.to_be_bytes());
+    h.update(&(data.len() as u64).to_be_bytes());
+    for r in &data {
+        h.update(&r.offset.to_be_bytes());
+        h.update(&r.flags.to_be_bytes());
+        h.update(&(r.headers.len() as u64).to_be_bytes());
+        h.update(&r.headers);
+        h.update(&(r.payload.len() as u64).to_be_bytes());
+        h.update(&r.payload);
+    }
     let mut history = RetainedHistoryIdentity {
-        log_layout: Default::default(),
         version: 2,
         storage_history: Some(quorum.reports[node].storage.clone()),
         id: [0; 32],
-        message_digest: digest(&data[0]),
-        event_digest: digest(&data[1]),
         snapshot_digest: None,
-        message_head: 0,
-        message_next: messages,
-        event_head: 0,
-        event_next: data[1].len() as u64,
+        logs: fibril_broker::recovery::RetainedLogs::Queue(fibril_broker::recovery::RetainedLog {
+            head: 0,
+            next: data.len() as u64,
+            digest: *h.finalize().as_bytes(),
+        }),
     };
-    let mut h = blake3::Hasher::new();
-    h.update(b"fibril-retained-history-v1\0");
-    h.update(&rmp_serde::to_vec_named(&("q", 0u32, None::<&str>, false, &history)).unwrap());
-    history.id = *h.finalize().as_bytes();
+    history.id = history.compute_id("q", 0, None, false).unwrap();
     TestSource {
         report: BrokerSealedReplica {
             node_id: node.into(),
@@ -121,10 +103,6 @@ fn source(
                     transition: pending.transition_digest().unwrap(),
                     fence_epoch: pending.proposed.epoch,
                 },
-                message_head: 0,
-                message_next: messages,
-                event_head: 0,
-                event_next: history.event_next,
                 history,
             },
         },
@@ -152,7 +130,8 @@ fn inspect(a: &TestSource, b: &TestSource, target: Option<u64>) -> RecoveryPairI
             RecoverySide::Left => a,
             RecoverySide::Right => b,
         };
-        let records = &source.data[usize::from(request.source == RecoveryReadSource::Events)];
+        assert_eq!(request.source, RecoveryReadSource::Log);
+        let records = &source.data;
         let next = (records.len() as u64).min(request.from + request.max_records as u64);
         inspector
             .accept_page(
@@ -178,19 +157,26 @@ fn artifact(source: &TestSource, target: u64) -> RecoveryQueueStateArtifact {
         .1[0]
         .clone()
 }
-fn enqueue(off: u64) -> StromaEvent {
-    StromaEvent::Enqueue {
-        off,
-        retries: 0,
+fn payload(body: u8) -> StromaEvent {
+    StromaEvent::PayloadEnqueue {
+        not_before: None,
         expire_at: None,
+        headers: vec![],
+        payload: vec![body],
     }
+}
+fn payloads(count: u64) -> Vec<StromaEvent> {
+    (0..count).map(|n| payload(n as u8)).collect()
+}
+fn tail(source: &TestSource) -> u64 {
+    source.report.seal.history.queue_log().unwrap().next
 }
 
 #[test]
 fn source_selection_covers_observed_tails_and_rejects_missing_comparison_or_partial_replay() {
     let (snapshot, pending, quorum) = selecting(2);
-    let a = source(&pending, &quorum, "a", 1, vec![enqueue(0)]);
-    let b = source(&pending, &quorum, "b", 2, vec![enqueue(0), enqueue(1)]);
+    let a = source(&pending, &quorum, "a", payloads(1));
+    let b = source(&pending, &quorum, "b", payloads(2));
     let mut witnesses = RecoveryWitnessSet::new(&snapshot, &pending).unwrap();
     let mut artifacts =
         BTreeMap::from([("a".into(), artifact(&a, 1)), ("b".into(), artifact(&b, 2))]);
@@ -214,7 +200,7 @@ fn source_selection_covers_observed_tails_and_rejects_missing_comparison_or_part
         .select_queue_source(&snapshot, &artifacts, &[pair.clone()])
         .unwrap();
     assert_eq!(chosen.source_node(), "b");
-    assert_eq!((chosen.event_next(), chosen.message_next()), (2, 2));
+    assert_eq!((chosen.event_next(), chosen.message_next()), (2, 0));
     assert_eq!(chosen.snapshot_digest(), artifacts["b"].snapshot_digest());
     assert_eq!(
         chosen.digest().unwrap(),
@@ -245,7 +231,7 @@ fn source_selection_covers_observed_tails_and_rejects_missing_comparison_or_part
 fn source_selection_accepts_one_intersecting_witness_but_refuses_old_timer_origin() {
     for version in [1, 2] {
         let (snapshot, pending, quorum) = selecting(version);
-        let b = source(&pending, &quorum, "b", 1, vec![enqueue(0)]);
+        let b = source(&pending, &quorum, "b", payloads(1));
         let artifacts = BTreeMap::from([("b".into(), artifact(&b, 1))]);
         let mut witnesses = RecoveryWitnessSet::new(&snapshot, &pending).unwrap();
         witnesses.record(&snapshot, "b", b.report.clone()).unwrap();
@@ -258,36 +244,36 @@ fn source_selection_accepts_one_intersecting_witness_but_refuses_old_timer_origi
     }
 }
 
+/// Divergent histories block selection. So does a longest tail whose
+/// witness cannot supply a complete artifact: no shorter source is promoted.
 #[test]
-fn source_selection_refuses_divergence_and_crossed_incomplete_tails() {
+fn source_selection_refuses_divergence_and_uncovered_longest_tail() {
     let (snapshot, pending, quorum) = selecting(2);
-    for crossed in [false, true] {
+    for uncovered in [false, true] {
         let a = source(
             &pending,
             &quorum,
             "a",
-            if crossed { 2 } else { 1 },
-            vec![enqueue(0)],
+            if uncovered {
+                payloads(2)
+            } else {
+                vec![payload(0), StromaEvent::Ack { off: 0 }]
+            },
         );
         let b = source(
             &pending,
             &quorum,
             "b",
-            1,
-            if crossed {
-                vec![enqueue(0), StromaEvent::Ack { off: 0 }]
+            if uncovered {
+                payloads(1)
             } else {
-                vec![StromaEvent::Enqueue {
-                    off: 0,
-                    retries: 1,
-                    expire_at: None,
-                }]
+                vec![payload(0), StromaEvent::Nack { off: 0, requeue: true }]
             },
         );
-        let artifacts = BTreeMap::from([
-            ("a".into(), artifact(&a, a.report.seal.event_next)),
-            ("b".into(), artifact(&b, b.report.seal.event_next)),
-        ]);
+        let mut artifacts = BTreeMap::from([("b".into(), artifact(&b, tail(&b)))]);
+        if !uncovered {
+            artifacts.insert("a".into(), artifact(&a, tail(&a)));
+        }
         let mut witnesses = RecoveryWitnessSet::new(&snapshot, &pending).unwrap();
         for s in [&a, &b] {
             witnesses
@@ -299,7 +285,7 @@ fn source_selection_refuses_divergence_and_crossed_incomplete_tails() {
             .select_queue_source(&snapshot, &artifacts, &[pair])
             .unwrap_err();
         assert!(
-            error.contains(if crossed {
+            error.contains(if uncovered {
                 "both observed tails"
             } else {
                 "diverge"
@@ -309,18 +295,30 @@ fn source_selection_refuses_divergence_and_crossed_incomplete_tails() {
     }
 }
 
+/// Selection takes the source tail as the stage boundary, and the source
+/// artifact must match that sealed tail exactly. This is what lets the stage
+/// spec carry the source log alone without a separate applied boundary.
+#[test]
+fn selected_boundary_equals_the_source_seal_tail() {
+    let (snapshot, pending, quorum) = selecting(2);
+    let b = source(&pending, &quorum, "b", payloads(3));
+    let mut witnesses = RecoveryWitnessSet::new(&snapshot, &pending).unwrap();
+    witnesses.record(&snapshot, "b", b.report.clone()).unwrap();
+    for target in 0..3 {
+        let short = BTreeMap::from([("b".into(), artifact(&b, target))]);
+        assert!(witnesses.select_queue_source(&snapshot, &short, &[]).is_err());
+    }
+    let full = BTreeMap::from([("b".into(), artifact(&b, 3))]);
+    let chosen = witnesses.select_queue_source(&snapshot, &full, &[]).unwrap();
+    assert_eq!(chosen.event_next(), tail(&b));
+}
+
 #[test]
 fn recovery_plan_binds_verified_state_and_preserves_the_pending_barrier() {
     use crate::recovery_plan::QueueRecoveryPlan;
     for count in [0, 2] {
         let (mut snapshot, pending, quorum) = selecting(2);
-        let b = source(
-            &pending,
-            &quorum,
-            "b",
-            count,
-            (0..count).map(enqueue).collect(),
-        );
+        let b = source(&pending, &quorum, "b", payloads(count));
         let state_artifact = artifact(&b, count);
         let mut witnesses = RecoveryWitnessSet::new(&snapshot, &pending).unwrap();
         witnesses.record(&snapshot, "b", b.report.clone()).unwrap();
@@ -364,13 +362,7 @@ fn recovery_plan_binds_verified_state_and_preserves_the_pending_barrier() {
         );
         assert!(accepted_history(&snapshot, &pending.previous.resource).is_err());
         // A valid but different replay cannot be substituted after restart.
-        let another = source(
-            &pending,
-            &quorum,
-            "b",
-            count + 1,
-            (0..=count).map(enqueue).collect(),
-        );
+        let another = source(&pending, &quorum, "b", payloads(count + 1));
         assert!(
             restored
                 .verify_artifact(&artifact(&another, count + 1))
@@ -387,7 +379,7 @@ fn recovery_plan_binds_verified_state_and_preserves_the_pending_barrier() {
 fn recovery_plan_rejects_substituted_sources_bindings_witnesses_and_transition() {
     use crate::recovery_plan::QueueRecoveryPlan;
     let (snapshot, pending, quorum) = selecting(2);
-    let b = source(&pending, &quorum, "b", 1, vec![enqueue(0)]);
+    let b = source(&pending, &quorum, "b", payloads(1));
     let mut witnesses = RecoveryWitnessSet::new(&snapshot, &pending).unwrap();
     witnesses.record(&snapshot, "b", b.report.clone()).unwrap();
     let selected = witnesses
@@ -434,7 +426,7 @@ fn recovery_plan_rejects_substituted_sources_bindings_witnesses_and_transition()
     }
     // Source choice cannot outlive an added witness, even if the newly observed
     // tail would otherwise tempt a coordinator to retain its earlier proposal.
-    let a = source(&pending, &quorum, "a", 2, vec![enqueue(0), enqueue(1)]);
+    let a = source(&pending, &quorum, "a", payloads(2));
     witnesses.record(&snapshot, "a", a.report).unwrap();
     assert!(QueueRecoveryPlan::proposed(&snapshot, &pending, &witnesses, &selected).is_err());
 }

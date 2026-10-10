@@ -513,22 +513,14 @@ mod tests {
                     fence_epoch: 8,
                 },
                 history: RetainedHistoryIdentity {
-                    log_layout: Default::default(),
                     version: 2,
                     storage_history: Some(quorum.reports["b"].storage.clone()),
                     id: [9; 32],
-                    message_digest: [10; 32],
-                    event_digest: [11; 32],
                     snapshot_digest: None,
-                    message_head: 0,
-                    message_next: 5,
-                    event_head: 0,
-                    event_next: 7,
+                    logs: fibril_broker::recovery::RetainedLogs::Queue(
+                        fibril_broker::recovery::RetainedLog { head: 0, next: 7, digest: [11; 32] },
+                    ),
                 },
-                message_head: 0,
-                message_next: 5,
-                event_head: 0,
-                event_next: 7,
             },
         };
         for mutation in 0..5 {

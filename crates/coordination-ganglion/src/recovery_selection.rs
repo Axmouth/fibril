@@ -123,29 +123,39 @@ impl RecoveryWitnessSet {
             );
         }
         let reports = self.reports(snapshot)?;
-        let event_next = reports
+        // Every witness must be a queue history before any tail is compared,
+        // so a stream history can never slip into the single-log maximum.
+        let logs = reports
+            .iter()
+            .map(|(node, r)| {
+                r.seal
+                    .history
+                    .queue_log()
+                    .map(|log| (node.clone(), *log))
+                    .ok_or("queue source selection received a stream history")
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let event_next = logs
             .values()
-            .map(|r| r.seal.event_next)
+            .map(|log| log.next)
             .max()
             .ok_or("no sealed witnesses")?;
-        let message_next = reports
-            .values()
-            .map(|r| r.seal.message_next)
-            .max()
-            .ok_or("no sealed witnesses")?;
+        // Queues have no separate message lane.
+        let message_next = 0;
         for (node, artifact) in artifacts {
             let seal = &reports
                 .get(node)
                 .ok_or("artifact is not from a collected witness")?
                 .seal;
+            let log = &logs[node];
             let evidence = artifact.evidence();
-            if evidence.log_layout != seal.history.log_layout
-                || evidence.payload_log != seal.history.payload_log()
+            if evidence.log_layout != fibril_broker::recovery::QueueLogLayout::Combined
+                || Some(&evidence.payload_log) != seal.history.payload_log().as_ref()
                 || evidence.version != 2
                 || evidence.history_id != seal.history.id
-                || evidence.event_next != seal.event_next
-                || evidence.message_next != seal.message_next
-                || artifact.message_head() != seal.message_head
+                || evidence.event_next != log.next
+                || evidence.message_next != 0
+                || artifact.message_head() != 0
                 || evidence.live_payload_digest.is_none()
             {
                 return Err("artifact does not cover its complete sealed source".into());
@@ -181,11 +191,14 @@ impl RecoveryWitnessSet {
                 } else {
                     (&report.seal, source_seal)
                 };
+                let range = |seal: &fibril_broker::recovery::SealedReplicaFrontiers| {
+                    seal.history.queue_log().map(|log| (log.head, log.next))
+                };
                 if pair.transition != command.transition
-                    || pair.messages.left_range != (left.message_head, left.message_next)
-                    || pair.messages.right_range != (right.message_head, right.message_next)
-                    || pair.events.left_range != (left.event_head, left.event_next)
-                    || pair.events.right_range != (right.event_head, right.event_next)
+                    || pair.messages.left_range != (0, 0)
+                    || pair.messages.right_range != (0, 0)
+                    || Some(pair.events.left_range) != range(left)
+                    || Some(pair.events.right_range) != range(right)
                 {
                     return Err("comparison does not identify the exact sealed witnesses".into());
                 }

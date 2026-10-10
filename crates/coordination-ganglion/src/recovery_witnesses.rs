@@ -114,21 +114,14 @@ impl RecoveryWitnessSet {
         if seal.request.transition != self.command.transition
             || seal.request.fence_epoch != self.command.fence_epoch
             || !history.valid_version()
-            || history.message_head > history.message_next
-            || history.event_head > history.event_next
-            || (
-                seal.message_head,
-                seal.message_next,
-                seal.event_head,
-                seal.event_next,
-            ) != (
-                history.message_head,
-                history.message_next,
-                history.event_head,
-                history.event_next,
-            )
         {
             return Err("stale or malformed recovery seal reply".into());
+        }
+        // The logs variant is part of the history identity. It must name the
+        // resource kind of the transition, so a queue seal never counts for a
+        // stream recovery or the other way round.
+        if history.logs.is_stream() != self.command.stream {
+            return Err("recovery seal logs do not match the resource kind".into());
         }
         if let Some(previous) = self.reports.get(contacted_node) {
             if previous != &report {
@@ -150,8 +143,7 @@ impl RecoveryWitnessSet {
             partition = self.command.partition.id(), received = self.reports.len() + 1,
             required = self.required, history = %blake3::Hash::from_bytes(history.id),
             transition = %blake3::Hash::from_bytes(self.command.transition),
-            message_head = history.message_head, message_next = history.message_next,
-            event_head = history.event_head, event_next = history.event_next,
+            logs = ?history.logs,
             "recovery seal witness admitted; compatible history remains unproven"
         );
         self.reports.insert(contacted_node.to_owned(), report);
@@ -209,7 +201,8 @@ mod tests {
     use super::*;
     use crate::promotion::{pending_recovery_key, retain_unproven_assignments};
     use fibril_broker::recovery::{
-        RecoverySealRequest, RetainedHistoryIdentity, SealedReplicaFrontiers,
+        RecoverySealRequest, RetainedHistoryIdentity, RetainedLog, RetainedLogs,
+        SealedReplicaFrontiers,
     };
     use ganglion_core::{PartitionAssignment, ReplicationDurabilityPolicy, ResourceIdentity};
 
@@ -244,7 +237,14 @@ mod tests {
         (desired, request)
     }
 
+    fn log(head: u64, next: u64) -> RetainedLog {
+        RetainedLog { head, next, digest: [2; 32] }
+    }
+
+    /// A well formed seal of the set's resource kind: a version two queue
+    /// history, or a version one stream history.
     fn report(set: &RecoveryWitnessSet, node: &str) -> BrokerSealedReplica {
+        let stream = set.command.stream;
         BrokerSealedReplica {
             node_id: node.into(),
             seal: SealedReplicaFrontiers {
@@ -253,22 +253,27 @@ mod tests {
                     fence_epoch: set.command.fence_epoch,
                 },
                 history: RetainedHistoryIdentity {
-                    log_layout: Default::default(),
-                    storage_history: None,
-                    version: 1,
+                    storage_history: (!stream).then(|| fibril_broker::queue_engine::PreparedStorageHistory {
+                        topic: set.command.topic.clone(),
+                        partition: set.command.partition.id(),
+                        group: set.command.group.clone(),
+                        stream: false,
+                        binding: fibril_broker::queue_engine::StorageHistoryBinding {
+                            resource_incarnation: [1; 16],
+                            accepted_history: [2; 16],
+                            writer_session: [3; 16],
+                        },
+                        storage_instance: [4; 16],
+                    }),
+                    version: if stream { 1 } else { 2 },
                     id: [1; 32],
-                    message_digest: [2; 32],
-                    event_digest: [3; 32],
                     snapshot_digest: None,
-                    message_head: 0,
-                    message_next: 10,
-                    event_head: 0,
-                    event_next: 8,
+                    logs: if stream {
+                        RetainedLogs::Stream { records: log(0, 10), cursor_events: log(0, 8) }
+                    } else {
+                        RetainedLogs::Queue(log(0, 10))
+                    },
                 },
-                message_head: 0,
-                message_next: 10,
-                event_head: 0,
-                event_next: 8,
             },
         }
     }
@@ -310,10 +315,16 @@ mod tests {
                 1 => bad.seal.request.transition[0] ^= 1,
                 2 => bad.seal.request.fence_epoch += 1,
                 3 => bad.seal.history.version += 1,
-                4 => bad.seal.history.message_head = 11,
-                5 => bad.seal.history.event_head = 9,
-                6 => bad.seal.message_next += 1,
-                _ => bad.seal.event_next += 1,
+                4 => bad.seal.history.logs = RetainedLogs::Queue(log(11, 10)),
+                5 => {
+                    bad.seal.history.logs =
+                        RetainedLogs::Stream { records: log(0, 10), cursor_events: log(0, 8) }
+                }
+                6 => bad.seal.history.storage_history.as_mut().unwrap().stream = true,
+                _ => {
+                    bad.seal.history.version = 1;
+                    bad.seal.history.storage_history = None;
+                }
             }
             assert!(set.record(&snapshot, "f1", bad).is_err());
             assert!(set.reports(&snapshot).unwrap().is_empty());
@@ -345,8 +356,7 @@ mod tests {
         set.record(&snapshot, "f1", report(&set, "f1")).unwrap();
         let mut other = report(&set, "f2");
         other.seal.history.id[0] ^= 1;
-        other.seal.history.message_head = 5;
-        other.seal.message_head = 5;
+        other.seal.history.logs = RetainedLogs::Queue(log(5, 10));
         set.record(&snapshot, "f2", other).unwrap();
         assert_eq!(
             set.progress(&snapshot).unwrap(),
@@ -401,6 +411,11 @@ mod tests {
         assert_eq!(request.previous_write_nodes, 3);
         let mut set = RecoveryWitnessSet::new(&snapshot, &request).unwrap();
         assert!(set.command().stream);
+        // A queue seal can never count toward a stream recovery.
+        let mut queue = report(&set, "f2");
+        queue.seal.history.logs = RetainedLogs::Queue(log(0, 10));
+        assert!(set.record(&snapshot, "f2", queue).is_err());
+        assert!(set.reports(&snapshot).unwrap().is_empty());
         set.record(&snapshot, "f2", report(&set, "f2")).unwrap();
         assert_eq!(
             set.progress(&snapshot).unwrap(),

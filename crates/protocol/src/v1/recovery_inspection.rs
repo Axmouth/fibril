@@ -66,6 +66,16 @@ pub async fn inspect_recovery_pair_with_journal(
     .map(|(report, ())| report)
 }
 
+/// Applied boundary a source artifact replays to: the sealed queue log tail.
+fn source_queue_next(source: &BrokerSealedReplica) -> Result<u64, BrokerError> {
+    source
+        .seal
+        .history
+        .queue_log()
+        .map(|log| log.next)
+        .ok_or_else(|| BrokerError::InvalidArgument("source artifact requires a queue seal".into()))
+}
+
 fn journal_identity(
     command: &RecoverySealCommand,
     source: &BrokerSealedReplica,
@@ -210,7 +220,7 @@ pub async fn inspect_recovery_source_artifact_resumable(
         source,
         limits,
         Some((
-            source.seal.event_next,
+            source_queue_next(source)?,
             replay_limits,
             Some(max_checkpoint_bytes),
         )),
@@ -356,7 +366,7 @@ async fn inspect_source_artifact(
         source,
         limits,
         Some((
-            source.seal.event_next,
+            source_queue_next(source)?,
             replay_limits,
             Some(max_checkpoint_bytes),
         )),

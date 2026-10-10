@@ -3572,8 +3572,21 @@ where
                         let replica_id = sealed.node_id;
                         let sealed = sealed.seal;
                         let h = sealed.history;
+                        let bounds = |log: &fibril_broker::recovery::RetainedLog| {
+                            crate::v1::RecoveryLogBounds { head: log.head, next: log.next, digest: log.digest }
+                        };
+                        let logs = match &h.logs {
+                            fibril_broker::recovery::RetainedLogs::Queue(log) => {
+                                crate::v1::RecoverySealLogs::Queue(bounds(log))
+                            }
+                            fibril_broker::recovery::RetainedLogs::Stream { records, cursor_events } => {
+                                crate::v1::RecoverySealLogs::Stream {
+                                    records: bounds(records),
+                                    cursor_events: bounds(cursor_events),
+                                }
+                            }
+                        };
                         let reply = RecoverySealOk {
-                            combined_log: h.log_layout == fibril_broker::recovery::QueueLogLayout::Combined,
                             replica_id,
                             transition: sealed.request.transition,
                             fence_epoch: sealed.request.fence_epoch,
@@ -3587,13 +3600,8 @@ where
                                 }
                             }),
                             history_id: h.id,
-                            message_digest: h.message_digest,
-                            event_digest: h.event_digest,
                             snapshot_digest: h.snapshot_digest,
-                            message_head: h.message_head,
-                            message_next: h.message_next,
-                            event_head: h.event_head,
-                            event_next: h.event_next,
+                            logs,
                         };
                         frame_tx_high_prio
                             .send(try_encode(Op::RecoverySealOk, frame.request_id, &reply)?)
@@ -3638,8 +3646,8 @@ where
                     },
                     history_id: read.history_id,
                     source: match read.source {
-                        0 => RecoveryReadSource::Messages,
-                        1 => RecoveryReadSource::Events,
+                        0 => RecoveryReadSource::StreamRecords,
+                        1 => RecoveryReadSource::Log,
                         _ => RecoveryReadSource::Snapshot,
                     },
                     from: read.from,

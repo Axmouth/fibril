@@ -1880,9 +1880,12 @@ fn validate_recovery_seal_reply(
     command: &fibril_broker::recovery::RecoverySealCommand,
     reply: crate::v1::RecoverySealOk,
 ) -> Result<fibril_broker::recovery::BrokerSealedReplica, BrokerError> {
+    use crate::v1::{RecoveryLogBounds, RecoverySealLogs};
     use fibril_broker::recovery::{
-        BrokerSealedReplica, RecoverySealRequest, RetainedHistoryIdentity, SealedReplicaFrontiers,
+        BrokerSealedReplica, RecoverySealRequest, RetainedHistoryIdentity, RetainedLog,
+        RetainedLogs, SealedReplicaFrontiers,
     };
+    let ordered = |log: &RecoveryLogBounds| log.head <= log.next;
     if reply.replica_id != replica_id
         || reply.transition != command.transition
         || reply.fence_epoch != command.fence_epoch
@@ -1890,14 +1893,25 @@ fn validate_recovery_seal_reply(
             (reply.history_version, reply.storage_history.is_some()),
             (1, false) | (2, true)
         )
-        || (reply.combined_log && (command.stream || reply.history_version != 2 || reply.message_head != 0 || reply.message_next != 0))
-        || reply.message_head > reply.message_next
-        || reply.event_head > reply.event_next
+        // The reply must describe the requested resource kind. A queue seal
+        // also needs a version two storage receipt.
+        || reply.logs.is_stream() != command.stream
+        || match &reply.logs {
+            RecoverySealLogs::Queue(log) => reply.history_version != 2 || !ordered(log),
+            RecoverySealLogs::Stream { records, cursor_events } => {
+                !ordered(records) || !ordered(cursor_events)
+            }
+        }
     {
         return Err(BrokerError::InvalidArgument(
             "recovery reply identity, transition or bounds mismatch".into(),
         ));
     }
+    let retained = |log: RecoveryLogBounds| RetainedLog {
+        head: log.head,
+        next: log.next,
+        digest: log.digest,
+    };
     Ok(BrokerSealedReplica {
         node_id: reply.replica_id,
         seal: SealedReplicaFrontiers {
@@ -1906,11 +1920,6 @@ fn validate_recovery_seal_reply(
                 fence_epoch: reply.fence_epoch,
             },
             history: RetainedHistoryIdentity {
-                log_layout: if reply.combined_log {
-                    fibril_broker::recovery::QueueLogLayout::Combined
-                } else {
-                    fibril_broker::recovery::QueueLogLayout::Separate
-                },
                 version: reply.history_version,
                 storage_history: reply.storage_history.map(|h| {
                     fibril_broker::queue_engine::PreparedStorageHistory {
@@ -1927,18 +1936,15 @@ fn validate_recovery_seal_reply(
                     }
                 }),
                 id: reply.history_id,
-                message_digest: reply.message_digest,
-                event_digest: reply.event_digest,
                 snapshot_digest: reply.snapshot_digest,
-                message_head: reply.message_head,
-                message_next: reply.message_next,
-                event_head: reply.event_head,
-                event_next: reply.event_next,
+                logs: match reply.logs {
+                    RecoverySealLogs::Queue(log) => RetainedLogs::Queue(retained(log)),
+                    RecoverySealLogs::Stream { records, cursor_events } => RetainedLogs::Stream {
+                        records: retained(records),
+                        cursor_events: retained(cursor_events),
+                    },
+                },
             },
-            message_head: reply.message_head,
-            message_next: reply.message_next,
-            event_head: reply.event_head,
-            event_next: reply.event_next,
         },
     })
 }
@@ -1960,51 +1966,59 @@ mod recovery_tests {
         }
     }
 
+    fn bounds(head: u64, next: u64) -> crate::v1::RecoveryLogBounds {
+        crate::v1::RecoveryLogBounds { head, next, digest: [3; 32] }
+    }
+
+    /// The reply logs must match the requested kind both ways: a queue
+    /// command refuses stream logs and a stream command refuses queue logs.
     #[test]
-    fn recovery_reply_must_match_target_transition_version_and_bounds() {
-        let reply = RecoverySealOk {
-            combined_log: false,
-            storage_history: None,
+    fn recovery_reply_must_match_target_kind_transition_version_and_bounds() {
+        use crate::v1::RecoverySealLogs;
+        let queue = RecoverySealOk {
+            storage_history: Some(crate::v1::RecoveryStorageHistory {
+                resource_incarnation: [5; 16], accepted_history: [6; 16],
+                writer_session: [7; 16], storage_instance: [8; 16],
+            }),
             replica_id: "b".into(),
             transition: [1; 32],
             fence_epoch: 8,
-            history_version: 1,
+            history_version: 2,
             history_id: [2; 32],
-            message_digest: [3; 32],
-            event_digest: [4; 32],
             snapshot_digest: None,
-            message_head: 0,
-            message_next: 0,
-            event_head: 0,
-            event_next: 0,
+            logs: RecoverySealLogs::Queue(bounds(0, 4)),
         };
-        assert!(validate_recovery_seal_reply("b", &command(), reply.clone()).is_ok());
-        let mut combined = reply.clone();
-        combined.combined_log = true;
-        assert!(validate_recovery_seal_reply("b", &command(), combined.clone()).is_err());
-        combined.history_version = 2;
-        combined.storage_history = Some(crate::v1::RecoveryStorageHistory {
-            resource_incarnation: [5; 16], accepted_history: [6; 16],
-            writer_session: [7; 16], storage_instance: [8; 16],
-        });
-        let recovered = validate_recovery_seal_reply("b", &command(), combined.clone()).unwrap();
-        assert_eq!(recovered.seal.history.log_layout, fibril_broker::recovery::QueueLogLayout::Combined);
-        let mut stream = command();
-        stream.stream = true;
-        assert!(validate_recovery_seal_reply("b", &stream, combined.clone()).is_err());
-        combined.message_next = 1;
-        assert!(validate_recovery_seal_reply("b", &command(), combined).is_err());
+        let recovered = validate_recovery_seal_reply("b", &command(), queue.clone()).unwrap();
+        assert_eq!(
+            recovered.seal.history.queue_log().map(|log| (log.head, log.next)),
+            Some((0, 4))
+        );
+        assert!(!recovered.seal.history.storage_history.as_ref().unwrap().stream);
+        let mut stream_command = command();
+        stream_command.stream = true;
+        assert!(validate_recovery_seal_reply("b", &stream_command, queue.clone()).is_err());
+        let mut stream = queue.clone();
+        stream.logs = RecoverySealLogs::Stream { records: bounds(0, 2), cursor_events: bounds(0, 1) };
+        assert!(validate_recovery_seal_reply("b", &command(), stream.clone()).is_err());
+        let recovered = validate_recovery_seal_reply("b", &stream_command, stream.clone()).unwrap();
+        assert!(recovered.seal.history.logs.is_stream());
+        stream.history_version = 1;
+        stream.storage_history = None;
+        assert!(validate_recovery_seal_reply("b", &stream_command, stream).is_ok());
         for mutation in 0..6 {
-            let mut bad = reply.clone();
+            let mut bad = queue.clone();
             match mutation {
                 0 => bad.replica_id = "c".into(),
                 1 => bad.transition[0] ^= 1,
                 2 => bad.fence_epoch += 1,
                 3 => bad.history_version += 1,
-                4 => bad.message_head = 1,
-                _ => bad.event_head = 1,
+                4 => bad.logs = RecoverySealLogs::Queue(bounds(5, 4)),
+                _ => {
+                    bad.history_version = 1;
+                    bad.storage_history = None;
+                }
             }
-            assert!(validate_recovery_seal_reply("b", &command(), bad).is_err());
+            assert!(validate_recovery_seal_reply("b", &command(), bad).is_err(), "mutation {mutation}");
         }
     }
 
@@ -2113,8 +2127,8 @@ async fn request_recovery_read_mode(
         },
         history_id: request.history_id,
         source: match request.source {
-            RecoveryReadSource::Messages => 0,
-            RecoveryReadSource::Events => 1,
+            RecoveryReadSource::StreamRecords => 0,
+            RecoveryReadSource::Log => 1,
             RecoveryReadSource::Snapshot => 2,
         },
         from: request.from,
@@ -2191,13 +2205,15 @@ fn validate_recovery_read_reply(
             return Err(invalid());
         }
     } else {
-        let (head, end) = if reply.source == 0 {
-            (history.message_head, history.message_next)
-        } else {
-            (history.event_head, history.event_next)
+        // Source 0 names stream records, which a queue history does not have.
+        let source = match reply.source {
+            0 => fibril_broker::recovery::RecoveryReadSource::StreamRecords,
+            1 => fibril_broker::recovery::RecoveryReadSource::Log,
+            _ => return Err(invalid()),
         };
-        if reply.source > 1
-            || reply.from < head
+        let log = history.logs.for_source(source).ok_or_else(invalid)?;
+        let (head, end) = (log.head, log.next);
+        if reply.from < head
             || reply.end != end
             || !reply.snapshot_bytes.is_empty()
             || reply.records.len() > request.max_records as usize
@@ -2323,27 +2339,30 @@ mod recovery_read_tests {
             "b",
             &command,
             crate::v1::RecoverySealOk {
-                combined_log: false,
-                storage_history: None,
+                storage_history: Some(crate::v1::RecoveryStorageHistory {
+                    resource_incarnation: [5; 16],
+                    accepted_history: [6; 16],
+                    writer_session: [7; 16],
+                    storage_instance: [8; 16],
+                }),
                 replica_id: "b".into(),
                 transition: [1; 32],
                 fence_epoch: 8,
-                history_version: 1,
+                history_version: 2,
                 history_id: [2; 32],
-                message_digest: [3; 32],
-                event_digest: [4; 32],
                 snapshot_digest: None,
-                message_head: 0,
-                message_next: 0,
-                event_head: 0,
-                event_next: 0,
+                logs: crate::v1::RecoverySealLogs::Queue(crate::v1::RecoveryLogBounds {
+                    head: 0,
+                    next: 0,
+                    digest: [3; 32],
+                }),
             },
         )
         .unwrap();
         let request = RecoveryReadRequest {
             seal: sealed.seal.request.clone(),
             history_id: sealed.seal.history.id,
-            source: RecoveryReadSource::Messages,
+            source: RecoveryReadSource::Log,
             from: 0,
             max_records: 1,
             max_bytes: 32,
@@ -2380,18 +2399,16 @@ mod recovery_read_tests {
 
     #[test]
     fn read_reply_rejects_wrong_identity_holes_bounds_and_budget_violations() {
+        use fibril_broker::recovery::{RetainedLog, RetainedLogs};
         let history = RetainedHistoryIdentity {
-            log_layout: Default::default(),
             storage_history: None,
             version: 1,
             id: [2; 32],
-            message_digest: [3; 32],
-            event_digest: [4; 32],
             snapshot_digest: Some([5; 32]),
-            message_head: 4,
-            message_next: 8,
-            event_head: 1,
-            event_next: 9,
+            logs: RetainedLogs::Stream {
+                records: RetainedLog { head: 4, next: 8, digest: [3; 32] },
+                cursor_events: RetainedLog { head: 1, next: 9, digest: [4; 32] },
+            },
         };
         let request = RecoveryRead {
             seal: RecoverySeal {
@@ -2478,7 +2495,7 @@ mod recovery_read_tests {
         assert!(validate_recovery_read_reply("b", &events_req, &history, &events).is_err());
         let mut snapshot_req = request.clone();
         snapshot_req.source = 2;
-        let mut snapshot = reply;
+        let mut snapshot = reply.clone();
         snapshot.source = 2;
         snapshot.records.clear();
         snapshot.snapshot_bytes = vec![8];
@@ -2488,5 +2505,15 @@ mod recovery_read_tests {
         snapshot.next = 6;
         snapshot_req.max_bytes = 1;
         assert!(validate_recovery_read_reply("b", &snapshot_req, &history, &snapshot).is_err());
+        // A queue history has only its single log. A source 0 page for it is
+        // refused even when it looks well formed.
+        let mut queue = history.clone();
+        queue.logs = RetainedLogs::Queue(RetainedLog { head: 4, next: 8, digest: [3; 32] });
+        assert!(validate_recovery_read_reply("b", &request, &queue, &reply).is_err());
+        let mut log_req = request.clone();
+        log_req.source = 1;
+        let mut log = reply.clone();
+        log.source = 1;
+        assert!(validate_recovery_read_reply("b", &log_req, &queue, &log).is_ok());
     }
 }
