@@ -172,7 +172,7 @@ them:
   startup log. No files needed, survives leaf certificate rotation under the
   same CA.
 - `tls_ca_path(...)` trusts the CA certificate(s) in a PEM file, e.g. the
-  broker's generated `<data_dir>/tls/ca.pem` or an internal CA.
+  broker's generated `<data_dir>/node/tls/ca.pem` or an internal CA.
 - bare `tls()` uses the OS trust store, for brokers with publicly issued
   certificates.
 
@@ -184,7 +184,7 @@ use fibril_client::ClientOptions;
 
 let client = ClientOptions::new()
     .auth("fibril", "fibril")
-    .tls_ca_path("/var/lib/fibril/tls/ca.pem")
+    .tls_ca_path("/var/lib/fibril/node/tls/ca.pem")
     .connect("broker.internal:9876")
     .await?;
 ```
@@ -197,7 +197,7 @@ import { ClientOptions } from "@fibril/client";
 
 const client = await new ClientOptions()
   .withAuth("fibril", "fibril")
-  .withTlsCaPath("/var/lib/fibril/tls/ca.pem")
+  .withTlsCaPath("/var/lib/fibril/node/tls/ca.pem")
   .connect("broker.internal:9876");
 ```
 
@@ -210,7 +210,7 @@ from fibril import ClientOptions
 client = await (
     ClientOptions()
     .with_auth("fibril", "fibril")
-    .with_tls_ca_path("/var/lib/fibril/tls/ca.pem")
+    .with_tls_ca_path("/var/lib/fibril/node/tls/ca.pem")
     .connect("broker.internal:9876")
 )
 ```
@@ -221,7 +221,7 @@ client = await (
 ```go
 client, err := fibril.Dial(ctx, "broker.internal:9876", fibril.ClientOptions{
     Credentials: &fibril.Credentials{Username: "fibril", Password: "fibril"},
-    TLS:  &fibril.TLSOptions{CAFile: "/var/lib/fibril/tls/ca.pem"},
+    TLS:  &fibril.TLSOptions{CAFile: "/var/lib/fibril/node/tls/ca.pem"},
 })
 ```
 
@@ -236,7 +236,7 @@ roots. A client certificate is `ClientCertFile` with `ClientKeyFile`.
 var client = await Client.ConnectAsync("broker.internal:9876", new ClientOptions
 {
     Credentials = new Credentials("fibril", "fibril"),
-    Tls = new TlsOptions { CaFile = "/var/lib/fibril/tls/ca.pem" },
+    Tls = new TlsOptions { CaFile = "/var/lib/fibril/node/tls/ca.pem" },
 });
 ```
 

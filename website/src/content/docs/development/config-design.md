@@ -65,6 +65,7 @@ Example TOML shape:
 
 ```toml
 [server]
+# Node root: fibril-node marker, node/, coordination/, storage/, cache/
 data_dir = "server_data"
 
 [broker.listener]

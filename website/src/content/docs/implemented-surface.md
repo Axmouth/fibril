@@ -626,7 +626,7 @@ See also: [configuration](/configuration/) for the `tls` section fields.
 | TLS startup config (`tls` section) | Implemented | Config crate with env overrides and guided validation errors |
 | Broker listener TLS | Implemented | rustls acceptor on the protocol listener |
 | Operator-supplied PEM material | Implemented | `tls.cert_path` + `tls.key_path` |
-| Per-deployment generated material | Implemented | `tls.auto_self_signed`: CA + server cert under `<data_dir>/tls`, CA SHA-256 fingerprint printed at startup |
+| Per-deployment generated material | Implemented | `tls.auto_self_signed`: CA + server cert under `<data_dir>/node/tls`, CA SHA-256 fingerprint printed at startup |
 | TLS/plaintext mismatch detection | Implemented | Both directions named at accept. A plaintext client on a TLS listener receives an error frame (code 426) instead of a bare close |
 | `fibrilctl cert` | Implemented | `cert generate` creates the per-deployment material ahead of first boot (extra SANs via `--san`), `cert fingerprint` prints a PEM certificate's SHA-256 |
 | First-boot setup mode | Implemented | `setup.mode = true` + no marker serves only a localhost setup page: TLS choice (generate, supply PEMs, or skip), an optional admin user, and an optional cluster secret. The choices persist as a config overlay layered below explicit config, plus the secret file |

@@ -22,7 +22,7 @@ Fibril never ships a certificate. Shipped default certificates are the
 default-password vulnerability class: every deployment would share one private
 key. Operators either supply their own PEM files or opt into per-deployment
 generation (the Elasticsearch 8 pattern), which creates a CA and a server
-certificate under the data dir and prints the CA fingerprint so clients can pin
+certificate under `<data_dir>/node/tls` and prints the CA fingerprint so clients can pin
 it. Generated mode serves the leaf plus the CA so a client pinning the CA
 fingerprint has the CA in the presented chain to validate against.
 
@@ -100,7 +100,7 @@ Setup mode exists to make both easy without forcing either. When armed and no
 completed marker exists, the server serves only a localhost setup page and the
 broker listener stays down, so no traffic can precede the operator's choice. The
 choice (TLS material, an optional admin user, an optional cluster secret)
-persists as a config overlay written to the data dir, which boot layers below
+persists as a config overlay written to `<data_dir>/node`, which boot layers below
 explicit file and environment config, so explicit configuration always wins. A
 fully configured deployment marks setup complete and boots straight through,
 which is the unattended lane. The setup listener binds loopback because the

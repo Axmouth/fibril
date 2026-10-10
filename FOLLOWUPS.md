@@ -106,8 +106,8 @@ Flow:
    - records the consumed nonce,
    - returns { cluster_secret, ca_pem, server_pem, server_key,
      coordination: { raft_node_id, peers including self, mode } }.
-4. The joiner writes everything into the data dir: cluster.secret (0600),
-   tls-provided material, and a coordination section in
+4. The joiner writes everything into <data_dir>/node: cluster.secret
+   (0600), tls-provided/ material, and a coordination section in
    config-overlay.toml (ConfigOverlay grows coordination, same
    layered-below-explicit-config precedence as tls and auth). The
    overlay+marker write is LAST and is the commit point: a failure at

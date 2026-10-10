@@ -49,7 +49,8 @@ false` to keep it on plain HTTP behind a reverse proxy that terminates TLS. See
 startup summary shows the current TLS state, including the CA fingerprint for
 generated material.
 
-With `setup.mode = true` and a fresh data dir, the server boots into a
+With `setup.mode = true` and no `<data_dir>/node/setup_complete` marker, the
+server boots into a
 first-boot setup page on `127.0.0.1:<admin port>` instead of serving: choose
 generated TLS material, paste a certificate and key, or explicitly continue
 without TLS, and the broker starts once the choice is applied. See

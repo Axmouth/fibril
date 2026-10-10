@@ -554,16 +554,17 @@ additional checks below.
 Installation builds a complete replacement generation in a separate directory.
 It copies the verified queue event prefix through the exact selected target,
 preserving live payloads older than the snapshot cut. It writes the queue checkpoint
-at that cut and persists a new storage receipt. The installer reopens and verifies the baseline before publishing one
-checksummed, directory-synced route pointer. An external installation anchor prevents
-an interrupted switch from reopening missing directories as a legacy empty queue.
+at that cut and persists a new storage receipt. The installer reopens and verifies the baseline before switching
+the partition's `current` file to the new generation. The switch writes `current.next`,
+syncs it, renames it over `current` and syncs the partition directory, so an interrupted
+switch leaves exactly one complete generation active.
 
 The partition lifecycle lock drains old operations, permanently fences old handles
 and retires pending snapshot work. The new registry entry records an existing
 on-disk queue, ensuring actor materialization loads the installed snapshot. Old
 sealed generations retain their original identity and remain readable under the
 pending transition. Linux SIGKILL tests cover handle retirement, record copying,
-completed generation persistence and route publication.
+completed generation persistence and the generation switch.
 
 Each proposed target records its exact plan, coordinator process and storage
 instance through consensus. The current recovery candidate requires its own live receipt and

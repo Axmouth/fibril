@@ -39,7 +39,7 @@ Either way, the development server currently:
 
 - listens for broker TCP traffic on `9876`
 - serves the early admin interface on `8081`
-- stores durable state under `server_data/` (the `fibril-server-data` volume with Docker)
+- stores durable state under `server_data/` (the `fibril-server-data` volume with Docker), laid out as described in [configuration](/configuration/#startup-fields)
 - uses development authentication defaults in the server binary
 
 Do not expose this development server directly to the public internet. Before
