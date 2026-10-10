@@ -22,19 +22,28 @@ installation, exact quorum activation and bounded recovery are documented in
    bounds. Measure full-history rescans, checkpoint/hash CPU, peak memory and
    recovery latency on representative storage and replication configurations.
 4. Add safe reclamation of retained generations and stages. Extend implemented
-   node-level disk accounting to per-queue attribution. Establish durable metadata
-   support before enabling the installation protocol on non-Unix platforms.
+   node-level disk accounting to per-queue attribution.
 5. Design [resumable recovery phases, storage-health policy and cooperative owner
    handoff](/development/recovery-continuation/). Add actual write/fsync-failure
    injection before adopting early replication or fault-triggered relinquishment.
 
-Fresh Unix cluster queues enroll automatically. The worker prepares their write
-quorum, activates exact instances and retries local admission independently on
-all replicas. Owner-process replacement before activation renews the preparation;
-activated queues use verified history recovery and retain their configured
-confirmation threshold. Owner-only durability still requires its
-surviving storage. Pending plans retry with bounded backoff when reachable evidence
-is insufficient; authoritative divergence requires investigation.
+Fresh cluster queues enroll automatically on every platform. The worker prepares
+their write quorum, activates exact instances and retries local admission
+independently on all replicas. Owner-process replacement before activation renews
+the preparation. Activated queues use verified history recovery and retain their
+configured confirmation threshold. Owner-only durability still requires its
+surviving storage: the controller holds such a resource on its owner until the
+owner returns or an operator accepts the loss. Pending plans retry with bounded
+backoff when reachable evidence is insufficient. Authoritative divergence requires
+investigation.
+
+Placement feeds recovery with a live follower as the candidate, ranked by its
+applied-tail label, and proposes only copy holders while they still meet the old
+write requirement. A new controller waits for registered nodes during its startup
+grace before moving owners. Pending recoveries that the worker never resolves, and
+owner-only holds, are listed as controller attention with guarded withdraw and
+accept-owner-loss overrides. See
+[failure modes](/reliability/failure-modes/#choosing-the-new-owner).
 
 ## Fast recovery
 
@@ -265,7 +274,7 @@ preserves the durable generation-installation protocol.
 
 ### 4. Agreed checkpoints and suffix comparison
 
-An opt-in Unix queue worker now establishes a common applied boundary during
+An opt-in queue worker establishes a common applied boundary during
 healthy operation. `replication.agreed_checkpoint_interval_ms` defaults to zero;
 positive values start periodic attempts on materialized queues. Each admitted
 replica pins a separate durable replay base before the owner chooses the common
@@ -341,7 +350,7 @@ starts are implemented in [recovery sealing](/reliability/recovery-sealing/#queu
 New resource declarations have a consensus incarnation ID bound into pending
 recovery transitions. An explicit local storage primitive persists incarnation,
 history and writer-session IDs for pristine storage, and blocks ordinary access
-after restart while retaining recovery sealing. Ordinary Unix cluster queue
+after restart while retaining recovery sealing. Ordinary cluster queue
 creation uses this protocol. Consensus preparation fixes history/session IDs and
 withholds serving until activation. Before activation, a new owner process or
 placement can renew preparation with the same origin IDs and fresh quorum receipts.

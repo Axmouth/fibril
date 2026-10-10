@@ -183,6 +183,7 @@ These fields are read on process start.
 | `coordination.ganglion.target_followers` | none | none | `1` |
 | `coordination.ganglion.stream_replication_factor` | none | none | `1` |
 | `coordination.ganglion.repartition_adoption_timeout_ms` | none | none | `30000` |
+| `coordination.ganglion.controller_startup_grace_ms` | none | none | `30000` |
 | `coordination.ganglion.assignment_durability` | `FIBRIL_COORDINATION_ASSIGNMENT_DURABILITY` | none | `local_durable` |
 | `recovery.on_mismatch` | `FIBRIL_RECOVERY_ON_MISMATCH` | none | `quarantine` |
 
@@ -379,6 +380,17 @@ has drained. Adoption is observed from client topology acks. The timeout keeps a
 silent or stuck client from stalling a cutover forever; publish version-fencing
 is the correctness backstop regardless. See
 [live routing and cutover](/development/live-routing-and-cutover/).
+
+`coordination.ganglion.controller_startup_grace_ms` keeps partition owners in
+place after a node becomes the coordination leader. Until every node registered
+in the committed metadata has a fresh heartbeat, or the grace expires, the
+controller moves no existing owner or follower. It still fills empty follower
+slots and places new partitions. This stops a whole-cluster restart from moving
+partitions away from a node that boots a few seconds after the others. The cost
+is that a registered node that never comes back delays owner failover by up to
+this long after every leader change. `0` disables the grace. While it is active,
+the controller status in the admin topology response lists the nodes it is
+waiting for under `consensus.controller.startup_grace_waiting_for`.
 
 ## Linux Memory Policy
 

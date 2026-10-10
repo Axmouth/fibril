@@ -35,12 +35,11 @@ version-one envelopes store an inclusive value and remain readable, including th
 existing ambiguous-zero recovery handling. Older binaries cannot read version-two
 snapshots; preserve a compatible data copy when testing an older revision.
 
-On Unix, the file and directory entries are synchronized before periodic prefix
+The file and directory entries are synchronized before periodic prefix
 compaction. A failed write leaves the queue dirty for retry. Snapshot capture,
 persistence and compaction serialize with follower application and recovery
 installation; later owner applications can proceed after capture and mark the
-queue dirty again. Directory durability and crash acceptance on other platforms
-remain separate validation work.
+queue dirty again. Crash acceptance tests run on Linux only.
 
 ## Single-log queue recovery
 

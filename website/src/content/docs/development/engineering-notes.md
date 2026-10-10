@@ -8,6 +8,19 @@ for further detail. Measurements describe the stated workload and hardware.
 Current capabilities are in [implemented surface](/implemented-surface/);
 remaining work is in the [roadmap](/roadmap/).
 
+## Failover placement and owner-only holds
+
+Owner moves used liveness and a round-robin pick, so a whole-cluster restart could
+move partitions off a late-booting node, a fresh node could become the recovery
+driver and copy the whole history, a stream follower ahead only on cursor events
+could win and drop confirmed records, and one follower took every partition of a
+failed peer. The controller holds owner-only durable resources for their owner,
+waits a startup grace for registered nodes, prefers live copy holders ranked by
+record tail and spreads ties by owned partitions, with guarded operator overrides
+for held owners and stuck recoveries. Controller unit and handler tests cover each
+case, in commits 7fa8d2d through 247908e. See
+[failure modes](/reliability/failure-modes/#choosing-the-new-owner).
+
 ## Resumable queue recovery
 
 Queue recovery persists exact inspection pages and completed phases, transfers

@@ -6,8 +6,8 @@ description: Recovery authorization, verified staging, durable installation and 
 import BrokerStory from "../../../components/BrokerStory.astro";
 import DashboardDemo from "../../../components/DashboardDemo.astro";
 
-Recovery sealing freezes a replica's retained records for inspection. Fresh Unix
-cluster queues enroll automatically. A bounded worker collects witnesses, verifies
+Recovery sealing freezes a replica's retained records for inspection. Fresh
+cluster queues enroll automatically on every platform. A bounded worker collects witnesses, verifies
 a source, installs a new durable quorum and activates its exact process/storage
 instances. The previous assignment stays fenced until activation commits.
 Stream-state recovery remains a separate gate. Legacy migration is unsupported
@@ -80,7 +80,7 @@ previous encoding.
 
 This ID identifies a catalogue lifetime. Source selection also requires accepted
 history, writer-session authority and an authoritative checkpoint. The local
-storage primitive below supplies an explicit binding. Fresh Unix cluster queues
+storage primitive below supplies an explicit binding. Fresh cluster queues
 receive this binding through automatic enrollment; existing histories have no migration. The new consensus commands require matching
 metadata-node binaries; mixed-version rollout is not supported for this change.
 
@@ -180,13 +180,11 @@ can leave admitted preparation running, so retries use the same decision. The
 transport deadline covers setup and the response, and replies must match the target,
 resource, decision and storage binding with nonzero process/storage instances.
 
-Ordinary Unix cluster queue declarations enroll automatically. The worker prepares
+Ordinary cluster queue declarations enroll automatically on every platform. The worker prepares
 replicas over authenticated connections, persists the configured write quorum and
 activates it. Every replica independently retries local admission, including after
 an owner disappears following activation. Existing experimental queues require
-retirement and recreation. Non-Unix cluster queues retain their previous declaration
-path until durable metadata support is available, without the new recovery authority.
-Standalone queues and stream declarations retain their existing paths.
+retirement and recreation. Standalone queues and stream declarations retain their existing paths.
 Matching broker and metadata binaries are required; older brokers do not enforce
 the enrollment projection and the retirement command requires updated metadata
 nodes. Mixed-version enrollment and downgrade are unsupported.
@@ -473,8 +471,8 @@ rejects oversized recovery-read requests and replies from their frame headers,
 before accumulating their bodies.
 
 Linux storage, fault, cancellation and real TCP authorization tests cover this
-increment. Non-Unix sealing rejects before mutation pending durable metadata
-support. Process tests do not establish hardware power-loss behavior.
+increment. Other platforms run the same sealing path without that test coverage.
+Process tests do not establish hardware power-loss behavior.
 
 The cluster currently uses a shared node credential and trusts its peers. The
 returned replica ID is coordinator-derived, rather than a cryptographic identity
@@ -634,7 +632,7 @@ cannot both commit. The selected owner must still have its own installed receipt
 and the full configured write quorum. If no planned member is available, recovery
 waits; replacement outside that fixed set needs additional membership work.
 
-Ordinary Unix cluster queues enroll automatically. Wider membership/isolation
+Ordinary cluster queues enroll automatically. Wider membership/isolation
 coverage, recovery membership expansion and retained-data reclamation remain
 rollout work. Migration of existing queues is unsupported; existing experimental
 queues must be drained and recreated to adopt the new recovery path. See the

@@ -33,10 +33,20 @@ partition has one **owner** and one or more **followers**:
   installs an owner checkpoint and resumes from there.
 - **Replicated failover waits for recovery proof.** The controller records a
   proposed replacement and retains the previous assignment and replication
-  source. Fresh Unix cluster queues enroll automatically; a worker seals
-  replicas, verifies a source, installs the recovered state and activates a new
-  quorum. Legacy histories have no supported migration into this recovery path. Heartbeat tails can suggest a
-  candidate but cannot authorize it to serve.
+  source. Fresh cluster queues enroll automatically on every platform. A worker
+  seals replicas, verifies a source, installs the recovered state and activates a
+  new quorum. Legacy histories have no supported migration into this recovery
+  path. Heartbeat tails can suggest a candidate but cannot authorize it to serve.
+  The controller prefers a live follower as the candidate and, when enough
+  copy holders survive, proposes only nodes that already hold a copy, so
+  recovery does not wait on a full history copy to a fresh node. See
+  [choosing the new owner](/reliability/failure-modes/#choosing-the-new-owner).
+- **Owner-only data waits for its owner.** A resource that only its owner is
+  known to hold in full, such as an owner-only durable stream or a legacy queue
+  whose write requirement is one copy, stays on its owner while that owner is
+  missing. An operator can
+  [accept the loss](/reliability/failure-modes/#a-recovery-or-held-owner-needs-an-operator)
+  to move it. Ephemeral streams make no durability promise and can move.
 - **Replica-durable publishes wait for replicas.** When the assignment's
   durability policy requires more than the owner, a confirmed publish does not
   return until enough followers have reported the required progress, subject to a
@@ -74,7 +84,7 @@ to inspect a frame. **Save frame** exports the current view for a presentation.
 
 ## Agreed recovery checkpoints
 
-Unix cluster queues can periodically agree on a durable recovery snapshot. Set
+Cluster queues can periodically agree on a durable recovery snapshot. Set
 `runtime_seed.replication.agreed_checkpoint_interval_ms` at startup, or change
 `replication.agreed_checkpoint_interval_ms` in the dashboard's cluster settings. Optional
 `agreed_checkpoint_max_events` and `agreed_checkpoint_max_bytes` thresholds in the
@@ -196,8 +206,7 @@ replica continues waiting for every required replica. Repair does not lower that
 threshold. A slow copy can exceed its retention grace and retry from a newer
 checkpoint. Retained original generations consume disk space, and automatic
 reclamation and byte-based retention budgets remain future work. This path applies
-to enrolled queues with matching broker revisions, with directory durability support
-on Unix. Stream recovery remains separate.
+to enrolled queues with matching broker revisions. Stream recovery remains separate.
 
 ## Activation and conditions
 
@@ -232,19 +241,20 @@ on Unix. Stream recovery remains separate.
   accepted-history witnesses and fencing before selecting and installing a
   source. Enrolled queues retain their configured confirmation threshold after
   recovery; unsupported or insufficient evidence leaves the partition fenced.
-  Checkpoint backfill is checked before promotion and after restart. Unix
-  checkpoint installation uses a durable journal to resume interrupted log/state
+  Checkpoint backfill is checked before promotion and after restart. Checkpoint
+  installation uses a durable journal to resume interrupted log/state
   replacement before ordinary replay; completed retries preserve later backfill.
-  Linux fault and process-kill tests cover this local path. Non-Unix checkpoint
-  installation is unsupported pending durable metadata support.
+  Linux fault and process-kill tests cover this local path. Other platforms run
+  the same path without that test coverage.
 - The controller persists pending recovery metadata for owner replacement and
   follower-set or durability-policy changes involving replicated confirmation.
   Existing healthy owners retain their active configuration until recovery can
   safely activate the proposed assignment. Recovery of enrolled queues requires
   a complete source and an available proposed owner; replacing an unavailable
   proposed owner and reconstructing crossed histories remain rollout gates.
-  Pending requests appear in the admin topology's controller status. Do not
-  discard a surviving replica or clear a request to bypass recovery proof.
+  Pending requests appear in the admin topology's controller status, and those
+  that need an operator also appear under `attention`. Do not discard a
+  surviving replica or clear a request to bypass recovery proof.
 - Cross-broker replication-lag aggregation into a single cluster view is still
   pending. A broker's own follower workers and their progress are visible on the
   [admin queues page](/admin-dashboard/).

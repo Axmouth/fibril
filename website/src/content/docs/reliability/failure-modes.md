@@ -33,11 +33,11 @@ Two distinct failures matter, and they are not the same:
 | Tier | Survives process restart | Survives node loss | Notes |
 | --- | --- | --- | --- |
 | Queue, single owner (`local_durable`) | Yes (fsync per durable write) | No | The partition is unavailable while the node is down. This is the default and the only mode for a standalone broker. |
-| Queue, replicated (`replica_durable` / `majority_durable`) | Yes | Copies survive; automatic failover paused | Confirmation waits for the required replicas. The controller retains the old assignment while a pending recovery request awaits confirmed-history proof. Requires Ganglion coordination and assigned followers. |
-| Stream, `durable` owner-only | Yes (fsync before deliver/confirm) | No | Survives restart, not node loss. Records and cursors are on the one owner. |
-| Stream, `durable` replicated (`stream_replication_factor` >= 2) | Yes | Copies survive; automatic failover paused | Record and cursor logs replicate; replicated ownership changes share the pending-recovery barrier of queues. |
-| Stream, `speculative` | Partial | No | Delivers off the staged offset and defers the producer confirm until durable, so a confirmed record is durable, but unconfirmed records in flight at a crash can be lost. |
-| Stream, `ephemeral` | Partial | No | Lowest latency, `AfterWrite` (no per-record fsync). Recent records can be lost on a crash. Intended for where freshness beats durability. |
+| Queue, replicated (`replica_durable` / `majority_durable`) | Yes | Copies survive. Failover waits for recovery proof | Confirmation waits for the required replicas. The controller retains the old assignment while a pending recovery request awaits confirmed-history proof, and enrolled queues then recover automatically. Requires Ganglion coordination and assigned followers. |
+| Stream, `durable` owner-only | Yes (fsync before deliver/confirm) | No | Survives restart, not node loss. Records and cursors are on the one owner, so the partition waits for that owner to return. |
+| Stream, `durable` replicated (`stream_replication_factor` >= 2) | Yes | Copies survive. Automatic failover paused | Record and cursor logs replicate. Replicated ownership changes share the pending-recovery barrier of queues, but automatic recovery does not resolve a stream request. See [operator decisions](#a-recovery-or-held-owner-needs-an-operator). |
+| Stream, `speculative` | Partial | No | Delivers off the staged offset and defers the producer confirm until durable, so a confirmed record is durable, but unconfirmed records in flight at a crash can be lost. An owner-only partition waits for its owner to return. |
+| Stream, `ephemeral` | Partial | No | Lowest latency, `AfterWrite` (no per-record fsync). Recent records can be lost on a crash. Intended for where freshness beats durability. Makes no durability promise, so the controller can move it to another node when the owner stops heartbeating. |
 
 Cross-cutting guarantees that hold across a restart or a clean failover:
 
@@ -96,13 +96,115 @@ barrier until verified history and an installed write quorum are available:
   response and retain every surviving replica's data. These records preserve the
   original proposal; candidate-replacement logs identify a subsequent handoff.
   Returning replicas can supply missing evidence. Serving resumes only after
-  verified activation and exact local admission.
+  verified activation and exact local admission. Never withdraw a pending
+  recovery for an enrolled queue to skip this proof. The withdraw command
+  refuses it.
 - Check the [admin queues page](/admin-dashboard/) for owner and in-sync
   replica status.
 
 A `local_durable` single-owner partition has no follower to promote, so it is
 **unavailable until the node returns** with its data dir. This is expected - that
 mode trades node-loss survival for lower latency.
+
+The same hold applies to any resource that only its owner is known to hold in
+full: owner-only `speculative` and `durable` streams, and legacy queues (created
+before history enrollment) whose write requirement is one copy. A follower or
+another node may hold some of the data, but only the owner is known to hold every
+confirmed write, so the controller keeps the assignment on the missing owner
+instead of serving from a copy that could be missing confirmed data. `ephemeral`
+streams make no durability promise and move to another node on liveness alone.
+
+### Choosing the new owner
+
+When an owner is gone or draining, the controller picks the replacement in this
+order:
+
+1. A live, non-draining follower. A follower that published an applied-tail
+   label in its heartbeat beats one that did not. Labelled followers rank by
+   their tail: queues by their log position, streams by record tail first and
+   cursor-event tail second. Producer confirms count records, so a follower
+   ahead on consumer progress but behind on records does not win. A lagging
+   cursor-event log can at worst rewind cursors, which means redelivery.
+2. An ordinary round-robin pick, only when no live follower remains. That node
+   may have to copy the whole history before it can serve.
+
+Equally ranked followers, including followers with no label, go to the one that
+owns the fewest partitions, counting choices made earlier in the same pass, then
+to the smallest node id. This spreads a failed node's partitions over its
+followers instead of moving them all to one.
+
+For a recovery, the proposed replica set keeps only nodes that already hold a
+copy, as long as they still meet the old write requirement. A fresh node with no
+copy would otherwise have to receive a full history before the new owner serves.
+Normal placement adds followers later. When too few copy holders survive, a fresh
+node still joins, because recovery never lowers the write requirement on liveness
+alone.
+
+### Whole-cluster restart
+
+A newly elected controller waits before moving any owner. Until every
+registered node has a fresh heartbeat, or
+`coordination.ganglion.controller_startup_grace_ms` (default 30 seconds)
+expires, it keeps existing owners and followers in place. It still fills empty
+follower slots and places new partitions. So a node that boots a few seconds
+late keeps its partitions. The trade-off is that a registered node that never
+returns delays owner failover by up to the grace after every leader change.
+`consensus.controller.startup_grace_waiting_for` in the admin topology response
+lists the nodes the controller is still waiting for. Set the grace to `0` to
+disable it. See [configuration](/configuration/).
+
+### A recovery or held owner needs an operator
+
+The controller lists what it cannot resolve on its own under
+`consensus.controller.attention` in the admin topology response
+(`fibrilctl admin topology`), and logs a warning when an entry appears. Each
+entry names the resource, the reason and the suggested action. Two cases appear
+there:
+
+- **A pending recovery automatic recovery will not finish.** The recovery worker
+  only recovers queues with an accepted history. A pending recovery for a stream
+  or a legacy queue stays until an operator withdraws it.
+- **A resource held on a missing owner.** See the hold described above.
+
+Two operator commands resolve these. Both need Ganglion coordination and
+admin access, and both are recorded in the activity feed.
+
+```sh
+# Remove a pending recovery so the controller plans the partition again.
+fibrilctl admin recovery withdraw <topic> <partition> [--group <group>] [--stream]
+
+# Let a held partition move off its missing owner. Gives up writes only that owner stored.
+fibrilctl admin recovery accept-owner-loss <topic> <partition> [--group <group>] [--stream] --confirm-data-loss
+```
+
+The matching admin routes are `POST /admin/api/recovery/withdraw` and
+`POST /admin/api/recovery/accept-owner-loss`, with a JSON body of `kind`
+(`queue` or `stream`), `topic`, `partition` and an optional `group`.
+Accept-owner-loss also needs `"confirm_data_loss": true` and is refused
+without it.
+
+**Withdraw** is refused when:
+
+- the resource has no pending recovery,
+- the pending recovery is for a queue with an accepted history, because its
+  replicas may already be sealed for that request, or
+- recovery already recorded a plan.
+
+Use it for a stream once its owner serves again, or as the first step before
+accepting owner loss.
+
+**Accept owner loss** gives up every write that only the missing owner stored,
+including confirmed ones. It is refused when:
+
+- the resource has no assignment,
+- the resource has an accepted history (it recovers from sealed replicas
+  instead), or
+- a recovery request is pending for it. Withdraw that first.
+
+The decision covers only the owner and epoch the controller holds at that
+moment. The next move uses it up. It is cleared without effect if the owner
+comes back and serves again or the assignment changes, so a later failure needs
+a fresh decision.
 
 ### Replica-durable publishes start failing fast
 

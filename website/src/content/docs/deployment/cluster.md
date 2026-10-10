@@ -175,6 +175,30 @@ It shows the members, per-partition ownership, and consensus state. A healthy
 cluster lists every node and a leader. Clients can connect to any broker and are
 redirected to the owner of each partition.
 
+## Restarts and stuck partitions
+
+When every node restarts at once, the newly elected controller keeps existing
+owners in place until every registered node heartbeats again, or
+until `coordination.ganglion.controller_startup_grace_ms` (default 30 seconds)
+expires, so a node that boots late keeps its partitions. A node that is gone for
+good delays owner failover by up to that grace after each leader change. Set
+the grace to `0` to turn this off.
+
+A partition whose only full copy is on a missing owner (owner-only durable
+streams, and legacy single-copy queues) waits for that owner instead of moving.
+The topology output lists such holds, and pending recoveries that automatic
+recovery will not finish, under `consensus.controller.attention`. Two guarded
+commands resolve them:
+
+```sh
+fibrilctl admin recovery withdraw <topic> <partition> [--group <group>] [--stream]
+fibrilctl admin recovery accept-owner-loss <topic> <partition> [--group <group>] [--stream] --confirm-data-loss
+```
+
+Accepting owner loss gives up every write that only the old owner stored. See
+[failure modes](/reliability/failure-modes/#a-recovery-or-held-owner-needs-an-operator)
+for when each command is refused and what it changes.
+
 ## Adding and removing users
 
 Users are cluster data. Create one on any node and it replicates to all:

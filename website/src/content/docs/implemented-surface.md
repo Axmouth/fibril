@@ -100,8 +100,8 @@ Conditions and limits:
   included. Interrupted application blocks capture and promotion until recovery or
   checkpoint installation. Verified repeated follower events are not applied twice.
 - Snapshot version two records the exclusive boundary. Legacy snapshots remain
-  readable; older binaries cannot read version-two files. On Unix, snapshot file
-  and directory persistence precede periodic prefix compaction.
+  readable. Older binaries cannot read version-two files. Snapshot file and
+  directory persistence precede periodic prefix compaction.
 - Explicit sealed inspection can replay each queue from its own exact checkpoint
   to a common target, compare canonical state and live payload identities, and
   separately normalize owner-local leases. Retry, delay, TTL and DLQ state remain
@@ -455,6 +455,7 @@ See also: [admin dashboard](/admin-dashboard/).
 | DLQ replay controls | Implemented | Dashboard and API |
 | Topology page | Implemented | Coordination nodes, per-partition ownership/epochs (queues and streams), consensus block, per-node liveness/raft-id/publish+delivery rates/runtime facts (version, uptime, TLS state, cert expiry) from heartbeat labels; rendered as the living cluster diagram (ring sprites, fiber tendrils, load signals) or a card list with a placement matrix (`?view=list`) |
 | Repartition control | Partial | `/admin/api/repartition` and a topology-page form (Ganglion mode) |
+| Recovery overrides | Implemented | `POST /admin/api/recovery/withdraw` and `POST /admin/api/recovery/accept-owner-loss` (Ganglion mode), recorded in the activity feed. See [failure modes](/reliability/failure-modes/#a-recovery-or-held-owner-needs-an-operator) |
 | Coordination membership control | Partial | Add/remove a consensus voting member from the topology page and API |
 | Cohort visibility | Partial | Per-broker exclusive-cohort membership with live per-partition coverage on the subscriptions page, queue-detail partition cards, and `/admin/api/cohorts` |
 | Quarantine banner and repair | Implemented | Global banner, `/admin/api/quarantine`, repair endpoint, `/readyz` |
@@ -499,6 +500,7 @@ See also: [source deployment](/deployment/source/) and
 | Message inspection | Implemented | `fibrilctl admin messages` |
 | DLQ replay | Implemented | `fibrilctl admin dlq replay` |
 | Queue observability | Implemented | `fibrilctl admin queues` |
+| Recovery overrides | Implemented | `fibrilctl admin recovery withdraw` and `fibrilctl admin recovery accept-owner-loss --confirm-data-loss` (Ganglion mode) |
 | Pub or sub from CLI | Planned | Useful for manual testing, not currently implemented |
 
 Conditions and limits:
@@ -680,16 +682,19 @@ See also: [clustering](/concepts/clustering/) and
 | Queue catalogue and placement controller | Partial | Declared queues register partitions, controller assigns owners and followers, placement is stable and anti-churn |
 | Partition ownership gate | Partial | Broker serves only assigned owners in Ganglion mode. Standalone mode owns all queues |
 | Follower pull replication | Partial | Node-authenticated follower workers pull owner records, apply durably and install checkpoints when needed. Internal read/apply/checkpoint/streaming controls require node credentials on each physical connection |
-| Automatic failover | Partial | Enrolled Unix queues fence assignment changes, collect intersecting witnesses, verify a complete source and install/activate the new quorum automatically. Unsupported histories remain fenced; legacy owner-only policy retains its existing behavior |
+| Automatic failover | Partial | Enrolled queues fence assignment changes, collect intersecting witnesses, verify a complete source and install/activate the new quorum automatically. Unsupported histories remain fenced. Resources only their owner holds in full (owner-only durable and speculative streams, legacy queues with a one-copy write requirement) wait for that owner. Ephemeral streams can move |
+| Failover candidate selection | Implemented | The controller hands a gone or draining owner's partition to a live, non-draining follower: labelled followers first, ranked by queue log position or by stream record tail then cursor-event tail, with ties to the follower owning the fewest partitions, then the smallest node id. Round-robin placement is used only when no live follower remains. The recovery set keeps only copy holders while they meet the old write requirement. See [failure modes](/reliability/failure-modes/#choosing-the-new-owner) |
+| Controller startup grace | Implemented | `coordination.ganglion.controller_startup_grace_ms` (default 30000, `0` disables): a new controller leader moves no owner until every registered node heartbeats fresh or the grace expires. Empty follower slots and new partitions are still placed. Waiting nodes are listed in controller status as `startup_grace_waiting_for` |
+| Recovery operator overrides | Implemented | `fibrilctl admin recovery withdraw` and `accept-owner-loss --confirm-data-loss`, over `POST /admin/api/recovery/withdraw` and `/accept-owner-loss`. Withdraw refuses accepted queue histories and requests with a recorded plan. Accept-owner-loss requires explicit confirmation, is bound to the current owner and epoch, and refuses accepted histories and resources with a pending request. Controller status lists items needing a decision under `attention` |
 | Eager failure detection | Experimental | Opt-in cluster runtime policy uses repeated explicit Raft transport failures and a reconnect grace; zero grace adds idle-connection monitoring and immediate reconnect verification on the active controller. Success or a fresh heartbeat clears suspicion; heartbeat expiry handles silent failures. Recovery proof and confirmation thresholds remain required; diagnostics are in controller status |
 | Cold-restart orphan reconciliation | Partial | A partition reassigned away while a node was down is retained as inert on-disk cold storage after restart (ownership-gated serving means it is never served or materialized) and surfaced at startup. Reclaim of that disk is still manual |
 | Epoch fencing | Implemented | Role transitions advance log epochs before serving or applying replicated batches |
 | Follower source refresh | Implemented | An owner or epoch change drains and retargets a remaining follower's worker while retaining its replication cursors |
 | Checkpoint epoch checks | Implemented | Both source epochs are validated before reset and checked again by each storage writer in command order |
-| Recovery seal receiver and retained identity | Partial | Node-authenticated requests bind to fresh consensus and the exact pending transition. Durable local seals and retained fingerprints support interrupted retry and automatic collection for enrolled queues; Linux validated, non-Unix unsupported |
+| Recovery seal receiver and retained identity | Partial | Node-authenticated requests bind to fresh consensus and the exact pending transition. Durable local seals and retained fingerprints support interrupted retry and automatic collection for enrolled queues. Linux validated |
 | Recovery witness admission | Partial | Authenticated replies identify distinct accepted replicas and their original durable storage instances. Fixed eligible-set witness thresholds intersect the configured write requirement; source validation follows collection |
 | Sealed-source reads | Partial | Bounded authenticated pages preserve live/cold seals and retained generations during installation. Automatic inspection reuses authenticated connections and sequential cursors, verifying complete sealed digests; strict diagnostic and copy-fallback reads retain per-page scans |
-| Resource incarnation | Partial | Atomic creation and retirement identities bind recovery and stale deletion checks. Fresh Unix cluster queues enroll on declaration and withhold serving until preparation and activation. Legacy migration is unsupported and not planned |
+| Resource incarnation | Partial | Atomic creation and retirement identities bind recovery and stale deletion checks. Fresh cluster queues enroll on declaration on every platform and withhold serving until preparation and activation. Legacy migration is unsupported and not planned |
 | Initial history preparation | Partial | Explicit consensus decisions require creation-time enrollment and bind assignment and owner instance to fixed history/session IDs. Replica preparation leaves storage non-writable; exact prepared-quorum receipts persist through consensus, require the owner and write threshold, and survive restart. Node-authenticated remote preparation checks fresh consensus and exact replica identity with bounded work/deadlines. Automatic enrollment renews pristine preparation after owner/process replacement before activation |
 | Initial activation and replication identity | Partial | Explicit activation binds the prepared process/storage quorum. Live replication carries accepted identity and retains the full confirmation threshold; recovered activations extend that authority. Ordinary queue creation orchestrates preparation and activation; each replica independently retries admission |
 | Local storage history binding | Partial | Exact incarnation/history/session receipts gate writer admission and preserve cold sealing after restart. Bound reopen refuses destructive tail repair; recovered admission requires a verified installed generation and fresh activation |
@@ -700,9 +705,9 @@ See also: [clustering](/concepts/clustering/) and
 | Queue recovery installation and activation | Partial | Verified generations preserve old sealed sources; one durable route publishes storage. Exact target receipts gate atomic assignment/activation and fresh local admission. Consecutive recoveries, source loss, majority confirms and Linux SIGKILL are covered |
 | Recovery candidate handoff | Partial | Guarded controller changes select a live, non-draining member of the fixed proposed replica set. Seals, plans, completed stages and write thresholds remain unchanged; stale candidates cannot activate. Membership expansion remains a separate gate |
 | Background learner admission | Partial | Assigned replicas outside the activated write set catch up without an owner recovery fence. Exact durable/applied cuts and payload completeness gate additive consensus admission; old sessions and confirms retain valid progress, and later recovery uses the enlarged witness set. Partial checkpoint backfill and older retained storage generations are supported |
-| Admitted follower repair | Implemented on Unix | Active follower cursors constrain owner compaction. Exhausted history revokes that follower's acknowledgement role, builds a separate complete generation and re-admits it with fresh transport identity. Original recovery evidence and configured confirmation counts are preserved. Stalled pins have time budgets, with byte budgets and automatic old-generation reclamation still pending |
+| Admitted follower repair | Implemented | Active follower cursors constrain owner compaction. Exhausted history revokes that follower's acknowledgement role, builds a separate complete generation and re-admits it with fresh transport identity. Original recovery evidence and configured confirmation counts are preserved. Stalled pins have time budgets, with byte budgets and automatic old-generation reclamation still pending |
 | Bounded queue recovery worker | Partial | New cluster queues enroll automatically and collect witnesses, select a verified source, resume transfer and activate with bounded retries. Stream origins, recovery membership expansion and recovery-data reclamation remain gates. Legacy histories require recreation to adopt this path |
-| Checkpoint recovery | Partial | Unix installation journals resume interrupted replacement of retained queue records and snapshot state before ordinary replay. Completion receipts preserve later backfill on retry. Payload dependencies gate promotion across restart. Linux fault/SIGKILL tests pass; non-Unix installation is unsupported pending durable metadata support |
+| Checkpoint recovery | Partial | Installation journals resume interrupted replacement of retained queue records and snapshot state before ordinary replay. Completion receipts preserve later backfill on retry. Payload dependencies gate promotion across restart. Linux fault/SIGKILL tests pass |
 | Agreed recovery checkpoints | Experimental, opt-in | `replication.agreed_checkpoint_interval_ms` coordinates one candidate per queue across every admitted replica. Durable replay bases, canonical capsules, authenticated local receipts and guarded consensus publication precede exact retained floors. Recovery uses the accepted snapshot and verified suffix, with ordinary snapshot fallback when compatible material is absent. Optional event/append-byte triggers complement staggered periodic cadence; the shared dashboard reports age, retained ranges and agreement progress. Live payloads, quorum checks and fencing remain required; stream checkpoints and retention-policy tuning remain pending |
 | Conflict diagnostics | Implemented | Bounded, payload-free control history, offsets and effective record identities accompany overlap reports; checkpoint logs show source epochs and continuation offsets |
 | Replica-durable confirms | Partial | Queues require the same follower to cover the payload batch and exact enqueue frontier; epoch/session-fenced progress feeds confirmation and delivery visibility, with timeout and ISR floor |
@@ -734,8 +739,9 @@ Conditions and limits:
   changes involving replicated confirmation, including replicated durable
   streams. Pending recovery records survive metadata restart and are exposed in
   controller status. This prevents automatic promotion of an unproven candidate;
-  enrolled queues can complete verified recovery automatically. Legacy origins,
-  streams and unsupported evidence remain fenced.
+  enrolled queues can complete verified recovery automatically. Legacy origins and
+  streams remain fenced until an operator withdraws the request, and enrolled
+  queues with unsupported evidence remain fenced.
 - Conflict diagnostics do not enable automatic repair of divergent histories.
   Checkpoint installation checks both epochs and uses a recoverable journal;
   enrolled queue recovery uses authoritative source selection and exact new-quorum

@@ -164,7 +164,8 @@ first run builds the broker and CLI, so it takes longer than later runs.
 - **A controller assigns ownership.** The consensus leader acts as the
   controller. It assigns every partition an **owner** and, when followers are
   configured, a follower set, and it spreads a queue's partitions across distinct
-  nodes before reusing a node.
+  nodes before reusing a node. After a leader change it waits for registered
+  nodes to heartbeat, up to a startup grace, before moving any owner.
 - **Fencing epochs prevent split-brain.** Each assignment carries an epoch.
   Whenever ownership moves, the epoch is bumped. A broker that believes it is
   still the owner cannot keep serving once the epoch has advanced: writes and
@@ -182,6 +183,10 @@ In coordinated mode the topology page and admin API expose cluster operations:
 
 - **Repartition** a queue (grow or shrink its partition count).
 - **Add or remove a consensus voting member** to change the coordination quorum.
+- **Withdraw a stuck recovery or accept owner loss** with
+  `fibrilctl admin recovery`, when the controller lists a partition under
+  `attention`. See
+  [failure modes](/reliability/failure-modes/#a-recovery-or-held-owner-needs-an-operator).
 
 Change voting membership deliberately and one member at a time, since quorum
 changes affect availability.
