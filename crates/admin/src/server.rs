@@ -2033,7 +2033,7 @@ mod tests {
             _group: Option<String>,
         ) -> Result<serde_json::Value, String> {
             self.0.lock().unwrap().push(("accept".into(), kind, topic, partition));
-            Err("resource has a pending recovery; withdraw it before accepting loss".into())
+            Err("resource has a pending recovery, withdraw it before accepting loss".into())
         }
     }
 

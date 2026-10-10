@@ -118,12 +118,12 @@ impl GanglionCoordination {
             .map_err(error)?;
         if incarnation.is_some_and(|id| id.version == 2) {
             return Err(error(
-                "resource has an accepted history and recovers from sealed replicas; accepting loss does not apply",
+                "resource has an accepted history and recovers from sealed replicas, so accepting loss does not apply",
             ));
         }
         if snapshot.attributes.contains_key(&pending_recovery_key(resource)) {
             return Err(error(
-                "resource has a pending recovery; withdraw it before accepting loss",
+                "resource has a pending recovery, withdraw it before accepting loss",
             ));
         }
         let accepted = AcceptedOwnerLoss {

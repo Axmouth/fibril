@@ -4854,7 +4854,7 @@ mod tests {
                 tick: Duration::from_millis(100),
                 liveness_ttl: Duration::from_millis(900),
                 max_cas_retries: 8,
-                // The dead owner never returns; skip the startup wait.
+                // The dead owner never returns, so skip the startup wait.
                 startup_grace: Duration::ZERO,
                 ..Default::default()
             },
