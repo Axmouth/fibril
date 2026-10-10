@@ -772,6 +772,10 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   records in between. Backfill now waits for those records to become durable
   and never moves to the ring until the whole log range is delivered.
 
+- A caught-up stream follower's replication long-poll wakes when the owner
+  makes new stream records or cursor commits durable. It used to sleep out
+  the full `max_wait_ms`, which slowed replica-durable stream confirms.
+
 - Equally ranked failover candidates are broken by fewest currently owned
   partitions, then by node id, so a failed node's partitions spread over its
   followers instead of all moving to the last one listed.

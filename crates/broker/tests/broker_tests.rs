@@ -3492,6 +3492,84 @@ async fn owner_replication_read_serves_coordination_declared_stream() {
     broker.shutdown().await;
 }
 
+/// A caught-up stream follower's long-poll must wake when the owner makes a
+/// new record durable, instead of sleeping out the whole `max_wait_ms`.
+#[tokio::test]
+async fn caught_up_stream_follower_long_poll_wakes_on_new_durable_record() {
+    use fibril_broker::broker::{StreamOpenConfig, StreamOwnership};
+    use fibril_broker::stream::StreamDurability;
+
+    #[derive(Debug)]
+    struct OwnsEventsStream;
+    impl StreamOwnership for OwnsEventsStream {
+        fn owns_stream(&self, topic: &str, _partition: Partition) -> bool {
+            topic == "events"
+        }
+        fn stream_open_config(&self, topic: &str) -> Option<StreamOpenConfig> {
+            (topic == "events").then(|| StreamOpenConfig {
+                durability: StreamDurability::Durable,
+                retention: None,
+            })
+        }
+    }
+
+    let (broker, _dir) = open_test_broker_with_ownerships(
+        Arc::new(StaticQueueOwnership::new(StdHashSet::new())),
+        Arc::new(OwnsEventsStream),
+    )
+    .await;
+    let channel = broker
+        .get_or_open_stream("events", 0, StreamDurability::Durable, None)
+        .await
+        .unwrap();
+    let headers = || MessageHeaders {
+        published: unix_millis(),
+        publish_received: unix_millis(),
+        content_type: None,
+        extra: Default::default(),
+    };
+    channel.publish(headers(), b"first".to_vec()).await.unwrap();
+
+    let publisher = tokio::spawn({
+        let channel = channel.clone();
+        async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            channel
+                .publish_pipelined(headers(), b"second".to_vec())
+                .await
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap()
+        }
+    });
+    let started = std::time::Instant::now();
+    let records = tokio::time::timeout(
+        Duration::from_secs(5),
+        broker.read_owner_stream_records(
+            "events",
+            Partition::new(0),
+            1,
+            0,
+            10,
+            10,
+            usize::MAX,
+            30_000,
+        ),
+    )
+    .await
+    .expect("caught-up stream follower slept through a durable record")
+    .unwrap();
+    assert_eq!(publisher.await.unwrap(), 1);
+    let stroma_core::OwnerReplicationRead::Batch(messages) = records.messages else {
+        panic!("retained stream records")
+    };
+    assert_eq!(messages.records.len(), 1);
+    assert_eq!(messages.records[0].0, 1);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    broker.shutdown().await;
+}
+
 #[tokio::test]
 async fn owner_replication_read_rejects_unowned_queue_before_materializing() {
     let (broker, _dir) =

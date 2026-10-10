@@ -2600,6 +2600,17 @@ impl Broker<StromaEngine> {
         };
         let notified = qs.replication_notify.notified();
         tokio::pin!(notified);
+        // Stream publishes and cursor commits run on the stream channel, not
+        // the queue loop, so the channel's durability signal wakes followers.
+        // Created before the read so a wake that lands during it is kept.
+        let stream_progress = self.stream_durable_progress(topic, partition.id());
+        let stream_notified = stream_progress.as_ref().map(|progress| progress.notified());
+        let stream_wake = async {
+            match stream_notified {
+                Some(notified) => notified.await,
+                None => std::future::pending::<()>().await,
+            }
+        };
 
         let records = self
             .read_owner_stream_records_now(
@@ -2618,6 +2629,7 @@ impl Broker<StromaEngine> {
 
         tokio::select! {
             _ = &mut notified => {}
+            _ = stream_wake => {}
             _ = early_wake => {}
             _ = self.shutdown_publishers.cancelled() => {}
             _ = tokio::time::sleep(Duration::from_millis(max_wait_ms)) => {}

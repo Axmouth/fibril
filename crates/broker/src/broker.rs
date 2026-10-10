@@ -1649,6 +1649,8 @@ pub struct StreamStatsEntry {
     pub topic: String,
     pub partition: u32,
     pub head: u64,
+    /// One past the last staged record. On the express tiers it can be ahead
+    /// of the durable frontier.
     pub tail: u64,
     pub durability: StreamDurability,
     pub max_age_ms: Option<u64>,
@@ -1893,6 +1895,17 @@ impl<
         Ok(self.streams.entry(key).or_insert(opened).value().clone())
     }
 
+    /// Durability signal of a hosted stream channel, for waking caught-up
+    /// replication followers. `None` when this broker does not host it.
+    pub(crate) fn stream_durable_progress(&self, tp: &str, part: u32) -> Option<Arc<Notify>> {
+        let key = QueueKey {
+            tp: tp.to_string(),
+            part: part.into(),
+            group: None,
+        };
+        self.streams.get(&key).map(|ch| ch.value().durable_progress())
+    }
+
     /// Per-stream partition counts for client routing: `(topic, partition_count)`
     /// over the stream channels this broker hosts. Sync (no IO) so a topology
     /// source can call it. In standalone the broker hosts every partition, so the
@@ -1908,6 +1921,7 @@ impl<
 
     /// Snapshot of the stream channels this broker is currently hosting, with
     /// per-partition head/tail offsets and the declared durability and retention.
+    /// The tail counts staged records, which may not be durable yet.
     /// Open channels only (what the broker is serving), mirroring how queue stats
     /// reflect materialized queues.
     pub async fn stream_stats(&self) -> Vec<StreamStatsEntry> {

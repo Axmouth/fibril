@@ -184,7 +184,9 @@ pub trait QueueEngine {
         observer: stroma_core::QueuePublishObserver,
     ) -> Result<(), StromaError>;
 
-    /// Durable end of the single queue log and its epoch.
+    /// End of the single queue log and its epoch. `next` is the staged next
+    /// offset, which can be ahead of the durable frontier, so a dependency on it
+    /// can only wait longer, never confirm early.
     async fn queue_durable_commit(
         &self,
         tp: &str,
