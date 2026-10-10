@@ -745,6 +745,10 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- Stream failover candidates rank by record tail first and cursor-event tail
+  second. Ranking by the event tail alone could prefer a follower that is
+  ahead on consumer progress but missing confirmed records.
+
 - When a partition owner is gone or draining, the controller hands the
   partition to a live committed follower even when no follower published an
   applied-tail label. Round-robin placement, which may pick a node that must

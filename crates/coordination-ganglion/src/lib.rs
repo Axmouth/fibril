@@ -691,15 +691,18 @@ pub fn encode_stream_applied_tail(message_next: u64, event_next: u64) -> String 
     format!("{message_next}:{event_next}")
 }
 
-/// Ranking value of an applied-tail label: the queue log position, or the
-/// stream cursor-event tail. A value in the other kind's format is ignored.
-fn parse_applied_tail(raw: &str, stream: bool) -> Option<u64> {
+/// Ranking value of an applied-tail label, compared lexicographically. A
+/// queue ranks by its log position. A stream ranks by its record tail first,
+/// since producer confirms count record progress only, and by its
+/// cursor-event tail second: a lagging event log rewinds cursors and causes
+/// redelivery, while a lagging record log loses confirmed records. A value in
+/// the other kind's format is ignored.
+fn parse_applied_tail(raw: &str, stream: bool) -> Option<(u64, u64)> {
     if stream {
         let (message, event) = raw.split_once(':')?;
-        message.parse::<u64>().ok()?;
-        event.parse().ok()
+        Some((message.parse().ok()?, event.parse().ok()?))
     } else {
-        raw.parse().ok()
+        Some((raw.parse().ok()?, 0))
     }
 }
 
@@ -3709,8 +3712,14 @@ mod tests {
 
     #[test]
     fn applied_tail_labels_are_parsed_by_resource_kind() {
-        assert_eq!(parse_applied_tail(&encode_queue_applied_tail(9), false), Some(9));
-        assert_eq!(parse_applied_tail(&encode_stream_applied_tail(4, 6), true), Some(6));
+        assert_eq!(parse_applied_tail(&encode_queue_applied_tail(9), false), Some((9, 0)));
+        assert_eq!(parse_applied_tail(&encode_stream_applied_tail(4, 6), true), Some((4, 6)));
+        // Records outrank cursor events: ahead on events but behind on
+        // records must never win.
+        let rank = |m, e| parse_applied_tail(&encode_stream_applied_tail(m, e), true).unwrap();
+        assert!(rank(100, 48) > rank(10, 50));
+        assert!(rank(100, 50) > rank(90, 60));
+        assert!(rank(100, 51) > rank(100, 50));
         // A value in the other kind's format ranks nothing.
         assert_eq!(parse_applied_tail(&encode_stream_applied_tail(4, 6), false), None);
         assert_eq!(parse_applied_tail(&encode_queue_applied_tail(9), true), None);
@@ -5548,6 +5557,28 @@ mod tests {
         committed.nodes.insert("d".into(), node);
         assert_eq!(choose_failover_owner(&current, &committed, label, false, any).as_deref(), Some("d"));
         assert_eq!(choose_failover_owner(&current, &committed, label, false, |_| false), None);
+    }
+
+    #[test]
+    fn stream_failover_ranks_record_tail_before_event_tail() {
+        let resource = ganglion_core::ResourceIdentity::new(STREAM_NAMESPACE, "s", 0, None);
+        let current = ganglion_core::PartitionAssignment::new(
+            resource,
+            "a",
+            vec!["b-backfilling".into(), "c-caught-up".into()],
+            1,
+        );
+        let label = "applied/s/0";
+        let mut committed = ganglion_core::CoordinationSnapshot::default();
+        for (id, records, events) in [("b-backfilling", 10_000, 50), ("c-caught-up", 1_000_000, 48)] {
+            let mut node = ganglion_core::NodeInfo::new(id, "127.0.0.1:1", None);
+            node.labels.insert(label.into(), encode_stream_applied_tail(records, events));
+            committed.nodes.insert(id.into(), node);
+        }
+        assert_eq!(
+            choose_failover_owner(&current, &committed, label, true, |_| true).as_deref(),
+            Some("c-caught-up")
+        );
     }
 
     /// With no applied-tail labels, a dead owner's partition goes to a live
