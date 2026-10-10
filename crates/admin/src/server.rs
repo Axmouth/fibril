@@ -1724,7 +1724,14 @@ mod tests {
                         "topic": "orders",
                         "partition": 1,
                         "group": "workers",
-                        "state": { "message_next_offset": 42, "event_next_offset": 7 },
+                        "state": { "kind": "stream", "message_next_offset": 42, "event_next_offset": 7 },
+                        "busy": false,
+                    },
+                    {
+                        "topic": "jobs",
+                        "partition": 3,
+                        "group": "workers",
+                        "state": { "kind": "queue", "next_offset": 9 },
                         "busy": false,
                     },
                     {
@@ -1771,6 +1778,21 @@ mod tests {
             body.contains(
                 r#"fibril_replication_follower_applied_events{topic="orders",group="workers",partition="1"} 7"#
             ),
+            "{body}"
+        );
+        // A queue follower reports its single log position in its own family.
+        assert!(
+            body.contains(
+                r#"fibril_replication_follower_next_offset{topic="jobs",group="workers",partition="3"} 9"#
+            ),
+            "{body}"
+        );
+        assert!(
+            !body.contains(r#"fibril_replication_follower_applied_messages{topic="jobs""#),
+            "{body}"
+        );
+        assert!(
+            !body.contains(r#"fibril_replication_follower_next_offset{topic="orders""#),
             "{body}"
         );
         // A follower with no applied state yet contributes no series.
@@ -3832,8 +3854,8 @@ mod tests {
                         "partition": 0,
                         "group": null,
                         "state": {
-                            "message_next_offset": 4,
-                            "event_next_offset": 6,
+                            "kind": "queue",
+                            "next_offset": 6,
                             "status": {
                                 "status": "pending_retry"
                             },

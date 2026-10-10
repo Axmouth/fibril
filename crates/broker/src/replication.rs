@@ -700,7 +700,7 @@ pub(crate) struct WorkerQueuePushApply {
 impl WorkerQueuePushApply {
     async fn advance_worker(&self, next: Offset) {
         let mut state = self.worker.lock().await;
-        state.set_queue_cursor(next);
+        state.cursor = FollowerCursor::Queue { next_offset: next };
         state.status = FollowerReplicationWorkerStatus::CaughtUp;
     }
 }
@@ -904,20 +904,61 @@ pub enum FollowerReplicationWorkerStatus {
     },
 }
 
+/// Where a follower worker resumes. A queue follows one position in its
+/// single log. A stream follows its record log and cursor-event log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FollowerCursor {
+    Queue {
+        next_offset: Offset,
+    },
+    Stream {
+        message_next_offset: Offset,
+        event_next_offset: Offset,
+    },
+}
+
+impl FollowerCursor {
+    /// Start of the log or logs for a resource of `kind`.
+    pub fn zero(kind: ReplicationResourceKind) -> Self {
+        match kind {
+            ReplicationResourceKind::Queue => Self::Queue { next_offset: 0 },
+            ReplicationResourceKind::Stream => Self::Stream {
+                message_next_offset: 0,
+                event_next_offset: 0,
+            },
+        }
+    }
+
+    pub fn kind(&self) -> ReplicationResourceKind {
+        match self {
+            Self::Queue { .. } => ReplicationResourceKind::Queue,
+            Self::Stream { .. } => ReplicationResourceKind::Stream,
+        }
+    }
+}
+
+/// Last catch-up pass of a follower worker, typed like its cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CatchUpProgress {
+    Queue(QueueCatchUpProgress),
+    Stream(StreamCatchUpProgress),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct FollowerReplicationWorkerState {
-    pub message_next_offset: Offset,
-    pub event_next_offset: Offset,
+    #[serde(flatten)]
+    pub cursor: FollowerCursor,
     pub status: FollowerReplicationWorkerStatus,
-    pub last_progress: Option<StreamCatchUpProgress>,
+    pub last_progress: Option<CatchUpProgress>,
     pub next_delay_ms: u64,
 }
 
 impl FollowerReplicationWorkerState {
-    pub fn new(message_next_offset: Offset, event_next_offset: Offset) -> Self {
+    pub fn new(cursor: FollowerCursor) -> Self {
         Self {
-            message_next_offset,
-            event_next_offset,
+            cursor,
             status: FollowerReplicationWorkerStatus::Idle,
             last_progress: None,
             next_delay_ms: 0,
@@ -931,26 +972,37 @@ impl FollowerReplicationWorkerState {
         }
     }
 
-    pub fn queue_catch_up_options(&self, cfg: FollowerReplicationWorkerConfig) -> QueueCatchUpOptions {
-        cfg.queue_catch_up_options(self.event_next_offset, self.max_wait_ms(cfg))
+    /// Options for the next queue pass, or an error when this worker follows
+    /// a stream.
+    pub fn queue_catch_up_options(
+        &self,
+        cfg: FollowerReplicationWorkerConfig,
+    ) -> Result<QueueCatchUpOptions, BrokerError> {
+        match self.cursor {
+            FollowerCursor::Queue { next_offset } => {
+                Ok(cfg.queue_catch_up_options(next_offset, self.max_wait_ms(cfg)))
+            }
+            FollowerCursor::Stream { .. } => Err(cursor_kind_mismatch()),
+        }
     }
 
+    /// Options for the next stream pass, or an error when this worker follows
+    /// a queue.
     pub fn stream_catch_up_options(
         &self,
         cfg: FollowerReplicationWorkerConfig,
-    ) -> StreamCatchUpOptions {
-        cfg.stream_catch_up_options(
-            self.message_next_offset,
-            self.event_next_offset,
-            self.max_wait_ms(cfg),
-        )
-    }
-
-    /// Queue cursor in the single log. The message cursor stays zero because
-    /// a queue has no separate payload log.
-    pub(crate) fn set_queue_cursor(&mut self, next: Offset) {
-        self.message_next_offset = 0;
-        self.event_next_offset = next;
+    ) -> Result<StreamCatchUpOptions, BrokerError> {
+        match self.cursor {
+            FollowerCursor::Stream {
+                message_next_offset,
+                event_next_offset,
+            } => Ok(cfg.stream_catch_up_options(
+                message_next_offset,
+                event_next_offset,
+                self.max_wait_ms(cfg),
+            )),
+            FollowerCursor::Queue { .. } => Err(cursor_kind_mismatch()),
+        }
     }
 
     pub fn should_install_checkpoint(&self, cfg: FollowerReplicationWorkerConfig) -> bool {
@@ -989,14 +1041,10 @@ impl FollowerReplicationWorkerState {
                 cfg.checkpoint_retry_poll_ms,
             ),
         };
-        self.set_queue_cursor(progress.next_offset);
-        self.last_progress = Some(StreamCatchUpProgress {
-            iterations: progress.iterations,
-            applied_message_records: 0,
-            applied_event_records: progress.applied_records,
-            message_next_offset: 0,
-            event_next_offset: progress.next_offset,
-        });
+        self.cursor = FollowerCursor::Queue {
+            next_offset: progress.next_offset,
+        };
+        self.last_progress = Some(CatchUpProgress::Queue(*progress));
         self.status = status;
         self.next_delay_ms = delay;
     }
@@ -1033,10 +1081,16 @@ impl FollowerReplicationWorkerState {
     }
 
     fn apply_stream_progress(&mut self, progress: &StreamCatchUpProgress) {
-        self.message_next_offset = progress.message_next_offset;
-        self.event_next_offset = progress.event_next_offset;
-        self.last_progress = Some(*progress);
+        self.cursor = FollowerCursor::Stream {
+            message_next_offset: progress.message_next_offset,
+            event_next_offset: progress.event_next_offset,
+        };
+        self.last_progress = Some(CatchUpProgress::Stream(*progress));
     }
+}
+
+fn cursor_kind_mismatch() -> BrokerError {
+    BrokerError::InvalidArgument("follower worker cursor belongs to another resource kind".into())
 }
 
 // ---------------- Follower replication observability ----------------
@@ -1064,8 +1118,9 @@ pub struct FollowerReplicationWorkerSummary {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FollowerReplicaObservability {
     pub node_id: String,
-    pub durable_message_next: Offset,
-    pub durable_event_next: Offset,
+    /// Last durable position the follower reported, `None` before its first
+    /// report.
+    pub progress: Option<DurableProgress>,
     /// Time since the last progress report; `None` if it has never reported.
     pub last_report_age_ms: Option<u64>,
     pub in_sync: bool,
@@ -1228,12 +1283,9 @@ pub(crate) struct FollowerReplicationWorkerRuntime {
 }
 
 impl FollowerReplicationWorkerRuntime {
-    pub(crate) fn new(message_next_offset: Offset, event_next_offset: Offset) -> Self {
+    pub(crate) fn new(cursor: FollowerCursor) -> Self {
         Self {
-            state: Arc::new(AsyncMutex::new(FollowerReplicationWorkerState::new(
-                message_next_offset,
-                event_next_offset,
-            ))),
+            state: Arc::new(AsyncMutex::new(FollowerReplicationWorkerState::new(cursor))),
             shutdown: CancellationToken::new(),
             started: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
@@ -1296,7 +1348,10 @@ mod follower_runtime_tests {
 
     #[tokio::test]
     async fn stop_waits_for_last_tick_and_rejects_new_ticks() {
-        let runtime = Arc::new(FollowerReplicationWorkerRuntime::new(3, 7));
+        let runtime = Arc::new(FollowerReplicationWorkerRuntime::new(FollowerCursor::Stream {
+            message_next_offset: 3,
+            event_next_offset: 7,
+        }));
         let tick = runtime.begin_tick().unwrap();
         let stop = runtime.stop_and_wait();
         tokio::pin!(stop);
@@ -3330,7 +3385,7 @@ impl Broker<StromaEngine> {
         let topic = queue.topic.as_str();
         let outcome = match kind {
             ReplicationResourceKind::Queue => {
-                let options = worker.lock().await.queue_catch_up_options(cfg);
+                let options = worker.lock().await.queue_catch_up_options(cfg)?;
                 let group = queue.group.as_deref();
                 FollowerCatchUp::Queue(if cfg.allow_checkpoint_install {
                     self.catch_up_queue_follower_with_checkpoint(
@@ -3343,7 +3398,7 @@ impl Broker<StromaEngine> {
                 })
             }
             ReplicationResourceKind::Stream => {
-                let options = worker.lock().await.stream_catch_up_options(cfg);
+                let options = worker.lock().await.stream_catch_up_options(cfg)?;
                 FollowerCatchUp::Stream(if cfg.allow_checkpoint_install {
                     self.catch_up_stream_follower_with_checkpoint(
                         owner, topic, queue.partition, options,
@@ -3470,7 +3525,7 @@ impl Broker<StromaEngine> {
                                 assignment.queue.group.as_deref(),
                             ).await?;
                         scoped_owner.check_history()?;
-                        runtime.state.lock().await.set_queue_cursor(next);
+                        runtime.state.lock().await.cursor = FollowerCursor::Queue { next_offset: next };
                         initialized_history_offsets = true;
                     }
                     // The credit-based push transport carries only queues (only
@@ -3519,18 +3574,14 @@ impl Broker<StromaEngine> {
                     return Ok(FollowerReplicationWorkerLoopExit::OwnerChanged { ticks });
                 }
                 Err(err) => {
-                    let (message_next_offset, event_next_offset) = {
-                        let state = runtime.state.lock().await;
-                        (state.message_next_offset, state.event_next_offset)
-                    };
+                    let cursor = runtime.state.lock().await.cursor;
                     tracing::warn!(
                         topic = %assignment.queue.topic,
                         partition = assignment.queue.partition.id(),
                         group = ?assignment.queue.group,
                         owner = %assignment.owner,
                         assignment_epoch = assignment.epoch,
-                        message_next_offset,
-                        event_next_offset,
+                        ?cursor,
                         "follower replication worker tick failed: {err:?}"
                     );
                     drop(_tick_guard);
@@ -3564,7 +3615,7 @@ impl Broker<StromaEngine> {
     ) -> Result<(), BrokerError> {
         let _follower_tick_timer = self.replication_timing.follower_tick.timer();
         let worker = self.follower_replication_worker(queue)?;
-        let from = worker.lock().await.event_next_offset;
+        let from = worker.lock().await.queue_catch_up_options(cfg)?.from;
 
         // The apply object advances the worker-state cursor live (per batch), so
         // a fallback/next tick resumes from the right place without an exit sync.
@@ -3913,10 +3964,13 @@ impl<
     pub(crate) fn ensure_follower_replication_worker(
         &self,
         queue: &crate::coordination::QueueIdentity,
+        kind: ReplicationResourceKind,
     ) -> Arc<FollowerReplicationWorkerRuntime> {
         self.follower_replication_workers
             .entry(queue.clone())
-            .or_insert_with(|| Arc::new(FollowerReplicationWorkerRuntime::new(0, 0)))
+            .or_insert_with(|| {
+                Arc::new(FollowerReplicationWorkerRuntime::new(FollowerCursor::zero(kind)))
+            })
             .value()
             .clone()
     }
@@ -4226,35 +4280,20 @@ impl<
                             let progress = cell
                                 .as_ref()
                                 .and_then(|cell| cell.lock_followers().get(node_id).copied());
-                            let (
-                                durable_message_next,
-                                durable_event_next,
-                                last_report_age_ms,
-                                in_sync,
-                            ) = match progress {
+                            let (durable, last_report_age_ms, in_sync) = match progress {
                                 Some(progress) => {
                                     let age = now.duration_since(progress.last_report);
-                                    // A queue position covers its payloads
-                                    // and events at once.
-                                    let (message, event) = match progress.progress {
-                                        DurableProgress::Queue { next } => (next, next),
-                                        DurableProgress::Stream { message_next, event_next } => {
-                                            (message_next, event_next)
-                                        }
-                                    };
                                     (
-                                        message,
-                                        event,
+                                        Some(progress.progress),
                                         Some(age.as_millis().min(u64::MAX as u128) as u64),
                                         age <= isr_timeout,
                                     )
                                 }
-                                None => (0, 0, None, false),
+                                None => (None, None, false),
                             };
                             FollowerReplicaObservability {
                                 node_id: node_id.clone(),
-                                durable_message_next,
-                                durable_event_next,
+                                progress: durable,
                                 last_report_age_ms,
                                 in_sync,
                             }

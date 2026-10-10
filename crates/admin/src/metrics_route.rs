@@ -224,6 +224,7 @@ fn replication_families(server: &AdminServer, per_channel: bool) -> Vec<MetricFa
             .get("replication_followers")
             .and_then(|v| v.as_array())
     {
+        let mut queue_next = Vec::new();
         let mut messages = Vec::new();
         let mut events = Vec::new();
         for follower in followers {
@@ -258,21 +259,35 @@ fn replication_families(server: &AdminServer, per_channel: bool) -> Vec<MetricFa
             ];
             let offset =
                 |key: &str| state.get(key).and_then(|v| v.as_u64()).unwrap_or_default() as f64;
-            messages.push(Sample::labeled(
-                labels.clone(),
-                offset("message_next_offset"),
-            ));
-            events.push(Sample::labeled(labels, offset("event_next_offset")));
+            // A queue follows one log. A stream follows its record log and
+            // cursor-event log, each with its own family.
+            match state.get("kind").and_then(|v| v.as_str()) {
+                Some("queue") => queue_next.push(Sample::labeled(labels, offset("next_offset"))),
+                Some("stream") => {
+                    messages.push(Sample::labeled(
+                        labels.clone(),
+                        offset("message_next_offset"),
+                    ));
+                    events.push(Sample::labeled(labels, offset("event_next_offset")));
+                }
+                _ => {}
+            }
         }
         families.push(MetricFamily {
+            name: "fibril_replication_follower_next_offset",
+            help: "Next queue-log offset a follower on this node will apply for a followed queue partition.",
+            kind: MetricKind::Gauge,
+            samples: queue_next,
+        });
+        families.push(MetricFamily {
             name: "fibril_replication_follower_applied_messages",
-            help: "Next message-log offset a follower on this node will apply for a followed partition.",
+            help: "Next record-log offset a follower on this node will apply for a followed stream partition.",
             kind: MetricKind::Gauge,
             samples: messages,
         });
         families.push(MetricFamily {
             name: "fibril_replication_follower_applied_events",
-            help: "Next event-log offset a follower on this node will apply for a followed partition.",
+            help: "Next cursor-event offset a follower on this node will apply for a followed stream partition.",
             kind: MetricKind::Gauge,
             samples: events,
         });

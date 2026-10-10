@@ -180,7 +180,7 @@ fn watch_followers(server: &AdminServer, seen: &mut WatchState) {
         .cloned()
         .unwrap_or_default();
 
-    let mut next: HashMap<String, (String, u64, u64, u32)> = HashMap::new();
+    let mut next: HashMap<String, FollowerWatch> = HashMap::new();
     let mut stalled = Vec::new();
     for follower in &followers {
         let topic = follower.get("topic").and_then(|v| v.as_str()).unwrap_or("?");
@@ -194,17 +194,10 @@ fn watch_followers(server: &AdminServer, seen: &mut WatchState) {
             .and_then(|s| s.get("status"))
             .and_then(|s| s.as_str())
             .unwrap_or("unknown");
-        let message_next = state
-            .and_then(|s| s.get("message_next_offset"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let event_next = state
-            .and_then(|s| s.get("event_next_offset"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        let cursor = state.map(follower_cursor).unwrap_or_default();
         let subject = format!("{topic}/{partition}");
-        let record = advance_follower(seen.followers.get(&subject), status, message_next, event_next);
-        if record.3 >= FOLLOWER_STALL_PASSES {
+        let record = advance_follower(seen.followers.get(&subject), status, cursor);
+        if record.passes >= FOLLOWER_STALL_PASSES {
             stalled.push(subject.clone());
         }
         next.insert(subject, record);
@@ -261,8 +254,8 @@ async fn watch_stream_lag(server: &AdminServer, seen: &mut WatchState) {
 pub struct WatchState {
     attention: Option<HashSet<(String, String, String)>>,
     nodes: Option<HashSet<String>>,
-    /// Per follower `(status, message_next, event_next, passes_without_progress)`.
-    followers: HashMap<String, (String, u64, u64, u32)>,
+    /// Per follower status, cursor and passes without progress.
+    followers: HashMap<String, FollowerWatch>,
     /// Per stream partition, the last lag-eviction count seen.
     stream_lag: Option<HashMap<String, u64>>,
 }
@@ -296,29 +289,43 @@ impl DerivedConditions {
     }
 }
 
+/// What the watcher remembers about one follower between passes.
+#[derive(Debug, Clone, PartialEq)]
+struct FollowerWatch {
+    status: String,
+    /// The worker cursor fields of its state (`kind` plus one queue offset,
+    /// or the stream record and cursor-event offsets), compared as a whole.
+    cursor: serde_json::Value,
+    passes: u32,
+}
+
+/// The cursor part of a follower worker state. Any change in it counts as
+/// progress, whichever resource kind the worker follows.
+fn follower_cursor(state: &serde_json::Value) -> serde_json::Value {
+    const CURSOR_KEYS: [&str; 4] = ["kind", "next_offset", "message_next_offset", "event_next_offset"];
+    let cursor = CURSOR_KEYS
+        .iter()
+        .filter_map(|key| state.get(*key).map(|value| (key.to_string(), value.clone())))
+        .collect();
+    serde_json::Value::Object(cursor)
+}
+
 /// Advance one follower's stall accounting: returns the updated record given
 /// what this pass observed. Pure so the state machine is unit-testable.
 fn advance_follower(
-    previous: Option<&(String, u64, u64, u32)>,
+    previous: Option<&FollowerWatch>,
     status: &str,
-    message_next: u64,
-    event_next: u64,
-) -> (String, u64, u64, u32) {
-    if status == "caught_up" {
-        return (status.to_string(), message_next, event_next, 0);
-    }
-    match previous {
-        Some((_, prev_msg, prev_event, passes))
-            if *prev_msg == message_next && *prev_event == event_next =>
-        {
-            (
-                status.to_string(),
-                message_next,
-                event_next,
-                passes.saturating_add(1),
-            )
-        }
-        _ => (status.to_string(), message_next, event_next, 0),
+    cursor: serde_json::Value,
+) -> FollowerWatch {
+    let passes = match previous {
+        _ if status == "caught_up" => 0,
+        Some(previous) if previous.cursor == cursor => previous.passes.saturating_add(1),
+        _ => 0,
+    };
+    FollowerWatch {
+        status: status.to_string(),
+        cursor,
+        passes,
     }
 }
 
@@ -337,16 +344,43 @@ pub async fn run_watcher(server: Arc<AdminServer>) {
 mod tests {
     use super::*;
 
+    fn stream(message: u64, event: u64) -> serde_json::Value {
+        follower_cursor(&serde_json::json!({
+            "kind": "stream",
+            "message_next_offset": message,
+            "event_next_offset": event,
+            "status": { "status": "pending_retry" },
+        }))
+    }
+
+    fn queue(next: u64) -> serde_json::Value {
+        follower_cursor(&serde_json::json!({
+            "kind": "queue",
+            "next_offset": next,
+            "status": { "status": "pending_retry" },
+        }))
+    }
+
     #[test]
     fn follower_stall_counts_passes_without_progress() {
-        let start = advance_follower(None, "pending_retry", 10, 20);
-        assert_eq!(start.3, 0);
-        let stuck = advance_follower(Some(&start), "pending_retry", 10, 20);
-        assert_eq!(stuck.3, 1);
-        let advanced = advance_follower(Some(&stuck), "pending_retry", 11, 20);
-        assert_eq!(advanced.3, 0, "offset progress resets the stall count");
-        let caught = advance_follower(Some(&stuck), "caught_up", 10, 20);
-        assert_eq!(caught.3, 0, "caught up is never stalled");
+        let start = advance_follower(None, "pending_retry", stream(10, 20));
+        assert_eq!(start.passes, 0);
+        let stuck = advance_follower(Some(&start), "pending_retry", stream(10, 20));
+        assert_eq!(stuck.passes, 1);
+        let advanced = advance_follower(Some(&stuck), "pending_retry", stream(11, 20));
+        assert_eq!(advanced.passes, 0, "offset progress resets the stall count");
+        let caught = advance_follower(Some(&stuck), "caught_up", stream(10, 20));
+        assert_eq!(caught.passes, 0, "caught up is never stalled");
+    }
+
+    #[test]
+    fn queue_follower_stall_follows_its_single_cursor() {
+        assert_eq!(queue(7), serde_json::json!({ "kind": "queue", "next_offset": 7 }));
+        let start = advance_follower(None, "pending_retry", queue(7));
+        let stuck = advance_follower(Some(&start), "pending_retry", queue(7));
+        assert_eq!(stuck.passes, 1);
+        let advanced = advance_follower(Some(&stuck), "pending_retry", queue(8));
+        assert_eq!(advanced.passes, 0);
     }
 
     #[test]

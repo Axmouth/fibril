@@ -24,7 +24,7 @@ use fibril_admin::{
 use fibril_broker::{
     auth_store::{NODE_PRINCIPAL, StoreAuthHandler, UserStoreError, UserStoreManager},
     broker::{
-        Broker, BrokerConfig, FollowerReplicationWorkerConfig, OwnAllQueues, OwnAllStreams,
+        Broker, BrokerConfig, FollowerCursor, FollowerReplicationWorkerConfig, OwnAllQueues, OwnAllStreams,
         QueueOwnership, StreamOwnership,
     },
     coordination::{
@@ -1050,10 +1050,19 @@ pub fn broker_heartbeat_labels(
     {
         if let Some(state) = worker.state {
             let queue = QueueIdentity::new(worker.topic, worker.partition, worker.group.as_deref());
-            labels.insert(
-                fibril_coordination_ganglion::applied_tail_label(&queue),
-                format!("{}:{}", state.message_next_offset, state.event_next_offset),
-            );
+            let tail = match state.cursor {
+                FollowerCursor::Queue { next_offset } => {
+                    fibril_coordination_ganglion::encode_queue_applied_tail(next_offset)
+                }
+                FollowerCursor::Stream {
+                    message_next_offset,
+                    event_next_offset,
+                } => fibril_coordination_ganglion::encode_stream_applied_tail(
+                    message_next_offset,
+                    event_next_offset,
+                ),
+            };
+            labels.insert(fibril_coordination_ganglion::applied_tail_label(&queue), tail);
         }
     }
 

@@ -3507,7 +3507,10 @@ async fn follower_worker_loop_reports_checkpoint_requirement_without_history() {
         // Several more retries must still never pause the owner for an export.
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 0);
-        assert_eq!((state.message_next_offset, state.event_next_offset), (0, 0));
+        assert_eq!(
+            state.cursor,
+            fibril_broker::broker::FollowerCursor::Queue { next_offset: 0 }
+        );
         shutdown.cancel();
     };
     let loop_task = follower_broker.run_follower_replication_worker_loop(

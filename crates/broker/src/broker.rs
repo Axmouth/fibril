@@ -5184,7 +5184,7 @@ impl Broker<StromaEngine> {
                     assignment_epoch,
                 )
                 .await?;
-                let runtime = self.ensure_follower_replication_worker(&transition.queue);
+                let runtime = self.ensure_follower_replication_worker(&transition.queue, ReplicationResourceKind::Queue);
                 if let Some(saved) = saved {
                     *runtime.state.lock().await = saved;
                 }
@@ -5216,7 +5216,7 @@ impl Broker<StromaEngine> {
                     assignment_epoch,
                 )
                 .await?;
-                self.ensure_follower_replication_worker(&transition.queue);
+                self.ensure_follower_replication_worker(&transition.queue, ReplicationResourceKind::Queue);
                 Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
             }
             LocalAssignmentIntent::DemoteOwnerToFollower => {
@@ -5242,7 +5242,7 @@ impl Broker<StromaEngine> {
                         assignment_epoch,
                     )
                     .await?;
-                self.ensure_follower_replication_worker(&transition.queue);
+                self.ensure_follower_replication_worker(&transition.queue, ReplicationResourceKind::Queue);
                 Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
             }
             LocalAssignmentIntent::FreezeOwner => {
@@ -5432,7 +5432,7 @@ impl Broker<StromaEngine> {
                 self.engine
                     .become_stream_follower_with_epoch(&topic, partition.id(), assignment_epoch)
                     .await?;
-                let runtime = self.ensure_follower_replication_worker(&identity);
+                let runtime = self.ensure_follower_replication_worker(&identity, ReplicationResourceKind::Stream);
                 if let Some(saved) = saved {
                     *runtime.state.lock().await = saved;
                 }
@@ -5454,7 +5454,7 @@ impl Broker<StromaEngine> {
                 self.engine
                     .become_stream_follower_with_epoch(&topic, partition.id(), assignment_epoch)
                     .await?;
-                self.ensure_follower_replication_worker(&identity);
+                self.ensure_follower_replication_worker(&identity, ReplicationResourceKind::Stream);
                 Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
             }
             LocalAssignmentIntent::DemoteOwnerToFollower => {
@@ -5464,7 +5464,7 @@ impl Broker<StromaEngine> {
                 self.engine
                     .become_stream_follower_with_epoch(&topic, partition.id(), assignment_epoch)
                     .await?;
-                self.ensure_follower_replication_worker(&identity);
+                self.ensure_follower_replication_worker(&identity, ReplicationResourceKind::Stream);
                 Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
             }
             LocalAssignmentIntent::FreezeOwner => {

@@ -15,7 +15,8 @@ use fibril_broker::{
         Broker, BrokerAssignmentTransitionApply, BrokerConfig, BrokerError,
         BrokerOwnerReplicationPeer, BrokerOwnerReplicationPeerResolver, BrokerOwnerStreamRecords,
         BrokerQueueCatchUp, BrokerQueueFollowerApply, BrokerReplicationCheckpointRequired,
-        BrokerStreamCatchUp, ConsumerConfig, DurableProgress, FollowerCatchUp, QueueCatchUpOptions,
+        BrokerStreamCatchUp, CatchUpProgress, ConsumerConfig, DurableProgress, FollowerCatchUp,
+        FollowerCursor, QueueCatchUpOptions,
         QueueCatchUpProgress, StreamCatchUpOptions, StreamCatchUpProgress,
         FollowerReplicationWorkerConfig, FollowerReplicationWorkerLoopExit,
         FollowerReplicationWorkerState, FollowerReplicationWorkerStatus, OwnedQueue,
@@ -1744,9 +1745,8 @@ async fn refresh_follower_keeps_replication_worker_progress() {
         Some(LocalAssignmentRole::Follower),
         Some(LocalAssignmentRole::Follower),
     );
-    // Queue payloads ride in the event log, so only the event cursor moves.
-    assert_eq!(before.message_next_offset, 0);
-    assert!(before.event_next_offset > 0);
+    // Queue payloads ride in the single queue log, so one cursor moves.
+    assert!(matches!(before.cursor, FollowerCursor::Queue { next_offset } if next_offset > 0));
     refresh.previous = Some(PartitionAssignment::new(
         queue.clone(),
         "old-owner",
@@ -2152,7 +2152,7 @@ async fn owner_replica_observability_reports_follower_lag_and_isr() {
         .find(|f| f.node_id == "follower-b")
         .expect("follower-b present");
     assert!(b.in_sync);
-    assert_eq!(b.durable_message_next, 5);
+    assert_eq!(b.progress, Some(DurableProgress::Queue { next: 5 }));
     assert!(b.last_report_age_ms.is_some());
 
     let c = owned
@@ -2161,6 +2161,7 @@ async fn owner_replica_observability_reports_follower_lag_and_isr() {
         .find(|f| f.node_id == "follower-c")
         .expect("follower-c present");
     assert!(!c.in_sync);
+    assert_eq!(c.progress, None);
     assert_eq!(c.last_report_age_ms, None);
 
     broker.shutdown().await;
@@ -4353,6 +4354,53 @@ async fn checkpoint_aware_catch_up_refuses_unauthorized_reset_of_overlapping_pre
     follower.shutdown().await;
 }
 
+fn stream_cursor(message_next_offset: Offset, event_next_offset: Offset) -> FollowerCursor {
+    FollowerCursor::Stream {
+        message_next_offset,
+        event_next_offset,
+    }
+}
+
+#[test]
+fn follower_worker_state_serializes_its_cursor_by_kind() {
+    let mut queue = FollowerReplicationWorkerState::new(FollowerCursor::Queue { next_offset: 0 });
+    queue.record_catch_up(
+        FollowerReplicationWorkerConfig::default(),
+        &FollowerCatchUp::Queue(BrokerQueueCatchUp::CaughtUp(QueueCatchUpProgress {
+            iterations: 2,
+            applied_records: 5,
+            next_offset: 5,
+        })),
+    );
+    assert_eq!(
+        serde_json::to_value(&queue).unwrap(),
+        serde_json::json!({
+            "kind": "queue",
+            "next_offset": 5,
+            "status": { "status": "caught_up" },
+            "last_progress": {
+                "kind": "queue",
+                "iterations": 2,
+                "applied_records": 5,
+                "next_offset": 5,
+            },
+            "next_delay_ms": 0,
+        })
+    );
+    let stream = FollowerReplicationWorkerState::new(stream_cursor(3, 4));
+    assert_eq!(
+        serde_json::to_value(&stream).unwrap(),
+        serde_json::json!({
+            "kind": "stream",
+            "message_next_offset": 3,
+            "event_next_offset": 4,
+            "status": { "status": "idle" },
+            "last_progress": null,
+            "next_delay_ms": 0,
+        })
+    );
+}
+
 #[test]
 fn follower_worker_state_builds_catch_up_options_from_current_offsets() {
     let cfg = FollowerReplicationWorkerConfig {
@@ -4370,10 +4418,10 @@ fn follower_worker_state_builds_catch_up_options_from_current_offsets() {
         stream_apply_max_merge_bytes: 16 * 1024 * 1024,
         stream_buffer_batches: 8,
     };
-    let state = FollowerReplicationWorkerState::new(23, 29);
+    let state = FollowerReplicationWorkerState::new(stream_cursor(23, 29));
 
     assert_eq!(
-        state.stream_catch_up_options(cfg),
+        state.stream_catch_up_options(cfg).unwrap(),
         StreamCatchUpOptions {
             message_from: 23,
             event_from: 29,
@@ -4384,9 +4432,13 @@ fn follower_worker_state_builds_catch_up_options_from_current_offsets() {
             max_wait_ms: 0,
         }
     );
-    // A queue reads one log, so it uses the event cursor and record limit.
+    // A stream cursor cannot drive a queue pass, and the other way round.
+    assert!(state.queue_catch_up_options(cfg).is_err());
+    let queue_state = FollowerReplicationWorkerState::new(FollowerCursor::Queue { next_offset: 29 });
+    assert!(queue_state.stream_catch_up_options(cfg).is_err());
+    // A queue reads one log, so it uses its single cursor and the record limit.
     assert_eq!(
-        state.queue_catch_up_options(cfg),
+        queue_state.queue_catch_up_options(cfg).unwrap(),
         QueueCatchUpOptions {
             from: 29,
             max_records_per_read: 13,
@@ -4400,7 +4452,7 @@ fn follower_worker_state_builds_catch_up_options_from_current_offsets() {
 #[test]
 fn follower_worker_state_records_caught_up_progress_and_enables_wait_budget() {
     let cfg = FollowerReplicationWorkerConfig::default();
-    let mut state = FollowerReplicationWorkerState::new(0, 0);
+    let mut state = FollowerReplicationWorkerState::new(stream_cursor(0, 0));
     let progress = StreamCatchUpProgress {
         message_next_offset: 5,
         event_next_offset: 7,
@@ -4409,13 +4461,12 @@ fn follower_worker_state_records_caught_up_progress_and_enables_wait_budget() {
 
     state.record_catch_up(cfg, &FollowerCatchUp::Stream(BrokerStreamCatchUp::CaughtUp(progress)));
 
-    assert_eq!(state.message_next_offset, 5);
-    assert_eq!(state.event_next_offset, 7);
+    assert_eq!(state.cursor, stream_cursor(5, 7));
     assert_eq!(state.status, FollowerReplicationWorkerStatus::CaughtUp);
-    assert_eq!(state.last_progress, Some(progress));
+    assert_eq!(state.last_progress, Some(CatchUpProgress::Stream(progress)));
     assert_eq!(state.next_delay_ms, 0);
     assert_eq!(
-        state.stream_catch_up_options(cfg).max_wait_ms,
+        state.stream_catch_up_options(cfg).unwrap().max_wait_ms,
         cfg.caught_up_poll_ms
     );
 }
@@ -4426,9 +4477,9 @@ fn follower_worker_state_uses_wait_budget_only_after_caught_up() {
         caught_up_poll_ms: 250,
         ..Default::default()
     };
-    let mut state = FollowerReplicationWorkerState::new(0, 0);
+    let mut state = FollowerReplicationWorkerState::new(stream_cursor(0, 0));
 
-    assert_eq!(state.stream_catch_up_options(cfg).max_wait_ms, 0);
+    assert_eq!(state.stream_catch_up_options(cfg).unwrap().max_wait_ms, 0);
 
     state.record_catch_up(
         cfg,
@@ -4436,14 +4487,14 @@ fn follower_worker_state_uses_wait_budget_only_after_caught_up() {
             progress: StreamCatchUpProgress::default(),
         }),
     );
-    assert_eq!(state.stream_catch_up_options(cfg).max_wait_ms, 0);
+    assert_eq!(state.stream_catch_up_options(cfg).unwrap().max_wait_ms, 0);
 
     state.record_catch_up(
         cfg,
         &FollowerCatchUp::Stream(BrokerStreamCatchUp::CaughtUp(StreamCatchUpProgress::default())),
     );
     assert_eq!(
-        state.stream_catch_up_options(cfg).max_wait_ms,
+        state.stream_catch_up_options(cfg).unwrap().max_wait_ms,
         cfg.caught_up_poll_ms
     );
 }
@@ -4451,7 +4502,7 @@ fn follower_worker_state_uses_wait_budget_only_after_caught_up() {
 #[test]
 fn follower_worker_state_records_iteration_limit_as_retry() {
     let cfg = FollowerReplicationWorkerConfig::default();
-    let mut state = FollowerReplicationWorkerState::new(1, 2);
+    let mut state = FollowerReplicationWorkerState::new(stream_cursor(1, 2));
     let progress = StreamCatchUpProgress {
         message_next_offset: 3,
         event_next_offset: 4,
@@ -4460,17 +4511,16 @@ fn follower_worker_state_records_iteration_limit_as_retry() {
 
     state.record_catch_up(cfg, &FollowerCatchUp::Stream(BrokerStreamCatchUp::IterationLimit { progress }));
 
-    assert_eq!(state.message_next_offset, 3);
-    assert_eq!(state.event_next_offset, 4);
+    assert_eq!(state.cursor, stream_cursor(3, 4));
     assert_eq!(state.status, FollowerReplicationWorkerStatus::PendingRetry);
-    assert_eq!(state.last_progress, Some(progress));
+    assert_eq!(state.last_progress, Some(CatchUpProgress::Stream(progress)));
     assert_eq!(state.next_delay_ms, cfg.retry_poll_ms);
 }
 
 #[test]
 fn follower_worker_state_records_checkpoint_requirement() {
     let cfg = FollowerReplicationWorkerConfig::default();
-    let mut state = FollowerReplicationWorkerState::new(10, 20);
+    let mut state = FollowerReplicationWorkerState::new(stream_cursor(10, 20));
     let checkpoint = BrokerReplicationCheckpointRequired {
         epoch: 2,
         requested_offset: 10,
@@ -4499,13 +4549,13 @@ fn follower_worker_state_records_checkpoint_requirement() {
             events: None,
         }
     );
-    assert_eq!(state.last_progress, Some(progress));
+    assert_eq!(state.last_progress, Some(CatchUpProgress::Stream(progress)));
     assert_eq!(state.next_delay_ms, cfg.checkpoint_retry_poll_ms);
 }
 
 #[test]
 fn follower_worker_checkpoint_install_is_policy_gated() {
-    let mut state = FollowerReplicationWorkerState::new(10, 20);
+    let mut state = FollowerReplicationWorkerState::new(stream_cursor(10, 20));
     let checkpoint = BrokerReplicationCheckpointRequired {
         epoch: 2,
         requested_offset: 10,
@@ -4537,7 +4587,7 @@ fn follower_worker_checkpoint_install_is_policy_gated() {
 
 #[test]
 fn follower_worker_checkpoint_install_requires_checkpoint_status() {
-    let mut state = FollowerReplicationWorkerState::new(0, 0);
+    let mut state = FollowerReplicationWorkerState::new(stream_cursor(0, 0));
     let cfg = FollowerReplicationWorkerConfig {
         allow_checkpoint_install: true,
         ..Default::default()
@@ -4616,16 +4666,13 @@ async fn follower_worker_tick_records_catch_up_progress() {
             .follower_replication_worker_snapshot("worker-tick", Partition::new(0), Some("workers"))
             .await,
         Some(FollowerReplicationWorkerState {
-            message_next_offset: 0,
-            event_next_offset: 1,
+            cursor: FollowerCursor::Queue { next_offset: 1 },
             status: FollowerReplicationWorkerStatus::PendingRetry,
-            last_progress: Some(StreamCatchUpProgress {
+            last_progress: Some(CatchUpProgress::Queue(QueueCatchUpProgress {
                 iterations: 1,
-                applied_message_records: 0,
-                applied_event_records: 1,
-                message_next_offset: 0,
-                event_next_offset: 1,
-            }),
+                applied_records: 1,
+                next_offset: 1,
+            })),
             next_delay_ms: cfg.retry_poll_ms,
         })
     );
@@ -4642,8 +4689,8 @@ async fn follower_worker_tick_records_catch_up_progress() {
         worker
             .state
             .as_ref()
-            .map(|state| (state.message_next_offset, state.event_next_offset)),
-        Some((0, 1))
+            .map(|state| state.cursor),
+        Some(FollowerCursor::Queue { next_offset: 1 })
     );
 
     owner.shutdown().await;

@@ -654,10 +654,12 @@ pub struct ClientTopology {
 }
 
 /// Heartbeat label prefix for per-assignment applied tails:
-/// `applied/<topic>/<partition>[/<group>] = "<message_next>:<event_next>"`.
+/// `applied/<topic>/<partition>[/<group>]`. A queue publishes `"<next>"`, its
+/// position in the single queue log. A stream publishes
+/// `"<message_next>:<event_next>"`, its record and cursor-event logs.
 /// Advisory data for failover candidate selection. Local promotion checks log
-/// and state completeness, but does not prove possession of every previously
-/// confirmed batch; stale labels can select a consistent but lagging candidate.
+/// and state completeness, but do not prove possession of every previously
+/// confirmed batch. Stale labels can select a consistent but lagging candidate.
 pub const APPLIED_TAIL_LABEL_PREFIX: &str = "applied/";
 
 /// Label key for one queue's applied tails.
@@ -674,9 +676,26 @@ pub fn applied_tail_label(queue: &QueueIdentity) -> String {
     }
 }
 
-fn parse_applied_tail(raw: &str) -> Option<(u64, u64)> {
-    let (message, event) = raw.split_once(':')?;
-    Some((message.parse().ok()?, event.parse().ok()?))
+/// Applied-tail label value for a queue follower.
+pub fn encode_queue_applied_tail(next: u64) -> String {
+    next.to_string()
+}
+
+/// Applied-tail label value for a stream follower.
+pub fn encode_stream_applied_tail(message_next: u64, event_next: u64) -> String {
+    format!("{message_next}:{event_next}")
+}
+
+/// Ranking value of an applied-tail label: the queue log position, or the
+/// stream cursor-event tail. A value in the other kind's format is ignored.
+fn parse_applied_tail(raw: &str, stream: bool) -> Option<u64> {
+    if stream {
+        let (message, event) = raw.split_once(':')?;
+        message.parse::<u64>().ok()?;
+        event.parse().ok()
+    } else {
+        raw.parse().ok()
+    }
 }
 
 /// Node label carrying the broker's last heartbeat (unix milliseconds, broker
@@ -2933,7 +2952,7 @@ impl GanglionCoordination {
             // Failover candidate selection: when the committed owner is gone
             // (dead, or live but draining) and the planner moved ownership,
             // prefer the most caught-up LIVE committed follower (by
-            // heartbeat-label applied event tail). This is advisory: local
+            // heartbeat-label applied tail). This is advisory: local
             // promotion checks do not establish the cluster's confirmed prefix.
             // With one follower this selection is a no-op.
             for (resource, planned) in desired.assignments.iter_mut() {
@@ -2949,10 +2968,13 @@ impl GanglionCoordination {
                 // follower reuses the queue follower worker (group None), so it
                 // already publishes its tail under that same key - derive it the
                 // same way for the stream resource.
-                let label = if let Some(queue) = to_fibril_queue(resource) {
-                    applied_tail_label(&queue)
+                let (label, stream) = if let Some(queue) = to_fibril_queue(resource) {
+                    (applied_tail_label(&queue), false)
                 } else if let Some(stream) = to_fibril_stream(resource) {
-                    applied_tail_label(&QueueIdentity::new(stream.topic, stream.partition, None))
+                    (
+                        applied_tail_label(&QueueIdentity::new(stream.topic, stream.partition, None)),
+                        true,
+                    )
                 } else {
                     continue;
                 };
@@ -2965,10 +2987,10 @@ impl GanglionCoordination {
                             .nodes
                             .get(follower)
                             .and_then(|node| node.labels.get(&label))
-                            .and_then(|raw| parse_applied_tail(raw))?;
-                        Some((follower.clone(), tails.1))
+                            .and_then(|raw| parse_applied_tail(raw, stream))?;
+                        Some((follower.clone(), tails))
                     })
-                    .max_by_key(|(_, event_tail)| *event_tail);
+                    .max_by_key(|(_, tail)| *tail);
                 match best {
                     Some((best_follower, _)) => {
                         if planned.owner != best_follower {
@@ -3500,6 +3522,16 @@ mod tests {
     use std::time::Duration;
 
     use ganglion_openraft::{default_raft_config, InProcessRouter};
+
+    #[test]
+    fn applied_tail_labels_are_parsed_by_resource_kind() {
+        assert_eq!(parse_applied_tail(&encode_queue_applied_tail(9), false), Some(9));
+        assert_eq!(parse_applied_tail(&encode_stream_applied_tail(4, 6), true), Some(6));
+        // A value in the other kind's format ranks nothing.
+        assert_eq!(parse_applied_tail(&encode_stream_applied_tail(4, 6), false), None);
+        assert_eq!(parse_applied_tail(&encode_queue_applied_tail(9), true), None);
+        assert_eq!(parse_applied_tail("x:6", true), None);
+    }
 
     fn unique_dir(tag: &str) -> std::path::PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -4769,9 +4801,9 @@ mod tests {
             broker_addr: format!("127.0.0.1:{port}"),
             admin_addr: None,
         };
-        let tails = |message: u64, event: u64| {
+        let tails = |next: u64| {
             let mut labels = std::collections::BTreeMap::new();
-            labels.insert(applied_tail_label(&queue), format!("{message}:{event}"));
+            labels.insert(applied_tail_label(&queue), encode_queue_applied_tail(next));
             labels
         };
 
@@ -4781,11 +4813,11 @@ mod tests {
             .expect("a");
         // b-slow sorts FIRST among followers but is behind; c-fast is ahead.
         provider
-            .register_self_with_labels(&info("b-slow", 9001), tails(5, 5))
+            .register_self_with_labels(&info("b-slow", 9001), tails(5))
             .await
             .expect("b");
         provider
-            .register_self_with_labels(&info("c-fast", 9002), tails(9, 9))
+            .register_self_with_labels(&info("c-fast", 9002), tails(9))
             .await
             .expect("c");
         provider.register_legacy_queue(&queue).await.expect("queue");
@@ -4894,7 +4926,7 @@ mod tests {
                     &info(id),
                     BTreeMap::from([(
                         applied_tail_label(&queue),
-                        format!("{reported_tail}:{reported_tail}"),
+                        encode_queue_applied_tail(reported_tail),
                     )]),
                 )
                 .await
@@ -5076,9 +5108,9 @@ mod tests {
             broker_addr: format!("127.0.0.1:{port}"),
             admin_addr: None,
         };
-        let tails = |message: u64, event: u64| {
+        let tails = |next: u64| {
             let mut labels = std::collections::BTreeMap::new();
-            labels.insert(applied_tail_label(&queue), format!("{message}:{event}"));
+            labels.insert(applied_tail_label(&queue), encode_queue_applied_tail(next));
             labels
         };
 
@@ -5087,11 +5119,11 @@ mod tests {
             .await
             .expect("a");
         provider
-            .register_self_with_labels(&info("b-slow", 9001), tails(5, 5))
+            .register_self_with_labels(&info("b-slow", 9001), tails(5))
             .await
             .expect("b");
         provider
-            .register_self_with_labels(&info("c-fast", 9002), tails(9, 9))
+            .register_self_with_labels(&info("c-fast", 9002), tails(9))
             .await
             .expect("c");
         provider.register_legacy_queue(&queue).await.expect("queue");

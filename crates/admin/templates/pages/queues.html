@@ -107,9 +107,18 @@ function formatTime(ms) {
 function formatProgress(p) {
   if (!p) return "N/A";
   if (typeof p === "object") {
+    if (p.kind === "queue") return `${p.applied_records ?? 0} records`;
     return `${p.applied_message_records ?? 0} msg · ${p.applied_event_records ?? 0} ev`;
   }
   return formatTime(p);
+}
+
+// A queue follower tracks one position in its log. A stream follower tracks
+// its record log and its cursor-event log.
+function formatCursor(state) {
+  if (!state) return "0";
+  if (state.kind === "queue") return `${state.next_offset ?? 0}`;
+  return `${state.message_next_offset ?? 0} · ${state.event_next_offset ?? 0}`;
 }
 
 function formatLastLeaseActivity(activity) {
@@ -313,8 +322,7 @@ function render(bundle) {
           <td class="text-right">${f.partition ?? 0}</td>
           <td>${escapeHtml(f.group || "default")}</td>
           <td><span class="queue-state-pill replica-status-${escapeHtml(status)}">${escapeHtml(humanizeSnake(status))}</span></td>
-          <td class="text-right">${f.state?.message_next_offset ?? 0}</td>
-          <td class="text-right">${f.state?.event_next_offset ?? 0}</td>
+          <td class="text-right">${escapeHtml(formatCursor(f.state))}</td>
           <td>${escapeHtml(formatProgress(f.state?.last_progress))}</td>
           <td class="text-right">${f.state?.next_delay_ms ?? 0}ms</td>
           <td>${f.busy ? "yes" : "no"}</td>
@@ -333,8 +341,7 @@ function render(bundle) {
             <th class="text-right">Partition</th>
             <th>Group</th>
             <th>Status</th>
-            <th class="text-right">Message next</th>
-            <th class="text-right">Event next</th>
+            <th class="text-right">Next offset</th>
             <th>Last progress</th>
             <th class="text-right">Next retry in</th>
             <th>Busy</th>
