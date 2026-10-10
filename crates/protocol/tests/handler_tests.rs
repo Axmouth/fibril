@@ -31,10 +31,9 @@ use fibril_protocol::v1::{
     DeclareQueueOk, Deliver, ERR_CONFLICT, ERR_INVALID, ErrorMsg, HEADER_SPECULATIVE, Hello,
     HelloOk, Nack, Op, PROTOCOL_V1, Publish, PublishDelayed, QueueDlqPolicy, QueueTopologyEntry,
     ReasonCode, ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult,
-    ReconcileSubscription, ReplicationApply, ReplicationApplyOk, ReplicationCheckpointExport,
-    ReplicationCheckpointExportOk, ReplicationCheckpointRequired, ReplicationEventApplyBatch,
-    ReplicationEventRead, ReplicationEventRecord, ReplicationMessageApplyBatch,
-    ReplicationMessageRead, ReplicationMessageRecord, ReplicationRead, ReplicationReadOk,
+    QueueReplicationRead, ReconcileSubscription, ReplicationCheckpointExport,
+    ReplicationCheckpointExportOk, ReplicationCheckpointRequired, ReplicationEventRead,
+    ReplicationEventRecord,
     ReplicationStateCheckpoint, ResumeIdentity, ResumeOutcome, StreamDurability, StreamRetention,
     StreamStart, Subscribe, SubscribeOk, SubscribeStream, SubscriptionClosed, TopologyOk,
     TopologyRequest, TopologyUpdateAck,
@@ -46,9 +45,7 @@ use fibril_protocol::v1::{
     helper::{Conn, plain_conn, try_decode, try_encode},
     replication::{
         CoordinationProtocolOwnerPeerResolver, ProtocolOwnerPeerResolverConfig,
-        ProtocolOwnerReplicationPeer, ProtocolReplicationCatchUp,
-        ProtocolReplicationCatchUpOptions, StaticProtocolOwnerPeerResolver,
-        catch_up_replication_over_protocol,
+        ProtocolOwnerReplicationPeer, StaticProtocolOwnerPeerResolver,
     },
     wire,
 };
@@ -299,7 +296,6 @@ fn tolerate_peer_disconnect(result: anyhow::Result<()>) -> anyhow::Result<()> {
 
 async fn start_checkpoint_required_owner_server(
     checkpoint: ReplicationStateCheckpoint,
-    message_records: Vec<ReplicationMessageRecord>,
     event_records: Vec<ReplicationEventRecord>,
     exports: Arc<std::sync::atomic::AtomicUsize>,
 ) -> (SocketAddr, tokio::task::JoinHandle<anyhow::Result<()>>) {
@@ -333,45 +329,28 @@ async fn start_checkpoint_required_owner_server(
             while let Some(frame) = conn.next().await {
                 let frame = frame?;
                 match frame.opcode {
-                    x if x == Op::ReplicationRead as u16 => {
-                        let read: ReplicationRead = try_decode(&frame)?;
-                        // This fake models an owner whose event log has been
-                        // compacted but whose messages are still available from
-                        // the checkpoint message offset.
-                        let response = if read.event_from < checkpoint.event_next_offset {
-                            ReplicationReadOk {
-                                messages: read_fake_message_batch(
-                                    &checkpoint,
-                                    &message_records,
-                                    read.message_from,
-                                    read.max_messages,
-                                ),
-                                events: ReplicationEventRead::CheckpointRequired(
-                                    ReplicationCheckpointRequired {
-                                        epoch: checkpoint.event_epoch,
-                                        requested_offset: read.event_from,
-                                        head_offset: checkpoint.event_next_offset,
-                                        next_offset: checkpoint.event_next_offset,
-                                    },
-                                ),
-                            }
+                    x if x == Op::QueueReplicationRead as u16 => {
+                        let read: QueueReplicationRead = try_decode(&frame)?;
+                        // This fake models an owner whose queue log has been
+                        // compacted below the checkpoint.
+                        let response = if read.from < checkpoint.event_next_offset {
+                            ReplicationEventRead::CheckpointRequired(
+                                ReplicationCheckpointRequired {
+                                    epoch: checkpoint.event_epoch,
+                                    requested_offset: read.from,
+                                    head_offset: checkpoint.event_next_offset,
+                                    next_offset: checkpoint.event_next_offset,
+                                },
+                            )
                         } else {
-                            ReplicationReadOk {
-                                messages: read_fake_message_batch(
-                                    &checkpoint,
-                                    &message_records,
-                                    read.message_from,
-                                    read.max_messages,
-                                ),
-                                events: read_fake_event_batch(
-                                    &checkpoint,
-                                    &event_records,
-                                    read.event_from,
-                                    read.max_events,
-                                ),
-                            }
+                            read_fake_event_batch(
+                                &checkpoint,
+                                &event_records,
+                                read.from,
+                                read.max_records,
+                            )
                         };
-                        conn.send(wire::encode_replication_read_ok(
+                        conn.send(wire::encode_queue_replication_read_ok(
                             frame.request_id,
                             &response,
                         )?)
@@ -398,27 +377,6 @@ async fn start_checkpoint_required_owner_server(
         tolerate_peer_disconnect(served)
     });
     (addr, server_task)
-}
-
-fn read_fake_message_batch(
-    checkpoint: &ReplicationStateCheckpoint,
-    message_records: &[ReplicationMessageRecord],
-    from: u64,
-    max: u32,
-) -> ReplicationMessageRead {
-    let records = message_records
-        .iter()
-        .filter(|record| record.offset >= from)
-        .take(max as usize)
-        .cloned()
-        .collect::<Vec<_>>();
-    let next_offset = records.last().map_or(from, |record| record.offset + 1);
-    ReplicationMessageRead::Batch {
-        epoch: checkpoint.message_epoch,
-        requested_offset: from,
-        next_offset,
-        records,
-    }
 }
 
 fn read_fake_event_batch(
@@ -1786,45 +1744,26 @@ async fn replication_read_returns_owner_log_records() {
     )
     .await;
 
+    let read = QueueReplicationRead {
+        reporter_epoch: None,
+        topic: "replication.read.tcp".into(),
+        group: Some("workers".into()),
+        partition: Partition::new(0),
+        from: 0,
+        max_records: 10,
+        max_bytes: 1024 * 1024,
+        max_wait_ms: 0,
+        reporter_node_id: None,
+    };
     framed
-        .send(
-            try_encode(
-                Op::ReplicationRead,
-                3,
-                &ReplicationRead {
-                    reporter_epoch: None,
-                    topic: "replication.read.tcp".into(),
-                    group: Some("workers".into()),
-                    partition: Partition::new(0),
-                    message_from: 0,
-                    event_from: 0,
-                    max_messages: 10,
-                    max_events: 10,
-                    max_bytes: 1024 * 1024,
-                    max_wait_ms: 0,
-                    reporter_node_id: None,
-                },
-            )
-            .unwrap(),
-        )
+        .send(try_encode(Op::QueueReplicationRead, 3, &read).unwrap())
         .await
         .unwrap();
 
     let frame = recv_frame(&mut framed).await;
-    assert_eq!(frame.opcode, Op::ReplicationReadOk as u16);
+    assert_eq!(frame.opcode, Op::QueueReplicationReadOk as u16);
     assert_eq!(frame.request_id, 3);
-    let response: ReplicationReadOk = wire::decode_replication_read_ok(&frame).unwrap();
-
-    match response.messages {
-        ReplicationMessageRead::Batch { records, .. } => {
-            assert!(records.is_empty(), "queues keep no separate message log");
-        }
-        ReplicationMessageRead::CheckpointRequired(required) => {
-            panic!("unexpected message checkpoint requirement: {required:?}");
-        }
-    }
-
-    match response.events {
+    match wire::decode_queue_replication_read_ok(&frame).unwrap() {
         ReplicationEventRead::Batch { records, .. } => {
             assert_eq!(records[0].offset, 0);
             assert_eq!(
@@ -1833,38 +1772,19 @@ async fn replication_read_returns_owner_log_records() {
             );
         }
         ReplicationEventRead::CheckpointRequired(required) => {
-            panic!("unexpected event checkpoint requirement: {required:?}");
+            panic!("unexpected checkpoint requirement: {required:?}");
         }
     }
 
-    // A queue read whose message lane cursor is not zero names a layout the
-    // queue does not have, so the owner refuses it.
-    framed
-        .send(
-            try_encode(
-                Op::ReplicationRead,
-                4,
-                &ReplicationRead {
-                    reporter_epoch: None,
-                    topic: "replication.read.tcp".into(),
-                    group: Some("workers".into()),
-                    partition: Partition::new(0),
-                    message_from: 1,
-                    event_from: 0,
-                    max_messages: 10,
-                    max_events: 10,
-                    max_bytes: 1024 * 1024,
-                    max_wait_ms: 0,
-                    reporter_node_id: None,
-                },
-            )
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    let frame = recv_frame(&mut framed).await;
-    assert_eq!(frame.opcode, Op::Error as u16);
-    assert_eq!(frame.request_id, 4);
+    // A two-lane read body from an older peer fails the body magic check and
+    // leaves the connection usable.
+    let mut old = try_encode(Op::QueueReplicationRead, 4, &read).unwrap();
+    let mut bytes = old.payload.to_vec();
+    bytes[..4].copy_from_slice(b"FRQ1");
+    old.payload = bytes.into();
+    framed.send(old).await.unwrap();
+    assert_error_frame(&mut framed, 4, 400).await;
+    assert_connection_still_responds(&mut framed).await;
 
     drop(framed);
     server_task.await.unwrap().unwrap();
@@ -1881,17 +1801,15 @@ async fn unowned_replication_read_returns_not_owner_error_and_keeps_connection_o
     framed
         .send(
             try_encode(
-                Op::ReplicationRead,
+                Op::QueueReplicationRead,
                 2,
-                &ReplicationRead {
+                &QueueReplicationRead {
                     reporter_epoch: None,
                     topic: "unowned".into(),
                     group: None,
                     partition: Partition::new(0),
-                    message_from: 0,
-                    event_from: 0,
-                    max_messages: 10,
-                    max_events: 10,
+                    from: 0,
+                    max_records: 10,
                     max_bytes: 1024 * 1024,
                     max_wait_ms: 0,
                     reporter_node_id: None,
@@ -1910,130 +1828,59 @@ async fn unowned_replication_read_returns_not_owner_error_and_keeps_connection_o
 }
 
 #[tokio::test]
-async fn replication_apply_writes_follower_log_records() {
-    let (broker, dir) = open_test_broker().await;
-    broker
-        .become_replication_follower("replication.apply.tcp", Partition::new(0), None)
-        .await
-        .unwrap();
-    let (mut framed, server_task, _dir, broker) =
-        open_node_connection_for_broker(ConnectionSettings::new(Some(60)), broker, dir).await;
+async fn retired_replication_apply_ops_are_refused_and_keep_connection_open() {
+    let (mut framed, server_task, _dir) = open_node_connection().await;
     node_handshake(&mut framed).await;
-
-    // The publish record carries its own payload and its event offset is the
-    // message id.
-    let event_payload = StromaEvent::PayloadEnqueue {
-        not_before: None,
-        expire_at: None,
-        headers: Vec::new(),
-        payload: b"replicated-follower-payload".to_vec(),
+    for (request_id, opcode) in [(2, 82u16), (3, 83)] {
+        framed
+            .send(Frame {
+                version: PROTOCOL_V1,
+                opcode,
+                flags: 0,
+                request_id,
+                payload: bytes::Bytes::from_static(b"FRA1\0"),
+            })
+            .await
+            .unwrap();
+        assert_error_frame(&mut framed, request_id, 400).await;
     }
-    .encode()
-    .unwrap();
-    framed
-        .send(
-            try_encode(
-                Op::ReplicationApply,
-                2,
-                &ReplicationApply {
-                    topic: "replication.apply.tcp".into(),
-                    group: None,
-                    partition: Partition::new(0),
-                    messages: None,
-                    events: Some(ReplicationEventApplyBatch {
-                        epoch: 0,
-                        records: vec![ReplicationEventRecord {
-                            offset: 0,
-                            payload: event_payload,
-                        }],
-                    }),
-                },
-            )
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    let frame = recv_frame(&mut framed).await;
-    assert_eq!(frame.opcode, Op::ReplicationApplyOk as u16);
-    assert_eq!(frame.request_id, 2);
-    let response: ReplicationApplyOk = try_decode(&frame).unwrap();
-    assert!(!response.messages_applied);
-    assert!(response.events_applied);
-
-    let promoted = broker
-        .promote_replication_follower_if_caught_up(
-            "replication.apply.tcp",
-            Partition::new(0),
-            None,
-            0,
-            1,
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        promoted,
-        QueuePromotionOutcome::Promoted {
-            message_next_offset: 0,
-            event_next_offset: 1,
-            applied_event_offset: Some(0),
-        }
-    );
+    assert_connection_still_responds(&mut framed).await;
 
     drop(framed);
     server_task.await.unwrap().unwrap();
 }
 
-#[tokio::test]
-async fn replication_apply_rejects_non_contiguous_records_and_keeps_connection_open() {
-    let (broker, dir) = open_test_broker().await;
-    broker
-        .become_replication_follower("replication.apply.bad", Partition::new(0), None)
-        .await
-        .unwrap();
-    let (mut framed, server_task, _dir, _broker) =
-        open_node_connection_for_broker(ConnectionSettings::new(Some(60)), broker, dir).await;
-    node_handshake(&mut framed).await;
-
-    framed
-        .send(
-            try_encode(
-                Op::ReplicationApply,
-                2,
-                &ReplicationApply {
-                    topic: "replication.apply.bad".into(),
-                    group: None,
-                    partition: Partition::new(0),
-                    messages: Some(ReplicationMessageApplyBatch {
-                        epoch: 0,
-                        records: vec![
-                            ReplicationMessageRecord {
-                                offset: 0,
-                                flags: 0,
-                                headers: Vec::new(),
-                                payload: b"first".to_vec(),
-                            },
-                            ReplicationMessageRecord {
-                                offset: 2,
-                                flags: 0,
-                                headers: Vec::new(),
-                                payload: b"gap".to_vec(),
-                            },
-                        ],
-                    }),
-                    events: None,
-                },
-            )
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_error_frame(&mut framed, 2, 400).await;
-    assert_connection_still_responds(&mut framed).await;
-
-    drop(framed);
-    server_task.await.unwrap().unwrap();
+/// Pull the owner queue log through the protocol peer and apply it to the
+/// follower broker until a read comes back empty. Returns the follower tail.
+async fn pull_queue_log_into_follower(
+    peer: &ProtocolOwnerReplicationPeer,
+    follower: &Broker<StromaEngine>,
+    topic: &str,
+    group: Option<&str>,
+    max_records: usize,
+) -> (u64, usize) {
+    let mut from = 0;
+    let mut reads = 0;
+    loop {
+        let read = peer
+            .read_owner_queue_records(topic, Partition::new(0), group, from, max_records, usize::MAX, 0)
+            .await
+            .unwrap();
+        let OwnerReplicationRead::Batch(batch) = &read else {
+            panic!("unexpected checkpoint requirement: {read:?}");
+        };
+        if batch.records.is_empty() {
+            return (from, reads);
+        }
+        let next = batch.next_offset;
+        let applied = follower
+            .apply_follower_queue_records(topic, Partition::new(0), group, read)
+            .await
+            .unwrap();
+        assert!(matches!(applied, fibril_broker::broker::BrokerQueueFollowerApply::Applied(Some(_))));
+        from = next;
+        reads += 1;
+    }
 }
 
 #[tokio::test]
@@ -2059,48 +1906,17 @@ async fn replication_read_and_apply_compose_for_manual_catch_up() {
     )
     .await;
 
-    let (follower_broker, follower_dir) = open_test_broker().await;
+    let (follower_broker, _follower_dir) = open_test_broker().await;
     follower_broker
         .become_replication_follower(topic, Partition::new(0), group.as_deref())
         .await
         .unwrap();
-    let (mut follower_framed, follower_task, _follower_dir, follower_broker) =
-        open_node_connection_for_broker(
-            ConnectionSettings::new(Some(60)),
-            follower_broker,
-            follower_dir,
-        )
-        .await;
-    node_handshake(&mut follower_framed).await;
 
-    let outcome = catch_up_replication_over_protocol(
-        &mut owner_framed,
-        &mut follower_framed,
-        topic,
-        Partition::new(0),
-        group.as_deref(),
-        ProtocolReplicationCatchUpOptions {
-            max_messages_per_read: 1,
-            max_events_per_read: 1,
-            max_iterations: 4,
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
+    let peer = ProtocolOwnerReplicationPeer::new(owner_framed);
+    // Both publishes travel in the single queue log, one record per read.
     assert_eq!(
-        outcome,
-        ProtocolReplicationCatchUp::CaughtUp(
-            fibril_protocol::v1::replication::ProtocolReplicationCatchUpProgress {
-                iterations: 2,
-                // Both publishes travel in the event log. The message lane
-                // stays empty for queues.
-                applied_message_records: 0,
-                applied_event_records: 2,
-                message_next_offset: 0,
-                event_next_offset: 2,
-            }
-        )
+        pull_queue_log_into_follower(&peer, &follower_broker, topic, group.as_deref(), 1).await,
+        (2, 2)
     );
 
     let promoted = follower_broker
@@ -2116,10 +1932,8 @@ async fn replication_read_and_apply_compose_for_manual_catch_up() {
         }
     );
 
-    drop(owner_framed);
-    drop(follower_framed);
+    drop(peer);
     owner_task.await.unwrap().unwrap();
-    follower_task.await.unwrap().unwrap();
 }
 
 #[tokio::test]
@@ -3453,7 +3267,7 @@ async fn follower_worker_loop_reports_checkpoint_requirement_without_history() {
     };
     let exports = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let (addr, server_task) =
-        start_checkpoint_required_owner_server(checkpoint, Vec::new(), event_records, exports.clone())
+        start_checkpoint_required_owner_server(checkpoint, event_records, exports.clone())
             .await;
     let resolver = StaticProtocolOwnerPeerResolver::new(HashMap::from([(
         "owner-a".to_string(),
@@ -5218,49 +5032,21 @@ async fn replication_checkpoint_export_composes_with_catch_up() {
     assert_eq!(frame.opcode, Op::ReplicationCheckpointExportOk as u16);
     let export: ReplicationCheckpointExportOk = try_decode(&frame).unwrap();
 
-    let (follower_broker, follower_dir) = open_test_broker().await;
+    let (follower_broker, _follower_dir) = open_test_broker().await;
     follower_broker
         .become_replication_follower(topic, Partition::new(0), group.as_deref())
         .await
         .unwrap();
-    let (mut follower_framed, follower_task, _follower_dir, follower_broker) =
-        open_node_connection_for_broker(
-            ConnectionSettings::new(Some(60)),
-            follower_broker,
-            follower_dir,
-        )
-        .await;
-    node_handshake(&mut follower_framed).await;
 
     assert!(export.checkpoint.combined_log);
     assert_eq!(export.checkpoint.message_next_offset, 0);
     assert_eq!(export.checkpoint.event_next_offset, 2);
 
     // Ordinary catch-up reaches the exported frontier.
-    let outcome = catch_up_replication_over_protocol(
-        &mut owner_framed,
-        &mut follower_framed,
-        topic,
-        Partition::new(0),
-        group.as_deref(),
-        ProtocolReplicationCatchUpOptions {
-            max_messages_per_read: 10,
-            max_events_per_read: 10,
-            max_iterations: 2,
-            request_id_start: 10,
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
-    let ProtocolReplicationCatchUp::CaughtUp(progress) = outcome else {
-        panic!("expected caught up, got {outcome:?}");
-    };
-    assert_eq!(progress.message_next_offset, 0);
-    assert_eq!(
-        progress.event_next_offset,
-        export.checkpoint.event_next_offset
-    );
+    let peer = ProtocolOwnerReplicationPeer::new(owner_framed);
+    let (next, _) =
+        pull_queue_log_into_follower(&peer, &follower_broker, topic, group.as_deref(), 10).await;
+    assert_eq!(next, export.checkpoint.event_next_offset);
 
     let promoted = follower_broker
         .promote_replication_follower_if_caught_up(
@@ -5281,10 +5067,8 @@ async fn replication_checkpoint_export_composes_with_catch_up() {
         }
     );
 
-    drop(owner_framed);
-    drop(follower_framed);
+    drop(peer);
     owner_task.await.unwrap().unwrap();
-    follower_task.await.unwrap().unwrap();
 }
 
 #[tokio::test]
@@ -7254,18 +7038,19 @@ async fn replication_controls_do_not_inherit_node_privileges_from_a_resumed_sess
     broker.shutdown().await;
 }
 
-// Exercise every internal request before payload decoding, including stream
-// controls that otherwise return no response when no stream has been opened.
+// Exercise every internal request before payload decoding, including push
+// controls that otherwise return no response when no push has been opened.
+// The list comes from the op table, so a new node-only op is covered here.
 async fn assert_replication_controls_forbidden(conn: &mut Conn) {
-    for opcode in [
-        Op::ReplicationRead,
+    let node_ops: Vec<Op> = Op::ALL.iter().copied().filter(|op| op.node_control()).collect();
+    for required in [
+        Op::QueueReplicationRead,
         Op::StreamReplicationRead,
-        Op::ReplicationApply,
         Op::ReplicationCheckpointExport,
-        Op::ReplicationStreamStart,
-        Op::ReplicationStreamProgress,
-        Op::ReplicationStreamReset,
-        Op::ReplicationStreamStop,
+        Op::QueuePushStart,
+        Op::QueuePushProgress,
+        Op::QueuePushReset,
+        Op::QueuePushStop,
         Op::RecoverySeal,
         Op::RecoveryRead,
         Op::RecoveryReadSequential,
@@ -7273,6 +7058,9 @@ async fn assert_replication_controls_forbidden(conn: &mut Conn) {
         Op::RecoveryTransfer,
         Op::HistoryReplication,
     ] {
+        assert!(node_ops.contains(&required), "{required:?} must be node-only");
+    }
+    for opcode in node_ops {
         conn.send(Frame {
             version: PROTOCOL_V1,
             flags: 0,
@@ -7324,16 +7112,14 @@ async fn replication_controls_reject_anonymous_and_ordinary_users() {
         framed_publish(&mut conn, 3, "private-replica", None, b"private-body").await;
         conn.send(
             try_encode(
-                Op::ReplicationRead,
+                Op::QueueReplicationRead,
                 4,
-                &ReplicationRead {
+                &QueueReplicationRead {
                     topic: "private-replica".into(),
                     group: None,
                     partition: Partition::new(0),
-                    message_from: 0,
-                    event_from: 0,
-                    max_messages: 10,
-                    max_events: 10,
+                    from: 0,
+                    max_records: 10,
                     max_bytes: 1024 * 1024,
                     max_wait_ms: 0,
                     reporter_node_id: None,
@@ -7350,31 +7136,17 @@ async fn replication_controls_reject_anonymous_and_ordinary_users() {
             .become_replication_follower("private-follower", Partition::new(0), None)
             .await
             .unwrap();
-        conn.send(
-            try_encode(
-                Op::ReplicationApply,
-                5,
-                &ReplicationApply {
-                    topic: "private-follower".into(),
-                    group: None,
-                    partition: Partition::new(0),
-                    messages: Some(ReplicationMessageApplyBatch {
-                        epoch: 0,
-                        records: vec![ReplicationMessageRecord {
-                            offset: 0,
-                            flags: 0,
-                            headers: vec![],
-                            payload: b"forged".to_vec(),
-                        }],
-                    }),
-                    events: None,
-                },
-            )
-            .unwrap(),
-        )
+        // The retired push apply number cannot write follower storage.
+        conn.send(Frame {
+            version: PROTOCOL_V1,
+            flags: 0,
+            opcode: 82,
+            request_id: 5,
+            payload: Bytes::from_static(b"FRA1"),
+        })
         .await
         .unwrap();
-        assert_error_frame(&mut conn, 5, 403).await;
+        assert_error_frame(&mut conn, 5, 400).await;
         assert_eq!(
             broker
                 .promote_replication_follower_if_caught_up(
@@ -8538,14 +8310,12 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
     .await;
     dirs[0] = Some(owner_dir);
     node_handshake(&mut connection).await;
-    let read = ReplicationRead {
+    let read = QueueReplicationRead {
         topic: "initial-wire".into(),
         group: None,
         partition: Partition::new(0),
-        message_from: 0,
-        event_from: 0,
-        max_messages: 8,
-        max_events: 8,
+        from: 0,
+        max_records: 8,
         max_bytes: 65536,
         max_wait_ms: 0,
         reporter_node_id: Some("b".into()),
@@ -8557,7 +8327,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
         let mut legacy = read.clone();
         legacy.group = group;
         connection
-            .send(try_encode(Op::ReplicationRead, 70, &legacy).unwrap())
+            .send(try_encode(Op::QueueReplicationRead, 70, &legacy).unwrap())
             .await
             .unwrap();
         assert_eq!(recv_frame(&mut connection).await.opcode, Op::Error as u16);
@@ -8578,7 +8348,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
         }
         let frame = fibril_protocol::v1::history_replication::encode_frame(
             &bad,
-            try_encode(Op::ReplicationRead, 71, &read).unwrap(),
+            try_encode(Op::QueueReplicationRead, 71, &read).unwrap(),
         )
         .unwrap();
         connection.send(frame).await.unwrap();
@@ -8597,7 +8367,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
         }
         let frame = fibril_protocol::v1::history_replication::encode_frame(
             &session,
-            try_encode(Op::ReplicationRead, 72, &bad).unwrap(),
+            try_encode(Op::QueueReplicationRead, 72, &bad).unwrap(),
         )
         .unwrap();
         connection.send(frame).await.unwrap();

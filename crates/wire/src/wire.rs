@@ -10,12 +10,11 @@ use crate::{
     Op, PROTOCOL_V1, Partition, Publish, PublishDelayed, PublishOk, QueueDlqPolicy,
     QueueTopologyEntry, ReasonCode, ReconcileAction, ReconcileClient, ReconcilePolicy,
     ReconcileResult, ReconcileServer, ReconcileSubscription, ReconcileSubscriptionResult, Redirect,
-    ReplicationApply, ReplicationApplyOk, ReplicationCheckpointExport,
-    ReplicationCheckpointExportOk, ReplicationCheckpointRequired, ReplicationEventApplyBatch,
-    ReplicationEventRead, ReplicationEventRecord, ReplicationMessageApplyBatch,
-    ReplicationMessageRead, ReplicationMessageRecord, ReplicationRead, ReplicationReadOk,
-    ReplicationStateCheckpoint, ReplicationStreamEnd, ReplicationStreamProgress,
-    ReplicationStreamReset, ReplicationStreamStart, ResumeIdentity, ResumeOutcome,
+    QueuePushEnd, QueuePushProgress, QueuePushReset, QueuePushStart, QueueReplicationRead,
+    QueueReplicationReadOk, ReplicationCheckpointExport, ReplicationCheckpointExportOk,
+    ReplicationCheckpointRequired, ReplicationEventRead, ReplicationEventRecord,
+    ReplicationMessageRead, ReplicationMessageRecord, ReplicationStateCheckpoint,
+    ResumeIdentity, ResumeOutcome, StreamReplicationRead, StreamReplicationReadOk,
     StreamDurability, StreamRetention, StreamStart, StreamTopologyEntry, Subscribe, SubscribeOk,
     SubscribeStream, SubscriptionClosed, TopologyOk, TopologyRequest, TopologyUpdateAck,
     frame::Frame,
@@ -862,24 +861,85 @@ pub fn decode_reconcile_result(frame: &Frame) -> WireResult<ReconcileResult> {
     Ok(ReconcileResult { subscriptions })
 }
 
-fn put_replication_read_body(out: &mut BytesMut, read: &ReplicationRead) -> WireResult<()> {
-    put_queue_key(out, &read.topic, read.partition, read.group.as_deref())?;
+pub fn encode_queue_replication_read(
+    request_id: u64,
+    read: &QueueReplicationRead,
+) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FQR1");
+    put_queue_key(&mut out, &read.topic, read.partition, read.group.as_deref())?;
+    out.put_u64(read.from);
+    out.put_u32(read.max_records);
+    out.put_u64(read.max_bytes);
+    out.put_u32(read.max_wait_ms);
+    put_optional_str(&mut out, read.reporter_node_id.as_deref())?;
+    put_optional_u64(&mut out, read.reporter_epoch);
+    Ok(frame(Op::QueueReplicationRead, request_id, out.freeze()))
+}
+
+pub fn decode_queue_replication_read(frame: &Frame) -> WireResult<QueueReplicationRead> {
+    expect_op(frame, Op::QueueReplicationRead)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FQR1", "queue replication read")?;
+    let (topic, partition, group) = reader.queue_key()?;
+    let read = QueueReplicationRead {
+        topic,
+        group,
+        partition,
+        from: reader.u64()?,
+        max_records: reader.u32()?,
+        max_bytes: reader.u64()?,
+        max_wait_ms: reader.u32()?,
+        reporter_node_id: reader.optional_str()?.map(ToOwned::to_owned),
+        reporter_epoch: reader.optional_u64()?,
+    };
+    reader.finish()?;
+    Ok(read)
+}
+
+pub fn encode_queue_replication_read_ok(
+    request_id: u64,
+    read: &QueueReplicationReadOk,
+) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FQO1");
+    put_replication_event_read(&mut out, read)?;
+    Ok(frame(Op::QueueReplicationReadOk, request_id, out.freeze()))
+}
+
+pub fn decode_queue_replication_read_ok(frame: &Frame) -> WireResult<QueueReplicationReadOk> {
+    expect_op(frame, Op::QueueReplicationReadOk)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FQO1", "queue replication read ok")?;
+    let read = reader.replication_event_read()?;
+    reader.finish()?;
+    Ok(read)
+}
+
+// Stream (Plexus) follower replication: records plus cursor-commit events.
+pub fn encode_stream_replication_read(
+    request_id: u64,
+    read: &StreamReplicationRead,
+) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FSQ1");
+    put_queue_key(&mut out, &read.topic, read.partition, read.group.as_deref())?;
     out.put_u64(read.message_from);
     out.put_u64(read.event_from);
     out.put_u32(read.max_messages);
     out.put_u32(read.max_events);
     out.put_u64(read.max_bytes);
     out.put_u32(read.max_wait_ms);
-    put_optional_str(out, read.reporter_node_id.as_deref())?;
+    put_optional_str(&mut out, read.reporter_node_id.as_deref())?;
     if read.reporter_epoch.is_some() {
-        put_optional_u64(out, read.reporter_epoch);
+        put_optional_u64(&mut out, read.reporter_epoch);
     }
-    Ok(())
+    Ok(frame(Op::StreamReplicationRead, request_id, out.freeze()))
 }
 
-fn read_replication_read_body(reader: &mut Reader) -> WireResult<ReplicationRead> {
+pub fn decode_stream_replication_read(frame: &Frame) -> WireResult<StreamReplicationRead> {
+    expect_op(frame, Op::StreamReplicationRead)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FSQ1", "stream replication read")?;
     let (topic, partition, group) = reader.queue_key()?;
-    Ok(ReplicationRead {
+    let read = StreamReplicationRead {
         topic,
         group,
         partition,
@@ -895,65 +955,14 @@ fn read_replication_read_body(reader: &mut Reader) -> WireResult<ReplicationRead
         } else {
             None
         },
-    })
-}
-
-pub fn encode_replication_read(request_id: u64, read: &ReplicationRead) -> WireResult<Frame> {
-    let mut out = payload_builder(b"FRQ1");
-    put_replication_read_body(&mut out, read)?;
-    Ok(frame(Op::ReplicationRead, request_id, out.freeze()))
-}
-
-pub fn decode_replication_read(frame: &Frame) -> WireResult<ReplicationRead> {
-    expect_op(frame, Op::ReplicationRead)?;
-    let mut reader = Reader::new(&frame.payload);
-    reader.expect_magic(b"FRQ1", "replication read")?;
-    let read = read_replication_read_body(&mut reader)?;
-    reader.finish()?;
-    Ok(read)
-}
-
-pub fn encode_replication_read_ok(request_id: u64, read: &ReplicationReadOk) -> WireResult<Frame> {
-    let mut out = payload_builder(b"FRR2");
-    put_replication_message_read(&mut out, &read.messages)?;
-    put_replication_event_read(&mut out, &read.events)?;
-    Ok(frame(Op::ReplicationReadOk, request_id, out.freeze()))
-}
-
-pub fn decode_replication_read_ok(frame: &Frame) -> WireResult<ReplicationReadOk> {
-    expect_op(frame, Op::ReplicationReadOk)?;
-    let mut reader = Reader::new(&frame.payload);
-    reader.expect_magic(b"FRR2", "replication read ok")?;
-    let messages = reader.replication_message_read()?;
-    let events = reader.replication_event_read()?;
-    reader.finish()?;
-    Ok(ReplicationReadOk { messages, events })
-}
-
-// Stream (Plexus) follower replication: a distinct op that reuses the queue
-// replication read body (records + cursor-commit events). Distinct magics keep
-// the frames self-describing in a capture.
-pub fn encode_stream_replication_read(
-    request_id: u64,
-    read: &ReplicationRead,
-) -> WireResult<Frame> {
-    let mut out = payload_builder(b"FSQ1");
-    put_replication_read_body(&mut out, read)?;
-    Ok(frame(Op::StreamReplicationRead, request_id, out.freeze()))
-}
-
-pub fn decode_stream_replication_read(frame: &Frame) -> WireResult<ReplicationRead> {
-    expect_op(frame, Op::StreamReplicationRead)?;
-    let mut reader = Reader::new(&frame.payload);
-    reader.expect_magic(b"FSQ1", "stream replication read")?;
-    let read = read_replication_read_body(&mut reader)?;
+    };
     reader.finish()?;
     Ok(read)
 }
 
 pub fn encode_stream_replication_read_ok(
     request_id: u64,
-    read: &ReplicationReadOk,
+    read: &StreamReplicationReadOk,
 ) -> WireResult<Frame> {
     let mut out = payload_builder(b"FSR1");
     put_replication_message_read(&mut out, &read.messages)?;
@@ -961,200 +970,125 @@ pub fn encode_stream_replication_read_ok(
     Ok(frame(Op::StreamReplicationReadOk, request_id, out.freeze()))
 }
 
-pub fn decode_stream_replication_read_ok(frame: &Frame) -> WireResult<ReplicationReadOk> {
+pub fn decode_stream_replication_read_ok(frame: &Frame) -> WireResult<StreamReplicationReadOk> {
     expect_op(frame, Op::StreamReplicationReadOk)?;
     let mut reader = Reader::new(&frame.payload);
     reader.expect_magic(b"FSR1", "stream replication read ok")?;
     let messages = reader.replication_message_read()?;
     let events = reader.replication_event_read()?;
     reader.finish()?;
-    Ok(ReplicationReadOk { messages, events })
+    Ok(StreamReplicationReadOk { messages, events })
 }
 
-pub fn encode_replication_stream_start(
-    stream_id: u64,
-    start: &ReplicationStreamStart,
-) -> WireResult<Frame> {
-    let mut out = payload_builder(b"FSS1");
+pub fn encode_queue_push_start(stream_id: u64, start: &QueuePushStart) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FQS1");
     put_queue_key(
         &mut out,
         &start.topic,
         start.partition,
         start.group.as_deref(),
     )?;
-    out.put_u64(start.message_from);
-    out.put_u64(start.event_from);
+    out.put_u64(start.from);
     out.put_u64(start.credit_bytes);
     put_optional_str(&mut out, start.reporter_node_id.as_deref())?;
-    if start.reporter_epoch.is_some() {
-        put_optional_u64(&mut out, start.reporter_epoch);
-    }
-    Ok(frame(Op::ReplicationStreamStart, stream_id, out.freeze()))
+    put_optional_u64(&mut out, start.reporter_epoch);
+    Ok(frame(Op::QueuePushStart, stream_id, out.freeze()))
 }
 
-pub fn decode_replication_stream_start(frame: &Frame) -> WireResult<ReplicationStreamStart> {
-    expect_op(frame, Op::ReplicationStreamStart)?;
+pub fn decode_queue_push_start(frame: &Frame) -> WireResult<QueuePushStart> {
+    expect_op(frame, Op::QueuePushStart)?;
     let mut reader = Reader::new(&frame.payload);
-    reader.expect_magic(b"FSS1", "replication stream start")?;
+    reader.expect_magic(b"FQS1", "queue push start")?;
     let (topic, partition, group) = reader.queue_key()?;
-    let start = ReplicationStreamStart {
+    let start = QueuePushStart {
         topic,
         group,
         partition,
-        message_from: reader.u64()?,
-        event_from: reader.u64()?,
+        from: reader.u64()?,
         credit_bytes: reader.u64()?,
         reporter_node_id: reader.optional_str()?.map(ToOwned::to_owned),
-        reporter_epoch: if reader.remaining() > 0 {
-            reader.optional_u64()?
-        } else {
-            None
-        },
+        reporter_epoch: reader.optional_u64()?,
     };
     reader.finish()?;
     Ok(start)
 }
 
-/// A streamed record batch reuses the `ReplicationReadOk` body verbatim; only the
-/// opcode (and the `request_id` as stream id) differ from the pull response.
-pub fn encode_replication_stream_batch(
+/// A pushed batch carries the `QueueReplicationReadOk` body. Only the opcode
+/// (and the `request_id` as push id) differ from the pull reply.
+pub fn encode_queue_push_batch(
     stream_id: u64,
-    batch: &ReplicationReadOk,
+    batch: &QueueReplicationReadOk,
 ) -> WireResult<Frame> {
-    let mut out = payload_builder(b"FSB1");
-    put_replication_message_read(&mut out, &batch.messages)?;
-    put_replication_event_read(&mut out, &batch.events)?;
-    Ok(frame(Op::ReplicationStreamBatch, stream_id, out.freeze()))
+    let mut out = payload_builder(b"FQB1");
+    put_replication_event_read(&mut out, batch)?;
+    Ok(frame(Op::QueuePushBatch, stream_id, out.freeze()))
 }
 
-pub fn decode_replication_stream_batch(frame: &Frame) -> WireResult<ReplicationReadOk> {
-    expect_op(frame, Op::ReplicationStreamBatch)?;
+pub fn decode_queue_push_batch(frame: &Frame) -> WireResult<QueueReplicationReadOk> {
+    expect_op(frame, Op::QueuePushBatch)?;
     let mut reader = Reader::new(&frame.payload);
-    reader.expect_magic(b"FSB1", "replication stream batch")?;
-    let messages = reader.replication_message_read()?;
-    let events = reader.replication_event_read()?;
+    reader.expect_magic(b"FQB1", "queue push batch")?;
+    let batch = reader.replication_event_read()?;
     reader.finish()?;
-    Ok(ReplicationReadOk { messages, events })
+    Ok(batch)
 }
 
-pub fn encode_replication_stream_progress(
+pub fn encode_queue_push_progress(
     stream_id: u64,
-    progress: &ReplicationStreamProgress,
+    progress: &QueuePushProgress,
 ) -> WireResult<Frame> {
-    let mut out = payload_builder(b"FSP1");
-    out.put_u64(progress.durable_message_next);
-    out.put_u64(progress.durable_event_next);
+    let mut out = payload_builder(b"FQP1");
+    out.put_u64(progress.durable_next);
     out.put_u64(progress.credit_add_bytes);
-    Ok(frame(
-        Op::ReplicationStreamProgress,
-        stream_id,
-        out.freeze(),
-    ))
+    Ok(frame(Op::QueuePushProgress, stream_id, out.freeze()))
 }
 
-pub fn decode_replication_stream_progress(frame: &Frame) -> WireResult<ReplicationStreamProgress> {
-    expect_op(frame, Op::ReplicationStreamProgress)?;
+pub fn decode_queue_push_progress(frame: &Frame) -> WireResult<QueuePushProgress> {
+    expect_op(frame, Op::QueuePushProgress)?;
     let mut reader = Reader::new(&frame.payload);
-    reader.expect_magic(b"FSP1", "replication stream progress")?;
-    let progress = ReplicationStreamProgress {
-        durable_message_next: reader.u64()?,
-        durable_event_next: reader.u64()?,
+    reader.expect_magic(b"FQP1", "queue push progress")?;
+    let progress = QueuePushProgress {
+        durable_next: reader.u64()?,
         credit_add_bytes: reader.u64()?,
     };
     reader.finish()?;
     Ok(progress)
 }
 
-pub fn encode_replication_stream_reset(
-    stream_id: u64,
-    reset: &ReplicationStreamReset,
-) -> WireResult<Frame> {
-    let mut out = payload_builder(b"FSR1");
-    out.put_u64(reset.message_from);
-    out.put_u64(reset.event_from);
-    Ok(frame(Op::ReplicationStreamReset, stream_id, out.freeze()))
+pub fn encode_queue_push_reset(stream_id: u64, reset: &QueuePushReset) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FQX1");
+    out.put_u64(reset.from);
+    Ok(frame(Op::QueuePushReset, stream_id, out.freeze()))
 }
 
-pub fn decode_replication_stream_reset(frame: &Frame) -> WireResult<ReplicationStreamReset> {
-    expect_op(frame, Op::ReplicationStreamReset)?;
+pub fn decode_queue_push_reset(frame: &Frame) -> WireResult<QueuePushReset> {
+    expect_op(frame, Op::QueuePushReset)?;
     let mut reader = Reader::new(&frame.payload);
-    reader.expect_magic(b"FSR1", "replication stream reset")?;
-    let reset = ReplicationStreamReset {
-        message_from: reader.u64()?,
-        event_from: reader.u64()?,
+    reader.expect_magic(b"FQX1", "queue push reset")?;
+    let reset = QueuePushReset {
+        from: reader.u64()?,
     };
     reader.finish()?;
     Ok(reset)
 }
 
-pub fn encode_replication_stream_end(
-    stream_id: u64,
-    end: &ReplicationStreamEnd,
-) -> WireResult<Frame> {
+pub fn encode_queue_push_end(stream_id: u64, end: &QueuePushEnd) -> WireResult<Frame> {
     let mut out = payload_builder(b"FSE1");
     out.put_u16(end.code);
     put_str(&mut out, &end.message)?;
-    Ok(frame(Op::ReplicationStreamEnd, stream_id, out.freeze()))
+    Ok(frame(Op::QueuePushEnd, stream_id, out.freeze()))
 }
 
-pub fn decode_replication_stream_end(frame: &Frame) -> WireResult<ReplicationStreamEnd> {
-    expect_op(frame, Op::ReplicationStreamEnd)?;
+pub fn decode_queue_push_end(frame: &Frame) -> WireResult<QueuePushEnd> {
+    expect_op(frame, Op::QueuePushEnd)?;
     let mut reader = Reader::new(&frame.payload);
-    reader.expect_magic(b"FSE1", "replication stream end")?;
-    let end = ReplicationStreamEnd {
+    reader.expect_magic(b"FSE1", "queue push end")?;
+    let end = QueuePushEnd {
         code: reader.u16()?,
         message: reader.str()?.to_owned(),
     };
     reader.finish()?;
     Ok(end)
-}
-
-pub fn encode_replication_apply(request_id: u64, apply: &ReplicationApply) -> WireResult<Frame> {
-    let mut out = payload_builder(b"FRA1");
-    put_queue_key(
-        &mut out,
-        &apply.topic,
-        apply.partition,
-        apply.group.as_deref(),
-    )?;
-    put_optional_replication_message_apply_batch(&mut out, apply.messages.as_ref())?;
-    put_optional_replication_event_apply_batch(&mut out, apply.events.as_ref())?;
-    Ok(frame(Op::ReplicationApply, request_id, out.freeze()))
-}
-
-pub fn decode_replication_apply(frame: &Frame) -> WireResult<ReplicationApply> {
-    expect_op(frame, Op::ReplicationApply)?;
-    let mut reader = Reader::new(&frame.payload);
-    reader.expect_magic(b"FRA1", "replication apply")?;
-    let (topic, partition, group) = reader.queue_key()?;
-    let apply = ReplicationApply {
-        topic,
-        group,
-        partition,
-        messages: reader.optional_replication_message_apply_batch()?,
-        events: reader.optional_replication_event_apply_batch()?,
-    };
-    reader.finish()?;
-    Ok(apply)
-}
-
-pub fn encode_replication_apply_ok(request_id: u64, ok: &ReplicationApplyOk) -> WireResult<Frame> {
-    let mut out = payload_builder(b"FAO1");
-    put_bool(&mut out, ok.messages_applied);
-    put_bool(&mut out, ok.events_applied);
-    Ok(frame(Op::ReplicationApplyOk, request_id, out.freeze()))
-}
-
-pub fn decode_replication_apply_ok(frame: &Frame) -> WireResult<ReplicationApplyOk> {
-    expect_op(frame, Op::ReplicationApplyOk)?;
-    let mut reader = Reader::new(&frame.payload);
-    reader.expect_magic(b"FAO1", "replication apply ok")?;
-    let ok = ReplicationApplyOk {
-        messages_applied: reader.bool()?,
-        events_applied: reader.bool()?,
-    };
-    reader.finish()?;
-    Ok(ok)
 }
 
 pub fn encode_replication_checkpoint_export(
@@ -1598,36 +1532,6 @@ fn put_replication_event_read(out: &mut BytesMut, read: &ReplicationEventRead) -
             out.put_u8(1);
             put_replication_checkpoint_required(out, required);
         }
-    }
-    Ok(())
-}
-
-fn put_optional_replication_message_apply_batch(
-    out: &mut BytesMut,
-    batch: Option<&ReplicationMessageApplyBatch>,
-) -> WireResult<()> {
-    match batch {
-        Some(batch) => {
-            out.put_u8(1);
-            out.put_u64(batch.epoch);
-            put_replication_message_records(out, &batch.records)?;
-        }
-        None => out.put_u8(0),
-    }
-    Ok(())
-}
-
-fn put_optional_replication_event_apply_batch(
-    out: &mut BytesMut,
-    batch: Option<&ReplicationEventApplyBatch>,
-) -> WireResult<()> {
-    match batch {
-        Some(batch) => {
-            out.put_u8(1);
-            out.put_u64(batch.epoch);
-            put_replication_event_records(out, &batch.records)?;
-        }
-        None => out.put_u8(0),
     }
     Ok(())
 }
@@ -2077,32 +1981,6 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn optional_replication_message_apply_batch(
-        &mut self,
-    ) -> WireResult<Option<ReplicationMessageApplyBatch>> {
-        match self.u8()? {
-            0 => Ok(None),
-            1 => Ok(Some(ReplicationMessageApplyBatch {
-                epoch: self.u64()?,
-                records: self.replication_message_records()?,
-            })),
-            value => Err(WireError::InvalidOption(value)),
-        }
-    }
-
-    fn optional_replication_event_apply_batch(
-        &mut self,
-    ) -> WireResult<Option<ReplicationEventApplyBatch>> {
-        match self.u8()? {
-            0 => Ok(None),
-            1 => Ok(Some(ReplicationEventApplyBatch {
-                epoch: self.u64()?,
-                records: self.replication_event_records()?,
-            })),
-            value => Err(WireError::InvalidOption(value)),
-        }
-    }
-
     fn replication_state_checkpoint(&mut self) -> WireResult<ReplicationStateCheckpoint> {
         Ok(ReplicationStateCheckpoint {
             combined_log: self.bool()?,
@@ -2323,8 +2201,26 @@ mod tests {
         ])
     }
 
-    fn sample_replication_read_ok() -> ReplicationReadOk {
-        ReplicationReadOk {
+    fn sample_queue_read_ok() -> QueueReplicationReadOk {
+        ReplicationEventRead::Batch {
+            epoch: 4,
+            requested_offset: 20,
+            next_offset: 22,
+            records: vec![
+                ReplicationEventRecord {
+                    offset: 20,
+                    payload: b"event-a".to_vec(),
+                },
+                ReplicationEventRecord {
+                    offset: 21,
+                    payload: b"event-b".to_vec(),
+                },
+            ],
+        }
+    }
+
+    fn sample_replication_read_ok() -> StreamReplicationReadOk {
+        StreamReplicationReadOk {
             messages: ReplicationMessageRead::Batch {
                 epoch: 4,
                 requested_offset: 10,
@@ -2492,19 +2388,55 @@ mod tests {
     }
 
     #[test]
-    fn replication_read_ok_roundtrips_batches() {
-        let msg = sample_replication_read_ok();
-        let frame = encode_replication_read_ok(14, &msg).unwrap();
+    fn queue_replication_read_ok_roundtrips_batches() {
+        let msg = sample_queue_read_ok();
+        let frame = encode_queue_replication_read_ok(14, &msg).unwrap();
 
         assert_eq!(frame.version, PROTOCOL_V1);
-        assert_eq!(frame.opcode, Op::ReplicationReadOk as u16);
+        assert_eq!(frame.opcode, Op::QueueReplicationReadOk as u16);
         assert_eq!(frame.request_id, 14);
-        assert_eq!(decode_replication_read_ok(&frame).unwrap(), msg);
+        assert_eq!(&frame.payload[..4], b"FQO1");
+        assert_eq!(decode_queue_replication_read_ok(&frame).unwrap(), msg);
+    }
+
+    #[test]
+    fn queue_replication_read_roundtrips_and_always_carries_the_epoch() {
+        let mut msg = QueueReplicationRead {
+            topic: "orders".into(),
+            group: Some("workers".into()),
+            partition: Partition::new(3),
+            from: 17,
+            max_records: 64,
+            max_bytes: 1 << 20,
+            max_wait_ms: 250,
+            reporter_node_id: Some("node-b".into()),
+            reporter_epoch: None,
+        };
+        for epoch in [None, Some(0), Some(42)] {
+            msg.reporter_epoch = epoch;
+            let frame = encode_queue_replication_read(7, &msg).unwrap();
+            assert_eq!(frame.opcode, Op::QueueReplicationRead as u16);
+            assert_eq!(&frame.payload[..4], b"FQR1");
+            assert_eq!(decode_queue_replication_read(&frame).unwrap(), msg);
+            // The epoch option is mandatory, so a body without it is truncated.
+            let mut short = frame.clone();
+            short.payload = short.payload.slice(..short.payload.len() - epoch.map_or(1, |_| 9));
+            assert!(decode_queue_replication_read(&short).is_err());
+        }
+        // A two-lane body from an old peer fails at the magic check.
+        let mut old = encode_queue_replication_read(7, &msg).unwrap();
+        let mut bytes = old.payload.to_vec();
+        bytes[..4].copy_from_slice(b"FRQ1");
+        old.payload = bytes.into();
+        assert!(matches!(
+            decode_queue_replication_read(&old),
+            Err(WireError::InvalidMagic { .. })
+        ));
     }
 
     #[test]
     fn stream_replication_read_roundtrips() {
-        let mut msg = ReplicationRead {
+        let mut msg = StreamReplicationRead {
             reporter_epoch: None,
             topic: "events".into(),
             group: None,
@@ -2543,27 +2475,30 @@ mod tests {
             head_offset: 10,
             next_offset: 20,
         };
-        let msg = ReplicationReadOk {
+        let queue = ReplicationEventRead::CheckpointRequired(checkpoint.clone());
+        let frame = encode_queue_replication_read_ok(15, &queue).unwrap();
+        assert_eq!(decode_queue_replication_read_ok(&frame).unwrap(), queue);
+
+        let stream = StreamReplicationReadOk {
             messages: ReplicationMessageRead::CheckpointRequired(checkpoint.clone()),
             events: ReplicationEventRead::CheckpointRequired(checkpoint),
         };
-
-        let frame = encode_replication_read_ok(15, &msg).unwrap();
-        assert_eq!(decode_replication_read_ok(&frame).unwrap(), msg);
+        let frame = encode_stream_replication_read_ok(15, &stream).unwrap();
+        assert_eq!(decode_stream_replication_read_ok(&frame).unwrap(), stream);
     }
 
     #[test]
     fn replication_read_ok_rejects_truncated_payload() {
         let frame = Frame {
             version: PROTOCOL_V1,
-            opcode: Op::ReplicationReadOk as u16,
+            opcode: Op::QueueReplicationReadOk as u16,
             flags: 0,
             request_id: 9,
-            payload: Bytes::from_static(b"FRR2\0"),
+            payload: Bytes::from_static(b"FQO1\0"),
         };
 
         assert!(matches!(
-            decode_replication_read_ok(&frame),
+            decode_queue_replication_read_ok(&frame),
             Err(WireError::UnexpectedEof)
         ));
     }
@@ -2577,30 +2512,42 @@ mod tests {
         {
             records[0].offset = 9;
         }
-
-        let frame = encode_replication_read_ok(14, &msg).unwrap();
+        let frame = encode_stream_replication_read_ok(14, &msg).unwrap();
         assert!(matches!(
-            decode_replication_read_ok(&frame),
+            decode_stream_replication_read_ok(&frame),
+            Err(WireError::InvalidRecordSequence(_))
+        ));
+
+        let mut queue = sample_queue_read_ok();
+        if let ReplicationEventRead::Batch {
+            ref mut records, ..
+        } = queue
+        {
+            records[0].offset = 19;
+        }
+        let frame = encode_queue_replication_read_ok(14, &queue).unwrap();
+        assert!(matches!(
+            decode_queue_replication_read_ok(&frame),
             Err(WireError::InvalidRecordSequence(_))
         ));
     }
 
     #[test]
     fn replication_read_ok_rejects_non_contiguous_records() {
-        let mut msg = sample_replication_read_ok();
+        let mut msg = sample_queue_read_ok();
         if let ReplicationEventRead::Batch {
             ref mut records, ..
-        } = msg.events
+        } = msg
         {
             records.push(ReplicationEventRecord {
-                offset: 22,
+                offset: 23,
                 payload: b"gap".to_vec(),
             });
         }
 
-        let frame = encode_replication_read_ok(14, &msg).unwrap();
+        let frame = encode_queue_replication_read_ok(14, &msg).unwrap();
         assert!(matches!(
-            decode_replication_read_ok(&frame),
+            decode_queue_replication_read_ok(&frame),
             Err(WireError::InvalidRecordSequence(_))
         ));
     }
@@ -2883,92 +2830,88 @@ mod tests {
     }
 
     #[test]
-    fn replication_stream_start_roundtrips() {
-        let mut start = ReplicationStreamStart {
+    fn queue_push_start_roundtrips() {
+        let mut start = QueuePushStart {
             reporter_epoch: None,
             topic: "orders".into(),
             group: Some("workers".into()),
             partition: Partition::new(7),
-            message_from: 100,
-            event_from: 42,
+            from: 42,
             credit_bytes: 8 * 1024 * 1024,
             reporter_node_id: Some("broker-2".into()),
         };
-        let frame = encode_replication_stream_start(555, &start).unwrap();
-        assert_eq!(frame.opcode, Op::ReplicationStreamStart as u16);
-        assert_eq!(frame.request_id, 555);
-        assert_eq!(decode_replication_stream_start(&frame).unwrap(), start);
-        for epoch in [Some(0), Some(42)] {
+        for epoch in [None, Some(0), Some(42)] {
             start.reporter_epoch = epoch;
-            let frame = encode_replication_stream_start(7, &start).unwrap();
-            assert_eq!(decode_replication_stream_start(&frame).unwrap(), start);
+            let frame = encode_queue_push_start(555, &start).unwrap();
+            assert_eq!(frame.opcode, Op::QueuePushStart as u16);
+            assert_eq!(frame.request_id, 555);
+            assert_eq!(&frame.payload[..4], b"FQS1");
+            assert_eq!(decode_queue_push_start(&frame).unwrap(), start);
         }
     }
 
     #[test]
-    fn replication_stream_batch_roundtrips_reusing_read_ok_body() {
-        let batch = sample_replication_read_ok();
-        let frame = encode_replication_stream_batch(900, &batch).unwrap();
-        assert_eq!(frame.opcode, Op::ReplicationStreamBatch as u16);
+    fn queue_push_batch_roundtrips_reusing_read_ok_body() {
+        let batch = sample_queue_read_ok();
+        let frame = encode_queue_push_batch(900, &batch).unwrap();
+        assert_eq!(frame.opcode, Op::QueuePushBatch as u16);
         assert_eq!(frame.request_id, 900);
-        assert_eq!(decode_replication_stream_batch(&frame).unwrap(), batch);
+        assert_eq!(&frame.payload[..4], b"FQB1");
+        assert_eq!(decode_queue_push_batch(&frame).unwrap(), batch);
+        let pull = encode_queue_replication_read_ok(900, &batch).unwrap();
+        assert_eq!(frame.payload[4..], pull.payload[4..]);
     }
 
     #[test]
-    fn replication_stream_progress_roundtrips() {
-        let progress = ReplicationStreamProgress {
-            durable_message_next: 1_000,
-            durable_event_next: 250,
+    fn queue_push_progress_roundtrips() {
+        let progress = QueuePushProgress {
+            durable_next: 250,
             credit_add_bytes: 4 * 1024 * 1024,
         };
-        let frame = encode_replication_stream_progress(900, &progress).unwrap();
-        assert_eq!(frame.opcode, Op::ReplicationStreamProgress as u16);
-        assert_eq!(
-            decode_replication_stream_progress(&frame).unwrap(),
-            progress
-        );
+        let frame = encode_queue_push_progress(900, &progress).unwrap();
+        assert_eq!(frame.opcode, Op::QueuePushProgress as u16);
+        assert_eq!(&frame.payload[..4], b"FQP1");
+        assert_eq!(frame.payload.len(), 4 + 16);
+        assert_eq!(decode_queue_push_progress(&frame).unwrap(), progress);
     }
 
     #[test]
-    fn replication_stream_reset_roundtrips() {
-        let reset = ReplicationStreamReset {
-            message_from: 500,
-            event_from: 120,
-        };
-        let frame = encode_replication_stream_reset(900, &reset).unwrap();
-        assert_eq!(frame.opcode, Op::ReplicationStreamReset as u16);
-        assert_eq!(decode_replication_stream_reset(&frame).unwrap(), reset);
+    fn queue_push_reset_roundtrips() {
+        let reset = QueuePushReset { from: 120 };
+        let frame = encode_queue_push_reset(900, &reset).unwrap();
+        assert_eq!(frame.opcode, Op::QueuePushReset as u16);
+        assert_eq!(&frame.payload[..4], b"FQX1");
+        assert_eq!(decode_queue_push_reset(&frame).unwrap(), reset);
     }
 
     #[test]
-    fn replication_stream_end_roundtrips() {
-        let end = ReplicationStreamEnd {
+    fn queue_push_end_roundtrips() {
+        let end = QueuePushEnd {
             code: 1,
             message: "not owner".into(),
         };
-        let frame = encode_replication_stream_end(900, &end).unwrap();
-        assert_eq!(frame.opcode, Op::ReplicationStreamEnd as u16);
-        assert_eq!(decode_replication_stream_end(&frame).unwrap(), end);
+        let frame = encode_queue_push_end(900, &end).unwrap();
+        assert_eq!(frame.opcode, Op::QueuePushEnd as u16);
+        assert_eq!(decode_queue_push_end(&frame).unwrap(), end);
     }
 
     #[test]
-    fn replication_stream_batch_rejects_wrong_opcode() {
-        let frame = encode_replication_stream_start(
+    fn queue_push_batch_rejects_wrong_opcode() {
+        let frame = encode_queue_push_start(
             1,
-            &ReplicationStreamStart {
+            &QueuePushStart {
                 reporter_epoch: None,
                 topic: "t".into(),
                 group: None,
                 partition: Partition::new(0),
-                message_from: 0,
-                event_from: 0,
+                from: 0,
                 credit_bytes: 1,
                 reporter_node_id: None,
             },
         )
         .unwrap();
         assert!(matches!(
-            decode_replication_stream_batch(&frame),
+            decode_queue_push_batch(&frame),
             Err(WireError::UnexpectedOpcode { .. })
         ));
     }
@@ -3453,26 +3396,11 @@ mod initial_history_tests {
 
 /// Returns the required direction, or refuses operations outside live replication.
 pub fn history_replication_owner_is_receiver(opcode: u16) -> WireResult<bool> {
-    if [
-        Op::ReplicationRead,
-        Op::StreamReplicationRead,
-        Op::ReplicationCheckpointExport,
-        Op::ReplicationStreamStart,
-        Op::ReplicationStreamProgress,
-        Op::ReplicationStreamReset,
-        Op::ReplicationStreamStop,
-    ]
-    .iter()
-    .any(|op| *op as u16 == opcode)
-    {
-        return Ok(true);
-    }
-    if opcode == Op::ReplicationApply as u16 {
-        return Ok(false);
-    }
-    Err(WireError::InvalidRecordSequence(
-        "invalid history replication operation",
-    ))
+    Op::from_code(opcode)
+        .and_then(Op::history_owner_is_receiver)
+        .ok_or(WireError::InvalidRecordSequence(
+            "invalid history replication operation",
+        ))
 }
 
 pub fn encode_history_replication(id: u64, req: &crate::HistoryReplication) -> WireResult<Frame> {
@@ -3546,13 +3474,8 @@ pub fn decode_history_replication(f: &Frame) -> WireResult<crate::HistoryReplica
 pub fn replication_resource_prefix(
     f: &Frame,
 ) -> WireResult<Option<(String, Partition, Option<String>)>> {
-    let magic: &[u8; 4] = match f.opcode {
-        x if x == Op::ReplicationRead as u16 => b"FRQ1",
-        x if x == Op::StreamReplicationRead as u16 => b"FSQ1",
-        x if x == Op::ReplicationApply as u16 => b"FRA1",
-        x if x == Op::ReplicationCheckpointExport as u16 => b"FCE1",
-        x if x == Op::ReplicationStreamStart as u16 => b"FSS1",
-        _ => return Ok(None),
+    let Some(magic) = Op::from_code(f.opcode).and_then(Op::resource_prefix_magic) else {
+        return Ok(None);
     };
     let mut r = Reader::new(&f.payload);
     r.expect_magic(magic, "replication resource prefix")?;
@@ -3582,7 +3505,7 @@ mod history_replication_tests {
                 receiver_process: [7; 16],
                 receiver_storage: [8; 16],
             },
-            opcode: Op::ReplicationRead as u16,
+            opcode: Op::QueueReplicationRead as u16,
             flags: 19,
             body: vec![0, 1, 2],
         };
@@ -3617,8 +3540,111 @@ mod history_replication_tests {
             extra.payload = bytes.into();
             assert!(decode_history_replication(&extra).is_err());
         }
-        assert!(history_replication_owner_is_receiver(Op::ReplicationRead as u16).unwrap());
-        assert!(!history_replication_owner_is_receiver(Op::ReplicationApply as u16).unwrap());
+        assert!(history_replication_owner_is_receiver(Op::QueueReplicationRead as u16).unwrap());
+        // Retired push apply numbers are not live replication operations.
+        for retired in [82u16, 83] {
+            assert!(history_replication_owner_is_receiver(retired).is_err());
+        }
+    }
+
+    #[test]
+    fn every_replication_and_recovery_op_is_node_only() {
+        let mut codes = std::collections::BTreeSet::new();
+        for op in Op::ALL {
+            assert!(codes.insert(*op as u16), "{op:?} listed twice");
+            assert_eq!(Op::from_code(*op as u16), Some(*op));
+            let name = format!("{op:?}");
+            // Requests a broker receives from a peer. Replies and owner pushes
+            // travel the other way and are never dispatched by the server.
+            let reply_or_push = name.ends_with("Ok")
+                || matches!(op, Op::QueuePushBatch | Op::QueuePushEnd);
+            let internal = ["Replication", "Recovery", "History", "QueuePush"]
+                .iter()
+                .any(|family| name.contains(family));
+            if internal && !reply_or_push {
+                assert!(op.node_control(), "{op:?} must be node-only");
+            }
+            if op.replication_kind().is_some()
+                || op.history_owner_is_receiver().is_some()
+                || op.resource_prefix_magic().is_some()
+                || op.continues_queue_push()
+            {
+                assert!(op.node_control(), "{op:?} must be node-only");
+            }
+            if op.node_control() {
+                assert!(internal, "{op:?} is node-only but not internal");
+            }
+            if op.continues_queue_push() {
+                assert_eq!(op.replication_kind(), Some(crate::ReplicationOpKind::Queue));
+            }
+        }
+        // No wildcard: a new variant fails to compile here until it is added
+        // to this match and to Op::ALL.
+        fn listed(op: Op) {
+            match op {
+            Op::Hello
+            | Op::HelloOk
+            | Op::HelloErr
+            | Op::Auth
+            | Op::AuthOk
+            | Op::AuthErr
+            | Op::Publish
+            | Op::PublishDelayed
+            | Op::PublishOk
+            | Op::Subscribe
+            | Op::SubscribeOk
+            | Op::SubscribeErr
+            | Op::Deliver
+            | Op::Ack
+            | Op::Nack
+            | Op::AssignmentChanged
+            | Op::Ping
+            | Op::Pong
+            | Op::DeclareQueue
+            | Op::DeclareQueueOk
+            | Op::DeclarePlexus
+            | Op::DeclarePlexusOk
+            | Op::SubscribeStream
+            | Op::ReconcileClient
+            | Op::ReconcileServer
+            | Op::ReconcileResult
+            | Op::QueueReplicationRead
+            | Op::QueueReplicationReadOk
+            | Op::ReplicationCheckpointExport
+            | Op::ReplicationCheckpointExportOk
+            | Op::RecoverySeal
+            | Op::RecoverySealOk
+            | Op::Topology
+            | Op::TopologyOk
+            | Op::Redirect
+            | Op::QueuePushStart
+            | Op::QueuePushBatch
+            | Op::QueuePushProgress
+            | Op::QueuePushReset
+            | Op::QueuePushStop
+            | Op::QueuePushEnd
+            | Op::StreamReplicationRead
+            | Op::StreamReplicationReadOk
+            | Op::TopologyUpdate
+            | Op::TopologyUpdateAck
+            | Op::GoingAway
+            | Op::SubscriptionClosed
+            | Op::RecoveryRead
+            | Op::RecoveryReadOk
+            | Op::RecoveryReadSequential
+            | Op::InitialHistoryPrepare
+            | Op::InitialHistoryPrepareOk
+            | Op::HistoryReplication
+            | Op::RecoveryTransfer
+            | Op::RecoveryTransferOk
+            | Op::Error => {}
+            }
+        }
+        Op::ALL.iter().copied().for_each(listed);
+        assert_eq!(Op::ALL.len(), 56);
+        for retired in [82u16, 83, 86, 87] {
+            assert_eq!(Op::from_code(retired), None);
+        }
     }
 }
 

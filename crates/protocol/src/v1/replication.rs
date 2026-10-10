@@ -27,95 +27,18 @@ use tokio_rustls::rustls;
 use tokio_util::sync::CancellationToken;
 
 use crate::v1::{
-    Auth, ERR_NOT_OWNER, ErrorMsg, Hello, HelloOk, Op, PROTOCOL_V1, ReplicationApply,
-    ReplicationApplyOk, ReplicationCheckpointExport, ReplicationCheckpointExportOk,
-    ReplicationCheckpointRequired, ReplicationEventApplyBatch, ReplicationEventRead,
-    ReplicationMessageApplyBatch, ReplicationMessageRead, ReplicationRead, ReplicationReadOk,
-    ReplicationStreamProgress, ReplicationStreamReset, ReplicationStreamStart,
+    Auth, ERR_NOT_OWNER, ErrorMsg, Hello, HelloOk, Op, PROTOCOL_V1, QueuePushProgress,
+    QueuePushReset, QueuePushStart, QueueReplicationRead, QueueReplicationReadOk,
+    ReplicationCheckpointExport, ReplicationCheckpointExportOk, ReplicationEventRead,
+    ReplicationMessageRead, StreamReplicationRead, StreamReplicationReadOk,
     frame::Frame,
-    helper::{self, Conn, ProtocolError, try_decode, try_encode},
-    replication_stream::{
-        self, ApplierExit, FollowerApplyOutcome, FollowerStreamControl, FollowerStreamSink,
-        run_follower_stream_applier,
+    helper::{self, Conn, try_decode, try_encode},
+    queue_push::{
+        self, ApplierExit, FollowerApplyOutcome, FollowerPushControl, FollowerPushSink,
+        run_follower_push_applier,
     },
     wire,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProtocolReplicationCatchUpOptions {
-    pub message_from: u64,
-    pub event_from: u64,
-    pub max_messages_per_read: u32,
-    pub max_events_per_read: u32,
-    pub max_bytes_per_read: u64,
-    pub max_iterations: usize,
-    pub request_id_start: u64,
-}
-
-impl Default for ProtocolReplicationCatchUpOptions {
-    fn default() -> Self {
-        Self {
-            message_from: 0,
-            event_from: 0,
-            max_messages_per_read: 2048,
-            max_events_per_read: 2048,
-            max_bytes_per_read: 8 * 1024 * 1024,
-            max_iterations: 1024,
-            request_id_start: 10_000,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct ProtocolReplicationCatchUpProgress {
-    pub iterations: usize,
-    pub applied_message_records: usize,
-    pub applied_event_records: usize,
-    pub message_next_offset: u64,
-    pub event_next_offset: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProtocolReplicationCatchUp {
-    CaughtUp(ProtocolReplicationCatchUpProgress),
-    CheckpointRequired {
-        progress: ProtocolReplicationCatchUpProgress,
-        messages: Option<ReplicationCheckpointRequired>,
-        events: Option<ReplicationCheckpointRequired>,
-    },
-    IterationLimit {
-        progress: ProtocolReplicationCatchUpProgress,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProtocolReplicationStream {
-    Messages,
-    Events,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ProtocolReplicationCatchUpError {
-    #[error("replication catch-up limits must be greater than zero")]
-    InvalidLimits,
-    #[error("failed to encode {operation} request: {source}")]
-    Encode {
-        operation: &'static str,
-        #[source]
-        source: ProtocolError,
-    },
-    #[error("failed to send {operation} request: {message}")]
-    Send {
-        operation: &'static str,
-        message: String,
-    },
-    #[error(transparent)]
-    Request(#[from] ProtocolReplicationRequestError),
-    #[error("replication apply response reported unapplied {stream:?} records")]
-    Unapplied { stream: ProtocolReplicationStream },
-    #[error("{stream:?} checkpoint requirement was not handled before apply conversion")]
-    UnhandledCheckpointRequired { stream: ProtocolReplicationStream },
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtocolOwnerPeerAuth {
@@ -830,19 +753,19 @@ impl ProtocolOwnerReplicationPeer {
 }
 
 impl ProtocolOwnerReplicationPeer {
-    /// Send one pull read (`ReplicationRead` or `StreamReplicationRead`, which
-    /// share a body) and wait for its reply, bounded by the long-poll window
-    /// plus slack.
-    async fn request_replication_read(
+    /// Send one pull read and wait for its reply, bounded by the long-poll
+    /// window plus slack.
+    async fn request_replication_read<T>(
         &self,
-        op: Op,
-        request: ReplicationRead,
-    ) -> Result<ReplicationReadOk, BrokerError> {
-        let topic = request.topic.clone();
-        let partition = request.partition;
-        let group = request.group.clone();
-        let max_wait_ms = request.max_wait_ms;
-        let stream = matches!(op, Op::StreamReplicationRead);
+        request: wire::WireResult<Frame>,
+        reply_op: Op,
+        decode: fn(&Frame) -> wire::WireResult<T>,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        max_wait_ms: u32,
+    ) -> Result<T, BrokerError> {
+        let request = request.map_err(protocol_error)?;
         let _request_guard = tokio::select! {
             biased;
             _ = self.close_token.cancelled() => {
@@ -851,29 +774,25 @@ impl ProtocolOwnerReplicationPeer {
             guard = self.request_lock.lock() => guard,
         };
         let request_id = self.next_request_id();
+        let mut request = request;
+        request.request_id = request_id;
         let mut conn = self.take_conn().await?;
-        if let Err(err) = conn
-            .send(self.history_frame(try_encode(op, request_id, &request).map_err(protocol_error)?)?)
-            .await
-        {
+        if let Err(err) = conn.send(self.history_frame(request)?).await {
             return Err(BrokerError::Unknown(format!(
                 "replication read send failed: {err}"
             )));
         }
 
         let recv = async {
-            if stream {
-                recv_stream_replication_read_ok_response(&mut conn, request_id).await
-            } else {
-                recv_replication_read_ok_response(&mut conn, request_id).await
-            }
+            let frame = recv_response_frame(&mut conn, request_id, reply_op).await?;
+            decode(&frame).map_err(|err| ProtocolReplicationRequestError::Decode(err.to_string()))
         };
         // Bound the wait: the owner long-polls up to `max_wait_ms`, so anything
         // past that plus slack means the response was lost (for example a
         // partition that dropped it). Give up and drop the connection so the
         // worker reconnects instead of hanging on a dead socket.
         let read_deadline_ms = max_wait_ms as u64 + self.read_timeout_slack_ms;
-        let read: ReplicationReadOk = match tokio::select! {
+        let read = match tokio::select! {
             biased;
             _ = self.close_token.cancelled() => {
                 Err(ProtocolReplicationRequestError::ConnectionClosed)
@@ -891,10 +810,7 @@ impl ProtocolOwnerReplicationPeer {
                     self.restore_conn(conn).await;
                 }
                 return Err(protocol_request_error_to_broker(
-                    err,
-                    &topic,
-                    partition,
-                    group.as_deref(),
+                    err, topic, partition, group,
                 ));
             }
         };
@@ -947,27 +863,29 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
             let max_wait_ms = u32::try_from(max_wait_ms).map_err(|_| {
                 BrokerError::InvalidArgument("max_wait_ms exceeds protocol limit".into())
             })?;
-            // The two-lane wire body carries the queue log as its event lane.
-            // The message lane is fixed at cursor zero.
+            let request = QueueReplicationRead {
+                topic: topic.to_string(),
+                group: group.map(str::to_string),
+                partition,
+                from,
+                max_records,
+                max_bytes,
+                max_wait_ms,
+                reporter_node_id: self.reporter_node_id.clone(),
+                reporter_epoch,
+            };
             let read = self
                 .request_replication_read(
-                    Op::ReplicationRead,
-                    ReplicationRead {
-                        reporter_epoch,
-                        topic: topic.to_string(),
-                        group: group.map(str::to_string),
-                        partition,
-                        message_from: 0,
-                        event_from: from,
-                        max_messages: max_records,
-                        max_events: max_records,
-                        max_bytes,
-                        max_wait_ms,
-                        reporter_node_id: self.reporter_node_id.clone(),
-                    },
+                    wire::encode_queue_replication_read(0, &request),
+                    Op::QueueReplicationReadOk,
+                    wire::decode_queue_replication_read_ok,
+                    topic,
+                    partition,
+                    group,
+                    max_wait_ms,
                 )
                 .await?;
-            queue_read_from_wire(read)
+            to_broker_event_read(read)
         })
     }
 
@@ -1020,22 +938,28 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
             let max_wait_ms = u32::try_from(max_wait_ms).map_err(|_| {
                 BrokerError::InvalidArgument("max_wait_ms exceeds protocol limit".into())
             })?;
+            let request = StreamReplicationRead {
+                reporter_epoch,
+                topic: topic.to_string(),
+                group: None,
+                partition,
+                message_from,
+                event_from,
+                max_messages,
+                max_events,
+                max_bytes,
+                max_wait_ms,
+                reporter_node_id: self.reporter_node_id.clone(),
+            };
             let read = self
                 .request_replication_read(
-                    Op::StreamReplicationRead,
-                    ReplicationRead {
-                        reporter_epoch,
-                        topic: topic.to_string(),
-                        group: None,
-                        partition,
-                        message_from,
-                        event_from,
-                        max_messages,
-                        max_events,
-                        max_bytes,
-                        max_wait_ms,
-                        reporter_node_id: self.reporter_node_id.clone(),
-                    },
+                    wire::encode_stream_replication_read(0, &request),
+                    Op::StreamReplicationReadOk,
+                    wire::decode_stream_replication_read_ok,
+                    topic,
+                    partition,
+                    None,
+                    max_wait_ms,
                 )
                 .await?;
             to_broker_stream_records(read)
@@ -1162,15 +1086,13 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
             // request/response on it). take_conn reconnects if needed.
             let conn = self.take_conn().await?;
             let stream_id = self.next_request_id();
-            let sink = Arc::new(QueuePushAdapterSink { apply });
-            // The two-lane wire start carries the queue log as its event lane.
-            let exit = run_follower_replication_stream_with_history(
+            let sink = Arc::new(QueuePushSink { apply });
+            let exit = run_follower_queue_push_with_history(
                 conn,
                 sink,
                 topic.to_string(),
                 partition,
                 group.map(str::to_string),
-                0,
                 from,
                 credit_bytes,
                 tunables,
@@ -1188,139 +1110,6 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
         })
     }
 }
-/// Pull replicated log records from an owner connection and apply them to a
-/// follower connection until both streams return empty or a limit is reached.
-///
-/// This is intentionally only the manual catch-up core. Background scheduling,
-/// ownership discovery, retries, and checkpoint installation belong above it.
-pub async fn catch_up_replication_over_protocol(
-    owner: &mut Conn,
-    follower: &mut Conn,
-    topic: &str,
-    partition: Partition,
-    group: Option<&str>,
-    options: ProtocolReplicationCatchUpOptions,
-) -> Result<ProtocolReplicationCatchUp, ProtocolReplicationCatchUpError> {
-    if options.max_messages_per_read == 0
-        || options.max_events_per_read == 0
-        || options.max_bytes_per_read == 0
-        || options.max_iterations == 0
-    {
-        return Err(ProtocolReplicationCatchUpError::InvalidLimits);
-    }
-
-    let mut request_id = options.request_id_start;
-    let mut progress = ProtocolReplicationCatchUpProgress {
-        message_next_offset: options.message_from,
-        event_next_offset: options.event_from,
-        ..Default::default()
-    };
-
-    for _ in 0..options.max_iterations {
-        let read_request_id = request_id;
-        request_id += 1;
-        let read_request = try_encode(
-            Op::ReplicationRead,
-            read_request_id,
-            &ReplicationRead {
-                reporter_epoch: None,
-                topic: topic.to_string(),
-                group: group.map(str::to_string),
-                partition,
-                message_from: progress.message_next_offset,
-                event_from: progress.event_next_offset,
-                max_messages: options.max_messages_per_read,
-                max_events: options.max_events_per_read,
-                max_bytes: options.max_bytes_per_read,
-                max_wait_ms: 0,
-                reporter_node_id: None,
-            },
-        )
-        .map_err(|source| ProtocolReplicationCatchUpError::Encode {
-            operation: "replication read",
-            source,
-        })?;
-        owner
-            .send(read_request)
-            .await
-            .map_err(|err| ProtocolReplicationCatchUpError::Send {
-                operation: "replication read",
-                message: err.to_string(),
-            })?;
-
-        let read: ReplicationReadOk =
-            recv_replication_read_ok_response(owner, read_request_id).await?;
-
-        if let Some(required) = message_checkpoint_required(&read.messages) {
-            return Ok(ProtocolReplicationCatchUp::CheckpointRequired {
-                progress,
-                messages: Some(required),
-                events: event_checkpoint_required(&read.events),
-            });
-        }
-        if let Some(required) = event_checkpoint_required(&read.events) {
-            return Ok(ProtocolReplicationCatchUp::CheckpointRequired {
-                progress,
-                messages: None,
-                events: Some(required),
-            });
-        }
-
-        let (messages, message_record_count, message_next_offset) =
-            message_apply_batch(read.messages)?;
-        let (events, event_record_count, event_next_offset) = event_apply_batch(read.events)?;
-
-        if message_record_count == 0 && event_record_count == 0 {
-            return Ok(ProtocolReplicationCatchUp::CaughtUp(progress));
-        }
-
-        let apply_request_id = request_id;
-        request_id += 1;
-        let apply_request = try_encode(
-            Op::ReplicationApply,
-            apply_request_id,
-            &ReplicationApply {
-                topic: topic.to_string(),
-                group: group.map(str::to_string),
-                partition,
-                messages,
-                events,
-            },
-        )
-        .map_err(|source| ProtocolReplicationCatchUpError::Encode {
-            operation: "replication apply",
-            source,
-        })?;
-        follower.send(apply_request).await.map_err(|err| {
-            ProtocolReplicationCatchUpError::Send {
-                operation: "replication apply",
-                message: err.to_string(),
-            }
-        })?;
-
-        let apply: ReplicationApplyOk =
-            recv_response(follower, apply_request_id, Op::ReplicationApplyOk).await?;
-        if message_record_count > 0 && !apply.messages_applied {
-            return Err(ProtocolReplicationCatchUpError::Unapplied {
-                stream: ProtocolReplicationStream::Messages,
-            });
-        }
-        if event_record_count > 0 && !apply.events_applied {
-            return Err(ProtocolReplicationCatchUpError::Unapplied {
-                stream: ProtocolReplicationStream::Events,
-            });
-        }
-
-        progress.iterations += 1;
-        progress.applied_message_records += message_record_count;
-        progress.applied_event_records += event_record_count;
-        progress.message_next_offset = message_next_offset;
-        progress.event_next_offset = event_next_offset;
-    }
-
-    Ok(ProtocolReplicationCatchUp::IterationLimit { progress })
-}
-
 pub(super) async fn recv_response<T>(
     conn: &mut Conn,
     request_id: u64,
@@ -1331,24 +1120,6 @@ where
 {
     let frame = recv_response_frame(conn, request_id, expected).await?;
     decode_response_frame(frame).await
-}
-
-async fn recv_replication_read_ok_response(
-    conn: &mut Conn,
-    request_id: u64,
-) -> Result<ReplicationReadOk, ProtocolReplicationRequestError> {
-    let frame = recv_response_frame(conn, request_id, Op::ReplicationReadOk).await?;
-    wire::decode_replication_read_ok(&frame)
-        .map_err(|err| ProtocolReplicationRequestError::Decode(err.to_string()))
-}
-
-async fn recv_stream_replication_read_ok_response(
-    conn: &mut Conn,
-    request_id: u64,
-) -> Result<ReplicationReadOk, ProtocolReplicationRequestError> {
-    let frame = recv_response_frame(conn, request_id, Op::StreamReplicationReadOk).await?;
-    wire::decode_stream_replication_read_ok(&frame)
-        .map_err(|err| ProtocolReplicationRequestError::Decode(err.to_string()))
 }
 
 async fn recv_response_frame(
@@ -1416,7 +1187,7 @@ where
     // ~20 GB/s (cache-cold large) to ~50 GB/s (in-cache), so 4 MiB is ~80-200us
     // inline. That fits a ~150us cooperative budget with headroom for replication
     // batches (which do more per-record work than this payload-memcpy-bound bench).
-    // Re-bench the actual ReplicationReadOk many-records case before raising further.
+    // Re-bench the actual QueueReplicationReadOk many-records case before raising further.
     //
     // FUTURE (adaptive): instead of a static value tuned on one CPU, FIT A
     // FUNCTION of decode-time vs bytes from a few real samples and solve
@@ -1446,72 +1217,6 @@ where
         .map_err(|err| ProtocolReplicationRequestError::Decode(err.to_string()))
 }
 
-fn message_checkpoint_required(
-    read: &ReplicationMessageRead,
-) -> Option<ReplicationCheckpointRequired> {
-    match read {
-        ReplicationMessageRead::CheckpointRequired(required) => Some(required.clone()),
-        ReplicationMessageRead::Batch { .. } => None,
-    }
-}
-
-fn event_checkpoint_required(read: &ReplicationEventRead) -> Option<ReplicationCheckpointRequired> {
-    match read {
-        ReplicationEventRead::CheckpointRequired(required) => Some(required.clone()),
-        ReplicationEventRead::Batch { .. } => None,
-    }
-}
-
-fn message_apply_batch(
-    read: ReplicationMessageRead,
-) -> Result<(Option<ReplicationMessageApplyBatch>, usize, u64), ProtocolReplicationCatchUpError> {
-    match read {
-        ReplicationMessageRead::Batch {
-            epoch,
-            next_offset,
-            records,
-            ..
-        } => {
-            let count = records.len();
-            Ok((
-                (count > 0).then_some(ReplicationMessageApplyBatch { epoch, records }),
-                count,
-                next_offset,
-            ))
-        }
-        ReplicationMessageRead::CheckpointRequired(_) => Err(
-            ProtocolReplicationCatchUpError::UnhandledCheckpointRequired {
-                stream: ProtocolReplicationStream::Messages,
-            },
-        ),
-    }
-}
-
-fn event_apply_batch(
-    read: ReplicationEventRead,
-) -> Result<(Option<ReplicationEventApplyBatch>, usize, u64), ProtocolReplicationCatchUpError> {
-    match read {
-        ReplicationEventRead::Batch {
-            epoch,
-            next_offset,
-            records,
-            ..
-        } => {
-            let count = records.len();
-            Ok((
-                (count > 0).then_some(ReplicationEventApplyBatch { epoch, records }),
-                count,
-                next_offset,
-            ))
-        }
-        ReplicationEventRead::CheckpointRequired(_) => Err(
-            ProtocolReplicationCatchUpError::UnhandledCheckpointRequired {
-                stream: ProtocolReplicationStream::Events,
-            },
-        ),
-    }
-}
-
 pub(super) fn protocol_error(err: impl std::fmt::Display) -> BrokerError {
     BrokerError::Unknown(format!("protocol replication error: {err}"))
 }
@@ -1534,44 +1239,11 @@ fn protocol_request_error_to_broker(
     }
 }
 
-fn to_broker_stream_records(read: ReplicationReadOk) -> Result<BrokerOwnerStreamRecords, BrokerError> {
+fn to_broker_stream_records(read: StreamReplicationReadOk) -> Result<BrokerOwnerStreamRecords, BrokerError> {
     Ok(BrokerOwnerStreamRecords {
         messages: to_broker_message_read(read.messages)?,
         events: to_broker_event_read(read.events)?,
     })
-}
-
-/// Convert a two-lane queue reply into a read of the single queue log. The
-/// queue log travels in the event lane. The message lane must be the fixed
-/// empty batch at cursor zero under the same epoch, otherwise the reply came
-/// from a peer that disagrees about the queue layout and nothing is applied.
-pub(crate) fn queue_read_from_wire(
-    read: ReplicationReadOk,
-) -> Result<OwnerReplicationRead<StromaEvent>, BrokerError> {
-    let lane_epoch = match &read.messages {
-        ReplicationMessageRead::Batch {
-            epoch,
-            requested_offset: 0,
-            next_offset: 0,
-            records,
-        } if records.is_empty() => *epoch,
-        _ => {
-            return Err(BrokerError::InvalidArgument(
-                "queue replication reply carries a message lane".into(),
-            ));
-        }
-    };
-    let events = to_broker_event_read(read.events)?;
-    let log_epoch = match &events {
-        OwnerReplicationRead::Batch(batch) => batch.epoch,
-        OwnerReplicationRead::CheckpointRequired { epoch, .. } => *epoch,
-    };
-    if lane_epoch != log_epoch {
-        return Err(BrokerError::InvalidArgument(format!(
-            "queue replication reply lane epoch {lane_epoch} differs from log epoch {log_epoch}"
-        )));
-    }
-    Ok(events)
 }
 
 fn to_broker_message_read(
@@ -1612,6 +1284,7 @@ fn to_broker_message_read(
     })
 }
 
+/// Decode one log read: a queue log reply, or a stream's cursor-event lane.
 fn to_broker_event_read(
     read: ReplicationEventRead,
 ) -> Result<OwnerReplicationRead<StromaEvent>, BrokerError> {
@@ -1652,62 +1325,42 @@ fn to_broker_event_read(
 }
 
 // ===========================================================================
-// Follower side: credit-based streaming transport (increment 3b).
+// Follower side: credit-based queue push transport.
 // ===========================================================================
 
-fn stream_batch_bytes(batch: &ReplicationReadOk) -> u64 {
-    let messages = match &batch.messages {
-        ReplicationMessageRead::Batch { records, .. } => records
-            .iter()
-            .map(|record| (record.headers.len() + record.payload.len()) as u64)
-            .sum(),
-        ReplicationMessageRead::CheckpointRequired(_) => 0,
-    };
-    let events = match &batch.events {
-        ReplicationEventRead::Batch { records, .. } => records
-            .iter()
-            .map(|record| record.payload.len() as u64)
-            .sum(),
-        ReplicationEventRead::CheckpointRequired(_) => 0,
-    };
-    messages + events
-}
-
-/// Run one follower replication stream over an established connection: send
-/// `ReplicationStreamStart`, then a reader demuxes pushed `ReplicationStreamBatch`
-/// frames into a bounded in-order buffer while an applier drains it (durably,
-/// in order) and sends combined progress+credit back. Returns why the stream
-/// ended. `buffer_batches` bounds the in-flight buffer; the granted `credit_bytes`
+/// Run one follower queue push over an established connection: send
+/// `QueuePushStart`, then a reader demuxes pushed `QueuePushBatch` frames into
+/// a bounded in-order buffer while an applier drains it (durably, in order)
+/// and sends combined progress+credit back. Returns why the push ended.
+/// `buffer_batches` bounds the in-flight buffer; the granted `credit_bytes`
 /// bounds in-flight bytes.
-pub async fn run_follower_replication_stream<S: FollowerStreamSink>(
+pub async fn run_follower_queue_push<S: FollowerPushSink>(
     conn: Conn,
     sink: Arc<S>,
     topic: String,
     partition: Partition,
     group: Option<String>,
-    message_from: Offset,
-    event_from: Offset,
+    from: Offset,
     credit_bytes: u64,
     tunables: StreamApplyTunablesFn,
     reporter_node_id: Option<String>,
     reporter_epoch: Option<u64>,
-    stream_id: u64,
+    push_id: u64,
     buffer_batches: usize,
     shutdown: CancellationToken,
 ) -> FollowerStreamExit {
-    run_follower_replication_stream_with_history(
+    run_follower_queue_push_with_history(
         conn,
         sink,
         topic,
         partition,
         group,
-        message_from,
-        event_from,
+        from,
         credit_bytes,
         tunables,
         reporter_node_id,
         reporter_epoch,
-        stream_id,
+        push_id,
         buffer_batches,
         shutdown,
         None,
@@ -1715,69 +1368,65 @@ pub async fn run_follower_replication_stream<S: FollowerStreamSink>(
     .await
 }
 
-async fn run_follower_replication_stream_with_history<S: FollowerStreamSink>(
+async fn run_follower_queue_push_with_history<S: FollowerPushSink>(
     conn: Conn,
     sink: Arc<S>,
     topic: String,
     partition: Partition,
     group: Option<String>,
-    message_from: Offset,
-    event_from: Offset,
+    from: Offset,
     credit_bytes: u64,
     tunables: StreamApplyTunablesFn,
     reporter_node_id: Option<String>,
     reporter_epoch: Option<u64>,
-    stream_id: u64,
+    push_id: u64,
     buffer_batches: usize,
     shutdown: CancellationToken,
     history: Option<fibril_broker::history_replication::HistoryReplicationSession>,
 ) -> FollowerStreamExit {
     let (mut conn_sink, mut conn_stream) = conn.split();
 
-    let start = ReplicationStreamStart {
-        reporter_epoch: reporter_epoch,
+    let start = QueuePushStart {
         topic,
         group,
         partition,
-        message_from,
-        event_from,
+        from,
         credit_bytes,
         reporter_node_id,
+        reporter_epoch,
     };
-    match wire::encode_replication_stream_start(stream_id, &start).and_then(
-        |frame| match &history {
-            Some(history) => crate::v1::history_replication::encode_frame(history, frame),
-            None => Ok(frame),
-        },
-    ) {
+    match wire::encode_queue_push_start(push_id, &start).and_then(|frame| match &history {
+        Some(history) => crate::v1::history_replication::encode_frame(history, frame),
+        None => Ok(frame),
+    }) {
         Ok(frame) => {
             if conn_sink.send(frame).await.is_err() {
-                return FollowerStreamExit::Error("failed to send stream start".into());
+                return FollowerStreamExit::Error("failed to send push start".into());
             }
         }
         Err(err) => return FollowerStreamExit::Error(err.to_string()),
     }
 
-    let (batch_tx, batch_rx) = mpsc::channel::<ReplicationReadOk>(buffer_batches.max(1));
-    let (control_tx, mut control_rx) = mpsc::channel::<FollowerStreamControl>(64);
+    let (batch_tx, batch_rx) = mpsc::channel::<QueueReplicationReadOk>(buffer_batches.max(1));
+    let (control_tx, mut control_rx) = mpsc::channel::<FollowerPushControl>(64);
 
-    // Reader: demux pushed frames into the buffer; return the stream-end reason.
+    // Reader: demux pushed frames into the buffer; return the push-end reason.
     let reader = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
         loop {
             match conn_stream.next().await {
                 Some(Ok(frame)) => {
-                    if frame.request_id != stream_id {
+                    if frame.request_id != push_id {
                         continue;
                     }
                     if frame.opcode == Op::Error as u16 {
                         return FollowerStreamExit::Error(
                             try_decode::<ErrorMsg>(&frame)
                                 .map(|e| e.message)
-                                .unwrap_or_else(|e| format!("invalid stream error: {e}")),
+                                .unwrap_or_else(|e| format!("invalid push error: {e}")),
                         );
                     }
-                    if frame.opcode == Op::ReplicationStreamBatch as u16 {
-                        match wire::decode_replication_stream_batch(&frame) {
+                    if frame.opcode == Op::QueuePushBatch as u16 {
+                        match wire::decode_queue_push_batch(&frame) {
                             Ok(batch) => {
                                 if batch_tx.send(batch).await.is_err() {
                                     return FollowerStreamExit::Closed;
@@ -1785,25 +1434,25 @@ async fn run_follower_replication_stream_with_history<S: FollowerStreamSink>(
                             }
                             Err(err) => {
                                 return FollowerStreamExit::Error(format!(
-                                    "decode stream batch: {err}"
+                                    "decode push batch: {err}"
                                 ));
                             }
                         }
-                    } else if frame.opcode == Op::ReplicationStreamEnd as u16 {
-                        let code = wire::decode_replication_stream_end(&frame)
+                    } else if frame.opcode == Op::QueuePushEnd as u16 {
+                        let code = wire::decode_queue_push_end(&frame)
                             .map(|end| end.code)
-                            .unwrap_or(replication_stream::STREAM_END_ERROR);
-                        return if code == replication_stream::STREAM_END_CHECKPOINT_REQUIRED {
+                            .unwrap_or(queue_push::PUSH_END_ERROR);
+                        return if code == queue_push::PUSH_END_CHECKPOINT_REQUIRED {
                             FollowerStreamExit::CheckpointRequired
-                        } else if code == replication_stream::STREAM_END_CLOSED {
+                        } else if code == queue_push::PUSH_END_CLOSED {
                             FollowerStreamExit::Closed
                         } else {
-                            FollowerStreamExit::Error("owner ended stream".into())
+                            FollowerStreamExit::Error("owner ended push".into())
                         };
                     }
                     // ignore unrelated opcodes on this connection
                 }
-                Some(Err(err)) => return FollowerStreamExit::Error(format!("stream recv: {err}")),
+                Some(Err(err)) => return FollowerStreamExit::Error(format!("push recv: {err}")),
                 None => return FollowerStreamExit::Error("connection closed".into()),
             }
         }
@@ -1813,28 +1462,19 @@ async fn run_follower_replication_stream_with_history<S: FollowerStreamSink>(
     let writer = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
         while let Some(control) = control_rx.recv().await {
             let frame = match control {
-                FollowerStreamControl::Progress {
-                    durable_message_next,
-                    durable_event_next,
+                FollowerPushControl::Progress {
+                    durable_next,
                     credit_add_bytes,
-                } => wire::encode_replication_stream_progress(
-                    stream_id,
-                    &ReplicationStreamProgress {
-                        durable_message_next,
-                        durable_event_next,
+                } => wire::encode_queue_push_progress(
+                    push_id,
+                    &QueuePushProgress {
+                        durable_next,
                         credit_add_bytes,
                     },
                 ),
-                FollowerStreamControl::Reset {
-                    message_from,
-                    event_from,
-                } => wire::encode_replication_stream_reset(
-                    stream_id,
-                    &ReplicationStreamReset {
-                        message_from,
-                        event_from,
-                    },
-                ),
+                FollowerPushControl::Reset { from } => {
+                    wire::encode_queue_push_reset(push_id, &QueuePushReset { from })
+                }
             };
             let frame = frame.and_then(|frame| match &history {
                 Some(history) => crate::v1::history_replication::encode_frame(history, frame),
@@ -1853,19 +1493,18 @@ async fn run_follower_replication_stream_with_history<S: FollowerStreamSink>(
 
     let applier_exit = tokio::select! {
         _ = shutdown.cancelled() => None,
-        exit = run_follower_stream_applier(
+        exit = run_follower_push_applier(
             sink,
             batch_rx,
             control_tx,
-            message_from,
-            event_from,
+            from,
             tunables,
         ) => Some(exit),
     };
 
     let exit = match applier_exit {
         // The applier stopped because the reader closed the buffer; the reader
-        // knows why (StreamEnd code or connection error).
+        // knows why (push end code or connection error).
         Some(ApplierExit::ReaderClosed) => match reader.await {
             Ok(reason) => reason,
             Err(_) => FollowerStreamExit::Error("reader task aborted".into()),
@@ -1888,20 +1527,18 @@ async fn run_follower_replication_stream_with_history<S: FollowerStreamSink>(
     exit
 }
 
-/// Adapts a broker-side [`BrokerQueuePushApply`] (which speaks single-log
-/// queue reads) to the protocol [`FollowerStreamSink`] the transport drives.
-/// Converts each two-lane batch to a queue read, computes the credit (bytes)
-/// to return, and maps the broker outcome back to wire progress, where the
-/// message lane stays at zero.
-struct QueuePushAdapterSink {
+/// Adapts a broker-side [`BrokerQueuePushApply`] to the protocol
+/// [`FollowerPushSink`] the transport drives. Decodes each pushed batch,
+/// computes the credit (bytes) to return, and maps the broker outcome back to
+/// push progress.
+struct QueuePushSink {
     apply: Arc<dyn BrokerQueuePushApply>,
 }
 
 fn queue_push_outcome(outcome: Result<QueuePushApply, BrokerError>, bytes: u64) -> FollowerApplyOutcome {
     match outcome {
         Ok(QueuePushApply::Applied { next }) => FollowerApplyOutcome::Applied {
-            durable_message_next: 0,
-            durable_event_next: next,
+            durable_next: next,
             bytes,
         },
         Ok(QueuePushApply::CheckpointRequired) => FollowerApplyOutcome::CheckpointRequired,
@@ -1910,20 +1547,24 @@ fn queue_push_outcome(outcome: Result<QueuePushApply, BrokerError>, bytes: u64) 
 }
 
 #[async_trait::async_trait]
-impl FollowerStreamSink for QueuePushAdapterSink {
-    async fn apply_open(&self, frames: futures::stream::BoxStream<'_, ReplicationReadOk>) -> FollowerApplyOutcome {
-        use futures::StreamExt;
+impl FollowerPushSink for QueuePushSink {
+    async fn apply_open(
+        &self,
+        frames: futures::stream::BoxStream<'_, QueueReplicationReadOk>,
+    ) -> FollowerApplyOutcome {
         let mut bytes = 0u64;
-        let records = frames.map(|frame| {
-            bytes = bytes.saturating_add(stream_batch_bytes(&frame));
-            queue_read_from_wire(frame)
-        }).boxed();
+        let records = frames
+            .map(|frame| {
+                bytes = bytes.saturating_add(queue_push::batch_bytes(&frame));
+                to_broker_event_read(frame)
+            })
+            .boxed();
         let outcome = self.apply.apply_open_queue_push(records).await;
         queue_push_outcome(outcome, bytes)
     }
-    async fn apply(&self, batch: ReplicationReadOk) -> FollowerApplyOutcome {
-        let bytes = stream_batch_bytes(&batch);
-        let records = match queue_read_from_wire(batch) {
+    async fn apply(&self, batch: QueueReplicationReadOk) -> FollowerApplyOutcome {
+        let bytes = queue_push::batch_bytes(&batch);
+        let records = match to_broker_event_read(batch) {
             Ok(records) => records,
             Err(err) => return FollowerApplyOutcome::Error(err.to_string()),
         };
@@ -1932,82 +1573,34 @@ impl FollowerStreamSink for QueuePushAdapterSink {
 }
 
 #[cfg(test)]
-mod queue_wire_adapter_tests {
+mod queue_read_tests {
     use super::*;
-    use crate::v1::{ReplicationEventRecord, ReplicationMessageRecord};
-
-    fn reply(messages: ReplicationMessageRead, epoch: u64) -> ReplicationReadOk {
-        let event = StromaEvent::Ack { off: 4 }.encode().unwrap();
-        ReplicationReadOk {
-            messages,
-            events: ReplicationEventRead::Batch {
-                epoch,
-                requested_offset: 5,
-                next_offset: 6,
-                records: vec![ReplicationEventRecord { offset: 5, payload: event }],
-            },
-        }
-    }
-
-    fn lane(epoch: u64, requested_offset: u64, next_offset: u64, records: usize) -> ReplicationMessageRead {
-        ReplicationMessageRead::Batch {
-            epoch,
-            requested_offset,
-            next_offset,
-            records: (0..records)
-                .map(|i| ReplicationMessageRecord {
-                    offset: i as u64,
-                    flags: 0,
-                    headers: Vec::new(),
-                    payload: vec![1],
-                })
-                .collect(),
-        }
-    }
+    use crate::v1::{ReplicationCheckpointRequired, ReplicationEventRecord};
 
     #[test]
-    fn queue_reply_needs_the_fixed_empty_message_lane() {
-        let OwnerReplicationRead::Batch(batch) = queue_read_from_wire(reply(lane(3, 0, 0, 0), 3)).unwrap()
-        else {
+    fn queue_reply_decodes_log_records_and_checkpoint_requirements() {
+        let event = StromaEvent::Ack { off: 4 }.encode().unwrap();
+        let reply: QueueReplicationReadOk = ReplicationEventRead::Batch {
+            epoch: 3,
+            requested_offset: 5,
+            next_offset: 6,
+            records: vec![ReplicationEventRecord { offset: 5, payload: event }],
+        };
+        let OwnerReplicationRead::Batch(batch) = to_broker_event_read(reply).unwrap() else {
             panic!("queue batch")
         };
         assert_eq!((batch.epoch, batch.requested_offset, batch.next_offset), (3, 5, 6));
         assert_eq!(batch.records, vec![(5, StromaEvent::Ack { off: 4 })]);
 
-        // Message records, a moved lane cursor, a lane checkpoint or a lane
-        // under another epoch mean the peer disagrees about the queue layout.
-        for bad in [
-            reply(lane(3, 0, 1, 1), 3),
-            reply(lane(3, 1, 1, 0), 3),
-            reply(lane(3, 0, 2, 0), 3),
-            reply(lane(2, 0, 0, 0), 3),
-            reply(
-                ReplicationMessageRead::CheckpointRequired(ReplicationCheckpointRequired {
-                    epoch: 3,
-                    requested_offset: 0,
-                    head_offset: 1,
-                    next_offset: 1,
-                }),
-                3,
-            ),
-        ] {
-            assert!(queue_read_from_wire(bad).is_err());
-        }
-    }
-
-    #[test]
-    fn queue_reply_carries_a_log_checkpoint_requirement() {
-        let read = ReplicationReadOk {
-            messages: lane(7, 0, 0, 0),
-            events: ReplicationEventRead::CheckpointRequired(ReplicationCheckpointRequired {
+        let required: QueueReplicationReadOk =
+            ReplicationEventRead::CheckpointRequired(ReplicationCheckpointRequired {
                 epoch: 7,
                 requested_offset: 2,
                 head_offset: 9,
                 next_offset: 12,
-            }),
-        };
+            });
         assert_eq!(
-            queue_read_from_wire(read).unwrap(),
+            to_broker_event_read(required).unwrap(),
             OwnerReplicationRead::CheckpointRequired {
                 epoch: 7,
                 requested_offset: 2,
@@ -2015,68 +1608,64 @@ mod queue_wire_adapter_tests {
                 next_offset: 12,
             }
         );
+
+        // A record that is not a Stroma event is refused before apply.
+        let garbage: QueueReplicationReadOk = ReplicationEventRead::Batch {
+            epoch: 3,
+            requested_offset: 5,
+            next_offset: 6,
+            records: vec![ReplicationEventRecord {
+                offset: 5,
+                payload: vec![0xff; 3],
+            }],
+        };
+        assert!(to_broker_event_read(garbage).is_err());
     }
 }
 
 #[cfg(test)]
-mod stream_transport_tests {
+mod push_transport_tests {
     use super::*;
-    use crate::v1::{ReplicationMessageRecord, ReplicationStreamEnd};
+    use crate::v1::{QueuePushEnd, ReplicationEventRecord};
     use std::sync::Mutex as StdMutex;
     use tokio::net::TcpListener;
-    use tokio_util::codec::Framed;
 
     struct RecordingSink {
-        applied: StdMutex<Vec<(u64, u64)>>, // (message_next, bytes) per batch
+        applied: StdMutex<Vec<(u64, u64)>>, // (next, bytes) per batch
     }
 
     #[async_trait::async_trait]
-    impl FollowerStreamSink for RecordingSink {
-        async fn apply(&self, batch: ReplicationReadOk) -> FollowerApplyOutcome {
-            let bytes = stream_batch_bytes(&batch);
-            let (message_next, event_next) = match (&batch.messages, &batch.events) {
-                (
-                    ReplicationMessageRead::Batch { next_offset: m, .. },
-                    ReplicationEventRead::Batch { next_offset: e, .. },
-                ) => (*m, *e),
-                _ => return FollowerApplyOutcome::CheckpointRequired,
+    impl FollowerPushSink for RecordingSink {
+        async fn apply(&self, batch: QueueReplicationReadOk) -> FollowerApplyOutcome {
+            let bytes = queue_push::batch_bytes(&batch);
+            let ReplicationEventRead::Batch { next_offset, .. } = batch else {
+                return FollowerApplyOutcome::CheckpointRequired;
             };
-            self.applied.lock().unwrap().push((message_next, bytes));
+            self.applied.lock().unwrap().push((next_offset, bytes));
             FollowerApplyOutcome::Applied {
-                durable_message_next: message_next,
-                durable_event_next: event_next,
+                durable_next: next_offset,
                 bytes,
             }
         }
     }
 
-    fn sample_batch(first_offset: u64, count: u64) -> ReplicationReadOk {
+    fn sample_batch(first_offset: u64, count: u64) -> QueueReplicationReadOk {
         let records = (0..count)
-            .map(|i| ReplicationMessageRecord {
+            .map(|i| ReplicationEventRecord {
                 offset: first_offset + i,
-                flags: 0,
-                headers: Vec::new(),
                 payload: vec![7u8; 100],
             })
             .collect();
-        ReplicationReadOk {
-            messages: ReplicationMessageRead::Batch {
-                epoch: 1,
-                requested_offset: first_offset,
-                next_offset: first_offset + count,
-                records,
-            },
-            events: ReplicationEventRead::Batch {
-                epoch: 1,
-                requested_offset: 0,
-                next_offset: 0,
-                records: Vec::new(),
-            },
+        ReplicationEventRead::Batch {
+            epoch: 1,
+            requested_offset: first_offset,
+            next_offset: first_offset + count,
+            records,
         }
     }
 
     #[tokio::test]
-    async fn stream_rejection_exits_and_parent_cancellation_closes_transport_tasks() {
+    async fn push_rejection_exits_and_parent_cancellation_closes_transport_tasks() {
         for cancel in [false, true] {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let socket = TcpStream::connect(listener.local_addr().unwrap())
@@ -2087,13 +1676,12 @@ mod stream_transport_tests {
             let sink = Arc::new(RecordingSink {
                 applied: StdMutex::new(Vec::new()),
             });
-            let follower = tokio::spawn(run_follower_replication_stream(
+            let follower = tokio::spawn(run_follower_queue_push(
                 helper::plain_conn(socket),
                 sink.clone(),
                 "orders".into(),
                 Partition::new(0),
                 None,
-                0,
                 0,
                 1024,
                 Arc::new(|| fibril_broker::replication::StreamApplyTunables {
@@ -2108,7 +1696,7 @@ mod stream_transport_tests {
                 CancellationToken::new(),
             ));
             let start = owner.next().await.unwrap().unwrap();
-            assert_eq!(start.opcode, Op::ReplicationStreamStart as u16);
+            assert_eq!(start.opcode, Op::QueuePushStart as u16);
             if cancel {
                 follower.abort();
                 assert!(follower.await.unwrap_err().is_cancelled());
@@ -2146,44 +1734,43 @@ mod stream_transport_tests {
         }
     }
 
-    // Mock owner ↔ real follower transport over a real TCP connection: proves the
-    // wire round-trip (Start, batch demux, progress+credit, StreamEnd handling).
+    // Mock owner and real follower transport over a real TCP connection: proves
+    // the wire round-trip (start, batch demux, progress+credit, push end).
     #[tokio::test]
-    async fn follower_stream_round_trips_over_tcp() {
+    async fn follower_push_round_trips_over_tcp() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        // Mock owner: recv Start, push 3 batches, recv 3 progress, send StreamEnd.
+        // Mock owner: recv start, push 3 batches, recv 3 progress, send end.
         let owner = tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
             let mut conn = helper::plain_conn(socket);
 
             let start_frame = conn.next().await.unwrap().unwrap();
-            let start = wire::decode_replication_stream_start(&start_frame).unwrap();
+            let start = wire::decode_queue_push_start(&start_frame).unwrap();
             assert_eq!(start.topic, "orders");
-            assert_eq!(start.message_from, 0);
+            assert_eq!(start.from, 0);
             assert!(start.credit_bytes > 0);
-            let stream_id = start_frame.request_id;
+            let push_id = start_frame.request_id;
 
             for (first, count) in [(0u64, 2u64), (2, 3), (5, 1)] {
                 let frame =
-                    wire::encode_replication_stream_batch(stream_id, &sample_batch(first, count))
-                        .unwrap();
+                    wire::encode_queue_push_batch(push_id, &sample_batch(first, count)).unwrap();
                 conn.send(frame).await.unwrap();
             }
 
             let mut progress = Vec::new();
             while progress.len() < 3 {
                 let frame = conn.next().await.unwrap().unwrap();
-                if frame.opcode == Op::ReplicationStreamProgress as u16 {
-                    progress.push(wire::decode_replication_stream_progress(&frame).unwrap());
+                if frame.opcode == Op::QueuePushProgress as u16 {
+                    progress.push(wire::decode_queue_push_progress(&frame).unwrap());
                 }
             }
 
-            let end = wire::encode_replication_stream_end(
-                stream_id,
-                &ReplicationStreamEnd {
-                    code: replication_stream::STREAM_END_CLOSED,
+            let end = wire::encode_queue_push_end(
+                push_id,
+                &QueuePushEnd {
+                    code: queue_push::PUSH_END_CLOSED,
                     message: "done".into(),
                 },
             )
@@ -2197,19 +1784,18 @@ mod stream_transport_tests {
         let sink = Arc::new(RecordingSink {
             applied: StdMutex::new(Vec::new()),
         });
-        let exit = run_follower_replication_stream(
+        let exit = run_follower_queue_push(
             conn,
             sink.clone(),
             "orders".into(),
             Partition::new(0),
             None,
             0,
-            0,
             8 * 1024 * 1024,
             // keepalive/linger disabled; max_merge_bytes = 1 is below any batch, so
             // the applier never folds and each batch applies separately. This test
             // verifies the per-batch round-trip over TCP (transport + apply
-            // offset/bytes + progress/credit + stream close); its assertions always
+            // offset/bytes + progress/credit + push close); its assertions always
             // expected 3 distinct applies. Folding is non-deterministic over a fast
             // loopback (queued frames coalesce) and is covered on its own by the
             // applier unit tests, so we pin it off here rather than racing it.
@@ -2236,9 +1822,9 @@ mod stream_transport_tests {
 
         let progress = owner.await.unwrap();
         // Combined progress+credit: durable advances and credit = bytes applied.
-        assert_eq!(progress[0].durable_message_next, 2);
+        assert_eq!(progress[0].durable_next, 2);
         assert_eq!(progress[0].credit_add_bytes, 200);
-        assert_eq!(progress[2].durable_message_next, 6);
+        assert_eq!(progress[2].durable_next, 6);
         assert_eq!(progress[2].credit_add_bytes, 100);
     }
 }

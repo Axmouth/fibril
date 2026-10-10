@@ -35,7 +35,7 @@ pub const COMPLIANCE_STRING: &str = "v=1;license=MIT;ai_train=disallowed;policy=
 pub const PROTOCOL_V1: u16 = 1;
 
 #[repr(u16)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Op {
     Hello = 1,
     HelloOk = 2,
@@ -77,10 +77,12 @@ pub enum Op {
     ReconcileServer = 71,
     ReconcileResult = 72,
 
-    ReplicationRead = 80,
-    ReplicationReadOk = 81,
-    ReplicationApply = 82,
-    ReplicationApplyOk = 83,
+    /// follower->owner: read the single queue log from one offset.
+    QueueReplicationRead = 80,
+    /// owner->follower: one queue log batch or a checkpoint requirement.
+    QueueReplicationReadOk = 81,
+    // 82 and 83 carried a follower push apply with a two-lane body. They are
+    // retired and must not be reused.
     ReplicationCheckpointExport = 84,
     ReplicationCheckpointExportOk = 85,
 
@@ -94,26 +96,25 @@ pub enum Op {
     TopologyOk = 91,
     Redirect = 92,
 
-    // Streaming replication (credit-based). The frame `request_id` is the stream
-    // id, so batch/progress/reset/stop frames identify their stream without
+    // Credit-based queue push replication. The frame `request_id` is the push
+    // id, so batch/progress/reset/stop frames identify their push without
     // repeating the queue key.
-    /// follower->owner: open a replication stream with an initial send budget.
-    ReplicationStreamStart = 93,
-    /// owner->follower PUSH: one record batch (reuses the `ReplicationReadOk` body).
-    ReplicationStreamBatch = 94,
+    /// follower->owner: open a queue push with an initial send budget.
+    QueuePushStart = 93,
+    /// owner->follower PUSH: one queue log batch (the `QueueReplicationReadOk` body).
+    QueuePushBatch = 94,
     /// follower->owner: durable progress plus a credit refill (combined).
-    ReplicationStreamProgress = 95,
-    /// follower->owner: rewind the stream to an offset (gap / post-checkpoint).
-    ReplicationStreamReset = 96,
-    /// follower->owner: close the stream.
-    ReplicationStreamStop = 97,
-    /// owner->follower: the stream ended (not-owner, closed, or fenced).
-    ReplicationStreamEnd = 98,
+    QueuePushProgress = 95,
+    /// follower->owner: rewind the push to an offset (gap / post-checkpoint).
+    QueuePushReset = 96,
+    /// follower->owner: close the push.
+    QueuePushStop = 97,
+    /// owner->follower: the push ended (not-owner, closed, or fenced).
+    QueuePushEnd = 98,
 
-    // Plexus stream follower replication. Parallel to the queue
-    // `ReplicationRead`/`ReplicationReadOk` (reuses their body), kept a distinct
-    // op so stream replication stays separate from queue replication at the
-    // protocol layer. A stream has no group; the body carries `group: None`.
+    // Plexus stream follower replication. A stream has a record log and a
+    // cursor-commit event log, so its read body carries two lanes. A stream
+    // has no group; the body carries `group: None`.
     /// follower->owner: read a stream partition's record + cursor-event logs.
     StreamReplicationRead = 99,
     /// owner->follower: a stream replication batch (records + cursor events).
@@ -153,6 +154,145 @@ pub enum Op {
     RecoveryTransferOk = 111,
 
     Error = 255,
+}
+
+/// Resource kind an internal replication op serves.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ReplicationOpKind {
+    Queue,
+    Stream,
+}
+
+impl Op {
+    /// Every op in use. Retired numbers are absent.
+    pub const ALL: &'static [Op] = &[
+        Op::Hello,
+        Op::HelloOk,
+        Op::HelloErr,
+        Op::Auth,
+        Op::AuthOk,
+        Op::AuthErr,
+        Op::Publish,
+        Op::PublishDelayed,
+        Op::PublishOk,
+        Op::Subscribe,
+        Op::SubscribeOk,
+        Op::SubscribeErr,
+        Op::Deliver,
+        Op::Ack,
+        Op::Nack,
+        Op::AssignmentChanged,
+        Op::Ping,
+        Op::Pong,
+        Op::DeclareQueue,
+        Op::DeclareQueueOk,
+        Op::DeclarePlexus,
+        Op::DeclarePlexusOk,
+        Op::SubscribeStream,
+        Op::ReconcileClient,
+        Op::ReconcileServer,
+        Op::ReconcileResult,
+        Op::QueueReplicationRead,
+        Op::QueueReplicationReadOk,
+        Op::ReplicationCheckpointExport,
+        Op::ReplicationCheckpointExportOk,
+        Op::RecoverySeal,
+        Op::RecoverySealOk,
+        Op::Topology,
+        Op::TopologyOk,
+        Op::Redirect,
+        Op::QueuePushStart,
+        Op::QueuePushBatch,
+        Op::QueuePushProgress,
+        Op::QueuePushReset,
+        Op::QueuePushStop,
+        Op::QueuePushEnd,
+        Op::StreamReplicationRead,
+        Op::StreamReplicationReadOk,
+        Op::TopologyUpdate,
+        Op::TopologyUpdateAck,
+        Op::GoingAway,
+        Op::SubscriptionClosed,
+        Op::RecoveryRead,
+        Op::RecoveryReadOk,
+        Op::RecoveryReadSequential,
+        Op::InitialHistoryPrepare,
+        Op::InitialHistoryPrepareOk,
+        Op::HistoryReplication,
+        Op::RecoveryTransfer,
+        Op::RecoveryTransferOk,
+        Op::Error,
+    ];
+
+    pub fn from_code(code: u16) -> Option<Op> {
+        Op::ALL.iter().copied().find(|op| *op as u16 == code)
+    }
+
+    /// Ops a broker accepts only from an authenticated cluster peer. They can
+    /// read or replace storage, or report progress that releases confirms.
+    pub const fn node_control(self) -> bool {
+        matches!(
+            self,
+            Op::QueueReplicationRead
+                | Op::StreamReplicationRead
+                | Op::ReplicationCheckpointExport
+                | Op::QueuePushStart
+                | Op::QueuePushProgress
+                | Op::QueuePushReset
+                | Op::QueuePushStop
+                | Op::RecoverySeal
+                | Op::RecoveryRead
+                | Op::RecoveryReadSequential
+                | Op::RecoveryTransfer
+                | Op::InitialHistoryPrepare
+                | Op::HistoryReplication
+        )
+    }
+
+    /// Resource kind of a live replication request a broker receives, or None
+    /// for every other op. A history envelope must name the same kind.
+    pub const fn replication_kind(self) -> Option<ReplicationOpKind> {
+        match self {
+            Op::QueueReplicationRead
+            | Op::ReplicationCheckpointExport
+            | Op::QueuePushStart
+            | Op::QueuePushProgress
+            | Op::QueuePushReset
+            | Op::QueuePushStop => Some(ReplicationOpKind::Queue),
+            Op::StreamReplicationRead => Some(ReplicationOpKind::Stream),
+            _ => None,
+        }
+    }
+
+    /// Whether the resource owner receives this op inside a history envelope.
+    /// None means the op may not travel in one.
+    pub const fn history_owner_is_receiver(self) -> Option<bool> {
+        match self.replication_kind() {
+            Some(_) => Some(true),
+            None => None,
+        }
+    }
+
+    /// Body magic of a request whose body starts with a queue key, so the
+    /// resource can be authorized before the full decode.
+    pub const fn resource_prefix_magic(self) -> Option<&'static [u8; 4]> {
+        match self {
+            Op::QueueReplicationRead => Some(b"FQR1"),
+            Op::StreamReplicationRead => Some(b"FSQ1"),
+            Op::ReplicationCheckpointExport => Some(b"FCE1"),
+            Op::QueuePushStart => Some(b"FQS1"),
+            _ => None,
+        }
+    }
+
+    /// Ops that continue a push opened earlier on the same connection. They
+    /// must keep the history the push opened with.
+    pub const fn continues_queue_push(self) -> bool {
+        matches!(
+            self,
+            Op::QueuePushProgress | Op::QueuePushReset | Op::QueuePushStop
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -678,8 +818,35 @@ pub struct ReconcileResult {
     pub subscriptions: Vec<ReconcileSubscriptionResult>,
 }
 
+/// Op 80: read the single queue log of one partition.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReplicationRead {
+pub struct QueueReplicationRead {
+    pub topic: String,
+    pub group: Option<String>,
+    pub partition: Partition,
+    /// First offset wanted. Followers apply durably before asking again, so
+    /// this is also their durable progress.
+    pub from: u64,
+    pub max_records: u32,
+    /// Approximate byte budget for returned records. One oversized record may
+    /// still exceed this so replication can make progress.
+    pub max_bytes: u64,
+    /// Long-poll budget. Zero means an immediate read.
+    pub max_wait_ms: u32,
+    /// Follower identity for owner-side progress tracking.
+    pub reporter_node_id: Option<String>,
+    /// Assignment epoch of the reporting follower. Without it a read cannot
+    /// supply a replicated confirmation proof.
+    pub reporter_epoch: Option<u64>,
+}
+
+/// Op 81 reply and op 94 body: one read of the single queue log. Queue log
+/// records are encoded Stroma events, payloads included.
+pub type QueueReplicationReadOk = ReplicationEventRead;
+
+/// Op 99: read a stream partition's record log and cursor-commit event log.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StreamReplicationRead {
     pub topic: String,
     pub group: Option<String>,
     pub partition: Partition,
@@ -695,14 +862,12 @@ pub struct ReplicationRead {
     /// this only after they have caught up; ordinary catch-up remains pull.
     #[serde(default)]
     pub max_wait_ms: u32,
-    /// Follower identity for owner-side progress tracking (publish-confirm
-    /// durability policies). Followers apply durably, so `message_from` /
-    /// `event_from` are honest durable progress. Optional: old peers simply
-    /// don't report.
+    /// Follower identity for owner-side progress tracking. Followers apply
+    /// durably, so `message_from` / `event_from` are honest durable progress.
     #[serde(default)]
     pub reporter_node_id: Option<String>,
     /// Assignment epoch of the reporting follower. Missing epochs are readable
-    /// for compatibility but cannot supply a replicated confirmation proof.
+    /// but cannot supply a replicated confirmation proof.
     #[serde(default)]
     pub reporter_epoch: Option<u64>,
 }
@@ -753,55 +918,27 @@ pub enum ReplicationEventRead {
     CheckpointRequired(ReplicationCheckpointRequired),
 }
 
+/// Op 100 reply: one read of a stream's record and cursor-commit event logs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReplicationReadOk {
+pub struct StreamReplicationReadOk {
     pub messages: ReplicationMessageRead,
     pub events: ReplicationEventRead,
 }
 
+/// follower->owner: open a credit-based queue push for one partition.
+/// Later frames of this push are keyed by the frame `request_id`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReplicationMessageApplyBatch {
-    pub epoch: u64,
-    pub records: Vec<ReplicationMessageRecord>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReplicationEventApplyBatch {
-    pub epoch: u64,
-    pub records: Vec<ReplicationEventRecord>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReplicationApply {
+pub struct QueuePushStart {
     pub topic: String,
     pub group: Option<String>,
     pub partition: Partition,
-    pub messages: Option<ReplicationMessageApplyBatch>,
-    pub events: Option<ReplicationEventApplyBatch>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReplicationApplyOk {
-    pub messages_applied: bool,
-    pub events_applied: bool,
-}
-
-/// follower->owner: open a credit-based replication stream for one partition.
-/// Subsequent frames on this stream are keyed by the frame `request_id`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReplicationStreamStart {
-    pub topic: String,
-    pub group: Option<String>,
-    pub partition: Partition,
-    pub message_from: u64,
-    pub event_from: u64,
-    /// Initial send budget in bytes. The owner streams batches up to this and
-    /// pauses until the follower refills (see `ReplicationStreamProgress`).
+    pub from: u64,
+    /// Initial send budget in bytes. The owner pushes batches up to this and
+    /// pauses until the follower refills (see `QueuePushProgress`).
     pub credit_bytes: u64,
     /// Follower identity for owner-side durable progress tracking. Followers
     /// apply durably, so reported offsets are honest durable progress.
     pub reporter_node_id: Option<String>,
-    #[serde(default)]
     pub reporter_epoch: Option<u64>,
 }
 
@@ -809,24 +946,23 @@ pub struct ReplicationStreamStart {
 /// The progress half feeds the publish-confirm gate and the replica-durable
 /// visibility watermark; the credit half extends the owner's send budget.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReplicationStreamProgress {
-    pub durable_message_next: u64,
-    pub durable_event_next: u64,
+pub struct QueuePushProgress {
+    /// Exclusive end of the follower's durable queue log.
+    pub durable_next: u64,
     pub credit_add_bytes: u64,
 }
 
-/// follower->owner: rewind the stream to these offsets (an apply gap, or after a
+/// follower->owner: rewind the push to this offset (an apply gap, or after a
 /// checkpoint install) so the owner reseeks its cursor.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReplicationStreamReset {
-    pub message_from: u64,
-    pub event_from: u64,
+pub struct QueuePushReset {
+    pub from: u64,
 }
 
-/// owner->follower: the stream ended. `code` distinguishes not-owner / fenced /
-/// closed so the follower can re-resolve the owner and re-subscribe if needed.
+/// owner->follower: the push ended. `code` distinguishes not-owner / fenced /
+/// closed so the follower can re-resolve the owner and start again if needed.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReplicationStreamEnd {
+pub struct QueuePushEnd {
     pub code: u16,
     pub message: String,
 }

@@ -12,6 +12,13 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Breaking changes
 
+- Queue replication uses single-log internal frames. Ops 80 and 81 become
+  `QueueReplicationRead` and `QueueReplicationReadOk`, and ops 93 to 98
+  become the `QueuePush` family. The bodies carry new magics, so an older
+  peer fails with a decode error. Ops 82 and 83, the follower push apply,
+  are retired. Upgrade participating brokers together. Client message
+  frames are unchanged.
+
 - The data directory uses layout version 2. It holds a `fibril-node` marker
   with the node id and the subdirectories `node/` (setup marker, config
   overlay, cluster secret and TLS material), `coordination/`, `storage/` and

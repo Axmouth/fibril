@@ -133,23 +133,17 @@ pub fn try_encode<T: Serialize + Any>(op: Op, req_id: u64, msg: &T) -> ProtocolR
         Op::ReconcileResult => encode_typed(msg, "ReconcileResult", |msg| {
             wire::encode_reconcile_result(req_id, msg)
         }),
-        Op::ReplicationRead => encode_typed(msg, "ReplicationRead", |msg| {
-            wire::encode_replication_read(req_id, msg)
+        Op::QueueReplicationRead => encode_typed(msg, "QueueReplicationRead", |msg| {
+            wire::encode_queue_replication_read(req_id, msg)
         }),
-        Op::ReplicationReadOk => encode_typed(msg, "ReplicationReadOk", |msg| {
-            wire::encode_replication_read_ok(req_id, msg)
+        Op::QueueReplicationReadOk => encode_typed(msg, "QueueReplicationReadOk", |msg| {
+            wire::encode_queue_replication_read_ok(req_id, msg)
         }),
-        Op::StreamReplicationRead => encode_typed(msg, "ReplicationRead", |msg| {
+        Op::StreamReplicationRead => encode_typed(msg, "StreamReplicationRead", |msg| {
             wire::encode_stream_replication_read(req_id, msg)
         }),
-        Op::StreamReplicationReadOk => encode_typed(msg, "ReplicationReadOk", |msg| {
+        Op::StreamReplicationReadOk => encode_typed(msg, "StreamReplicationReadOk", |msg| {
             wire::encode_stream_replication_read_ok(req_id, msg)
-        }),
-        Op::ReplicationApply => encode_typed(msg, "ReplicationApply", |msg| {
-            wire::encode_replication_apply(req_id, msg)
-        }),
-        Op::ReplicationApplyOk => encode_typed(msg, "ReplicationApplyOk", |msg| {
-            wire::encode_replication_apply_ok(req_id, msg)
         }),
         Op::ReplicationCheckpointExport => {
             encode_typed(msg, "ReplicationCheckpointExport", |msg| {
@@ -178,21 +172,21 @@ pub fn try_encode<T: Serialize + Any>(op: Op, req_id: u64, msg: &T) -> ProtocolR
             wire::encode_subscription_closed(req_id, msg)
         }),
         Op::Redirect => encode_typed(msg, "Redirect", |msg| wire::encode_redirect(req_id, msg)),
-        Op::ReplicationStreamStart => encode_typed(msg, "ReplicationStreamStart", |msg| {
-            wire::encode_replication_stream_start(req_id, msg)
+        Op::QueuePushStart => encode_typed(msg, "QueuePushStart", |msg| {
+            wire::encode_queue_push_start(req_id, msg)
         }),
-        Op::ReplicationStreamBatch => encode_typed(msg, "ReplicationStreamBatch", |msg| {
-            wire::encode_replication_stream_batch(req_id, msg)
+        Op::QueuePushBatch => encode_typed(msg, "QueueReplicationReadOk", |msg| {
+            wire::encode_queue_push_batch(req_id, msg)
         }),
-        Op::ReplicationStreamProgress => encode_typed(msg, "ReplicationStreamProgress", |msg| {
-            wire::encode_replication_stream_progress(req_id, msg)
+        Op::QueuePushProgress => encode_typed(msg, "QueuePushProgress", |msg| {
+            wire::encode_queue_push_progress(req_id, msg)
         }),
-        Op::ReplicationStreamReset => encode_typed(msg, "ReplicationStreamReset", |msg| {
-            wire::encode_replication_stream_reset(req_id, msg)
+        Op::QueuePushReset => encode_typed(msg, "QueuePushReset", |msg| {
+            wire::encode_queue_push_reset(req_id, msg)
         }),
-        Op::ReplicationStreamStop => encode_unit_like(op, req_id, msg),
-        Op::ReplicationStreamEnd => encode_typed(msg, "ReplicationStreamEnd", |msg| {
-            wire::encode_replication_stream_end(req_id, msg)
+        Op::QueuePushStop => encode_unit_like(op, req_id, msg),
+        Op::QueuePushEnd => encode_typed(msg, "QueuePushEnd", |msg| {
+            wire::encode_queue_push_end(req_id, msg)
         }),
         Op::RecoverySeal => encode_typed(msg, "RecoverySeal", |msg| {
             wire::encode_recovery_seal(req_id, msg)
@@ -312,18 +306,22 @@ pub fn try_decode<T: for<'de> Deserialize<'de> + Any>(frame: &Frame) -> Protocol
         x if x == Op::ReconcileResult as u16 => wire::decode_reconcile_result(frame)
             .map_err(wire_decode_error)
             .and_then(cast_decoded),
-        x if x == Op::ReplicationRead as u16 => wire::decode_replication_read(frame)
+        x if x == Op::QueueReplicationRead as u16 => wire::decode_queue_replication_read(frame)
             .map_err(wire_decode_error)
             .and_then(cast_decoded),
-        x if x == Op::ReplicationReadOk as u16 => wire::decode_replication_read_ok(frame)
+        x if x == Op::QueueReplicationReadOk as u16 => {
+            wire::decode_queue_replication_read_ok(frame)
+                .map_err(wire_decode_error)
+                .and_then(cast_decoded)
+        }
+        x if x == Op::StreamReplicationRead as u16 => wire::decode_stream_replication_read(frame)
             .map_err(wire_decode_error)
             .and_then(cast_decoded),
-        x if x == Op::ReplicationApply as u16 => wire::decode_replication_apply(frame)
-            .map_err(wire_decode_error)
-            .and_then(cast_decoded),
-        x if x == Op::ReplicationApplyOk as u16 => wire::decode_replication_apply_ok(frame)
-            .map_err(wire_decode_error)
-            .and_then(cast_decoded),
+        x if x == Op::StreamReplicationReadOk as u16 => {
+            wire::decode_stream_replication_read_ok(frame)
+                .map_err(wire_decode_error)
+                .and_then(cast_decoded)
+        }
         x if x == Op::ReplicationCheckpointExport as u16 => {
             wire::decode_replication_checkpoint_export(frame)
                 .map_err(wire_decode_error)
@@ -487,11 +485,11 @@ mod tests {
         AssignmentChanged, Auth, DeclareQueue, DeclareQueueOk, Hello, HelloOk, QueueDlqPolicy,
         QueueTopologyEntry, ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult,
         ReconcileServer, ReconcileSubscription, ReconcileSubscriptionResult, Redirect,
-        ReplicationApply, ReplicationApplyOk, ReplicationCheckpointExport,
-        ReplicationCheckpointExportOk, ReplicationCheckpointRequired, ReplicationEventApplyBatch,
-        ReplicationEventRead, ReplicationEventRecord, ReplicationMessageApplyBatch,
-        ReplicationMessageRead, ReplicationMessageRecord, ReplicationRead, ReplicationReadOk,
-        ReplicationStateCheckpoint, ResumeIdentity, ResumeOutcome, Subscribe, SubscribeOk,
+        QueuePushProgress, QueueReplicationRead, QueueReplicationReadOk,
+        ReplicationCheckpointExport, ReplicationCheckpointExportOk, ReplicationCheckpointRequired,
+        ReplicationEventRead, ReplicationEventRecord, ReplicationMessageRead,
+        ReplicationMessageRecord, ReplicationStateCheckpoint, StreamReplicationRead,
+        StreamReplicationReadOk, ResumeIdentity, ResumeOutcome, Subscribe, SubscribeOk,
         TopologyOk,
     };
 
@@ -815,10 +813,25 @@ mod tests {
 
     #[test]
     fn replication_read_roundtrips() {
-        let msg = ReplicationRead {
-            reporter_epoch: None,
+        let msg = QueueReplicationRead {
+            reporter_epoch: Some(5),
             topic: "orders".into(),
             group: Some("workers".into()),
+            partition: Partition::new(3),
+            from: 17,
+            max_records: 256,
+            max_bytes: 1024 * 1024,
+            max_wait_ms: 250,
+            reporter_node_id: None,
+        };
+        let frame = try_encode(Op::QueueReplicationRead, 13, &msg).unwrap();
+        assert_eq!(frame.opcode, Op::QueueReplicationRead as u16);
+        assert_eq!(try_decode::<QueueReplicationRead>(&frame).unwrap(), msg);
+
+        let msg = StreamReplicationRead {
+            reporter_epoch: None,
+            topic: "events".into(),
+            group: None,
             partition: Partition::new(3),
             message_from: 11,
             event_from: 17,
@@ -828,15 +841,29 @@ mod tests {
             max_wait_ms: 250,
             reporter_node_id: None,
         };
-
-        let frame = try_encode(Op::ReplicationRead, 13, &msg).unwrap();
-        assert_eq!(frame.opcode, Op::ReplicationRead as u16);
-        assert_eq!(try_decode::<ReplicationRead>(&frame).unwrap(), msg);
+        let frame = try_encode(Op::StreamReplicationRead, 13, &msg).unwrap();
+        assert_eq!(frame.opcode, Op::StreamReplicationRead as u16);
+        assert_eq!(try_decode::<StreamReplicationRead>(&frame).unwrap(), msg);
+        // The queue op refuses the stream body type.
+        assert!(try_encode(Op::QueueReplicationRead, 13, &msg).is_err());
     }
 
     #[test]
     fn replication_read_ok_roundtrips_batches() {
-        let msg = ReplicationReadOk {
+        let queue: QueueReplicationReadOk = ReplicationEventRead::Batch {
+            epoch: 4,
+            requested_offset: 20,
+            next_offset: 21,
+            records: vec![ReplicationEventRecord {
+                offset: 20,
+                payload: b"event".to_vec(),
+            }],
+        };
+        let frame = try_encode(Op::QueueReplicationReadOk, 14, &queue).unwrap();
+        assert_eq!(frame.opcode, Op::QueueReplicationReadOk as u16);
+        assert_eq!(try_decode::<QueueReplicationReadOk>(&frame).unwrap(), queue);
+
+        let msg = StreamReplicationReadOk {
             messages: ReplicationMessageRead::Batch {
                 epoch: 4,
                 requested_offset: 10,
@@ -856,20 +883,11 @@ mod tests {
                     },
                 ],
             },
-            events: ReplicationEventRead::Batch {
-                epoch: 4,
-                requested_offset: 20,
-                next_offset: 21,
-                records: vec![ReplicationEventRecord {
-                    offset: 20,
-                    payload: b"event".to_vec(),
-                }],
-            },
+            events: queue,
         };
-
-        let frame = try_encode(Op::ReplicationReadOk, 14, &msg).unwrap();
-        assert_eq!(frame.opcode, Op::ReplicationReadOk as u16);
-        assert_eq!(try_decode::<ReplicationReadOk>(&frame).unwrap(), msg);
+        let frame = try_encode(Op::StreamReplicationReadOk, 14, &msg).unwrap();
+        assert_eq!(frame.opcode, Op::StreamReplicationReadOk as u16);
+        assert_eq!(try_decode::<StreamReplicationReadOk>(&frame).unwrap(), msg);
     }
 
     #[test]
@@ -880,55 +898,29 @@ mod tests {
             head_offset: 10,
             next_offset: 20,
         };
-        let msg = ReplicationReadOk {
+        let queue: QueueReplicationReadOk =
+            ReplicationEventRead::CheckpointRequired(checkpoint.clone());
+        let frame = try_encode(Op::QueueReplicationReadOk, 15, &queue).unwrap();
+        assert_eq!(try_decode::<QueueReplicationReadOk>(&frame).unwrap(), queue);
+
+        let msg = StreamReplicationReadOk {
             messages: ReplicationMessageRead::CheckpointRequired(checkpoint.clone()),
             events: ReplicationEventRead::CheckpointRequired(checkpoint),
         };
-
-        let frame = try_encode(Op::ReplicationReadOk, 15, &msg).unwrap();
-        assert_eq!(frame.opcode, Op::ReplicationReadOk as u16);
-        assert_eq!(try_decode::<ReplicationReadOk>(&frame).unwrap(), msg);
+        let frame = try_encode(Op::StreamReplicationReadOk, 15, &msg).unwrap();
+        assert_eq!(frame.opcode, Op::StreamReplicationReadOk as u16);
+        assert_eq!(try_decode::<StreamReplicationReadOk>(&frame).unwrap(), msg);
     }
 
     #[test]
-    fn replication_apply_roundtrips() {
-        let msg = ReplicationApply {
-            topic: "orders".into(),
-            group: Some("workers".into()),
-            partition: Partition::new(3),
-            messages: Some(ReplicationMessageApplyBatch {
-                epoch: 4,
-                records: vec![ReplicationMessageRecord {
-                    offset: 10,
-                    flags: 0,
-                    headers: b"headers".to_vec(),
-                    payload: b"payload".to_vec(),
-                }],
-            }),
-            events: Some(ReplicationEventApplyBatch {
-                epoch: 4,
-                records: vec![ReplicationEventRecord {
-                    offset: 20,
-                    payload: b"event".to_vec(),
-                }],
-            }),
+    fn queue_push_progress_encodes_through_the_helper() {
+        let msg = QueuePushProgress {
+            durable_next: 9,
+            credit_add_bytes: 100,
         };
-
-        let frame = try_encode(Op::ReplicationApply, 16, &msg).unwrap();
-        assert_eq!(frame.opcode, Op::ReplicationApply as u16);
-        assert_eq!(try_decode::<ReplicationApply>(&frame).unwrap(), msg);
-    }
-
-    #[test]
-    fn replication_apply_ok_roundtrips_applied() {
-        let msg = ReplicationApplyOk {
-            messages_applied: true,
-            events_applied: true,
-        };
-
-        let frame = try_encode(Op::ReplicationApplyOk, 18, &msg).unwrap();
-        assert_eq!(frame.opcode, Op::ReplicationApplyOk as u16);
-        assert_eq!(try_decode::<ReplicationApplyOk>(&frame).unwrap(), msg);
+        let frame = try_encode(Op::QueuePushProgress, 16, &msg).unwrap();
+        assert_eq!(frame.opcode, Op::QueuePushProgress as u16);
+        assert_eq!(crate::wire::decode_queue_push_progress(&frame).unwrap(), msg);
     }
 
     #[test]

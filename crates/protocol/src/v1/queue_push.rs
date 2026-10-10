@@ -1,73 +1,71 @@
-//! Owner side of credit-based streaming replication.
+//! Credit-based queue push replication.
 //!
-//! On `ReplicationStreamStart` the connection spawns one [`run_owner_replication_stream`]
-//! task per stream. The task holds a cursor and a byte-denominated send budget
-//! (credit), reads offset-ordered batches from the owner log (long-polling so it
-//! wakes on new publishes), and pushes them to the follower as `ReplicationStreamBatch`
-//! frames until the credit is exhausted. The follower refills credit and reports
-//! durable progress through [`OwnerStreamControl::Progress`], rewinds the cursor
-//! through [`OwnerStreamControl::Reset`], and closes with [`OwnerStreamControl::Stop`].
+//! On `QueuePushStart` the connection spawns one [`run_owner_queue_push`] task
+//! per push. The task holds a cursor in the single queue log and a
+//! byte-denominated send budget (credit), reads offset-ordered batches
+//! (long-polling so it wakes on new publishes), and pushes them to the
+//! follower as `QueuePushBatch` frames until the credit is exhausted. The
+//! follower refills credit and reports durable progress through
+//! [`OwnerPushControl::Progress`], rewinds the cursor through
+//! [`OwnerPushControl::Reset`], and closes with [`OwnerPushControl::Stop`].
 //!
-//! The batch payload reuses the pull `ReplicationReadOk` body, so this is a
-//! transport change, not a storage or apply change.
+//! The batch payload is the pull `QueueReplicationReadOk` body, so this is a
+//! transport choice, not a storage or apply change.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::{StreamExt, stream::BoxStream};
 use fibril_broker::replication::StreamApplyTunablesFn;
+use futures::{StreamExt, stream::BoxStream};
 use tokio::sync::mpsc;
 
 use crate::v1::{
-    Partition, ReplicationEventRead, ReplicationMessageRead, ReplicationReadOk,
-    ReplicationStreamEnd, ReplicationStreamStart, frame::Frame, wire,
+    Partition, QueuePushEnd, QueuePushStart, QueueReplicationReadOk, ReplicationEventRead,
+    frame::Frame, wire,
 };
 
-/// `ReplicationStreamEnd.code` values.
-pub const STREAM_END_CLOSED: u16 = 0;
-pub const STREAM_END_ERROR: u16 = 1;
-pub const STREAM_END_CHECKPOINT_REQUIRED: u16 = 2;
+/// `QueuePushEnd.code` values.
+pub const PUSH_END_CLOSED: u16 = 0;
+pub const PUSH_END_ERROR: u16 = 1;
+pub const PUSH_END_CHECKPOINT_REQUIRED: u16 = 2;
 
 /// Control messages from the connection's frame dispatch to a running owner
-/// stream sender.
+/// push sender.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OwnerStreamControl {
+pub enum OwnerPushControl {
     /// Follower reported durable progress and refilled the send budget.
     Progress {
-        durable_message_next: u64,
-        durable_event_next: u64,
+        durable_next: u64,
         credit_add_bytes: u64,
     },
-    /// Follower asked to rewind the stream cursor (gap or post-checkpoint).
-    Reset { message_from: u64, event_from: u64 },
-    /// Follower closed the stream.
+    /// Follower asked to rewind the push cursor (gap or post-checkpoint).
+    Reset { from: u64 },
+    /// Follower closed the push.
     Stop,
 }
 
 /// What the owner sender needs from the broker. A trait so the send loop is
 /// unit-testable without a live engine.
 #[async_trait]
-pub trait OwnerStreamSource: Send + Sync + 'static {
+pub trait OwnerPushSource: Send + Sync + 'static {
     /// Snapshot live read limits once per batch. Test sources may use the
-    /// configuration supplied when the stream starts.
-    fn stream_config(&self) -> Option<OwnerStreamConfig> {
+    /// configuration supplied when the push starts.
+    fn push_config(&self) -> Option<OwnerPushConfig> {
         None
     }
 
-    /// Read the next offset-ordered batch from the owner log. `max_wait_ms`
-    /// long-polls so a caught-up stream wakes on the next publish.
+    /// Read the next offset-ordered batch from the queue log. `max_wait_ms`
+    /// long-polls so a caught-up push wakes on the next publish.
     async fn read(
         &self,
         topic: &str,
         partition: Partition,
         group: Option<&str>,
-        message_from: u64,
-        event_from: u64,
-        max_messages: usize,
-        max_events: usize,
+        from: u64,
+        max_records: usize,
         max_bytes: usize,
         max_wait_ms: u64,
-    ) -> Result<ReplicationReadOk, String>;
+    ) -> Result<QueueReplicationReadOk, String>;
 
     /// Record the follower's durable progress (drives the publish-confirm gate
     /// and the replica-durable visibility watermark).
@@ -77,27 +75,24 @@ pub trait OwnerStreamSource: Send + Sync + 'static {
         partition: Partition,
         group: Option<&str>,
         reporter: &str,
-        durable_message_next: u64,
-        durable_event_next: u64,
+        durable_next: u64,
     );
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct OwnerStreamConfig {
-    pub max_messages: usize,
-    pub max_events: usize,
-    /// Approximate per-read byte budget, independent of credit. Oversized
-    /// records and accompanying events can exceed it to preserve progress.
+pub struct OwnerPushConfig {
+    pub max_records: usize,
+    /// Approximate per-read byte budget, independent of credit. An oversized
+    /// record can exceed it to preserve progress.
     pub max_batch_bytes: usize,
     /// Long-poll budget for a caught-up read.
     pub long_poll_ms: u64,
 }
 
-impl Default for OwnerStreamConfig {
+impl Default for OwnerPushConfig {
     fn default() -> Self {
         Self {
-            max_messages: 2048,
-            max_events: 2048,
+            max_records: 2048,
             max_batch_bytes: 8 * 1024 * 1024,
             long_poll_ms: 1_000,
         }
@@ -106,12 +101,12 @@ impl Default for OwnerStreamConfig {
 
 /// A read may exceed its budget to make progress on an oversized record.
 /// Keep that excess as debt so returning the batch cannot grow the window.
-struct StreamCredit {
+struct PushCredit {
     available: u64,
     debt: u64,
 }
 
-impl StreamCredit {
+impl PushCredit {
     fn new(available: u64) -> Self {
         Self { available, debt: 0 }
     }
@@ -131,117 +126,71 @@ impl StreamCredit {
 
 enum BatchOutcome {
     /// Deliverable records: their total bytes and the advanced cursor.
-    Records {
-        bytes: u64,
-        message_next: u64,
-        event_next: u64,
-    },
+    Records { bytes: u64, next: u64 },
     /// Nothing available right now (caught up / long-poll timeout).
     Empty,
     /// The owner cannot serve from here without a checkpoint (offset gap).
     CheckpointRequired,
 }
 
-fn message_side(read: &ReplicationMessageRead) -> Option<(u64, u64)> {
-    match read {
-        ReplicationMessageRead::Batch {
-            next_offset,
-            records,
-            ..
-        } => {
-            let bytes = records
-                .iter()
-                .map(|r| (r.headers.len() + r.payload.len()) as u64)
-                .sum();
-            Some((*next_offset, bytes))
+/// Payload bytes of a batch. A checkpoint requirement carries none.
+pub(crate) fn batch_bytes(batch: &QueueReplicationReadOk) -> u64 {
+    match batch {
+        ReplicationEventRead::Batch { records, .. } => {
+            records.iter().map(|r| r.payload.len() as u64).sum()
         }
-        ReplicationMessageRead::CheckpointRequired(_) => None,
+        ReplicationEventRead::CheckpointRequired(_) => 0,
     }
 }
 
-fn event_side(read: &ReplicationEventRead) -> Option<(u64, u64)> {
-    match read {
+fn classify(batch: &QueueReplicationReadOk) -> BatchOutcome {
+    match batch {
+        ReplicationEventRead::CheckpointRequired(_) => BatchOutcome::CheckpointRequired,
+        ReplicationEventRead::Batch { next_offset, .. } => match batch_bytes(batch) {
+            0 => BatchOutcome::Empty,
+            bytes => BatchOutcome::Records {
+                bytes,
+                next: *next_offset,
+            },
+        },
+    }
+}
+
+/// Epoch and exclusive end of a batch, or None for a checkpoint requirement.
+fn frame_tail(frame: &QueueReplicationReadOk) -> Option<(u64, u64)> {
+    match frame {
         ReplicationEventRead::Batch {
-            next_offset,
-            records,
-            ..
-        } => {
-            let bytes = records.iter().map(|r| r.payload.len() as u64).sum();
-            Some((*next_offset, bytes))
-        }
+            epoch, next_offset, ..
+        } => Some((*epoch, *next_offset)),
         ReplicationEventRead::CheckpointRequired(_) => None,
     }
 }
 
-fn classify(batch: &ReplicationReadOk) -> BatchOutcome {
-    let (Some((message_next, msg_bytes)), Some((event_next, evt_bytes))) =
-        (message_side(&batch.messages), event_side(&batch.events))
-    else {
-        return BatchOutcome::CheckpointRequired;
-    };
-    let bytes = msg_bytes + evt_bytes;
-    if bytes == 0 {
-        BatchOutcome::Empty
-    } else {
-        BatchOutcome::Records {
-            bytes,
-            message_next,
-            event_next,
-        }
+/// Epoch and first offset of a batch, or None for a checkpoint requirement.
+fn frame_start(frame: &QueueReplicationReadOk) -> Option<(u64, u64)> {
+    match frame {
+        ReplicationEventRead::Batch {
+            epoch,
+            requested_offset,
+            ..
+        } => Some((*epoch, *requested_offset)),
+        ReplicationEventRead::CheckpointRequired(_) => None,
     }
 }
 
-fn batch_bytes(batch: &ReplicationReadOk) -> u64 {
-    let msg = message_side(&batch.messages).map(|(_, b)| b).unwrap_or(0);
-    let evt = event_side(&batch.events).map(|(_, b)| b).unwrap_or(0);
-    msg + evt
-}
-
-/// Fold `next` into `acc` so the follower can apply (and fsync) several streamed
-/// frames as one batch. Succeeds only when both the message and event sides
-/// continue `acc` contiguously at the same epoch and neither side is a checkpoint
-/// frame. On success `acc` covers both frames; on failure `next` is handed back
-/// untouched so the caller applies `acc` and carries `next` to the next apply
-/// (this is how an epoch change, an offset gap, or a checkpoint frame stops a
-/// merge run without losing data).
-fn try_fold_streamed(
-    acc: &mut ReplicationReadOk,
-    next: ReplicationReadOk,
-) -> Result<(), ReplicationReadOk> {
-    let messages_continue = matches!(
-        (&acc.messages, &next.messages),
-        (
-            ReplicationMessageRead::Batch { epoch: ae, next_offset: an, .. },
-            ReplicationMessageRead::Batch { epoch: be, requested_offset: br, .. },
-        ) if ae == be && an == br
-    );
-    let events_continue = matches!(
-        (&acc.events, &next.events),
-        (
-            ReplicationEventRead::Batch { epoch: ae, next_offset: an, .. },
-            ReplicationEventRead::Batch { epoch: be, requested_offset: br, .. },
-        ) if ae == be && an == br
-    );
-    if !(messages_continue && events_continue) {
+/// Fold `next` into `acc` so the follower can apply (and fsync) several pushed
+/// frames as one batch. Succeeds only when `next` continues `acc` contiguously
+/// at the same epoch and neither is a checkpoint frame. On failure `next` is
+/// handed back untouched so the caller applies `acc` and carries `next` to the
+/// next apply (this is how an epoch change, an offset gap, or a checkpoint
+/// frame stops a merge run without losing data).
+fn try_fold_pushed(
+    acc: &mut QueueReplicationReadOk,
+    next: QueueReplicationReadOk,
+) -> Result<(), QueueReplicationReadOk> {
+    if frame_tail(acc).is_none() || frame_tail(acc) != frame_start(&next) {
         return Err(next);
     }
-
-    if let (
-        ReplicationMessageRead::Batch {
-            next_offset: an,
-            records: ar,
-            ..
-        },
-        ReplicationMessageRead::Batch {
-            next_offset: bn,
-            records: br,
-            ..
-        },
-    ) = (&mut acc.messages, next.messages)
-    {
-        ar.extend(br);
-        *an = bn;
-    }
     if let (
         ReplicationEventRead::Batch {
             next_offset: an,
@@ -253,7 +202,7 @@ fn try_fold_streamed(
             records: br,
             ..
         },
-    ) = (&mut acc.events, next.events)
+    ) = (acc, next)
     {
         ar.extend(br);
         *an = bn;
@@ -261,56 +210,43 @@ fn try_fold_streamed(
     Ok(())
 }
 
-/// Apply a control message. Returns `false` when the stream should stop.
-fn apply_control<S: OwnerStreamSource>(
-    control: OwnerStreamControl,
+/// Apply a control message. Returns `false` when the push should stop.
+fn apply_control<S: OwnerPushSource>(
+    control: OwnerPushControl,
     source: &S,
     topic: &str,
     partition: Partition,
     group: Option<&str>,
     reporter: Option<&str>,
-    credit: &mut StreamCredit,
-    message_from: &mut u64,
-    event_from: &mut u64,
+    credit: &mut PushCredit,
+    from: &mut u64,
 ) -> bool {
     match control {
-        OwnerStreamControl::Progress {
-            durable_message_next,
-            durable_event_next,
+        OwnerPushControl::Progress {
+            durable_next,
             credit_add_bytes,
         } => {
             credit.replenish(credit_add_bytes);
             if let Some(reporter) = reporter {
-                source.record_progress(
-                    topic,
-                    partition,
-                    group,
-                    reporter,
-                    durable_message_next,
-                    durable_event_next,
-                );
+                source.record_progress(topic, partition, group, reporter, durable_next);
             }
             true
         }
-        OwnerStreamControl::Reset {
-            message_from: m,
-            event_from: e,
-        } => {
-            *message_from = m;
-            *event_from = e;
+        OwnerPushControl::Reset { from: reset } => {
+            *from = reset;
             if let Some(reporter) = reporter {
-                source.record_progress(topic, partition, group, reporter, m, e);
+                source.record_progress(topic, partition, group, reporter, reset);
             }
             true
         }
-        OwnerStreamControl::Stop => false,
+        OwnerPushControl::Stop => false,
     }
 }
 
-async fn send_stream_end(frame_tx: &mpsc::Sender<Frame>, stream_id: u64, code: u16, message: &str) {
-    if let Ok(frame) = wire::encode_replication_stream_end(
-        stream_id,
-        &ReplicationStreamEnd {
+async fn send_push_end(frame_tx: &mpsc::Sender<Frame>, push_id: u64, code: u16, message: &str) {
+    if let Ok(frame) = wire::encode_queue_push_end(
+        push_id,
+        &QueuePushEnd {
             code,
             message: message.to_string(),
         },
@@ -319,47 +255,164 @@ async fn send_stream_end(frame_tx: &mpsc::Sender<Frame>, stream_id: u64, code: u
     }
 }
 
+/// Drive one owner queue push until the follower stops it, the connection
+/// drops, or a fatal read error. The frame `request_id` of every pushed batch
+/// is `push_id`.
+pub async fn run_owner_queue_push<S: OwnerPushSource>(
+    source: Arc<S>,
+    frame_tx: mpsc::Sender<Frame>,
+    push_id: u64,
+    start: QueuePushStart,
+    mut control_rx: mpsc::Receiver<OwnerPushControl>,
+    cfg: OwnerPushConfig,
+) {
+    let topic = start.topic;
+    let group = start.group;
+    let partition = start.partition;
+    let reporter = start.reporter_node_id;
+    let mut from = start.from;
+    let mut credit = PushCredit::new(start.credit_bytes);
+
+    'push: loop {
+        // Out of budget: park until the follower refills (or stops / drops).
+        if credit.available == 0 {
+            match control_rx.recv().await {
+                Some(control) => {
+                    if !apply_control(
+                        control,
+                        source.as_ref(),
+                        &topic,
+                        partition,
+                        group.as_deref(),
+                        reporter.as_deref(),
+                        &mut credit,
+                        &mut from,
+                    ) {
+                        break 'push;
+                    }
+                    continue 'push;
+                }
+                None => break 'push,
+            }
+        }
+
+        let cfg = source.push_config().unwrap_or(cfg);
+        let max_bytes = credit.available.min(cfg.max_batch_bytes as u64) as usize;
+        let read = source.read(
+            &topic,
+            partition,
+            group.as_deref(),
+            from,
+            cfg.max_records,
+            max_bytes,
+            cfg.long_poll_ms,
+        );
+
+        tokio::pin!(read);
+        loop {
+            tokio::select! {
+                // Progress only updates credit and durable acknowledgements. Keep
+                // the scan alive across progress so its blocking storage work is not
+                // discarded and restarted. Reset and stop still cancel promptly.
+                control = control_rx.recv() => {
+                    match control {
+                        Some(control) => {
+                            let reset = matches!(control, OwnerPushControl::Reset { .. });
+                            if !apply_control(
+                                control,
+                                source.as_ref(),
+                                &topic,
+                                partition,
+                                group.as_deref(),
+                                reporter.as_deref(),
+                                &mut credit,
+                                &mut from,
+                            ) {
+                                break 'push;
+                            }
+                            if reset {
+                                continue 'push;
+                            }
+                        }
+                        None => break 'push,
+                    }
+                }
+                result = &mut read => {
+                    match result {
+                        Ok(batch) => match classify(&batch) {
+                            BatchOutcome::Empty => continue 'push,
+                            BatchOutcome::CheckpointRequired => {
+                                send_push_end(
+                                    &frame_tx,
+                                    push_id,
+                                    PUSH_END_CHECKPOINT_REQUIRED,
+                                    "checkpoint required",
+                                )
+                                .await;
+                                break 'push;
+                            }
+                            BatchOutcome::Records { bytes, next } => {
+                                let frame = match wire::encode_queue_push_batch(push_id, &batch) {
+                                    Ok(frame) => frame,
+                                    Err(err) => {
+                                        send_push_end(&frame_tx, push_id, PUSH_END_ERROR, &err.to_string()).await;
+                                        break 'push;
+                                    }
+                                };
+                                if frame_tx.send(frame).await.is_err() {
+                                    break 'push;
+                                }
+                                from = next;
+                                credit.consume(bytes);
+                                continue 'push;
+                            }
+                        },
+                        Err(err) => {
+                            send_push_end(&frame_tx, push_id, PUSH_END_ERROR, &err).await;
+                            break 'push;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Follower side: the applier loop.
 // ---------------------------------------------------------------------------
 
-/// Control the follower needs to send back to the owner as it applies. The
-/// transport encodes these to `ReplicationStreamProgress` / `ReplicationStreamReset`
-/// frames on the stream.
+/// Control the follower sends back to the owner as it applies. The transport
+/// encodes these to `QueuePushProgress` / `QueuePushReset` frames.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FollowerStreamControl {
+pub enum FollowerPushControl {
     /// Durable progress plus a credit refill (combined). Sent per applied batch
     /// so progress is prompt (confirm latency) and the budget stays topped up.
     Progress {
-        durable_message_next: u64,
-        durable_event_next: u64,
+        durable_next: u64,
         credit_add_bytes: u64,
     },
-    /// Rewind the owner stream cursor (the follower handled a checkpoint).
-    Reset { message_from: u64, event_from: u64 },
+    /// Rewind the owner push cursor (the follower handled a checkpoint).
+    Reset { from: u64 },
 }
 
-/// Outcome of durably applying one streamed batch.
+/// Outcome of durably applying one pushed batch.
 pub enum FollowerApplyOutcome {
-    /// Applied durably; here is the new durable cursor and the bytes applied
+    /// Applied durably; here is the new durable log end and the bytes applied
     /// (the credit to return).
-    Applied {
-        durable_message_next: u64,
-        durable_event_next: u64,
-        bytes: u64,
-    },
-    /// The batch needs a checkpoint (offset gap / epoch fence). The stream stops
+    Applied { durable_next: u64, bytes: u64 },
+    /// The batch needs a checkpoint (offset gap / epoch fence). The push stops
     /// so the worker can fall back to the proven pull+checkpoint path, then
-    /// re-stream from the post-checkpoint cursor.
+    /// push again from the post-checkpoint cursor.
     CheckpointRequired,
     /// Fatal apply error; the applier stops.
     Error(String),
 }
 
-/// Why a follower stream applier loop ended.
+/// Why a follower push applier loop ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplierExit {
-    /// The reader closed the batch channel (stream torn down upstream).
+    /// The reader closed the batch channel (push torn down upstream).
     ReaderClosed,
     /// An apply needs a checkpoint; the caller should fall back to pull.
     CheckpointRequired,
@@ -370,30 +423,31 @@ pub enum ApplierExit {
 /// What the follower applier does with a received batch. A trait so the loop is
 /// unit-testable without a live engine.
 #[async_trait]
-pub trait FollowerStreamSink: Send + Sync + 'static {
-    async fn apply_open(&self, _frames: BoxStream<'_, ReplicationReadOk>) -> FollowerApplyOutcome {
+pub trait FollowerPushSink: Send + Sync + 'static {
+    async fn apply_open(
+        &self,
+        _frames: BoxStream<'_, QueueReplicationReadOk>,
+    ) -> FollowerApplyOutcome {
         FollowerApplyOutcome::Error("open follower batches unsupported".into())
     }
-    async fn apply(&self, batch: ReplicationReadOk) -> FollowerApplyOutcome;
+    async fn apply(&self, batch: QueueReplicationReadOk) -> FollowerApplyOutcome;
 }
 
 /// Drain in-order batches from the reader and apply them durably, sending a
-/// combined progress+credit refill after each one (and a reset when the sink
-/// handled a checkpoint). Ends when the reader channel closes (stream torn down)
-/// or an apply error occurs. The reader feeds `batch_rx`; the transport encodes
-/// `control_tx` items to frames.
+/// combined progress+credit refill after each one. Ends when the reader channel
+/// closes (push torn down) or an apply error occurs. The reader feeds
+/// `batch_rx`; the transport encodes `control_tx` items to frames.
 ///
-/// `message_from`/`event_from` is the starting durable cursor. When no batch
-/// arrives within `keepalive` (the follower is caught up), a zero-credit progress
-/// frame is sent so the owner's in-sync freshness check stays satisfied for an
+/// `from` is the starting durable cursor. When no batch arrives within
+/// `keepalive` (the follower is caught up), a zero-credit progress frame is
+/// sent so the owner's in-sync freshness check stays satisfied for an
 /// idle-but-current follower (the pull path gets this for free via caught-up
 /// polling). `keepalive` of zero disables the keepalive.
-pub async fn run_follower_stream_applier<S: FollowerStreamSink>(
+pub async fn run_follower_push_applier<S: FollowerPushSink>(
     sink: Arc<S>,
-    batch_rx: mpsc::Receiver<ReplicationReadOk>,
-    control_tx: mpsc::Sender<FollowerStreamControl>,
-    message_from: u64,
-    event_from: u64,
+    batch_rx: mpsc::Receiver<QueueReplicationReadOk>,
+    control_tx: mpsc::Sender<FollowerPushControl>,
+    from: u64,
     tunables: StreamApplyTunablesFn,
 ) -> ApplierExit {
     #[cfg(feature = "fixed-coalesce-deadline-experiment")]
@@ -405,12 +459,11 @@ pub async fn run_follower_stream_applier<S: FollowerStreamSink>(
     };
     #[cfg(not(feature = "fixed-coalesce-deadline-experiment"))]
     let deadline_policy = false;
-    run_follower_stream_applier_with_policy(
+    run_follower_push_applier_with_policy(
         sink,
         batch_rx,
         control_tx,
-        message_from,
-        event_from,
+        from,
         tunables,
         deadline_policy,
         open_batch_policy(),
@@ -433,20 +486,12 @@ fn open_batch_policy() -> u8 {
     { 0 }
 }
 
-fn frame_tail(frame: &ReplicationReadOk) -> Option<(u64, u64, u64, u64)> {
-    match (&frame.messages, &frame.events) {
-        (ReplicationMessageRead::Batch { epoch: m, next_offset: mn, .. },
-         ReplicationEventRead::Batch { epoch: e, next_offset: en, .. }) => Some((*m, *mn, *e, *en)),
-        _ => None,
-    }
-}
-
 /// Input is polled by storage after each frame is staged, keeping one recovery
 /// guard across the open group. No record clones and no detached apply task.
 struct OpenBatchInput<'a> {
-    first: Option<ReplicationReadOk>,
-    rx: &'a mut mpsc::Receiver<ReplicationReadOk>,
-    carry: &'a mut Option<ReplicationReadOk>,
+    first: Option<QueueReplicationReadOk>,
+    rx: &'a mut mpsc::Receiver<QueueReplicationReadOk>,
+    carry: &'a mut Option<QueueReplicationReadOk>,
     deadline: tokio::time::Instant,
     linger: std::time::Duration,
     deadline_policy: bool,
@@ -454,11 +499,11 @@ struct OpenBatchInput<'a> {
     drain_only: bool,
     bytes: u64,
     limit: u64,
-    tail: Option<(u64, u64, u64, u64)>,
+    tail: Option<(u64, u64)>,
 }
 
 impl OpenBatchInput<'_> {
-    async fn next(&mut self) -> Option<ReplicationReadOk> {
+    async fn next(&mut self) -> Option<QueueReplicationReadOk> {
         let frame = if let Some(first) = self.first.take() {
             first
         } else {
@@ -477,11 +522,7 @@ impl OpenBatchInput<'_> {
                 }
                 Err(mpsc::error::TryRecvError::Empty) => None,
             }?;
-            let continues = match (&next.messages, &next.events, self.tail) {
-                (ReplicationMessageRead::Batch { epoch: m, requested_offset: mn, .. },
-                 ReplicationEventRead::Batch { epoch: e, requested_offset: en, .. }, Some(tail)) => (*m, *mn, *e, *en) == tail,
-                _ => false,
-            };
+            let continues = self.tail.is_some() && frame_start(&next) == self.tail;
             if !continues { *self.carry = Some(next); return None; }
             next
         };
@@ -491,17 +532,16 @@ impl OpenBatchInput<'_> {
     }
 }
 
-async fn run_follower_stream_applier_with_policy<S: FollowerStreamSink>(
+async fn run_follower_push_applier_with_policy<S: FollowerPushSink>(
     sink: Arc<S>,
-    mut batch_rx: mpsc::Receiver<ReplicationReadOk>,
-    control_tx: mpsc::Sender<FollowerStreamControl>,
-    message_from: u64,
-    event_from: u64,
+    mut batch_rx: mpsc::Receiver<QueueReplicationReadOk>,
+    control_tx: mpsc::Sender<FollowerPushControl>,
+    from: u64,
     tunables: StreamApplyTunablesFn,
     deadline_policy: bool,
     open_policy: u8,
 ) -> ApplierExit {
-    // Microbatch the apply: streamed frames arrive small (the owner reads whatever
+    // Microbatch the apply: pushed frames arrive small (the owner reads whatever
     // has trickled in), and applying each one separately means one follower fsync
     // per frame, which collapses durable-replication throughput on real disk. So
     // fold contiguous same-epoch frames into one apply. Under backlog the queued
@@ -514,13 +554,12 @@ async fn run_follower_stream_applier_with_policy<S: FollowerStreamSink>(
     // setting stream_apply_max_merge_bytes): caps how large a coalesced apply can
     // grow, i.e. peak memory vs fsync-amortization. Pairs with apply_linger.
 
-    let mut message_next = message_from;
-    let mut event_next = event_from;
-    let mut carry: Option<ReplicationReadOk> = None;
+    let mut next = from;
+    let mut carry: Option<QueueReplicationReadOk> = None;
     let mut drain_continuation = false;
     loop {
         // Read the tunables LIVE each iteration (not captured once at start), so a
-        // runtime-settings change takes effect on the next apply with no stream
+        // runtime-settings change takes effect on the next apply with no push
         // restart.
         let knobs = tunables();
         let keepalive = std::time::Duration::from_millis(knobs.keepalive_ms);
@@ -533,7 +572,7 @@ async fn run_follower_stream_applier_with_policy<S: FollowerStreamSink>(
         let first = match carry.take() {
             Some(batch) => batch,
             None => {
-                let received: Result<Option<ReplicationReadOk>, ()> = if keepalive.is_zero() {
+                let received: Result<Option<QueueReplicationReadOk>, ()> = if keepalive.is_zero() {
                     Ok(batch_rx.recv().await)
                 } else {
                     tokio::time::timeout(keepalive, batch_rx.recv())
@@ -546,9 +585,8 @@ async fn run_follower_stream_applier_with_policy<S: FollowerStreamSink>(
                     Err(()) => {
                         // Caught-up keepalive: refresh durable progress, no credit.
                         if control_tx
-                            .send(FollowerStreamControl::Progress {
-                                durable_message_next: message_next,
-                                durable_event_next: event_next,
+                            .send(FollowerPushControl::Progress {
+                                durable_next: next,
                                 credit_add_bytes: 0,
                             })
                             .await
@@ -562,7 +600,7 @@ async fn run_follower_stream_applier_with_policy<S: FollowerStreamSink>(
             }
         };
 
-        // Retain epochs for matching a queued continuation to the completed
+        // Retain the epoch for matching a queued continuation to the completed
         // history. A carried epoch/gap boundary starts ordinary collection.
         let applied_history = frame_tail(&first);
         let outcome = if matches!(open_policy, 1 | 3) && applied_history.is_some() {
@@ -591,7 +629,7 @@ async fn run_follower_stream_applier_with_policy<S: FollowerStreamSink>(
             {
                 break;
             }
-            let next = match batch_rx.try_recv() {
+            let received = match batch_rx.try_recv() {
                 Ok(batch) => Some(batch),
                 Err(mpsc::error::TryRecvError::Empty) => {
                     if apply_linger.is_zero() {
@@ -615,8 +653,8 @@ async fn run_follower_stream_applier_with_policy<S: FollowerStreamSink>(
                 }
                 Err(mpsc::error::TryRecvError::Disconnected) => None,
             };
-            match next {
-                Some(batch) => match try_fold_streamed(&mut merged, batch) {
+            match received {
+                Some(batch) => match try_fold_pushed(&mut merged, batch) {
                     Ok(()) => continue,
                     Err(unmerged) => {
                         carry = Some(unmerged);
@@ -635,12 +673,10 @@ async fn run_follower_stream_applier_with_policy<S: FollowerStreamSink>(
         };
         match outcome {
             FollowerApplyOutcome::Applied {
-                durable_message_next,
-                durable_event_next,
+                durable_next,
                 bytes,
             } => {
-                message_next = durable_message_next;
-                event_next = durable_event_next;
+                next = durable_next;
                 // Snapshot readiness immediately after successful application.
                 // Waiting for progress-channel capacity must not turn a later
                 // arrival into proof of backlog at the completion boundary.
@@ -650,18 +686,14 @@ async fn run_follower_stream_applier_with_policy<S: FollowerStreamSink>(
                         carry = batch_rx.try_recv().ok();
                     }
                     drain_continuation = matches!(
-                        (carry.as_ref(), applied_history),
-                        (Some(ReplicationReadOk {
-                            messages: ReplicationMessageRead::Batch { epoch: m, requested_offset: mn, .. },
-                            events: ReplicationEventRead::Batch { epoch: e, requested_offset: en, .. },
-                        }), Some((me, _, ee, _)))
-                        if (*m, *mn, *e, *en) == (me, message_next, ee, event_next)
+                        (carry.as_ref().and_then(frame_start), applied_history),
+                        (Some((epoch, start)), Some((applied_epoch, _)))
+                            if (epoch, start) == (applied_epoch, next)
                     );
                 }
                 if control_tx
-                    .send(FollowerStreamControl::Progress {
-                        durable_message_next,
-                        durable_event_next,
+                    .send(FollowerPushControl::Progress {
+                        durable_next,
                         credit_add_bytes: bytes,
                     })
                     .await
@@ -681,7 +713,7 @@ async fn run_follower_stream_applier_with_policy<S: FollowerStreamSink>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v1::ReplicationMessageRecord;
+    use crate::v1::ReplicationEventRecord;
     use fibril_broker::replication::StreamApplyTunables;
     use std::sync::Mutex;
     use std::time::Duration;
@@ -701,21 +733,21 @@ mod tests {
         })
     }
 
-    /// A mock log of `total` message records (REC_BYTES each, offsets 0..total)
-    /// and no events. Each read returns the records from `message_from` that fit
+    /// A mock queue log of `total` records (REC_BYTES each, offsets 0..total).
+    /// Each read returns the records from `from` that fit
     /// in `max_bytes`; a caught-up read sleeps for the long-poll then returns
     /// empty (so the loop parks but the select still reacts to control).
     struct MockSource {
         total: u64,
-        progress: Mutex<Vec<(u64, u64)>>,
-        config: Mutex<Option<OwnerStreamConfig>>,
-        reads: Mutex<Vec<(usize, usize, usize, u64)>>,
+        progress: Mutex<Vec<u64>>,
+        config: Mutex<Option<OwnerPushConfig>>,
+        reads: Mutex<Vec<(usize, usize, u64)>>,
         read_gate: Option<Arc<tokio::sync::Semaphore>>,
     }
 
     #[async_trait]
-    impl OwnerStreamSource for MockSource {
-        fn stream_config(&self) -> Option<OwnerStreamConfig> {
+    impl OwnerPushSource for MockSource {
+        fn push_config(&self) -> Option<OwnerPushConfig> {
             *self.config.lock().unwrap()
         }
 
@@ -724,31 +756,27 @@ mod tests {
             _topic: &str,
             _partition: Partition,
             _group: Option<&str>,
-            message_from: u64,
-            event_from: u64,
-            max_messages: usize,
-            max_events: usize,
+            from: u64,
+            max_records: usize,
             max_bytes: usize,
             max_wait_ms: u64,
-        ) -> Result<ReplicationReadOk, String> {
+        ) -> Result<QueueReplicationReadOk, String> {
             self.reads
                 .lock()
                 .unwrap()
-                .push((max_messages, max_events, max_bytes, max_wait_ms));
+                .push((max_records, max_bytes, max_wait_ms));
             if let Some(gate) = &self.read_gate {
                 gate.acquire().await.unwrap().forget();
             }
             let mut records = Vec::new();
-            let mut off = message_from;
+            let mut off = from;
             let mut bytes = 0u64;
             while off < self.total
-                && records.len() < max_messages
+                && records.len() < max_records
                 && (records.is_empty() || bytes + REC_BYTES <= max_bytes as u64)
             {
-                records.push(ReplicationMessageRecord {
+                records.push(ReplicationEventRecord {
                     offset: off,
-                    flags: 0,
-                    headers: Vec::new(),
                     payload: vec![0u8; REC_BYTES as usize],
                 });
                 bytes += REC_BYTES;
@@ -757,19 +785,11 @@ mod tests {
             if records.is_empty() {
                 tokio::time::sleep(Duration::from_millis(max_wait_ms.min(50))).await;
             }
-            Ok(ReplicationReadOk {
-                messages: ReplicationMessageRead::Batch {
-                    epoch: 1,
-                    requested_offset: message_from,
-                    next_offset: off,
-                    records,
-                },
-                events: ReplicationEventRead::Batch {
-                    epoch: 1,
-                    requested_offset: event_from,
-                    next_offset: event_from,
-                    records: Vec::new(),
-                },
+            Ok(ReplicationEventRead::Batch {
+                epoch: 1,
+                requested_offset: from,
+                next_offset: off,
+                records,
             })
         }
 
@@ -779,33 +799,27 @@ mod tests {
             _partition: Partition,
             _group: Option<&str>,
             _reporter: &str,
-            durable_message_next: u64,
-            durable_event_next: u64,
+            durable_next: u64,
         ) {
-            self.progress
-                .lock()
-                .unwrap()
-                .push((durable_message_next, durable_event_next));
+            self.progress.lock().unwrap().push(durable_next);
         }
     }
 
-    fn start(credit_bytes: u64) -> ReplicationStreamStart {
-        ReplicationStreamStart {
+    fn start(credit_bytes: u64) -> QueuePushStart {
+        QueuePushStart {
             reporter_epoch: None,
             topic: "orders".into(),
             group: None,
             partition: Partition::new(0),
-            message_from: 0,
-            event_from: 0,
+            from: 0,
             credit_bytes,
             reporter_node_id: Some("broker-2".into()),
         }
     }
 
-    fn cfg() -> OwnerStreamConfig {
-        OwnerStreamConfig {
-            max_messages: 1,
-            max_events: 1,
+    fn cfg() -> OwnerPushConfig {
+        OwnerPushConfig {
+            max_records: 1,
             max_batch_bytes: REC_BYTES as usize,
             long_poll_ms: 50,
         }
@@ -817,9 +831,9 @@ mod tests {
             let frame = tokio::time::timeout(Duration::from_secs(2), rx.recv())
                 .await
                 .expect("batch frame timed out")
-                .expect("stream sender closed early");
-            let batch = wire::decode_replication_stream_batch(&frame).unwrap();
-            if let ReplicationMessageRead::Batch { records, .. } = batch.messages {
+                .expect("push sender closed early");
+            let batch = wire::decode_queue_push_batch(&frame).unwrap();
+            if let ReplicationEventRead::Batch { records, .. } = batch {
                 for r in records {
                     offs.push(r.offset);
                 }
@@ -841,7 +855,7 @@ mod tests {
         let (control_tx, control_rx) = mpsc::channel(8);
 
         // Credit for exactly 2 records (max_batch_bytes = 1 record, so 2 batches).
-        let task = tokio::spawn(run_owner_replication_stream(
+        let task = tokio::spawn(run_owner_queue_push(
             source.clone(),
             frame_tx,
             7,
@@ -850,7 +864,7 @@ mod tests {
             cfg(),
         ));
 
-        // Two batches flow, then the stream parks (credit exhausted).
+        // Two batches flow, then the push parks (credit exhausted).
         assert_eq!(recv_offsets(&mut frame_rx, 2).await, vec![0, 1]);
         assert!(
             tokio::time::timeout(Duration::from_millis(200), frame_rx.recv())
@@ -861,17 +875,16 @@ mod tests {
 
         // Refill + progress: 3 more batches flow.
         control_tx
-            .send(OwnerStreamControl::Progress {
-                durable_message_next: 2,
-                durable_event_next: 0,
+            .send(OwnerPushControl::Progress {
+                durable_next: 2,
                 credit_add_bytes: 3 * REC_BYTES,
             })
             .await
             .unwrap();
         assert_eq!(recv_offsets(&mut frame_rx, 3).await, vec![2, 3, 4]);
-        assert_eq!(source.progress.lock().unwrap().as_slice(), &[(2, 0)]);
+        assert_eq!(source.progress.lock().unwrap().as_slice(), &[2]);
 
-        control_tx.send(OwnerStreamControl::Stop).await.unwrap();
+        control_tx.send(OwnerPushControl::Stop).await.unwrap();
         tokio::time::timeout(Duration::from_secs(2), task)
             .await
             .expect("sender did not stop")
@@ -892,7 +905,7 @@ mod tests {
 
         // Credit for exactly 3 records, so the sender sends 0,1,2 then parks.
         // That makes the reset deterministic (no batches race ahead of it).
-        let task = tokio::spawn(run_owner_replication_stream(
+        let task = tokio::spawn(run_owner_queue_push(
             source,
             frame_tx,
             1,
@@ -904,16 +917,14 @@ mod tests {
         assert_eq!(recv_offsets(&mut frame_rx, 3).await, vec![0, 1, 2]);
         // Rewind the cursor, then refill so it reads again from 0.
         control_tx
-            .send(OwnerStreamControl::Reset {
-                message_from: 0,
-                event_from: 0,
+            .send(OwnerPushControl::Reset {
+                from: 0,
             })
             .await
             .unwrap();
         control_tx
-            .send(OwnerStreamControl::Progress {
-                durable_message_next: 0,
-                durable_event_next: 0,
+            .send(OwnerPushControl::Progress {
+                durable_next: 0,
                 credit_add_bytes: REC_BYTES,
             })
             .await
@@ -921,7 +932,7 @@ mod tests {
         let after = recv_offsets(&mut frame_rx, 1).await;
         assert_eq!(after, vec![0], "reset must rewind the cursor to 0");
 
-        control_tx.send(OwnerStreamControl::Stop).await.unwrap();
+        control_tx.send(OwnerPushControl::Stop).await.unwrap();
         let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
     }
 
@@ -937,7 +948,7 @@ mod tests {
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
         let (control_tx, control_rx) = mpsc::channel(8);
         // One-and-a-half records of credit permits two records, then owes half.
-        let task = tokio::spawn(run_owner_replication_stream(
+        let task = tokio::spawn(run_owner_queue_push(
             source.clone(),
             frame_tx,
             1,
@@ -948,9 +959,8 @@ mod tests {
         assert_eq!(recv_offsets(&mut frame_rx, 2).await, vec![0, 1]);
         for offset in 2..6 {
             control_tx
-                .send(OwnerStreamControl::Progress {
-                    durable_message_next: offset,
-                    durable_event_next: 0,
+                .send(OwnerPushControl::Progress {
+                    durable_next: offset,
                     credit_add_bytes: REC_BYTES,
                 })
                 .await
@@ -963,20 +973,19 @@ mod tests {
             );
         }
         // Every returned record restores only half a record of available credit.
-        let budgets: Vec<_> = source.reads.lock().unwrap().iter().map(|r| r.2).collect();
+        let budgets: Vec<_> = source.reads.lock().unwrap().iter().map(|r| r.1).collect();
         assert_eq!(budgets, vec![100, 50, 50, 50, 50, 50]);
-        control_tx.send(OwnerStreamControl::Stop).await.unwrap();
+        control_tx.send(OwnerPushControl::Stop).await.unwrap();
         task.await.unwrap();
     }
 
     #[tokio::test]
-    async fn live_read_limits_apply_to_the_next_batch_on_an_existing_stream() {
+    async fn live_read_limits_apply_to_the_next_batch_on_an_existing_push() {
         let source = Arc::new(MockSource {
             total: 10,
             progress: Mutex::new(Vec::new()),
-            config: Mutex::new(Some(OwnerStreamConfig {
-                max_messages: 2,
-                max_events: 3,
+            config: Mutex::new(Some(OwnerPushConfig {
+                max_records: 2,
                 max_batch_bytes: 200,
                 long_poll_ms: 17,
             })),
@@ -985,7 +994,7 @@ mod tests {
         });
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
         let (control_tx, control_rx) = mpsc::channel(8);
-        let task = tokio::spawn(run_owner_replication_stream(
+        let task = tokio::spawn(run_owner_queue_push(
             source.clone(),
             frame_tx,
             1,
@@ -994,16 +1003,14 @@ mod tests {
             cfg(),
         ));
         assert_eq!(recv_offsets(&mut frame_rx, 1).await, vec![0, 1]);
-        *source.config.lock().unwrap() = Some(OwnerStreamConfig {
-            max_messages: 1,
-            max_events: 7,
+        *source.config.lock().unwrap() = Some(OwnerPushConfig {
+            max_records: 1,
             max_batch_bytes: 100,
             long_poll_ms: 23,
         });
         control_tx
-            .send(OwnerStreamControl::Progress {
-                durable_message_next: 2,
-                durable_event_next: 0,
+            .send(OwnerPushControl::Progress {
+                durable_next: 2,
                 credit_add_bytes: 200,
             })
             .await
@@ -1011,9 +1018,9 @@ mod tests {
         assert_eq!(recv_offsets(&mut frame_rx, 2).await, vec![2, 3]);
         assert_eq!(
             *source.reads.lock().unwrap(),
-            vec![(2, 3, 200, 17), (1, 7, 100, 23), (1, 7, 100, 23)]
+            vec![(2, 200, 17), (1, 100, 23), (1, 100, 23)]
         );
-        control_tx.send(OwnerStreamControl::Stop).await.unwrap();
+        control_tx.send(OwnerPushControl::Stop).await.unwrap();
         task.await.unwrap();
     }
 
@@ -1038,7 +1045,7 @@ mod tests {
         });
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
         let (control_tx, control_rx) = mpsc::channel(8);
-        let task = tokio::spawn(run_owner_replication_stream(
+        let task = tokio::spawn(run_owner_queue_push(
             source.clone(),
             frame_tx,
             1,
@@ -1049,9 +1056,8 @@ mod tests {
         until(|| source.reads.lock().unwrap().len() == 1).await;
         for count in 1..=3 {
             control_tx
-                .send(OwnerStreamControl::Progress {
-                    durable_message_next: 0,
-                    durable_event_next: 0,
+                .send(OwnerPushControl::Progress {
+                    durable_next: 0,
                     credit_add_bytes: 0,
                 })
                 .await
@@ -1066,18 +1072,16 @@ mod tests {
             "progress must not restart a scan"
         );
         control_tx
-            .send(OwnerStreamControl::Progress {
-                durable_message_next: 1,
-                durable_event_next: 0,
+            .send(OwnerPushControl::Progress {
+                durable_next: 1,
                 credit_add_bytes: REC_BYTES,
             })
             .await
             .unwrap();
         until(|| source.reads.lock().unwrap().len() == 2).await;
         control_tx
-            .send(OwnerStreamControl::Reset {
-                message_from: 4,
-                event_from: 0,
+            .send(OwnerPushControl::Reset {
+                from: 4,
             })
             .await
             .unwrap();
@@ -1085,15 +1089,14 @@ mod tests {
         gate.add_permits(1);
         assert_eq!(recv_offsets(&mut frame_rx, 1).await, vec![4]);
         control_tx
-            .send(OwnerStreamControl::Progress {
-                durable_message_next: 5,
-                durable_event_next: 0,
+            .send(OwnerPushControl::Progress {
+                durable_next: 5,
                 credit_add_bytes: REC_BYTES,
             })
             .await
             .unwrap();
         until(|| source.reads.lock().unwrap().len() == 4).await;
-        control_tx.send(OwnerStreamControl::Stop).await.unwrap();
+        control_tx.send(OwnerPushControl::Stop).await.unwrap();
         tokio::time::timeout(Duration::from_secs(2), task)
             .await
             .unwrap()
@@ -1106,13 +1109,13 @@ mod tests {
     struct MockSink {
         // Scripted outcomes, one per applied batch (front = next).
         outcomes: Mutex<std::collections::VecDeque<FollowerApplyOutcome>>,
-        applied: Mutex<Vec<u64>>, // first message offset of each applied batch
+        applied: Mutex<Vec<u64>>, // first offset of each applied batch
     }
 
     #[async_trait]
-    impl FollowerStreamSink for MockSink {
-        async fn apply(&self, batch: ReplicationReadOk) -> FollowerApplyOutcome {
-            if let ReplicationMessageRead::Batch { records, .. } = &batch.messages
+    impl FollowerPushSink for MockSink {
+        async fn apply(&self, batch: QueueReplicationReadOk) -> FollowerApplyOutcome {
+            if let ReplicationEventRead::Batch { records, .. } = &batch
                 && let Some(first) = records.first()
             {
                 self.applied.lock().unwrap().push(first.offset);
@@ -1125,28 +1128,18 @@ mod tests {
         }
     }
 
-    fn batch_from(first_offset: u64, count: u64) -> ReplicationReadOk {
+    fn batch_from(first_offset: u64, count: u64) -> QueueReplicationReadOk {
         let records = (0..count)
-            .map(|i| ReplicationMessageRecord {
+            .map(|i| ReplicationEventRecord {
                 offset: first_offset + i,
-                flags: 0,
-                headers: Vec::new(),
                 payload: vec![0u8; REC_BYTES as usize],
             })
             .collect();
-        ReplicationReadOk {
-            messages: ReplicationMessageRead::Batch {
-                epoch: 1,
-                requested_offset: first_offset,
-                next_offset: first_offset + count,
-                records,
-            },
-            events: ReplicationEventRead::Batch {
-                epoch: 1,
-                requested_offset: 0,
-                next_offset: 0,
-                records: Vec::new(),
-            },
+        ReplicationEventRead::Batch {
+            epoch: 1,
+            requested_offset: first_offset,
+            next_offset: first_offset + count,
+            records,
         }
     }
 
@@ -1155,9 +1148,9 @@ mod tests {
         sync: Arc<tokio::sync::Notify>,
     }
     #[async_trait]
-    impl FollowerStreamSink for OpenSink {
-        async fn apply(&self, _: ReplicationReadOk) -> FollowerApplyOutcome { panic!("unexpected closed apply") }
-        async fn apply_open(&self, mut frames: BoxStream<'_, ReplicationReadOk>) -> FollowerApplyOutcome {
+    impl FollowerPushSink for OpenSink {
+        async fn apply(&self, _: QueueReplicationReadOk) -> FollowerApplyOutcome { panic!("unexpected closed apply") }
+        async fn apply_open(&self, mut frames: BoxStream<'_, QueueReplicationReadOk>) -> FollowerApplyOutcome {
             let mut next = 0;
             let mut bytes = 0;
             while let Some(frame) = frames.next().await {
@@ -1166,7 +1159,7 @@ mod tests {
                 self.staged.send(next).unwrap();
             }
             self.sync.notified().await;
-            FollowerApplyOutcome::Applied { durable_message_next: next, durable_event_next: 0, bytes }
+            FollowerApplyOutcome::Applied { durable_next: next, bytes }
         }
     }
 
@@ -1176,8 +1169,8 @@ mod tests {
         let (control, mut controls) = mpsc::channel(8);
         let (staged, mut stages) = mpsc::unbounded_channel();
         let sync = Arc::new(tokio::sync::Notify::new());
-        let task = tokio::spawn(run_follower_stream_applier_with_policy(
-            Arc::new(OpenSink { staged, sync: sync.clone() }), rx, control, 0, 0,
+        let task = tokio::spawn(run_follower_push_applier_with_policy(
+            Arc::new(OpenSink { staged, sync: sync.clone() }), rx, control, 0,
             fixed_tunables(0, 20_000, 10_000), true, 1,
         ));
         tx.send(batch_from(0, 1)).await.unwrap();
@@ -1193,14 +1186,14 @@ mod tests {
         assert!(stages.try_recv().is_err(), "arrival after cutoff belongs to next batch");
         assert!(controls.try_recv().is_err(), "cutoff alone must not report durability");
         sync.notify_one();
-        assert_eq!(controls.recv().await, Some(FollowerStreamControl::Progress {
-            durable_message_next: 2, durable_event_next: 0, credit_add_bytes: 2 * REC_BYTES,
+        assert_eq!(controls.recv().await, Some(FollowerPushControl::Progress {
+            durable_next: 2, credit_add_bytes: 2 * REC_BYTES,
         }));
         assert_eq!(stages.recv().await, Some(3));
         drop(tx);
         sync.notify_one();
-        assert_eq!(controls.recv().await, Some(FollowerStreamControl::Progress {
-            durable_message_next: 3, durable_event_next: 0, credit_add_bytes: REC_BYTES,
+        assert_eq!(controls.recv().await, Some(FollowerPushControl::Progress {
+            durable_next: 3, credit_add_bytes: REC_BYTES,
         }));
         assert_eq!(task.await.unwrap(), ApplierExit::ReaderClosed);
     }
@@ -1211,8 +1204,8 @@ mod tests {
         let (control, mut controls) = mpsc::channel(8);
         let (staged, mut stages) = mpsc::unbounded_channel();
         let sync = Arc::new(tokio::sync::Notify::new());
-        let task = tokio::spawn(run_follower_stream_applier_with_policy(
-            Arc::new(OpenSink { staged, sync: sync.clone() }), rx, control, 0, 0,
+        let task = tokio::spawn(run_follower_push_applier_with_policy(
+            Arc::new(OpenSink { staged, sync: sync.clone() }), rx, control, 0,
             fixed_tunables(0, 20_000, 10_000), true, 2,
         ));
         tx.send(batch_from(0, 1)).await.unwrap();
@@ -1226,8 +1219,8 @@ mod tests {
         assert_eq!(stages.recv().await, Some(2));
         assert!(controls.try_recv().is_err());
         sync.notify_one();
-        assert_eq!(controls.recv().await, Some(FollowerStreamControl::Progress {
-            durable_message_next: 2, durable_event_next: 0, credit_add_bytes: 2 * REC_BYTES,
+        assert_eq!(controls.recv().await, Some(FollowerPushControl::Progress {
+            durable_next: 2, credit_add_bytes: 2 * REC_BYTES,
         }));
         drop(tx);
         assert_eq!(task.await.unwrap(), ApplierExit::ReaderClosed);
@@ -1240,7 +1233,7 @@ mod tests {
             let mut carry = None;
             let mut next = batch_from(1, 1);
             if mode == 2 {
-                if let ReplicationMessageRead::Batch { epoch, .. } = &mut next.messages { *epoch = 2; }
+                if let ReplicationEventRead::Batch { epoch, .. } = &mut next { *epoch = 2; }
             }
             tx.send(next).await.unwrap();
             let mut input = OpenBatchInput {
@@ -1263,11 +1256,11 @@ mod tests {
         fail: bool,
     }
     #[async_trait]
-    impl FollowerStreamSink for ContinuationSink {
-        async fn apply(&self, _: ReplicationReadOk) -> FollowerApplyOutcome {
+    impl FollowerPushSink for ContinuationSink {
+        async fn apply(&self, _: QueueReplicationReadOk) -> FollowerApplyOutcome {
             panic!("unexpected closed apply")
         }
-        async fn apply_open(&self, mut frames: BoxStream<'_, ReplicationReadOk>) -> FollowerApplyOutcome {
+        async fn apply_open(&self, mut frames: BoxStream<'_, QueueReplicationReadOk>) -> FollowerApplyOutcome {
             let mut next = 0;
             let mut bytes = 0;
             while let Some(frame) = frames.next().await {
@@ -1277,7 +1270,7 @@ mod tests {
             self.closed.send((next, tokio::time::Instant::now())).unwrap();
             self.sync.notified().await;
             if self.fail { return FollowerApplyOutcome::Error("sync failed".into()); }
-            FollowerApplyOutcome::Applied { durable_message_next: next, durable_event_next: 0, bytes }
+            FollowerApplyOutcome::Applied { durable_next: next, bytes }
         }
     }
 
@@ -1287,9 +1280,9 @@ mod tests {
         let (control, mut controls) = mpsc::channel(8);
         let (closed, mut closures) = mpsc::unbounded_channel();
         let sync = Arc::new(tokio::sync::Notify::new());
-        let task = tokio::spawn(run_follower_stream_applier_with_policy(
+        let task = tokio::spawn(run_follower_push_applier_with_policy(
             Arc::new(ContinuationSink { closed, sync: sync.clone(), fail: false }),
-            rx, control, 0, 0, fixed_tunables(0, 20_000, 10_000), true, 3,
+            rx, control, 0, fixed_tunables(0, 20_000, 10_000), true, 3,
         ));
         let start = tokio::time::Instant::now();
         tx.send(batch_from(0, 1)).await.unwrap();
@@ -1300,14 +1293,14 @@ mod tests {
         tx.send(batch_from(2, 1)).await.unwrap();
         let completed_at = tokio::time::Instant::now();
         sync.notify_one();
-        assert_eq!(controls.recv().await, Some(FollowerStreamControl::Progress {
-            durable_message_next: 1, durable_event_next: 0, credit_add_bytes: REC_BYTES,
+        assert_eq!(controls.recv().await, Some(FollowerPushControl::Progress {
+            durable_next: 1, credit_add_bytes: REC_BYTES,
         }));
         assert_eq!(closures.recv().await, Some((3, completed_at)), "queued continuation must close without waiting");
         assert!(controls.try_recv().is_err(), "staging and closure are not durable progress");
         sync.notify_one();
-        assert_eq!(controls.recv().await, Some(FollowerStreamControl::Progress {
-            durable_message_next: 3, durable_event_next: 0, credit_add_bytes: 2 * REC_BYTES,
+        assert_eq!(controls.recv().await, Some(FollowerPushControl::Progress {
+            durable_next: 3, credit_add_bytes: 2 * REC_BYTES,
         }));
         let idle_start = tokio::time::Instant::now();
         tx.send(batch_from(3, 1)).await.unwrap();
@@ -1322,32 +1315,28 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn continuation_epoch_boundary_restores_collection() {
-        for event_epoch in [false, true] {
-            let (tx, rx) = mpsc::channel(8);
-            let (control, mut controls) = mpsc::channel(8);
-            let (closed, mut closures) = mpsc::unbounded_channel();
-            let sync = Arc::new(tokio::sync::Notify::new());
-            let task = tokio::spawn(run_follower_stream_applier_with_policy(
-                Arc::new(ContinuationSink { closed, sync: sync.clone(), fail: false }),
-                rx, control, 0, 0, fixed_tunables(0, 20_000, 10_000), true, 3,
-            ));
-            tx.send(batch_from(0, 1)).await.unwrap();
-            closures.recv().await.unwrap();
-            let mut next = batch_from(1, 1);
-            if event_epoch {
-                if let ReplicationEventRead::Batch { epoch, .. } = &mut next.events { *epoch = 2; }
-            } else if let ReplicationMessageRead::Batch { epoch, .. } = &mut next.messages { *epoch = 2; }
-            tx.send(next).await.unwrap();
-            let now = tokio::time::Instant::now();
-            sync.notify_one();
-            controls.recv().await.unwrap();
-            let second = closures.recv().await.unwrap();
-            assert!(second.1.duration_since(now) >= Duration::from_millis(20));
-            drop(tx);
-            sync.notify_one();
-            controls.recv().await.unwrap();
-            assert_eq!(task.await.unwrap(), ApplierExit::ReaderClosed);
-        }
+        let (tx, rx) = mpsc::channel(8);
+        let (control, mut controls) = mpsc::channel(8);
+        let (closed, mut closures) = mpsc::unbounded_channel();
+        let sync = Arc::new(tokio::sync::Notify::new());
+        let task = tokio::spawn(run_follower_push_applier_with_policy(
+            Arc::new(ContinuationSink { closed, sync: sync.clone(), fail: false }),
+            rx, control, 0, fixed_tunables(0, 20_000, 10_000), true, 3,
+        ));
+        tx.send(batch_from(0, 1)).await.unwrap();
+        closures.recv().await.unwrap();
+        let mut next = batch_from(1, 1);
+        if let ReplicationEventRead::Batch { epoch, .. } = &mut next { *epoch = 2; }
+        tx.send(next).await.unwrap();
+        let now = tokio::time::Instant::now();
+        sync.notify_one();
+        controls.recv().await.unwrap();
+        let second = closures.recv().await.unwrap();
+        assert!(second.1.duration_since(now) >= Duration::from_millis(20));
+        drop(tx);
+        sync.notify_one();
+        controls.recv().await.unwrap();
+        assert_eq!(task.await.unwrap(), ApplierExit::ReaderClosed);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1356,9 +1345,9 @@ mod tests {
         let (control, mut controls) = mpsc::channel(8);
         let (closed, mut closures) = mpsc::unbounded_channel();
         let sync = Arc::new(tokio::sync::Notify::new());
-        let task = tokio::spawn(run_follower_stream_applier_with_policy(
+        let task = tokio::spawn(run_follower_push_applier_with_policy(
             Arc::new(ContinuationSink { closed, sync: sync.clone(), fail: true }),
-            rx, control, 0, 0, fixed_tunables(0, 20_000, 10_000), true, 3,
+            rx, control, 0, fixed_tunables(0, 20_000, 10_000), true, 3,
         ));
         tx.send(batch_from(0, 1)).await.unwrap();
         closures.recv().await.unwrap();
@@ -1394,14 +1383,14 @@ mod tests {
     }
 
     #[async_trait]
-    impl FollowerStreamSink for DeadlineSink {
-        async fn apply(&self, batch: ReplicationReadOk) -> FollowerApplyOutcome {
+    impl FollowerPushSink for DeadlineSink {
+        async fn apply(&self, batch: QueueReplicationReadOk) -> FollowerApplyOutcome {
             let bytes = batch_bytes(&batch);
-            let ReplicationMessageRead::Batch {
+            let ReplicationEventRead::Batch {
                 requested_offset,
                 next_offset,
                 ..
-            } = batch.messages
+            } = batch
             else {
                 return FollowerApplyOutcome::CheckpointRequired;
             };
@@ -1409,8 +1398,7 @@ mod tests {
                 .send((requested_offset, next_offset, tokio::time::Instant::now()))
                 .unwrap();
             FollowerApplyOutcome::Applied {
-                durable_message_next: next_offset,
-                durable_event_next: 0,
+                durable_next: next_offset,
                 bytes,
             }
         }
@@ -1421,19 +1409,18 @@ mod tests {
         linger_us: u64,
         max_bytes: u64,
     ) -> (
-        mpsc::Sender<ReplicationReadOk>,
+        mpsc::Sender<QueueReplicationReadOk>,
         mpsc::UnboundedReceiver<(u64, u64, tokio::time::Instant)>,
-        mpsc::Receiver<FollowerStreamControl>,
+        mpsc::Receiver<FollowerPushControl>,
         tokio::task::JoinHandle<ApplierExit>,
     ) {
         let (tx, rx) = mpsc::channel(8);
         let (applied, applied_rx) = mpsc::unbounded_channel();
         let (control, control_rx) = mpsc::channel(8);
-        let task = tokio::spawn(run_follower_stream_applier_with_policy(
+        let task = tokio::spawn(run_follower_push_applier_with_policy(
             Arc::new(DeadlineSink { applied }),
             rx,
             control,
-            0,
             0,
             fixed_tunables(0, linger_us, max_bytes),
             policy,
@@ -1468,9 +1455,8 @@ mod tests {
         );
         assert_eq!(
             controls.recv().await.unwrap(),
-            FollowerStreamControl::Progress {
-                durable_message_next: 3,
-                durable_event_next: 0,
+            FollowerPushControl::Progress {
+                durable_next: 3,
                 credit_add_bytes: 3 * REC_BYTES,
             }
         );
@@ -1514,7 +1500,7 @@ mod tests {
             tx.send(batch_from(0, 1)).await.unwrap();
             let mut second = batch_from(if change_epoch { 1 } else { 10 }, 1);
             if change_epoch {
-                let ReplicationMessageRead::Batch { epoch, .. } = &mut second.messages else {
+                let ReplicationEventRead::Batch { epoch, .. } = &mut second else {
                     unreachable!()
                 };
                 *epoch = 2;
@@ -1555,8 +1541,7 @@ mod tests {
         let sink = Arc::new(MockSink {
             outcomes: Mutex::new(
                 [FollowerApplyOutcome::Applied {
-                    durable_message_next: 5,
-                    durable_event_next: 0,
+                    durable_next: 5,
                     bytes: 5 * REC_BYTES,
                 }]
                 .into(),
@@ -1565,11 +1550,10 @@ mod tests {
         });
         let (batch_tx, batch_rx) = mpsc::channel(8);
         let (control_tx, mut control_rx) = mpsc::channel(8);
-        let task = tokio::spawn(run_follower_stream_applier(
+        let task = tokio::spawn(run_follower_push_applier(
             sink.clone(),
             batch_rx,
             control_tx,
-            0,
             0,
             fixed_tunables(0, 0, 16 * 1024 * 1024),
         ));
@@ -1580,9 +1564,8 @@ mod tests {
 
         assert_eq!(
             control_rx.recv().await.unwrap(),
-            FollowerStreamControl::Progress {
-                durable_message_next: 5,
-                durable_event_next: 0,
+            FollowerPushControl::Progress {
+                durable_next: 5,
                 credit_add_bytes: 5 * REC_BYTES,
             },
             "two contiguous frames coalesce into one progress + combined credit"
@@ -1603,7 +1586,7 @@ mod tests {
 
     // The applier reads the tunables LIVE once per apply iteration (not captured
     // once at start), which is what lets a runtime-settings change propagate
-    // mid-stream. (The source side - a config change reaching the reader - is
+    // mid-push. (The source side - a config change reaching the reader - is
     // covered by broker stream_apply_tunables_reads_live_config.)
     #[tokio::test]
     async fn applier_reads_tunables_live_each_iteration() {
@@ -1612,13 +1595,11 @@ mod tests {
             outcomes: Mutex::new(
                 [
                     FollowerApplyOutcome::Applied {
-                        durable_message_next: 2,
-                        durable_event_next: 0,
+                        durable_next: 2,
                         bytes: 2 * REC_BYTES,
                     },
                     FollowerApplyOutcome::Applied {
-                        durable_message_next: 5,
-                        durable_event_next: 0,
+                        durable_next: 5,
                         bytes: 3 * REC_BYTES,
                     },
                 ]
@@ -1642,11 +1623,10 @@ mod tests {
             }
         });
 
-        let task = tokio::spawn(run_follower_stream_applier(
+        let task = tokio::spawn(run_follower_push_applier(
             sink.clone(),
             batch_rx,
             control_tx,
-            0,
             0,
             tunables,
         ));
@@ -1684,13 +1664,11 @@ mod tests {
             outcomes: Mutex::new(
                 [
                     FollowerApplyOutcome::Applied {
-                        durable_message_next: 2,
-                        durable_event_next: 0,
+                        durable_next: 2,
                         bytes: 2 * REC_BYTES,
                     },
                     FollowerApplyOutcome::Applied {
-                        durable_message_next: 11,
-                        durable_event_next: 0,
+                        durable_next: 11,
                         bytes: REC_BYTES,
                     },
                 ]
@@ -1700,11 +1678,10 @@ mod tests {
         });
         let (batch_tx, batch_rx) = mpsc::channel(8);
         let (control_tx, mut control_rx) = mpsc::channel(8);
-        let task = tokio::spawn(run_follower_stream_applier(
+        let task = tokio::spawn(run_follower_push_applier(
             sink.clone(),
             batch_rx,
             control_tx,
-            0,
             0,
             fixed_tunables(0, 0, 16 * 1024 * 1024),
         ));
@@ -1714,17 +1691,15 @@ mod tests {
 
         assert_eq!(
             control_rx.recv().await.unwrap(),
-            FollowerStreamControl::Progress {
-                durable_message_next: 2,
-                durable_event_next: 0,
+            FollowerPushControl::Progress {
+                durable_next: 2,
                 credit_add_bytes: 2 * REC_BYTES,
             }
         );
         assert_eq!(
             control_rx.recv().await.unwrap(),
-            FollowerStreamControl::Progress {
-                durable_message_next: 11,
-                durable_event_next: 0,
+            FollowerPushControl::Progress {
+                durable_next: 11,
                 credit_add_bytes: REC_BYTES,
             }
         );
@@ -1746,11 +1721,10 @@ mod tests {
         });
         let (batch_tx, batch_rx) = mpsc::channel(8);
         let (control_tx, _control_rx) = mpsc::channel(8);
-        let task = tokio::spawn(run_follower_stream_applier(
+        let task = tokio::spawn(run_follower_push_applier(
             sink,
             batch_rx,
             control_tx,
-            0,
             0,
             fixed_tunables(0, 0, 16 * 1024 * 1024),
         ));
@@ -1773,13 +1747,12 @@ mod tests {
         });
         let (_batch_tx, batch_rx) = mpsc::channel(8);
         let (control_tx, mut control_rx) = mpsc::channel(8);
-        // Start cursor (5, 2); no batches arrive -> keepalive should fire.
-        let _task = tokio::spawn(run_follower_stream_applier(
+        // Start cursor 5; no batches arrive -> keepalive should fire.
+        let _task = tokio::spawn(run_follower_push_applier(
             sink,
             batch_rx,
             control_tx,
             5,
-            2,
             fixed_tunables(20, 0, 16 * 1024 * 1024),
         ));
 
@@ -1789,9 +1762,8 @@ mod tests {
             .unwrap();
         assert_eq!(
             ctrl,
-            FollowerStreamControl::Progress {
-                durable_message_next: 5,
-                durable_event_next: 2,
+            FollowerPushControl::Progress {
+                durable_next: 5,
                 credit_add_bytes: 0,
             },
             "idle keepalive reports the current cursor with zero credit"
@@ -1799,14 +1771,13 @@ mod tests {
     }
 
     // Regression: the keepalive must report the LATEST applied cursor, not the
-    // start cursor (so a stream that applied then went idle stays honest).
+    // start cursor (so a push that applied then went idle stays honest).
     #[tokio::test]
     async fn applier_keepalive_uses_latest_applied_cursor() {
         let sink = Arc::new(MockSink {
             outcomes: Mutex::new(
                 [FollowerApplyOutcome::Applied {
-                    durable_message_next: 100,
-                    durable_event_next: 40,
+                    durable_next: 100,
                     bytes: 2 * REC_BYTES,
                 }]
                 .into(),
@@ -1815,11 +1786,10 @@ mod tests {
         });
         let (batch_tx, batch_rx) = mpsc::channel(8);
         let (control_tx, mut control_rx) = mpsc::channel(8);
-        let _task = tokio::spawn(run_follower_stream_applier(
+        let _task = tokio::spawn(run_follower_push_applier(
             sink,
             batch_rx,
             control_tx,
-            0,
             0,
             fixed_tunables(20, 0, 16 * 1024 * 1024),
         ));
@@ -1831,9 +1801,8 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap(),
-            FollowerStreamControl::Progress {
-                durable_message_next: 100,
-                durable_event_next: 40,
+            FollowerPushControl::Progress {
+                durable_next: 100,
                 credit_add_bytes: 2 * REC_BYTES,
             }
         );
@@ -1843,140 +1812,11 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap(),
-            FollowerStreamControl::Progress {
-                durable_message_next: 100,
-                durable_event_next: 40,
+            FollowerPushControl::Progress {
+                durable_next: 100,
                 credit_add_bytes: 0,
             }
         );
     }
 }
 
-/// Drive one owner replication stream until the follower stops it, the
-/// connection drops, or a fatal read error. The frame `request_id` of every
-/// pushed batch is `stream_id`.
-pub async fn run_owner_replication_stream<S: OwnerStreamSource>(
-    source: Arc<S>,
-    frame_tx: mpsc::Sender<Frame>,
-    stream_id: u64,
-    start: ReplicationStreamStart,
-    mut control_rx: mpsc::Receiver<OwnerStreamControl>,
-    cfg: OwnerStreamConfig,
-) {
-    let topic = start.topic;
-    let group = start.group;
-    let partition = start.partition;
-    let reporter = start.reporter_node_id;
-    let mut message_from = start.message_from;
-    let mut event_from = start.event_from;
-    let mut credit = StreamCredit::new(start.credit_bytes);
-
-    'stream: loop {
-        // Out of budget: park until the follower refills (or stops / drops).
-        if credit.available == 0 {
-            match control_rx.recv().await {
-                Some(control) => {
-                    if !apply_control(
-                        control,
-                        source.as_ref(),
-                        &topic,
-                        partition,
-                        group.as_deref(),
-                        reporter.as_deref(),
-                        &mut credit,
-                        &mut message_from,
-                        &mut event_from,
-                    ) {
-                        break 'stream;
-                    }
-                    continue 'stream;
-                }
-                None => break 'stream,
-            }
-        }
-
-        let cfg = source.stream_config().unwrap_or(cfg);
-        let max_bytes = credit.available.min(cfg.max_batch_bytes as u64) as usize;
-        let read = source.read(
-            &topic,
-            partition,
-            group.as_deref(),
-            message_from,
-            event_from,
-            cfg.max_messages,
-            cfg.max_events,
-            max_bytes,
-            cfg.long_poll_ms,
-        );
-
-        tokio::pin!(read);
-        loop {
-            tokio::select! {
-                // Progress only updates credit and durable acknowledgements. Keep
-                // the scan alive across progress so its blocking storage work is not
-                // discarded and restarted. Reset and stop still cancel promptly.
-                control = control_rx.recv() => {
-                    match control {
-                        Some(control) => {
-                            let reset = matches!(control, OwnerStreamControl::Reset { .. });
-                            if !apply_control(
-                                control,
-                                source.as_ref(),
-                                &topic,
-                                partition,
-                                group.as_deref(),
-                                reporter.as_deref(),
-                                &mut credit,
-                                &mut message_from,
-                                &mut event_from,
-                            ) {
-                                break 'stream;
-                            }
-                            if reset {
-                                continue 'stream;
-                            }
-                        }
-                        None => break 'stream,
-                    }
-                }
-                result = &mut read => {
-                    match result {
-                        Ok(batch) => match classify(&batch) {
-                            BatchOutcome::Empty => continue 'stream,
-                            BatchOutcome::CheckpointRequired => {
-                                send_stream_end(
-                                    &frame_tx,
-                                    stream_id,
-                                    STREAM_END_CHECKPOINT_REQUIRED,
-                                    "checkpoint required",
-                                )
-                                .await;
-                                break 'stream;
-                            }
-                            BatchOutcome::Records { bytes, message_next, event_next } => {
-                                let frame = match wire::encode_replication_stream_batch(stream_id, &batch) {
-                                    Ok(frame) => frame,
-                                    Err(err) => {
-                                        send_stream_end(&frame_tx, stream_id, STREAM_END_ERROR, &err.to_string()).await;
-                                        break 'stream;
-                                    }
-                                };
-                                if frame_tx.send(frame).await.is_err() {
-                                    break 'stream;
-                                }
-                                message_from = message_next;
-                                event_from = event_next;
-                                credit.consume(bytes);
-                                continue 'stream;
-                            }
-                        },
-                        Err(err) => {
-                            send_stream_end(&frame_tx, stream_id, STREAM_END_ERROR, &err).await;
-                            break 'stream;
-                        }
-                    }
-                }
-            }
-        }
-    }
-}

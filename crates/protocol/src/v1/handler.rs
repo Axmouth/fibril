@@ -20,7 +20,7 @@ use arc_swap::ArcSwap;
 use fibril_broker::{Group, Partition, Topic};
 use fibril_broker::{
     broker::{
-        Broker, BrokerError, BrokerOwnerStreamRecords, BrokerQueueFollowerApply,
+        Broker, BrokerError, BrokerOwnerStreamRecords,
         ConsumerCloseCause, ConsumerConfig, ConsumerHandle, ConsumerLease,
         DurableProgress, ExclusiveAssignmentUpdate, PublisherHandle, ReplicationResourceKind,
         SettleRequest,
@@ -28,7 +28,7 @@ use fibril_broker::{
     },
     queue_engine::{
         DLQDiscardPolicyWire, DeclareMeta, GlobalDLQ, Message, MessageContentType, MessageHeaders,
-        OwnerReplicationBatch, OwnerReplicationRead, OwnerStateCheckpoint, QueueEngine,
+        OwnerReplicationRead, OwnerStateCheckpoint, QueueEngine,
         RetentionConfig, StreamStore, StromaEngine, StromaError, StromaEvent,
     },
     stream::{
@@ -610,58 +610,30 @@ fn to_replication_event_read(
     }
 }
 
-fn stream_records_to_wire(records: BrokerOwnerStreamRecords) -> std::io::Result<ReplicationReadOk> {
-    Ok(ReplicationReadOk {
+fn stream_records_to_wire(
+    records: BrokerOwnerStreamRecords,
+) -> std::io::Result<StreamReplicationReadOk> {
+    Ok(StreamReplicationReadOk {
         messages: to_replication_message_read(records.messages),
         events: to_replication_event_read(records.events)?,
     })
 }
 
-/// Encode a read of the single queue log in the two-lane wire body. The log
-/// travels in the event lane and the message lane is the fixed empty batch at
-/// cursor zero under the same epoch.
-fn queue_read_to_wire(read: OwnerReplicationRead<StromaEvent>) -> std::io::Result<ReplicationReadOk> {
-    let epoch = match &read {
-        OwnerReplicationRead::Batch(batch) => batch.epoch,
-        OwnerReplicationRead::CheckpointRequired { epoch, .. } => *epoch,
-    };
-    Ok(ReplicationReadOk {
-        messages: ReplicationMessageRead::Batch {
-            epoch,
-            requested_offset: 0,
-            next_offset: 0,
-            records: Vec::new(),
-        },
-        events: to_replication_event_read(read)?,
-    })
-}
-
-/// The two-lane queue read body fixes the message lane at cursor zero.
-fn queue_wire_cursor(message_from: u64, event_from: u64) -> Result<u64, BrokerError> {
-    if message_from != 0 {
-        return Err(BrokerError::InvalidArgument(
-            "queue replication message lane cursor must be zero".into(),
-        ));
-    }
-    Ok(event_from)
-}
-
-/// Broker-backed source for an owner replication stream sender. Bridges the
-/// generic [`replication_stream::OwnerStreamSource`] to the broker's read +
-/// follower-progress calls (the same ones the pull `ReplicationRead` path uses).
-struct BrokerOwnerStreamSource {
+/// Broker-backed source for an owner queue push. Bridges the generic
+/// [`queue_push::OwnerPushSource`] to the broker's read and follower-progress
+/// calls (the same ones the pull `QueueReplicationRead` path uses).
+struct BrokerOwnerPushSource {
     broker: Arc<Broker<StromaEngine>>,
     progress: Option<fibril_broker::replication::ReplicationProgressSession>,
     history: Option<fibril_broker::history_replication::HistoryReplicationSession>,
 }
 
 #[async_trait::async_trait]
-impl replication_stream::OwnerStreamSource for BrokerOwnerStreamSource {
-    fn stream_config(&self) -> Option<replication_stream::OwnerStreamConfig> {
+impl queue_push::OwnerPushSource for BrokerOwnerPushSource {
+    fn push_config(&self) -> Option<queue_push::OwnerPushConfig> {
         let cfg = self.broker.config_snapshot();
-        Some(replication_stream::OwnerStreamConfig {
-            max_messages: cfg.replication_max_messages_per_read,
-            max_events: cfg.replication_max_events_per_read,
+        Some(queue_push::OwnerPushConfig {
+            max_records: cfg.replication_max_events_per_read,
             max_batch_bytes: cfg.replication_max_bytes_per_read,
             long_poll_ms: cfg.replication_caught_up_poll_ms,
         })
@@ -672,13 +644,11 @@ impl replication_stream::OwnerStreamSource for BrokerOwnerStreamSource {
         topic: &str,
         partition: Partition,
         group: Option<&str>,
-        message_from: u64,
-        event_from: u64,
-        max_messages: usize,
-        max_events: usize,
+        from: u64,
+        max_records: usize,
         max_bytes: usize,
         max_wait_ms: u64,
-    ) -> Result<ReplicationReadOk, String> {
+    ) -> Result<QueueReplicationReadOk, String> {
         crate::v1::history_replication::check_resource(
             &self.broker,
             self.history.as_ref(),
@@ -688,11 +658,9 @@ impl replication_stream::OwnerStreamSource for BrokerOwnerStreamSource {
             true,
         )
         .map_err(|e| e.to_string())?;
-        let _ = max_messages;
-        let from = queue_wire_cursor(message_from, event_from).map_err(|e| e.to_string())?;
         let records = self
             .broker
-            .read_owner_queue_records(topic, partition, group, from, max_events, max_bytes, max_wait_ms)
+            .read_owner_queue_records(topic, partition, group, from, max_records, max_bytes, max_wait_ms)
             .await
             .map_err(|err| broker_error_response(&err).1.to_string())?;
         crate::v1::history_replication::check_resource(
@@ -704,7 +672,7 @@ impl replication_stream::OwnerStreamSource for BrokerOwnerStreamSource {
             true,
         )
         .map_err(|e| e.to_string())?;
-        queue_read_to_wire(records).map_err(|err| err.to_string())
+        to_replication_event_read(records).map_err(|err| err.to_string())
     }
 
     fn record_progress(
@@ -713,8 +681,7 @@ impl replication_stream::OwnerStreamSource for BrokerOwnerStreamSource {
         partition: Partition,
         group: Option<&str>,
         reporter: &str,
-        durable_message_next: u64,
-        durable_event_next: u64,
+        durable_next: u64,
     ) {
         if crate::v1::history_replication::check_resource(
             &self.broker,
@@ -730,83 +697,12 @@ impl replication_stream::OwnerStreamSource for BrokerOwnerStreamSource {
         {
             return;
         }
-        // The two-lane push progress carries the queue log as its event lane.
-        let Ok(next) = queue_wire_cursor(durable_message_next, durable_event_next) else {
-            tracing::warn!(topic, partition = partition.id(), reporter, "dropping queue push progress with a message lane");
-            return;
-        };
         if let Some(session) = &self.progress {
-            self.broker
-                .record_replication_session_progress(session, DurableProgress::Queue { next });
+            self.broker.record_replication_session_progress(
+                session,
+                DurableProgress::Queue { next: durable_next },
+            );
         }
-    }
-}
-
-fn ensure_contiguous_offsets<I>(offsets: I) -> Result<(), String>
-where
-    I: IntoIterator<Item = u64>,
-{
-    let mut iter = offsets.into_iter();
-    let Some(first) = iter.next() else {
-        return Ok(());
-    };
-    let mut expected = first + 1;
-    for offset in iter {
-        if offset != expected {
-            return Err(format!(
-                "replication apply records must be contiguous; expected offset {expected}, got {offset}"
-            ));
-        }
-        expected += 1;
-    }
-    Ok(())
-}
-
-fn to_owner_event_read(
-    batch: Option<ReplicationEventApplyBatch>,
-) -> Result<OwnerReplicationRead<StromaEvent>, String> {
-    let Some(batch) = batch else {
-        return Ok(OwnerReplicationRead::Batch(OwnerReplicationBatch {
-            epoch: 0,
-            requested_offset: 0,
-            next_offset: 0,
-            records: Vec::new(),
-        }));
-    };
-
-    ensure_contiguous_offsets(batch.records.iter().map(|record| record.offset))?;
-    let requested_offset = batch.records.first().map_or(0, |record| record.offset);
-    let next_offset = batch.records.last().map_or(0, |record| record.offset + 1);
-    let records = batch
-        .records
-        .into_iter()
-        .map(|record| {
-            let event = StromaEvent::decode(&record.payload).map_err(|err| err.to_string())?;
-            Ok((record.offset, event))
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-
-    Ok(OwnerReplicationRead::Batch(OwnerReplicationBatch {
-        epoch: batch.epoch,
-        requested_offset,
-        next_offset,
-        records,
-    }))
-}
-
-/// A two-lane apply for a queue carries the queue log in its event lane. A
-/// queue has no separate message log, so message records are refused.
-fn to_owner_queue_read(apply: ReplicationApply) -> Result<OwnerReplicationRead<StromaEvent>, String> {
-    if apply.messages.as_ref().is_some_and(|batch| !batch.records.is_empty()) {
-        return Err("queue replication apply carries message lane records".into());
-    }
-    to_owner_event_read(apply.events)
-}
-
-fn to_replication_apply_ok(messages_applied: bool, events_applied: bool) -> ReplicationApplyOk {
-    ReplicationApplyOk {
-        messages_applied,
-        events_applied,
     }
 }
 
@@ -2924,14 +2820,14 @@ where
         };
     }
 
-    // Owner-side replication streams opened by followers on this connection,
-    // keyed by stream id (the frame request_id). Dropping a control sender (on
-    // Stop or when this map drops at connection end) makes its sender task exit.
-    let mut owner_stream_histories: HashMap<
+    // Owner-side queue pushes opened by followers on this connection, keyed by
+    // push id (the frame request_id). Dropping a control sender (on Stop or
+    // when this map drops at connection end) makes its sender task exit.
+    let mut owner_push_histories: HashMap<
         u64,
         Option<fibril_broker::history_replication::HistoryReplicationSession>,
     > = HashMap::new();
-    let mut owner_streams: HashMap<u64, mpsc::Sender<replication_stream::OwnerStreamControl>> =
+    let mut owner_pushes: HashMap<u64, mpsc::Sender<queue_push::OwnerPushControl>> =
         HashMap::new();
     // Pull reads stamp progress on a session per resource and reporter. The
     // session's kind follows the read op, so a queue and a stream read never
@@ -3066,22 +2962,7 @@ where
         // Internal replication may read or replace storage and report progress
         // that releases confirms. Require node credentials on this transport,
         // independently of ordinary-client auth and logical session resumption.
-        let node_control = matches!(frame.opcode, x if
-            x == Op::ReplicationRead as u16
-            || x == Op::StreamReplicationRead as u16
-            || x == Op::ReplicationApply as u16
-            || x == Op::ReplicationCheckpointExport as u16
-            || x == Op::ReplicationStreamStart as u16
-            || x == Op::ReplicationStreamProgress as u16
-            || x == Op::ReplicationStreamReset as u16
-            || x == Op::ReplicationStreamStop as u16
-            || x == Op::RecoverySeal as u16
-            || x == Op::RecoveryRead as u16
-            || x == Op::RecoveryReadSequential as u16
-            || x == Op::RecoveryTransfer as u16
-            || x == Op::InitialHistoryPrepare as u16
-            || x == Op::HistoryReplication as u16
-        );
+        let node_control = Op::from_code(frame.opcode).is_some_and(Op::node_control);
         if node_control
             && authenticated_principal.as_deref() != Some(fibril_broker::auth_store::NODE_PRINCIPAL)
         {
@@ -3121,9 +3002,10 @@ where
             if let Some(history) = &history {
                 let owner_is_receiver = wire::history_replication_owner_is_receiver(frame.opcode)
                     .map_err(|e| BrokerError::InvalidArgument(e.to_string()))?;
-                // The streaming transport and checkpoint endpoints currently use
-                // queue actors; Plexus uses only its distinct pull-read endpoint.
-                if (frame.opcode == Op::StreamReplicationRead as u16) != history.stream {
+                let stream = Op::from_code(frame.opcode)
+                    .and_then(Op::replication_kind)
+                    .map(|kind| kind == ReplicationOpKind::Stream);
+                if stream != Some(history.stream) {
                     return Err(BrokerError::InvalidArgument(
                         "replication resource kind mismatch".into(),
                     ));
@@ -3143,18 +3025,11 @@ where
                         .map_err(|e| BrokerError::InvalidArgument(e.to_string()))?,
                 )?;
             }
-            if [
-                Op::ReplicationStreamProgress,
-                Op::ReplicationStreamReset,
-                Op::ReplicationStreamStop,
-            ]
-            .iter()
-            .any(|op| *op as u16 == frame.opcode)
-            {
-                if let Some(expected) = owner_stream_histories.get(&frame.request_id) {
+            if Op::from_code(frame.opcode).is_some_and(Op::continues_queue_push) {
+                if let Some(expected) = owner_push_histories.get(&frame.request_id) {
                     if expected.as_ref() != history.as_ref() {
                         return Err(BrokerError::InvalidArgument(
-                            "replication stream history changed".into(),
+                            "queue push history changed".into(),
                         ));
                     }
                 }
@@ -3270,25 +3145,15 @@ where
                     .await;
             }
 
-            // -------- REPLICATION READ --------------------------------------
-            x if x == Op::ReplicationRead as u16 => {
-                let read: ReplicationRead =
-                    decode_or_400!(frame, frame_tx_high_prio, metrics, ReplicationRead);
-                let from = match queue_wire_cursor(read.message_from, read.event_from) {
-                    Ok(from) => from,
-                    Err(error) => {
-                        let (code, message) = broker_error_response(&error);
-                        send_error_response_and_count(
-                            &frame_tx_high_prio,
-                            &metrics,
-                            frame.request_id,
-                            code,
-                            message,
-                        )
-                        .await;
-                        continue;
-                    }
-                };
+            // -------- QUEUE REPLICATION READ --------------------------------
+            x if x == Op::QueueReplicationRead as u16 => {
+                let read: QueueReplicationRead = decode_wire_or_400!(
+                    frame,
+                    frame_tx_high_prio,
+                    metrics,
+                    wire::decode_queue_replication_read
+                );
+                let from = read.from;
 
                 // A stamped read doubles as the follower's durable-progress
                 // report (followers apply durably; pull offsets = watermarks).
@@ -3348,7 +3213,7 @@ where
                         read.partition,
                         read.group.as_deref(),
                         from,
-                        read.max_events as usize,
+                        read.max_records as usize,
                         usize::try_from(read.max_bytes).unwrap_or(usize::MAX),
                         read.max_wait_ms as u64,
                     )
@@ -3365,7 +3230,7 @@ where
                         Ok(records)
                     }) {
                     Ok(records) => {
-                        let response = match queue_read_to_wire(records) {
+                        let response = match to_replication_event_read(records) {
                             Ok(response) => response,
                             Err(err) => {
                                 tracing::error!(
@@ -3384,7 +3249,7 @@ where
                             }
                         };
                         frame_tx_high_prio
-                            .send(wire::encode_replication_read_ok(
+                            .send(wire::encode_queue_replication_read_ok(
                                 frame.request_id,
                                 &response,
                             )?)
@@ -3406,7 +3271,7 @@ where
 
             // -------- STREAM REPLICATION READ (Plexus follower pull) -------
             x if x == Op::StreamReplicationRead as u16 => {
-                let read: ReplicationRead = decode_wire_or_400!(
+                let read: StreamReplicationRead = decode_wire_or_400!(
                     frame,
                     frame_tx_high_prio,
                     metrics,
@@ -3415,7 +3280,7 @@ where
 
                 // A stamped read doubles as the stream follower's durable-progress
                 // report (group None), feeding the owner's replica-durable confirm
-                // gate exactly as the queue ReplicationRead path does.
+                // gate exactly as the queue replication read path does.
                 if let Err(error) = crate::v1::history_replication::check_reporter(
                     history.as_ref(),
                     read.reporter_node_id.as_deref(),
@@ -3534,13 +3399,13 @@ where
                 }
             }
 
-            // -------- REPLICATION STREAM (credit-based) --------------------
-            x if x == Op::ReplicationStreamStart as u16 => {
-                let start: ReplicationStreamStart = decode_wire_or_400!(
+            // -------- QUEUE PUSH (credit-based) -----------------------------
+            x if x == Op::QueuePushStart as u16 => {
+                let start: QueuePushStart = decode_wire_or_400!(
                     frame,
                     frame_tx_high_prio,
                     metrics,
-                    wire::decode_replication_stream_start
+                    wire::decode_queue_push_start
                 );
                 if let Err(error) = crate::v1::history_replication::check_reporter(
                     history.as_ref(),
@@ -3557,12 +3422,12 @@ where
                     .await;
                     continue;
                 }
-                let stream_id = frame.request_id;
+                let push_id = frame.request_id;
                 let (control_tx, control_rx) = mpsc::channel(64);
-                // Replace any existing stream on this id (drops the old sender,
+                // Replace any existing push on this id (drops the old sender,
                 // which makes the old task exit).
-                owner_stream_histories.insert(stream_id, history.clone());
-                owner_streams.insert(stream_id, control_tx);
+                owner_push_histories.insert(push_id, history.clone());
+                owner_pushes.insert(push_id, control_tx);
                 let progress = start
                     .reporter_node_id
                     .as_ref()
@@ -3577,57 +3442,53 @@ where
                             epoch,
                         )
                     });
-                let source = Arc::new(BrokerOwnerStreamSource {
+                let source = Arc::new(BrokerOwnerPushSource {
                     broker: broker.clone(),
                     progress,
                     history: history.clone(),
                 });
-                tokio::spawn(replication_stream::run_owner_replication_stream(
+                tokio::spawn(queue_push::run_owner_queue_push(
                     source,
                     frame_tx_high_prio.clone(),
-                    stream_id,
+                    push_id,
                     start,
                     control_rx,
-                    replication_stream::OwnerStreamConfig::default(),
+                    queue_push::OwnerPushConfig::default(),
                 ));
             }
-            x if x == Op::ReplicationStreamProgress as u16 => {
-                let progress: ReplicationStreamProgress = decode_wire_or_400!(
+            x if x == Op::QueuePushProgress as u16 => {
+                let progress: QueuePushProgress = decode_wire_or_400!(
                     frame,
                     frame_tx_high_prio,
                     metrics,
-                    wire::decode_replication_stream_progress
+                    wire::decode_queue_push_progress
                 );
-                if let Some(control) = owner_streams.get(&frame.request_id) {
+                if let Some(control) = owner_pushes.get(&frame.request_id) {
                     let _ = control
-                        .send(replication_stream::OwnerStreamControl::Progress {
-                            durable_message_next: progress.durable_message_next,
-                            durable_event_next: progress.durable_event_next,
+                        .send(queue_push::OwnerPushControl::Progress {
+                            durable_next: progress.durable_next,
                             credit_add_bytes: progress.credit_add_bytes,
                         })
                         .await;
                 }
             }
-            x if x == Op::ReplicationStreamReset as u16 => {
-                let reset: ReplicationStreamReset = decode_wire_or_400!(
+            x if x == Op::QueuePushReset as u16 => {
+                let reset: QueuePushReset = decode_wire_or_400!(
                     frame,
                     frame_tx_high_prio,
                     metrics,
-                    wire::decode_replication_stream_reset
+                    wire::decode_queue_push_reset
                 );
-                if let Some(control) = owner_streams.get(&frame.request_id) {
+                if let Some(control) = owner_pushes.get(&frame.request_id) {
                     let _ = control
-                        .send(replication_stream::OwnerStreamControl::Reset {
-                            message_from: reset.message_from,
-                            event_from: reset.event_from,
-                        })
+                        .send(queue_push::OwnerPushControl::Reset { from: reset.from })
                         .await;
                 }
             }
-            x if x == Op::ReplicationStreamStop as u16 => {
+            x if x == Op::QueuePushStop as u16 => {
                 // Dropping the control sender makes the sender task exit.
-                owner_streams.remove(&frame.request_id);
-                owner_stream_histories.remove(&frame.request_id);
+                owner_pushes.remove(&frame.request_id);
+                owner_push_histories.remove(&frame.request_id);
             }
 
             // Recovery always requires an authenticated cluster principal,
@@ -3874,73 +3735,6 @@ where
                                 &response,
                             )?)
                             .await?;
-                    }
-                    Err(err) => {
-                        let (code, message) = broker_error_response(&err);
-                        send_error_response_and_count(
-                            &frame_tx_high_prio,
-                            &metrics,
-                            frame.request_id,
-                            code,
-                            message,
-                        )
-                        .await;
-                    }
-                }
-            }
-
-            // -------- REPLICATION APPLY -------------------------------------
-            x if x == Op::ReplicationApply as u16 => {
-                let apply: ReplicationApply =
-                    decode_or_400!(frame, frame_tx_high_prio, metrics, ReplicationApply);
-                let topic = apply.topic.clone();
-                let group = apply.group.clone();
-                let partition = apply.partition;
-                let records = match to_owner_queue_read(apply) {
-                    Ok(records) => records,
-                    Err(message) => {
-                        send_error_response_and_count(
-                            &frame_tx_high_prio,
-                            &metrics,
-                            frame.request_id,
-                            400,
-                            message,
-                        )
-                        .await;
-                        continue;
-                    }
-                };
-
-                match broker
-                    .apply_follower_queue_records(&topic, partition, group.as_deref(), records)
-                    .await
-                {
-                    Ok(BrokerQueueFollowerApply::Applied(outcome)) => {
-                        // A queue has no separate message log to apply.
-                        let response = to_replication_apply_ok(false, outcome.is_some());
-                        frame_tx_high_prio
-                            .send(try_encode(
-                                Op::ReplicationApplyOk,
-                                frame.request_id,
-                                &response,
-                            )?)
-                            .await?;
-                    }
-                    Ok(BrokerQueueFollowerApply::CheckpointRequired(_)) => {
-                        tracing::error!(
-                            topic,
-                            partition = partition.id(),
-                            group,
-                            "plain replication apply unexpectedly required a checkpoint"
-                        );
-                        send_error_response_and_count(
-                            &frame_tx_high_prio,
-                            &metrics,
-                            frame.request_id,
-                            500,
-                            "replication apply unexpectedly required checkpoint",
-                        )
-                        .await;
                     }
                     Err(err) => {
                         let (code, message) = broker_error_response(&err);

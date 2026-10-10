@@ -12,5 +12,5 @@ pub mod recovery_inspection;
 pub mod recovery_transfer;
 pub mod initial_history;
 pub mod history_replication;
-pub mod replication_stream;
+pub mod queue_push;
 pub mod session_store;

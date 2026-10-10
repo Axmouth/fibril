@@ -4,7 +4,7 @@ use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_ma
 use fibril_broker::storage::Partition;
 use fibril_protocol::v1::{
     ContentType, Op, Publish, ReplicationEventRead, ReplicationEventRecord, ReplicationMessageRead,
-    ReplicationMessageRecord, ReplicationReadOk,
+    ReplicationMessageRecord, StreamReplicationReadOk,
     helper::{try_decode, try_encode},
     wire,
 };
@@ -256,7 +256,7 @@ struct RawDecodeStats {
     checksum: u64,
 }
 
-fn replication_read_ok(message_count: usize, payload_size: usize) -> ReplicationReadOk {
+fn replication_read_ok(message_count: usize, payload_size: usize) -> StreamReplicationReadOk {
     let messages = (0..message_count)
         .map(|idx| ReplicationMessageRecord {
             offset: idx as u64,
@@ -272,7 +272,7 @@ fn replication_read_ok(message_count: usize, payload_size: usize) -> Replication
         })
         .collect();
 
-    ReplicationReadOk {
+    StreamReplicationReadOk {
         messages: ReplicationMessageRead::Batch {
             epoch: 42,
             requested_offset: 0,
@@ -320,7 +320,7 @@ fn read_u64(payload: &[u8], cursor: &mut usize) -> u64 {
 
 fn decode_raw_borrowed(payload: &[u8]) -> RawDecodeStats {
     let mut cursor = 0;
-    assert_eq!(take(payload, &mut cursor, 4), b"FRR2");
+    assert_eq!(take(payload, &mut cursor, 4), b"FSR1");
 
     let mut stats = RawDecodeStats {
         records: 0,
@@ -380,9 +380,9 @@ fn decode_raw_borrowed(payload: &[u8]) -> RawDecodeStats {
     stats
 }
 
-fn decode_raw_owned(payload: &[u8]) -> ReplicationReadOk {
+fn decode_raw_owned(payload: &[u8]) -> StreamReplicationReadOk {
     let mut cursor = 0;
-    assert_eq!(take(payload, &mut cursor, 4), b"FRR2");
+    assert_eq!(take(payload, &mut cursor, 4), b"FSR1");
 
     let messages = if read_u8(payload, &mut cursor) == 0 {
         let epoch = read_u64(payload, &mut cursor);
@@ -451,7 +451,7 @@ fn decode_raw_owned(payload: &[u8]) -> ReplicationReadOk {
     };
 
     assert_eq!(cursor, payload.len());
-    ReplicationReadOk { messages, events }
+    StreamReplicationReadOk { messages, events }
 }
 
 fn bench_replication_decode(c: &mut Criterion) {
@@ -460,13 +460,13 @@ fn bench_replication_decode(c: &mut Criterion) {
         let name = format!("{message_count}x{payload_size}");
         let read = replication_read_ok(message_count, payload_size);
         let msgpack = rmp_serde::to_vec_named(&read).unwrap();
-        let raw_frame = wire::encode_replication_read_ok(1, &read).unwrap();
+        let raw_frame = wire::encode_stream_replication_read_ok(1, &read).unwrap();
         let raw = raw_frame.payload.to_vec();
         let raw_stats = decode_raw_borrowed(&raw);
         assert_eq!(raw_stats.records, message_count * 2);
         assert_eq!(raw_stats.bytes, message_count * (payload_size + 16 + 48));
         assert_eq!(decode_raw_owned(&raw), read);
-        assert_eq!(wire::decode_replication_read_ok(&raw_frame).unwrap(), read);
+        assert_eq!(wire::decode_stream_replication_read_ok(&raw_frame).unwrap(), read);
 
         group.throughput(criterion::Throughput::Bytes(msgpack.len() as u64));
         group.bench_with_input(
@@ -474,7 +474,7 @@ fn bench_replication_decode(c: &mut Criterion) {
             &msgpack,
             |b, payload| {
                 b.iter(|| {
-                    let decoded: ReplicationReadOk =
+                    let decoded: StreamReplicationReadOk =
                         rmp_serde::from_slice(black_box(payload)).unwrap();
                     black_box(decoded);
                 })
@@ -483,19 +483,19 @@ fn bench_replication_decode(c: &mut Criterion) {
 
         group.throughput(criterion::Throughput::Bytes(raw.len() as u64));
         group.bench_with_input(BenchmarkId::new("wire_encode", &name), &read, |b, read| {
-            b.iter(|| black_box(wire::encode_replication_read_ok(1, black_box(read))))
+            b.iter(|| black_box(wire::encode_stream_replication_read_ok(1, black_box(read))))
         });
         group.bench_with_input(
             BenchmarkId::new("wire_owned", &name),
             &raw_frame,
-            |b, frame| b.iter(|| black_box(wire::decode_replication_read_ok(black_box(frame)))),
+            |b, frame| b.iter(|| black_box(wire::decode_stream_replication_read_ok(black_box(frame)))),
         );
         group.bench_with_input(
             BenchmarkId::new("helper_owned", &name),
             &raw_frame,
             |b, frame| {
                 b.iter(|| {
-                    let decoded: ReplicationReadOk = try_decode(black_box(frame)).unwrap();
+                    let decoded: StreamReplicationReadOk = try_decode(black_box(frame)).unwrap();
                     black_box(decoded);
                 })
             },
