@@ -745,6 +745,12 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- When a partition owner is gone or draining, the controller hands the
+  partition to a live committed follower even when no follower published an
+  applied-tail label. Round-robin placement, which may pick a node that must
+  copy the whole history before it can serve, is only used when no live
+  follower remains. Draining followers are no longer candidates.
+
 - The controller no longer moves a resource that only its owner is known to
   hold (owner-only speculative and durable streams, and legacy queues whose
   write requirement is one copy) just because the owner stopped heartbeating.

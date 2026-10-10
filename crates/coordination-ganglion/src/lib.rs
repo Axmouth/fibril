@@ -703,6 +703,37 @@ fn parse_applied_tail(raw: &str, stream: bool) -> Option<u64> {
     }
 }
 
+/// New owner for a partition whose owner is gone: the eligible committed
+/// follower with the best applied-tail label, or the first eligible follower
+/// when none reports a label. None when no follower is eligible.
+fn choose_failover_owner(
+    current: &ganglion_core::PartitionAssignment,
+    committed: &ganglion_core::CoordinationSnapshot,
+    label: &str,
+    stream: bool,
+    eligible: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let candidates: Vec<&String> = current
+        .followers
+        .iter()
+        .filter(|follower| eligible(follower))
+        .collect();
+    candidates
+        .iter()
+        .filter_map(|follower| {
+            let tail = committed
+                .nodes
+                .get(*follower)
+                .and_then(|node| node.labels.get(label))
+                .and_then(|raw| parse_applied_tail(raw, stream))?;
+            Some((*follower, tail))
+        })
+        .max_by_key(|(_, tail)| *tail)
+        .map(|(follower, _)| follower)
+        .or_else(|| candidates.first().copied())
+        .cloned()
+}
+
 /// Registered nodes whose heartbeat is not fresh. The controller startup
 /// grace waits for this list to empty before it moves any owner.
 fn startup_grace_missing(
@@ -3101,10 +3132,9 @@ impl GanglionCoordination {
 
             // Failover candidate selection: when the committed owner is gone
             // (dead, or live but draining) and the planner moved ownership,
-            // prefer the most caught-up LIVE committed follower (by
-            // heartbeat-label applied tail). This is advisory: local
-            // promotion checks do not establish the cluster's confirmed prefix.
-            // With one follower this selection is a no-op.
+            // hand the partition to a live committed follower, which already
+            // holds a copy, instead of the planner's data-blind pick. This is
+            // advisory: recovery proof, not this choice, decides safety.
             for (resource, planned) in desired.assignments.iter_mut() {
                 let Some(current) = committed.assignments.get(resource) else {
                     continue;
@@ -3128,21 +3158,11 @@ impl GanglionCoordination {
                 } else {
                     continue;
                 };
-                let best = current
-                    .followers
-                    .iter()
-                    .filter(|follower| live_nodes.contains_key(*follower))
-                    .filter_map(|follower| {
-                        let tails = committed
-                            .nodes
-                            .get(follower)
-                            .and_then(|node| node.labels.get(&label))
-                            .and_then(|raw| parse_applied_tail(raw, stream))?;
-                        Some((follower.clone(), tails))
-                    })
-                    .max_by_key(|(_, tail)| *tail);
+                let best = choose_failover_owner(current, &committed, &label, stream, |node| {
+                    live_nodes.contains_key(node) && !draining.contains(node)
+                });
                 match best {
-                    Some((best_follower, _)) => {
+                    Some(best_follower) => {
                         if planned.owner != best_follower {
                             let displaced =
                                 std::mem::replace(&mut planned.owner, best_follower.clone());
@@ -3160,12 +3180,11 @@ impl GanglionCoordination {
                             }
                         }
                     }
-                    // A draining owner with no reporting live follower keeps
-                    // the partition: the node is still serving, so staying
-                    // put beats handing ownership to a node without the
-                    // data. Reactive failover stays the backstop once the
-                    // process actually exits. A DEAD owner keeps the
-                    // planner's move, today's behavior.
+                    // A draining owner with no live follower keeps the
+                    // partition: the node is still serving, so staying put
+                    // beats handing ownership to a node without a copy.
+                    // Reactive failover stays the backstop once the process
+                    // exits. A dead owner keeps the planner's pick.
                     None if owner_draining => {
                         planned.owner = current.owner.clone();
                         planned.followers = current.followers.clone();
@@ -5410,12 +5429,13 @@ mod tests {
             .expect("shutdown");
     }
 
-    /// A draining owner whose followers report no applied tails keeps its
-    /// partition: the node is still serving, so staying put beats moving
-    /// ownership away from the data. Reactive failover remains the backstop
-    /// after the process exits.
+    /// A draining owner with no live follower keeps its partition: the node
+    /// is still serving, so staying put beats moving ownership to a node
+    /// without a copy. Reactive failover remains the backstop after the
+    /// process exits. An ephemeral owner-only stream shows this rule apart
+    /// from the owner-only durability hold.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn draining_owner_without_reporting_follower_keeps_the_partition() {
+    async fn draining_owner_without_live_follower_keeps_the_partition() {
         use fibril_broker::coordination::DeterministicPartitionPlacement;
 
         let router = InProcessRouter::new();
@@ -5445,8 +5465,14 @@ mod tests {
             .register_self(&info("b-fresh", 9001))
             .await
             .expect("b");
-        let queue = QueueIdentity::new("solo", Partition::new(0), None);
-        provider.register_legacy_queue(&queue).await.expect("queue");
+        provider
+            .declare_stream("solo", 1, STREAM_DURABILITY_EPHEMERAL, Default::default(), None)
+            .await
+            .expect("declare");
+        provider
+            .register_stream(&StreamIdentity::new("solo", Partition::new(0)))
+            .await
+            .expect("stream");
 
         let mut live = std::collections::HashMap::new();
         live.insert("a-owner".to_string(), info("a-owner", 9000));
@@ -5474,7 +5500,7 @@ mod tests {
 
         let committed = iterate(live.clone()).await;
         let first = committed
-            .assignment_for("solo", Partition::new(0), None)
+            .stream_assignment_for("solo", Partition::new(0))
             .expect("assigned")
             .clone();
         assert_eq!(first.owner, "a-owner");
@@ -5487,7 +5513,7 @@ mod tests {
             .expect("mark draining");
         let committed = iterate(live).await;
         let kept = committed
-            .assignment_for("solo", Partition::new(0), None)
+            .stream_assignment_for("solo", Partition::new(0))
             .expect("assigned")
             .clone();
         assert_eq!(kept.owner, "a-owner", "no reporting follower: stay put");
@@ -5498,6 +5524,88 @@ mod tests {
             .shutdown()
             .await
             .expect("shutdown");
+    }
+
+    #[test]
+    fn failover_owner_prefers_labelled_then_first_eligible_follower() {
+        let resource = ganglion_core::ResourceIdentity::new(QUEUE_NAMESPACE, "q", 0, None);
+        let current = ganglion_core::PartitionAssignment::new(
+            resource,
+            "a",
+            vec!["b".into(), "c".into(), "d".into()],
+            1,
+        );
+        let mut committed = ganglion_core::CoordinationSnapshot::default();
+        let label = "applied/q/0";
+        let any = |_: &str| true;
+        assert_eq!(choose_failover_owner(&current, &committed, label, false, any).as_deref(), Some("b"));
+        assert_eq!(
+            choose_failover_owner(&current, &committed, label, false, |n| n != "b").as_deref(),
+            Some("c")
+        );
+        let mut node = ganglion_core::NodeInfo::new("d", "127.0.0.1:1", None);
+        node.labels.insert(label.into(), encode_queue_applied_tail(3));
+        committed.nodes.insert("d".into(), node);
+        assert_eq!(choose_failover_owner(&current, &committed, label, false, any).as_deref(), Some("d"));
+        assert_eq!(choose_failover_owner(&current, &committed, label, false, |_| false), None);
+    }
+
+    /// With no applied-tail labels, a dead owner's partition goes to a live
+    /// committed follower rather than the planner's round-robin pick, which
+    /// would have to copy the whole history first.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dead_owner_prefers_an_unlabelled_follower_over_a_fresh_node() {
+        let router = InProcessRouter::new();
+        let raft_node = RaftMetadataNode::start(1, default_raft_config().unwrap(), &router)
+            .await
+            .unwrap();
+        raft_node
+            .initialize(BTreeMap::from([(1u64, ganglion_openraft::openraft::BasicNode::new("n1"))]))
+            .await
+            .unwrap();
+        raft_node.wait_for_leader(1, Duration::from_secs(10)).await.unwrap();
+        let provider = GanglionCoordination::new("b", raft_node);
+        let info = |id: &str| NodeInfo {
+            node_id: id.into(),
+            broker_addr: "127.0.0.1:9000".into(),
+            admin_addr: None,
+        };
+        let queue = QueueIdentity::new("orders", Partition::new(0), None);
+        provider.register_legacy_queue(&queue).await.unwrap();
+        let iterate = |ids: &'static [&'static str]| {
+            let provider = &provider;
+            async move {
+                let live: HashMap<String, NodeInfo> =
+                    ids.iter().map(|id| (id.to_string(), info(id))).collect();
+                provider
+                    .control_iteration(
+                        &fibril_broker::coordination::DeterministicPartitionPlacement,
+                        &provider.registered_queues(),
+                        &DeterministicStreamPlacement,
+                        &[],
+                        1,
+                        1,
+                        ReplicationDurabilityPolicy::MajorityDurable,
+                        &live,
+                        8,
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+        };
+        for id in ["b", "c"] {
+            provider.register_self(&info(id)).await.unwrap();
+        }
+        let first = iterate(&["b", "c"]).await.assignment_for("orders", Partition::new(0), None).unwrap().clone();
+        assert_eq!((first.owner.as_str(), first.followers.as_slice()), ("b", &["c".to_string()][..]));
+        // "a" joins later and sorts first, so round-robin would pick it.
+        provider.register_self(&info("a")).await.unwrap();
+        iterate(&["a", "c"]).await;
+        let pending = provider.pending_recoveries().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].proposed.owner, "c");
+        provider.consensus_node().shutdown().await.unwrap();
     }
 
     /// During the startup grace an existing assignment keeps its owner and
