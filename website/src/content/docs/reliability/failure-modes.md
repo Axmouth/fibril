@@ -33,7 +33,7 @@ Two distinct failures matter, and they are not the same:
 | Tier | Survives process restart | Survives node loss | Notes |
 | --- | --- | --- | --- |
 | Queue, single owner (`local_durable`) | Yes (fsync per durable write) | No | The partition is unavailable while the node is down. This is the default and the only mode for a standalone broker. |
-| Queue, replicated (`replica_durable` / `majority_durable`) | Yes | Copies survive. Failover waits for recovery proof | Confirmation waits for the required replicas. The controller retains the old assignment while a pending recovery request awaits confirmed-history proof, and enrolled queues then recover automatically. Requires Ganglion coordination and assigned followers. |
+| Queue, replicated (`replica_durable` / `majority_durable`) | Yes | Copies survive. Failover waits for recovery proof | Confirmation waits for the required replicas. The controller retains the old assignment while a pending recovery request awaits confirmed-history proof, and enrolled queues then recover automatically. Requires Ganglion coordination and assigned followers. A restarted follower of a queue with W >= 2 rejoins as a learner without a recovery fence. |
 | Stream, `durable` owner-only | Yes (fsync before deliver/confirm) | No | Survives restart, not node loss. Records and cursors are on the one owner, so the partition waits for that owner to return. |
 | Stream, `durable` replicated (`stream_replication_factor` >= 2) | Yes | Copies survive. Automatic failover paused | Record and cursor logs replicate. Replicated ownership changes share the pending-recovery barrier of queues, but automatic recovery does not resolve a stream request. See [operator decisions](#a-recovery-or-held-owner-needs-an-operator). |
 | Stream, `speculative` | Partial | No | Delivers off the staged offset and defers the producer confirm until durable, so a confirmed record is durable, but unconfirmed records in flight at a crash can be lost. An owner-only partition waits for its owner to return. |
@@ -80,6 +80,15 @@ Those assignments remain on the old owner while recovery is pending, so drain
 can time out with `handoff_complete = false`. Preserve that owner's data and
 inspect the pending recovery before stopping it. A draining node receives no new
 placements.
+
+On a broker that only follows a replicated queue (write requirement W of 2 or
+more), a restart needs no recovery. The queue keeps serving from its owner and
+the restarted follower rejoins as a learner. It does not count toward confirms
+until it is re-admitted, so publishes wait, and can fail their confirm, while
+fewer than W copies count. At most W-1 followers of a queue rejoin at once, so
+in a rolling restart wait for the previous node's followers to be re-admitted
+before restarting the next one. See
+[restarted queue followers](/reliability/recovery-sealing/#restarted-queue-followers).
 
 ### An owner broker dies (cluster)
 

@@ -182,7 +182,10 @@ replica-durable acceptance:
 
 The follower read budget and poll intervals
 (`runtime_seed.replication.*`) tune catch-up throughput versus idle confirm
-latency. See the [configuration](/configuration/) replication settings.
+latency. See the [configuration](/configuration/) replication settings. A
+caught-up follower's long-poll returns as soon as the owner has new durable
+data, including stream records and stream cursor commits, so the poll timeout
+bounds idle waits and does not delay each confirm.
 
 ## Follower retention and repair
 

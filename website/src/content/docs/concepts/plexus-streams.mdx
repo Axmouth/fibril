@@ -105,6 +105,17 @@ durability:
 All three are log-backed, so durable cursors, replay, and retention work on any
 tier.
 
+On the speculative and ephemeral tiers, live subscribers get a record when it is
+staged, before the log can serve it. Log reads return only durable records. A
+subscriber that starts behind the live feed, or catches up after falling behind,
+reads the log first and joins the live feed only once it has every record up to
+it. If the log is still behind the live feed, the subscriber waits for those
+records to become durable. Catch-up on these tiers can pause briefly, but it
+never skips a record. A start by wall-clock time at the live tail includes
+records that are staged but not written yet. A stream's reported tail also
+counts staged records, so on these tiers it can run ahead of what the log can
+serve.
+
 ## Durability vs high availability
 
 A durability tier and replication are different guarantees, and it is worth being
@@ -117,7 +128,9 @@ precise about which you have:
 - **Durable and replicated** (the durable tier with a replication factor of one or
   more) survives node loss: the owner replicates its record and cursor logs to that
   many followers, a durable publish confirms only once the replicas have it, and a
-  caught-up follower is promoted on failover. This is the high-availability
+  caught-up follower is promoted on failover. A caught-up follower picks up new
+  durable records and cursor commits as soon as the owner has them, so these
+  confirms do not wait out a poll interval. This is the high-availability
   configuration.
 
 Replication is the durable tier only. The express tiers (speculative, ephemeral)

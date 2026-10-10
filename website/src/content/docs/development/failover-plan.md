@@ -366,8 +366,12 @@ the current decision and require the owner and configured write threshold.
 Authenticated remote preparation rechecks the exact decision through consensus.
 Explicit initial activation now admits the exact prepared storage/process instances
 and carries their identity on live replication. Version-two seals now bind retained
-evidence to that accepted storage history and original replica instance; process
-replacement requests recovery even without a placement change. Recovered activation
+evidence to that accepted storage history and original replica instance. Owner
+process replacement requests recovery even without a placement change, as does
+any replica replacement on a stream or a W = 1 queue. A restarted follower of a
+queue with W >= 2 is suspended and
+[rejoins as a learner](/reliability/recovery-sealing/#restarted-queue-followers)
+while the queue keeps serving. Recovered activation
 establishes the next exact accepted history and supports repeated recoveries.
 Existing resources require recreation to adopt this path; the catalogue ID alone
 supplies no history authority.

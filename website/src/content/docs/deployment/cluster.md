@@ -182,7 +182,15 @@ owners in place until every registered node heartbeats again, or
 until `coordination.ganglion.controller_startup_grace_ms` (default 30 seconds)
 expires, so a node that boots late keeps its partitions. A node that is gone for
 good delays owner failover by up to that grace after each leader change. Set
-the grace to `0` to turn this off.
+the grace to `0` to turn this off. Every owner restarts in that case, so
+replicated queues go through recovery instead of the follower rejoin below.
+
+When a single node restarts, partitions it owns go through recovery. Queues it
+only follows keep serving if their write requirement W is 2 or more. The
+restarted follower rejoins as a learner and counts toward confirms again once it
+is re-admitted. At most W-1 followers of a queue rejoin at once, so in a rolling
+restart let one node's followers rejoin before restarting the next. See
+[restarted queue followers](/reliability/recovery-sealing/#restarted-queue-followers).
 
 A partition whose only full copy is on a missing owner (owner-only durable
 streams, and legacy single-copy queues) waits for that owner instead of moving.

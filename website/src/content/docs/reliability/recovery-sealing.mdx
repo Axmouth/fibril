@@ -237,12 +237,76 @@ rejects old receipts and resumes through the automatic worker. These checks do
 not establish power-loss behavior; packet-level asymmetric partitions and
 whole-process interruption during transfer remain separate acceptance work.
 
+## Restarted queue followers
+
+A queue follower whose broker process restarts registers a new process. When
+the owner did not restart and the queue's write requirement W is at least 2, the
+controller requests no recovery. The queue keeps its owner, epoch and accepted
+history, and keeps serving from the owner.
+
+Until the follower is re-admitted under its new process, the accepted history
+marks it suspended. A suspended follower does not serve, and its progress counts
+toward neither confirms nor the in-sync replica count. W stays the same.
+Publishes wait while the remaining copies cannot meet it, and fail their confirm
+if those copies still cannot meet it in time. With three copies, W = 2 and both
+followers restarted, publishes fail their confirm instead of confirming on the
+owner alone.
+
+The suspended follower keeps its slot in the eligible set. Recovery still needs
+E-W+1 seals over the unchanged set, so a restart cannot lower the seal threshold
+and let one lagging copy seal alone.
+
+The follower rejoins through the learner path above, under its new process. A
+follower with its data intact resumes the retained log in place and catches up
+from its local tail. A follower with a wiped data directory starts from an owner
+checkpoint. Admission replaces the follower's entry in the eligible set instead
+of adding one. Other followers keep their replication sessions and progress, and
+in-flight publishes keep waiting under the same contract. Only the restarted
+follower's old sessions and progress are dropped.
+
+Starting a rejoin rewrites the follower's local storage receipt, so its old copy
+stops being a valid seal witness until admission records the new instance. At
+most W-1 eligible followers rejoin at once, which leaves enough witnesses for
+E-W+1 seals if the owner process fails during a rejoin. A follower that restarts
+again before admission still holds its rejoin slot. A reseed whose target
+restarted is skipped, since the rejoin replaces the copy it was repairing.
+
+These cases still go through recovery:
+
+- An owner restart, including one at the same time as follower restarts.
+- Any replica restart on a stream. Streams have no learner path.
+- Any replica restart on a queue with W = 1. Such a queue needs a seal from every
+  eligible replica, so it has no spare witness while a follower rejoins.
+
+A full-cluster restart also restarts every owner, so every activated partition
+recovers. Followers that register before their owner are limited to W-1
+concurrent rejoins, which keeps the recovery seal threshold reachable.
+
+Some cases stall until more replicas return. They do not drop confirmed writes:
+
+- More followers restarted than W-1. The others wait for a free rejoin slot, and
+  publishes wait or fail their confirm while fewer than W copies count.
+- The owner fails while a follower is suspended or rejoining. A pending recovery
+  stops learner admission, and a follower that already started rejoining cannot
+  seal. If the other copies cannot supply E-W+1 seals, recovery waits for more
+  witnesses, for example the owner returning with its data.
+- A learner reads from the owner, so a rejoin cannot finish while the owner is
+  unreachable.
+
+A live three-node cluster test covers a follower restarting with its data, a
+follower restarting with an empty data directory and both followers restarting
+together. Each case checks that no recovery is requested, that epoch and history
+are kept, and that restarted followers count again only after re-admission. A
+later owner restart in the same test still requests recovery.
+
 ## Initial activation and live replication
 
 The original owner can commit an immutable activation of its exact persisted
 prepared quorum. Each replica then obtains fresh consensus authorization and
 admits only its recorded provider and storage instance. A replacement process,
-missing receipt or different storage instance requires recovery readmission.
+missing receipt or different storage instance requires recovery readmission,
+except for a [restarted queue follower](#restarted-queue-followers), which
+rejoins as a learner.
 Identical admission retries preserve subsequent writes.
 
 Activated assignments carry the history binding and exact replica instances.
@@ -280,8 +344,11 @@ which intersects every possible acknowledged write set. W still uses the full
 configured assignment. The pending transition binds the previous activation;
 seal-count completion still requires source validation before installation.
 
-A registered replacement process requests recovery even if placement is unchanged.
-Its heartbeat identity can close admission but cannot grant it. Bound storage
+A registered replacement process for an owner, a stream replica or any replica
+of a queue with W = 1 requests recovery even if placement is unchanged. Its
+heartbeat identity can close admission but cannot grant it. Other restarted queue
+followers rejoin as learners, described in
+[restarted queue followers](#restarted-queue-followers). Bound storage
 reopen verifies complete contiguous records and permits zero preallocation;
 partial or corrupt records, missing retained segments and semantic tail repair
 are refused before destructive repair. Those bytes remain available for diagnosis
@@ -589,7 +656,8 @@ assignment and immutable activation certificate while clearing the matching pend
 fence; advisory heartbeat updates are preserved. Every activated target performs a
 fresh consensus check before admitting its recorded process/storage instance.
 Repeated activation and admission preserve subsequent writes. A replacement process
-must recover through a new transition.
+must recover through a new transition, unless it is a restarted queue follower
+that can rejoin as a learner.
 
 Internal `RecoveryTransfer`/`RecoveryTransferOk` frames (110/111, `RXT2`) carry versioned,
 bounded control operations for staging, completed-stage reads, installation and

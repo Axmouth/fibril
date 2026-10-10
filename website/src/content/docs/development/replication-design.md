@@ -41,6 +41,14 @@ queue never opens a stream session and the reverse. Queue confirms count only
 queue progress and stream confirms count only stream record progress, so cursor
 events never release a record confirm.
 
+A caught-up stream follower long-polls the owner with `max_wait_ms`. The owner's
+read waits on the queue replication wakeup and on the stream channel's durability
+signal, which fires when new stream records or cursor commits become durable. A
+caught-up follower therefore gets new durable data right away instead of
+sleeping out the full wait, and replica-durable stream confirms do not wait for
+the long-poll timeout. The signal has no memory, so the read registers for it
+before checking for data.
+
 Queue checkpoint backfill may include payload-bearing records older than the
 snapshot cut. Those records restore payload coverage without reapplying state
 already represented by the snapshot.

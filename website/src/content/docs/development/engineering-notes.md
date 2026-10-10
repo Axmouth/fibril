@@ -8,6 +8,32 @@ for further detail. Measurements describe the stated workload and hardware.
 Current capabilities are in [implemented surface](/implemented-surface/);
 remaining work is in the [roadmap](/roadmap/).
 
+## Stream backfill on the Speculative and Ephemeral tiers
+
+The Speculative and Ephemeral tiers put records in the fan-out ring when they are
+staged, while log backfill reads durable records only. With more than a ring of
+records in flight, a subscriber attaching or recovering from lag got a short log
+read at the durable frontier and jumped to the ring, so the records in between
+were never delivered and cursor commits moved past them. Backfill waits for the
+durable frontier and joins the ring only after the whole log range is delivered,
+and a by-time start at the live edge no longer skips staged records. A caught-up
+stream follower's long-poll also slept out its full `max_wait_ms` because stream
+writes never fired the queue wakeup, slowing replica-durable stream confirms. It
+wakes on the stream durability signal. Fibril commits 54378cd and 519b100, with
+the Keratin side in its changelog.
+
+## Restarted queue followers rejoin as learners
+
+A queue follower whose process restarted put the queue into a pending recovery
+with unchanged placement, closing serving until seal, inspection and install
+finished. The restarted follower is suspended in the accepted history and
+rejoins through learner admission while the queue keeps serving, with W
+unchanged, its eligible-set slot kept and at most W-1 rejoins at once so a
+recovery can still collect E-W+1 seals. Owner restarts, streams and W = 1 queues
+still recover. Fibril commits c50b276, b62a00b and b7ae136, with a live
+three-node test. See
+[restarted queue followers](/reliability/recovery-sealing/#restarted-queue-followers).
+
 ## Failover placement and owner-only holds
 
 Owner moves used liveness and a round-robin pick, so a whole-cluster restart could

@@ -5,7 +5,8 @@ description: Proposed learner-based replica moves, planned owner handoff and a l
 
 import BrokerStory from "../../../components/BrokerStory.astro";
 
-This design note records proposed work. None of it is implemented. Current
+This design note records proposed work. Only the returning replica case is
+implemented, for restarted queue followers. The rest is proposed. Current
 placement is described in [clustering](/concepts/clustering/), recovery in
 [failover and recovery](/reliability/recovery-sealing/), and cooperative owner
 handoff in [recovery continuation](/development/recovery-continuation/).
@@ -28,7 +29,8 @@ of this applies to them.
 | Piece | State |
 | --- | --- |
 | Learner admission | A follower absent from the accepted history catches up from a checkpoint and the log tail, then is admitted without changing owner, epoch or write requirement |
-| History binding | The accepted history names the exact process and storage instance of each replica |
+| Restarted followers | A restarted queue follower is suspended and rejoins through learner admission without a fence, keeping its eligible-set slot. At most W - 1 rejoin at once. See [restarted queue followers](/reliability/recovery-sealing/#restarted-queue-followers) |
+| History binding | The accepted history names the exact process and storage instance of each replica, and marks a restarted follower suspended until it is re-admitted |
 | Reseed | Revokes and re-admits one replica inside the same history |
 | Recovery candidate handoff | Swaps the recovery driver within a fixed proposed set |
 | Drain | Moves a node's partitions away, but through a full crash-style recovery |
@@ -36,8 +38,9 @@ of this applies to them.
 
 Gaps:
 
-- Any follower change on an activated queue creates a pending recovery, which
-  closes serving until seal, inspection and install finish.
+- Any follower placement change on an activated queue creates a pending
+  recovery, which closes serving until seal, inspection and install finish. Only
+  a follower restart on an unchanged placement avoids the fence.
 - The write requirement is computed from the full assignment. Adding a copy to
   `followers` raises it for majority policies while the new copy cannot report
   confirm progress yet.
@@ -185,7 +188,7 @@ Policy:
 | Situation | Steps |
 | --- | --- |
 | New empty node joins | Repeated follower moves under the sync budget, then owner handoffs |
-| Returning replica | Step 0 only, the node becomes a follower again without a fence |
+| Returning replica | Implemented for restarted queue followers on an unchanged placement: the follower is suspended, rejoins as a learner and becomes a follower again without a fence. A replica returning to a changed placement would use step 0 only |
 | Replication factor increase | Step 0 then promotion to follower, no removal |
 | Lost follower replaced | Step 0 on the replacement, then remove the lost copy once the threshold allows |
 | Drain | Planned owner handoff to an admitted follower, then follower moves off the node |
