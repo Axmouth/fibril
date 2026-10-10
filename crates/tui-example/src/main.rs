@@ -812,7 +812,7 @@ fn parse_auth(auth: &str) -> Option<(String, String)> {
 }
 
 async fn connect(addr: &str) -> anyhow::Result<Conn> {
-    let stream = TcpStream::connect(addr).await?;
+    let stream = fibril_util::net::TcpStream::connect(addr).await?;
     stream.set_nodelay(true)?;
     Ok(fibril_protocol::v1::helper::plain_conn(stream))
 }

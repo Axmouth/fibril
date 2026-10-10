@@ -1,3 +1,8 @@
+// These tests run brokers on real loopback sockets. Under the `simulation`
+// feature the broker speaks turmoil's simulated TCP instead, and
+// simulation_tests.rs covers that build.
+#![cfg(not(feature = "simulation"))]
+
 use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,

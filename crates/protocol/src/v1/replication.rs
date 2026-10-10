@@ -1619,7 +1619,9 @@ mod queue_read_tests {
     }
 }
 
-#[cfg(test)]
+// These drive the push transport over real loopback sockets, which the
+// simulated network types cannot stand in for outside a turmoil Sim.
+#[cfg(all(test, not(feature = "simulation")))]
 mod push_transport_tests {
     use super::*;
     use crate::v1::{QueuePushEnd, ReplicationEventRecord};
