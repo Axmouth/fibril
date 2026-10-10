@@ -745,6 +745,10 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- Equally ranked failover candidates are broken by fewest currently owned
+  partitions, then by node id, so a failed node's partitions spread over its
+  followers instead of all moving to the last one listed.
+
 - When the controller hands a dead or draining owner's partition to a
   follower, the proposed replica set keeps only nodes that already hold a
   copy, as long as they still meet the write requirement. The planner's

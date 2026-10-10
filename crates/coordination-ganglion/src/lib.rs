@@ -707,34 +707,37 @@ fn parse_applied_tail(raw: &str, stream: bool) -> Option<(u64, u64)> {
 }
 
 /// New owner for a partition whose owner is gone: the eligible committed
-/// follower with the best applied-tail label, or the first eligible follower
-/// when none reports a label. None when no follower is eligible.
+/// follower with the best applied-tail label. A follower with a label beats
+/// one without. Ties go to the follower owning the fewest partitions, then
+/// to the smallest node id. None when no follower is eligible.
 fn choose_failover_owner(
     current: &ganglion_core::PartitionAssignment,
     committed: &ganglion_core::CoordinationSnapshot,
     label: &str,
     stream: bool,
+    owned: &HashMap<String, usize>,
     eligible: impl Fn(&str) -> bool,
 ) -> Option<String> {
-    let candidates: Vec<&String> = current
+    let owned = |node: &str| owned.get(node).copied().unwrap_or(0);
+    current
         .followers
         .iter()
         .filter(|follower| eligible(follower))
-        .collect();
-    candidates
-        .iter()
-        .filter_map(|follower| {
+        .map(|follower| {
             let tail = committed
                 .nodes
-                .get(*follower)
+                .get(follower)
                 .and_then(|node| node.labels.get(label))
-                .and_then(|raw| parse_applied_tail(raw, stream))?;
-            Some((*follower, tail))
+                .and_then(|raw| parse_applied_tail(raw, stream));
+            (tail, follower)
         })
-        .max_by_key(|(_, tail)| *tail)
-        .map(|(follower, _)| follower)
-        .or_else(|| candidates.first().copied())
-        .cloned()
+        .max_by(|(tail_a, a), (tail_b, b)| {
+            tail_a
+                .cmp(tail_b)
+                .then_with(|| owned(b).cmp(&owned(a)))
+                .then_with(|| b.cmp(a))
+        })
+        .map(|(_, follower)| follower.clone())
 }
 
 /// Registered nodes whose heartbeat is not fresh. The controller startup
@@ -3138,15 +3141,28 @@ impl GanglionCoordination {
             // hand the partition to a live committed follower, which already
             // holds a copy, instead of the planner's data-blind pick. This is
             // advisory: recovery proof, not this choice, decides safety.
+            let failover_target = |resource: &ganglion_core::ResourceIdentity,
+                                   planned: &ganglion_core::PartitionAssignment| {
+                committed.assignments.get(resource).is_some_and(|current| {
+                    (!live_nodes.contains_key(&current.owner) || draining.contains(&current.owner))
+                        && planned.owner != current.owner
+                })
+            };
+            // Partitions each node owns outside this failover pass. Choices
+            // below add to it, so equally ranked followers share the load
+            // instead of one node taking every partition of a failed peer.
+            let mut owned: HashMap<String, usize> = HashMap::new();
+            for (resource, planned) in &desired.assignments {
+                if !failover_target(resource, planned) {
+                    *owned.entry(planned.owner.clone()).or_default() += 1;
+                }
+            }
             for (resource, planned) in desired.assignments.iter_mut() {
-                let Some(current) = committed.assignments.get(resource) else {
-                    continue;
-                };
-                let owner_draining = draining.contains(&current.owner);
-                let owner_gone = !live_nodes.contains_key(&current.owner) || owner_draining;
-                if !owner_gone || planned.owner == current.owner {
+                if !failover_target(resource, planned) {
                     continue;
                 }
+                let current = &committed.assignments[resource];
+                let owner_draining = draining.contains(&current.owner);
                 // The applied-tail label is keyed by QueueIdentity. A stream
                 // follower reuses the queue follower worker (group None), so it
                 // already publishes its tail under that same key - derive it the
@@ -3161,7 +3177,7 @@ impl GanglionCoordination {
                 } else {
                     continue;
                 };
-                let best = choose_failover_owner(current, &committed, &label, stream, |node| {
+                let best = choose_failover_owner(current, &committed, &label, stream, &owned, |node| {
                     live_nodes.contains_key(node) && !draining.contains(node)
                 });
                 match best {
@@ -3210,6 +3226,7 @@ impl GanglionCoordination {
                     }
                     None => {}
                 }
+                *owned.entry(planned.owner.clone()).or_default() += 1;
             }
 
             if hold_owners {
@@ -5552,7 +5569,7 @@ mod tests {
     }
 
     #[test]
-    fn failover_owner_prefers_labelled_then_first_eligible_follower() {
+    fn failover_owner_prefers_labelled_then_least_loaded_follower() {
         let resource = ganglion_core::ResourceIdentity::new(QUEUE_NAMESPACE, "q", 0, None);
         let current = ganglion_core::PartitionAssignment::new(
             resource,
@@ -5563,16 +5580,32 @@ mod tests {
         let mut committed = ganglion_core::CoordinationSnapshot::default();
         let label = "applied/q/0";
         let any = |_: &str| true;
-        assert_eq!(choose_failover_owner(&current, &committed, label, false, any).as_deref(), Some("b"));
+        let none = HashMap::new();
+        assert_eq!(choose_failover_owner(&current, &committed, label, false, &none, any).as_deref(), Some("b"));
         assert_eq!(
-            choose_failover_owner(&current, &committed, label, false, |n| n != "b").as_deref(),
+            choose_failover_owner(&current, &committed, label, false, &none, |n| n != "b").as_deref(),
             Some("c")
         );
         let mut node = ganglion_core::NodeInfo::new("d", "127.0.0.1:1", None);
         node.labels.insert(label.into(), encode_queue_applied_tail(3));
         committed.nodes.insert("d".into(), node);
-        assert_eq!(choose_failover_owner(&current, &committed, label, false, any).as_deref(), Some("d"));
-        assert_eq!(choose_failover_owner(&current, &committed, label, false, |_| false), None);
+        assert_eq!(choose_failover_owner(&current, &committed, label, false, &none, any).as_deref(), Some("d"));
+        assert_eq!(choose_failover_owner(&current, &committed, label, false, &none, |_| false), None);
+
+        // Equal labels: the follower owning fewer partitions wins, then the
+        // smaller id, whatever the follower order.
+        for id in ["b", "c"] {
+            let mut node = ganglion_core::NodeInfo::new(id, "127.0.0.1:1", None);
+            node.labels.insert(label.into(), encode_queue_applied_tail(3));
+            committed.nodes.insert(id.into(), node);
+        }
+        let mut reversed = current.clone();
+        reversed.followers.reverse();
+        for assignment in [&current, &reversed] {
+            assert_eq!(choose_failover_owner(assignment, &committed, label, false, &none, any).as_deref(), Some("b"));
+            let loaded = HashMap::from([("b".to_string(), 2), ("d".to_string(), 1)]);
+            assert_eq!(choose_failover_owner(assignment, &committed, label, false, &loaded, any).as_deref(), Some("c"));
+        }
     }
 
     #[test]
@@ -5592,9 +5625,74 @@ mod tests {
             committed.nodes.insert(id.into(), node);
         }
         assert_eq!(
-            choose_failover_owner(&current, &committed, label, true, |_| true).as_deref(),
+            choose_failover_owner(&current, &committed, label, true, &HashMap::new(), |_| true).as_deref(),
             Some("c-caught-up")
         );
+    }
+
+    /// Partitions of a failed node spread over its equally ranked followers
+    /// instead of all landing on one of them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failover_spreads_equally_ranked_partitions() {
+        let router = InProcessRouter::new();
+        let raft_node = RaftMetadataNode::start(1, default_raft_config().unwrap(), &router)
+            .await
+            .unwrap();
+        raft_node
+            .initialize(BTreeMap::from([(1u64, ganglion_openraft::openraft::BasicNode::new("n1"))]))
+            .await
+            .unwrap();
+        raft_node.wait_for_leader(1, Duration::from_secs(10)).await.unwrap();
+        let provider = GanglionCoordination::new("b", raft_node);
+        let info = |id: &str| NodeInfo {
+            node_id: id.into(),
+            broker_addr: "127.0.0.1:9000".into(),
+            admin_addr: None,
+        };
+        for id in ["a", "b", "c"] {
+            provider.register_self(&info(id)).await.unwrap();
+        }
+        for partition in 0..6 {
+            provider
+                .register_legacy_queue(&QueueIdentity::new("orders", Partition::new(partition), None))
+                .await
+                .unwrap();
+        }
+        let iterate = |ids: &'static [&'static str]| {
+            let provider = &provider;
+            async move {
+                let live: HashMap<String, NodeInfo> =
+                    ids.iter().map(|id| (id.to_string(), info(id))).collect();
+                provider
+                    .control_iteration(
+                        &fibril_broker::coordination::DeterministicPartitionPlacement,
+                        &provider.registered_queues(),
+                        &DeterministicStreamPlacement,
+                        &[],
+                        2,
+                        2,
+                        ReplicationDurabilityPolicy::MajorityDurable,
+                        &live,
+                        8,
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+        };
+        let placed = iterate(&["a", "b", "c"]).await;
+        assert_eq!(placed.owned_by("a").len(), 2);
+        iterate(&["b", "c"]).await;
+        let mut new_owners: Vec<String> = provider
+            .pending_recoveries()
+            .unwrap()
+            .into_iter()
+            .filter(|pending| pending.previous.owner == "a")
+            .map(|pending| pending.proposed.owner)
+            .collect();
+        new_owners.sort();
+        assert_eq!(new_owners, vec!["b", "c"]);
+        provider.consensus_node().shutdown().await.unwrap();
     }
 
     /// The node the planner picked before the label override chose a
