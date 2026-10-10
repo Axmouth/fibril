@@ -1050,12 +1050,36 @@ mod tests {
             promotion::retain_unproven_assignments(&snapshot, &mut unchanged).unwrap(),
             0
         );
-        for id in ["a", "b"] {
+        // A restarted follower keeps the queue serving. It is suspended in the
+        // accepted history, stays in the eligible set and rejoins as a learner.
+        let mut follower_restarted = snapshot.clone();
+        follower_restarted.nodes.get_mut("b").unwrap().labels.insert(
+            crate::HISTORY_PROCESS_LABEL.into(),
+            uuid::Uuid::from_bytes([9; 16]).to_string(),
+        );
+        let mut desired = follower_restarted.clone();
+        desired.generation += 1;
+        assert_eq!(promotion::retain_unproven_assignments(&follower_restarted, &mut desired).unwrap(), 0);
+        assert_eq!(desired.assignments, snapshot.assignments);
+        assert!(!desired.attributes.contains_key(&promotion::pending_recovery_key(&resource)));
+        let history = crate::history_activation::accepted_history(&follower_restarted, &resource).unwrap();
+        assert_eq!(history.replicas.len(), 2);
+        assert!(!history.permits_role("b"));
+        assert!(history.permits_role("a"));
+        assert_eq!(
+            crate::history_activation::replaced_initial_processes(&follower_restarted, &resource).unwrap(),
+            vec!["b".to_string()]
+        );
+        // An owner restart still fences the queue for recovery, even with a
+        // restarted follower at the same time.
+        for restarted in [&["a"][..], &["a", "b"][..]] {
             let mut replaced = snapshot.clone();
-            replaced.nodes.get_mut(id).unwrap().labels.insert(
-                crate::HISTORY_PROCESS_LABEL.into(),
-                uuid::Uuid::from_bytes([9; 16]).to_string(),
-            );
+            for id in restarted {
+                replaced.nodes.get_mut(*id).unwrap().labels.insert(
+                    crate::HISTORY_PROCESS_LABEL.into(),
+                    uuid::Uuid::from_bytes([9; 16]).to_string(),
+                );
+            }
             let mut desired = replaced.clone();
             desired.generation += 1;
             assert_eq!(

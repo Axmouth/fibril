@@ -116,6 +116,23 @@ pub(crate) fn owner_move_loses_nothing(snapshot: &CoordinationSnapshot, resource
             .is_some_and(|config| config.durability == super::STREAM_DURABILITY_EPHEMERAL)
 }
 
+/// Whether restarted replicas can rejoin through learner admission instead of
+/// recovery. The queue keeps serving and the restarted followers stop counting
+/// until re-admitted. An owner restart still needs recovery, and so do streams,
+/// which have no learner path. A queue that confirms on its owner alone needs
+/// a seal from every eligible replica, so it has no spare witness for a rejoin
+/// in progress and keeps recovering instead.
+fn followers_rejoin_without_recovery(
+    previous: &PartitionAssignment,
+    replaced: &[String],
+    write_nodes: usize,
+) -> bool {
+    previous.resource.namespace == super::QUEUE_NAMESPACE
+        && crate::queue_learner::supports(&previous.resource)
+        && write_nodes >= 2
+        && !replaced.contains(&previous.owner)
+}
+
 /// Hold changes affecting a replicated confirmation contract and persist the
 /// original configuration beside the proposed replacement in the same CAS.
 /// Existing requests are immutable across controller retries and restarts.
@@ -187,10 +204,16 @@ pub(crate) fn retain_unproven_assignments(
         } else {
             Vec::new()
         };
+        let rejoining = !replaced.is_empty() && followers_rejoin_without_recovery(previous, &replaced, old_writes);
+        if rejoining && previous == proposed {
+            // Logged on every pass until the followers are re-admitted.
+            tracing::debug!(topic = resource.name, partition = resource.partition,
+                replicas = ?replaced, "follower process changed; it rejoins through learner admission while the queue keeps serving");
+        }
         // An enrolled activation binds the exact assignment, even for one local
         // writer. Moving/replacing that writer needs a continuation certificate.
         if if enrolled {
-            previous == proposed && replaced.is_empty()
+            previous == proposed && (replaced.is_empty() || rejoining)
         } else {
             same_configuration(previous, proposed) || old_writes == 1 && new_writes == 1
         } {
@@ -278,6 +301,17 @@ mod tests {
         retry.assignments = snapshot(assignment("b", &["c"])).assignments;
         retain_unproven_assignments(&restored, &mut retry).unwrap();
         assert_eq!(retry, restored);
+    }
+    #[test]
+    fn only_queue_follower_restarts_with_spare_witnesses_skip_recovery() {
+        let queue = assignment("a", &["b", "c"]);
+        let b = ["b".to_string()];
+        assert!(followers_rejoin_without_recovery(&queue, &b, 2));
+        assert!(!followers_rejoin_without_recovery(&queue, &["a".into(), "b".into()], 2));
+        assert!(!followers_rejoin_without_recovery(&queue, &b, 1));
+        let mut stream = queue.clone();
+        stream.resource.namespace = super::super::STREAM_NAMESPACE.into();
+        assert!(!followers_rejoin_without_recovery(&stream, &b, 3));
     }
     #[test]
     fn follower_only_and_policy_changes_require_recovery() {

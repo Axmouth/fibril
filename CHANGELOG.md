@@ -493,6 +493,17 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Changed
 
+- A queue follower whose broker process restarts no longer fences the queue
+  for recovery. The queue keeps serving, and the restarted follower stops
+  counting toward confirms until it rejoins through learner admission under
+  its new process. Retained data is resumed in place and caught up from the
+  owner. A wiped follower starts from the owner checkpoint. Publishes wait if
+  the remaining copies cannot meet the write requirement, which never drops.
+  The follower keeps its place in the recovery seal set, and at most W - 1
+  replicas rejoin at once so an owner failure can still collect enough seals.
+  Owner restarts, streams and queues that confirm on the owner alone still
+  recover as before.
+
 - Queue recovery reuses exactly matching, sealed local payloads after full bounds,
   CRC and digest verification. Completed stages also share closed payload segments
   into the installed generation, with independent writable tails and metadata.

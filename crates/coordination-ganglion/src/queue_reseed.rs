@@ -101,6 +101,13 @@ impl QueueReseed {
         }
         Ok(())
     }
+    /// The target's process restarted, or a learner admission already
+    /// replaced the instance this reseed was repairing.
+    fn superseded(&self, s: &CoordinationSnapshot, history: &AcceptedHistory) -> bool {
+        history.replicas.get(&self.node) != Some(&self.instance)
+            || history_activation::registered_process(s, &self.node)
+                .is_some_and(|p| p != self.instance.process)
+    }
     pub fn receipt(&self) -> PreparedStorageHistory {
         let r = &self.assignment.resource;
         PreparedStorageHistory {
@@ -154,6 +161,11 @@ pub(crate) fn project(
 ) -> Result<AcceptedHistory, String> {
     for node in history.replicas.keys().cloned().collect::<Vec<_>>() {
         if let Some(reseed) = read(s, history.activation, &node)? {
+            if history.replicas.get(&node) != Some(&reseed.instance) {
+                // The replica restarted and was re-admitted as a learner under
+                // a new instance, which replaces the copy this reseed repaired.
+                continue;
+            }
             reseed.validate_base(s, &history)?;
             if &reseed.assignment.resource != r {
                 return Err("reseed resource mismatch".into());
@@ -211,7 +223,10 @@ impl GanglionCoordination {
         if own.process != self.history_process {
             return Err(error("reseed requester process changed"));
         }
-        if let Some(old) = read(&s, base.activation, node).map_err(error)? {
+        if let Some(old) = read(&s, base.activation, node)
+            .map_err(error)?
+            .filter(|old| !old.superseded(&s, &base))
+        {
             old.validate_base(&s, &base).map_err(error)?;
             if old.phase != ReseedPhase::Admitted {
                 return Ok(());
@@ -222,7 +237,7 @@ impl GanglionCoordination {
             id: *uuid::Uuid::now_v7().as_bytes(),
             assignment: a.clone(),
             activation: base.activation,
-            binding: base.binding,
+            binding: base.binding.clone(),
             node: node.to_owned(),
             instance: base
                 .replicas
@@ -233,6 +248,9 @@ impl GanglionCoordination {
             phase: ReseedPhase::Revoking,
             completed_cut: None,
         };
+        if value.superseded(&s, &base) {
+            return Err(error("reseed target restarted; it rejoins as a learner"));
+        }
         self.store_reseed(&s, &value).await
     }
     pub fn queue_reseed_work(&self) -> Result<Vec<QueueReseed>, String> {
@@ -249,6 +267,10 @@ impl GanglionCoordination {
             };
             for node in &a.followers {
                 if let Some(intent) = read(&s, base.activation, node)? {
+                    if intent.superseded(&s, &base) {
+                        // The target restarted. It rejoins as a learner instead.
+                        continue;
+                    }
                     if intent.phase != ReseedPhase::Admitted
                         && (self.node_id == a.owner || self.node_id == *node)
                     {
@@ -372,5 +394,58 @@ impl GanglionCoordination {
             return Err("reseed read authority changed".into());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restart_or_readmission_of_the_target_supersedes_a_reseed() {
+        let resource = ResourceIdentity::new(crate::QUEUE_NAMESPACE, "q", 0, None::<String>);
+        let assignment = PartitionAssignment::new(resource, "a", vec!["b".into()], 1);
+        let instance = |n: u8| ReplicaHistoryInstance { process: [n; 16], storage: [n; 16] };
+        let mut history = AcceptedHistory {
+            activation: [1; 32],
+            binding: StorageHistoryBinding {
+                resource_incarnation: [1; 16],
+                accepted_history: [2; 16],
+                writer_session: [3; 16],
+            },
+            owner: "a".into(),
+            replicas: [("a".to_string(), instance(1)), ("b".to_string(), instance(2))].into(),
+            blocked_local_replica: None,
+            suspended_replicas: Default::default(),
+            replica_generations: Default::default(),
+        };
+        let reseed = QueueReseed {
+            version: RESEED_VERSION,
+            id: [4; 16],
+            assignment,
+            activation: history.activation,
+            binding: history.binding.clone(),
+            node: "b".into(),
+            instance: instance(2),
+            owner_instance: instance(1),
+            phase: ReseedPhase::Revoking,
+            completed_cut: None,
+        };
+        let mut snapshot = CoordinationSnapshot::default();
+        assert!(!reseed.superseded(&snapshot, &history), "no registration yet");
+        let mut node = ganglion_core::NodeInfo::new("b", "127.0.0.1:1", None::<String>);
+        node.labels.insert(
+            crate::HISTORY_PROCESS_LABEL.into(),
+            uuid::Uuid::from_bytes([2; 16]).to_string(),
+        );
+        snapshot.nodes.insert("b".into(), node);
+        assert!(!reseed.superseded(&snapshot, &history));
+        snapshot.nodes.get_mut("b").unwrap().labels.insert(
+            crate::HISTORY_PROCESS_LABEL.into(),
+            uuid::Uuid::from_bytes([5; 16]).to_string(),
+        );
+        assert!(reseed.superseded(&snapshot, &history), "target restarted");
+        history.replicas.insert("b".into(), instance(5));
+        assert!(reseed.superseded(&snapshot, &history), "target re-admitted");
     }
 }

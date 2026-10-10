@@ -209,11 +209,43 @@ pub(crate) fn accepted_history(
     snapshot: &CoordinationSnapshot,
     resource: &ganglion_core::ResourceIdentity,
 ) -> Result<fibril_broker::history_replication::AcceptedHistory, String> {
-    crate::queue_reseed::project(
+    let mut history = crate::queue_reseed::project(
         snapshot,
         resource,
         crate::queue_learner::extend(snapshot, resource, base_history(snapshot, resource)?)?,
-    )
+    )?;
+    suspend_replaced_followers(snapshot, &mut history);
+    Ok(history)
+}
+
+/// The process a node last registered, if it reported a usable one.
+pub(crate) fn registered_process(snapshot: &CoordinationSnapshot, node: &str) -> Option<[u8; 16]> {
+    let label = snapshot.nodes.get(node)?.labels.get(crate::HISTORY_PROCESS_LABEL)?;
+    let process = uuid::Uuid::parse_str(label).ok()?;
+    (!process.is_nil()).then(|| *process.as_bytes())
+}
+
+/// A follower that registered a process other than its accepted one has
+/// restarted and is not yet re-admitted. It stops serving and counting toward
+/// confirms, so publishes wait if the rest cannot meet W. It keeps its slot in
+/// the eligible set: confirms are only ever counted from members of that set,
+/// so a seal quorum of E - W + 1 over the unchanged set still meets every
+/// confirm set, while dropping the slot could let one lagging copy seal alone.
+/// An owner restart is not handled here, it goes through recovery.
+fn suspend_replaced_followers(
+    snapshot: &CoordinationSnapshot,
+    history: &mut fibril_broker::history_replication::AcceptedHistory,
+) {
+    let replaced: Vec<String> = history
+        .replicas
+        .iter()
+        .filter(|(id, instance)| {
+            **id != history.owner
+                && registered_process(snapshot, id).is_some_and(|p| p != instance.process)
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    history.suspended_replicas.extend(replaced);
 }
 
 pub(crate) fn base_history(
@@ -315,9 +347,10 @@ impl GanglionCoordination {
     }
 }
 
-/// Heartbeats can request a recovery fence when a known prepared process has
-/// been replaced, even if placement is unchanged. They never authorize the new
-/// process, choose its history, or clear an existing recovery decision.
+/// Replicas whose registered process differs from their accepted instance.
+/// Heartbeats can request a recovery fence when the owner is among them, even
+/// if placement is unchanged. They never authorize the new process, choose its
+/// history, or clear an existing recovery decision.
 pub(crate) fn replaced_initial_processes(
     snapshot: &CoordinationSnapshot,
     resource: &ganglion_core::ResourceIdentity,
@@ -329,13 +362,8 @@ pub(crate) fn replaced_initial_processes(
         .replicas
         .into_iter()
         .filter_map(|(id, previous)| {
-            let current = snapshot
-                .nodes
-                .get(&id)?
-                .labels
-                .get(crate::HISTORY_PROCESS_LABEL)?;
-            let current = uuid::Uuid::parse_str(current).ok()?;
-            (!current.is_nil() && current.as_bytes() != &previous.process).then_some(id)
+            let current = registered_process(snapshot, &id)?;
+            (current != previous.process).then_some(id)
         })
         .collect())
 }
@@ -397,6 +425,20 @@ mod tests {
         InitialHistoryDecision,
         InitialHistoryPreparedQuorum,
     ) {
+        activated_with(
+            &[("a", [2; 16], [5; 16]), ("b", [6; 16], [7; 16])],
+            ReplicationDurabilityPolicy::MajorityDurable,
+        )
+    }
+
+    fn activated_with(
+        prepared: &[(&str, [u8; 16], [u8; 16])],
+        durability: ReplicationDurabilityPolicy,
+    ) -> (
+        CoordinationSnapshot,
+        InitialHistoryDecision,
+        InitialHistoryPreparedQuorum,
+    ) {
         let resource = ResourceIdentity::new(crate::QUEUE_NAMESPACE, "q", 0, None::<String>);
         let incarnation = ResourceIncarnation {
             version: 2,
@@ -406,7 +448,7 @@ mod tests {
         };
         let mut assignment =
             PartitionAssignment::new(resource.clone(), "a", vec!["b".into(), "c".into()], 7);
-        assignment.durability = ReplicationDurabilityPolicy::MajorityDurable;
+        assignment.durability = durability;
         let decision = InitialHistoryDecision {
             version: 2,
             phase: InitialHistoryPhase::Preparing,
@@ -418,10 +460,11 @@ mod tests {
                 accepted_history: [3; 16],
                 writer_session: [4; 16],
             },
-            required_write_nodes: 2,
+            required_write_nodes: promotion::write_requirement(&assignment).unwrap(),
         };
-        let reports = [("a", [2; 16], [5; 16]), ("b", [6; 16], [7; 16])]
-            .into_iter()
+        let reports = prepared
+            .iter()
+            .copied()
             .map(|(node, process, storage)| {
                 (
                     node.into(),
@@ -470,7 +513,95 @@ mod tests {
             (key(&decision), serde_json::to_string(&activation).unwrap()),
         ]);
         activation.validate(&snapshot, &decision).unwrap();
+        for (node, process, _) in prepared {
+            let mut info = ganglion_core::NodeInfo::new(*node, "127.0.0.1:1", None::<String>);
+            info.labels.insert(
+                crate::HISTORY_PROCESS_LABEL.into(),
+                uuid::Uuid::from_bytes(*process).to_string(),
+            );
+            snapshot.nodes.insert((*node).into(), info);
+        }
         (snapshot, decision, quorum)
+    }
+
+    fn restart(snapshot: &mut CoordinationSnapshot, node: &str, process: [u8; 16]) {
+        snapshot.nodes.get_mut(node).unwrap().labels.insert(
+            crate::HISTORY_PROCESS_LABEL.into(),
+            uuid::Uuid::from_bytes(process).to_string(),
+        );
+    }
+
+    fn three_prepared() -> [(&'static str, [u8; 16], [u8; 16]); 3] {
+        [("a", [2; 16], [5; 16]), ("b", [6; 16], [7; 16]), ("c", [8; 16], [9; 16])]
+    }
+
+    #[test]
+    fn restarted_followers_keep_serving_and_stay_in_the_eligible_set() {
+        let (snapshot, decision, _) =
+            activated_with(&three_prepared(), ReplicationDurabilityPolicy::MajorityDurable);
+        let resource = &decision.incarnation.resource;
+        let mut restarted = snapshot.clone();
+        restart(&mut restarted, "c", [10; 16]);
+        let mut desired = restarted.clone();
+        desired.generation += 1;
+        assert_eq!(promotion::retain_unproven_assignments(&restarted, &mut desired).unwrap(), 0);
+        assert!(!desired.attributes.contains_key(&promotion::pending_recovery_key(resource)));
+        let history = accepted_history(&restarted, resource).unwrap();
+        assert_eq!(history.replicas.len(), 3);
+        assert_eq!(history.suspended_replicas, ["c".to_string()].into());
+        assert!(history.permits_role("a") && history.permits_role("b"));
+        assert!(history.session("q", fibril_broker::Partition::new(0), None, false, "c", "a").is_err());
+
+        // Both followers at once: the queue still serves from the owner, and
+        // the broker holds publishes because W = 2 cannot be met.
+        restart(&mut restarted, "b", [11; 16]);
+        let mut desired = restarted.clone();
+        desired.generation += 1;
+        assert_eq!(promotion::retain_unproven_assignments(&restarted, &mut desired).unwrap(), 0);
+        let history = accepted_history(&restarted, resource).unwrap();
+        assert_eq!(history.suspended_replicas.len(), 2);
+        assert!(history.permits_role("a"));
+
+        // The owner restarting as well fences the queue. Suspended followers
+        // still count in E, so recovery needs E - W + 1 = 2 seals, not 1.
+        restart(&mut restarted, "a", [12; 16]);
+        let mut desired = restarted.clone();
+        desired.generation += 1;
+        assert_eq!(promotion::retain_unproven_assignments(&restarted, &mut desired).unwrap(), 1);
+        let pending: promotion::PendingRecovery = serde_json::from_str(
+            &desired.attributes[&promotion::pending_recovery_key(resource)],
+        )
+        .unwrap();
+        assert_eq!(pending.required_old_witnesses, 2);
+        assert_eq!(pending.proposed.owner, "a");
+        let witnesses = RecoveryWitnessSet::new(&desired, &pending).unwrap();
+        assert_eq!(
+            witnesses.progress(&desired).unwrap(),
+            SealCollectionProgress::AwaitingSeals {
+                received: 0,
+                required: 2,
+                missing: vec!["a".into(), "b".into(), "c".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn follower_restart_on_an_owner_only_queue_still_recovers() {
+        // W = 1 needs a seal from every eligible replica, so there is no spare
+        // witness while a follower rejoins.
+        let (snapshot, decision, _) =
+            activated_with(&three_prepared(), ReplicationDurabilityPolicy::LocalDurable);
+        let resource = &decision.incarnation.resource;
+        let mut restarted = snapshot.clone();
+        restart(&mut restarted, "b", [10; 16]);
+        let mut desired = restarted.clone();
+        desired.generation += 1;
+        assert_eq!(promotion::retain_unproven_assignments(&restarted, &mut desired).unwrap(), 1);
+        let pending: promotion::PendingRecovery = serde_json::from_str(
+            &desired.attributes[&promotion::pending_recovery_key(resource)],
+        )
+        .unwrap();
+        assert_eq!(pending.required_old_witnesses, 3);
     }
 
     #[test]
