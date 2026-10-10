@@ -7492,17 +7492,11 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
     )
     .await
     .unwrap();
-    // Queues retain no separate message log, so that lane has nothing to compare.
     assert_eq!(
-        report.evidence.messages.overlap,
-        RecoveryOverlap::NoSharedRecords
-    );
-    assert_eq!(
-        report.evidence.events.overlap,
+        report.evidence.log.overlap,
         RecoveryOverlap::Matching { from: 0, next: 4 }
     );
-    // Four retained events from b and five from c. The empty message lanes
-    // contribute nothing.
+    // Four retained records from b and five from c.
     assert_eq!(report.evidence.records, 9);
     assert!(
         report
@@ -7525,13 +7519,13 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
             .await
             .unwrap();
         let [left, right] = replay.evidence.queue_replay.unwrap();
-        assert_eq!(left.event_next, target);
+        assert_eq!(left.next, target);
         assert_eq!(left.state_digest, right.state_digest);
         // Every replayed event offset is a message id or a settled state
         // record, so the payload prefix the state needs reaches the target.
-        assert_eq!(left.required_message_next, target);
-        assert_eq!(right.required_message_next, target);
-        assert_ne!(left.payload_log.digest, right.payload_log.digest);
+        assert_eq!(left.required_next, target);
+        assert_eq!(right.required_next, target);
+        assert_ne!(left.log.digest, right.log.digest);
         assert_ne!(left.history_id, right.history_id);
     }
     if checkpoints {
@@ -7550,15 +7544,15 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
             .await
             .unwrap();
         let [left, right] = result.evidence.queue_replay.unwrap();
-        assert_eq!(left.checkpoint_event_next, Some(3));
-        assert_eq!(right.checkpoint_event_next, Some(4));
+        assert_eq!(left.checkpoint_next, Some(3));
+        assert_eq!(right.checkpoint_next, Some(4));
         assert_eq!(
             left.lease_normalized_state_digest,
             right.lease_normalized_state_digest
         );
         assert_eq!(left.live_payload_digest, right.live_payload_digest);
         assert!(left.live_payload_digest.is_some());
-        assert_ne!(left.payload_log.digest, right.payload_log.digest);
+        assert_ne!(left.log.digest, right.log.digest);
         let artifact = fibril_protocol::v1::recovery_inspection::inspect_recovery_source_artifact(
             &config,
             &command,
@@ -7573,7 +7567,7 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
         .unwrap();
         assert_eq!(artifact.evidence().history_id, seals[0].seal.history.id);
         assert_eq!(
-            artifact.evidence().event_next,
+            artifact.evidence().next,
             seals[0].seal.history.queue_log().unwrap().next
         );
         assert_eq!(
@@ -9035,7 +9029,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
         )
         .unwrap();
     assert_eq!(chosen.source_node(), "b");
-    assert_eq!((chosen.event_next(), chosen.message_next()), (2, 0));
+    assert_eq!(chosen.next(), 2);
     assert!(
         providers[0]
             .persist_queue_recovery_plan(&pending, &witnesses, &chosen)
@@ -9060,7 +9054,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
     .await
     .unwrap();
     assert_eq!(plan.source_node(), "b");
-    assert_eq!((plan.event_next(), plan.message_next()), (2, 0));
+    assert_eq!(plan.next(), 2);
     assert_ne!(plan.binding(), &decision.binding);
     assert_eq!(
         providers[2].queue_recovery_plan(&pending).unwrap(),
@@ -9080,11 +9074,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
     // A proposed replica receives the selected state and native-log payloads in
     // non-serving staging. The old source stays sealed and readable throughout.
     // Queue payloads come from the source's single log.
-    let payload_log = plan.source_history().unwrap().payload_log().unwrap();
-    assert_eq!(
-        payload_log.source,
-        fibril_broker::recovery::RecoveryReadSource::Log
-    );
+    let payload_log = *plan.source_history().unwrap().queue_log().unwrap();
     assert_eq!(payload_log.next, 2);
     let stage = retry_metadata(|| {
         providers[2].open_local_queue_recovery_stage(
@@ -9103,7 +9093,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
             &fibril_broker::recovery::RecoveryReadRequest {
                 seal: sealed.seal.request.clone(),
                 history_id: sealed.seal.history.id,
-                source: payload_log.source,
+                source: fibril_broker::recovery::RecoveryReadSource::Log,
                 from: stage.next_offset().await,
                 max_records: 1,
                 max_bytes: 65536,
@@ -9115,7 +9105,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
         stage
             .append(fibril_broker::recovery::RecoveryReadPage {
                 history_id: reply.history_id,
-                source: payload_log.source,
+                source: fibril_broker::recovery::RecoveryReadSource::Log,
                 from: reply.from,
                 next: reply.next,
                 end: reply.end,
@@ -9136,7 +9126,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
     }
     let staged = stage.finish().await.unwrap();
     assert_eq!(staged.plan, plan.digest().unwrap());
-    assert_eq!((staged.event_next, staged.message_next), (2, 0));
+    assert_eq!(staged.next, 2);
     assert!(
         providers[2]
             .admit_local_initial_history(&decision, &engines[2])
@@ -9466,7 +9456,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
         .unwrap();
     let records=tokio::time::timeout(Duration::from_secs(10),async {
         loop {
-            let records=recovered_peer.read_owner_queue_records_fenced("initial-wire", Partition::new(0), None, plan.event_next(), 8, 65536, 20, Some(2)).await.unwrap();
+            let records=recovered_peer.read_owner_queue_records_fenced("initial-wire", Partition::new(0), None, plan.next(), 8, 65536, 20, Some(2)).await.unwrap();
             if !queue_publishes(&records).is_empty() {break records}
         }
     }).await.unwrap();
@@ -9474,7 +9464,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
     // takes the first event offset after the recovered prefix.
     assert_eq!(
         queue_publishes(&records),
-        vec![(plan.event_next(), b"after recovered activation".to_vec())]
+        vec![(plan.next(), b"after recovered activation".to_vec())]
     );
     assert!(matches!(
         new_confirm.try_recv(),

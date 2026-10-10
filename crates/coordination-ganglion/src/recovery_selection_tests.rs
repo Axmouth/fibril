@@ -200,7 +200,7 @@ fn source_selection_covers_observed_tails_and_rejects_missing_comparison_or_part
         .select_queue_source(&snapshot, &artifacts, &[pair.clone()])
         .unwrap();
     assert_eq!(chosen.source_node(), "b");
-    assert_eq!((chosen.event_next(), chosen.message_next()), (2, 0));
+    assert_eq!(chosen.next(), 2);
     assert_eq!(chosen.snapshot_digest(), artifacts["b"].snapshot_digest());
     assert_eq!(
         chosen.digest().unwrap(),
@@ -286,7 +286,7 @@ fn source_selection_refuses_divergence_and_uncovered_longest_tail() {
             .unwrap_err();
         assert!(
             error.contains(if uncovered {
-                "both observed tails"
+                "longest observed tail"
             } else {
                 "diverge"
             }),
@@ -310,7 +310,7 @@ fn selected_boundary_equals_the_source_seal_tail() {
     }
     let full = BTreeMap::from([("b".into(), artifact(&b, 3))]);
     let chosen = witnesses.select_queue_source(&snapshot, &full, &[]).unwrap();
-    assert_eq!(chosen.event_next(), tail(&b));
+    assert_eq!(chosen.next(), tail(&b));
 }
 
 #[test]
@@ -394,8 +394,8 @@ fn recovery_plan_rejects_substituted_sources_bindings_witnesses_and_transition()
     for mutation in 0..10 {
         let mut value = original.clone();
         match mutation {
-            0 => value["version"] = 2.into(),
-            1 => value["selected"]["event_next"] = 0.into(),
+            0 => value["version"] = 1.into(),
+            1 => value["selected"]["next"] = 0.into(),
             2 => value["selected"]["source_node"] = "a".into(),
             3 => value["selected"]["witnesses"] = serde_json::json!({}),
             4 => value["witnesses"] = serde_json::json!({}),

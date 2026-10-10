@@ -12,6 +12,14 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Breaking changes
 
+- Queue recovery coordination records one queue log position. Recorded
+  source selections carry `next` instead of event and message tails, and
+  their digest tag moves to `fibril-queue-recovery-selection-v2`. Recovery
+  plans move to version 2 with the `fibril-queue-recovery-plan-v2` digest
+  tag, so plans committed by earlier builds are refused. Internal ops 110
+  and 111 carry a new recovery stage spec and receipt inside their body and
+  move to the `RXT2` magic.
+
 - Internal op 89 `RecoverySealOk` carries the sealed logs by resource kind
   (`RSO3`): one log for a queue, a record log and a cursor event log for a
   stream. A reply whose logs do not match the requested kind is refused by

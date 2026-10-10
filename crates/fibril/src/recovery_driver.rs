@@ -559,8 +559,7 @@ async fn recover_queue_attempt(
         partition = pending.proposed.resource.partition,
         epoch = pending.proposed.epoch,
         replicas = activation.reports().len(),
-        message_next = plan.message_next(),
-        event_next = plan.event_next(),
+        next = plan.next(),
         "queue recovery activated"
     );
     Ok(())
@@ -582,10 +581,10 @@ async fn prepare_target(
     timing: &crate::recovery_timing::RecoveryTiming,
 ) -> Result<(), String> {
     let seal_command = pending.seal_command()?;
-    let payload_log = plan
+    let payload_log = *plan
         .source_history()
         .ok_or("recovery source is missing")?
-        .payload_log()
+        .queue_log()
         .ok_or("recovery source is not a queue history")?;
     timing
         .stage("prepare_target", node, async {
@@ -703,12 +702,8 @@ async fn read_source_page(
     // Completed-stage reads share one per-broker stage lock.
     // Serialize source reads while target appends still overlap.
     let _read = source_reads.lock().await;
-    let source_kind = plan
-        .source_history()
-        .ok_or("recovery source is missing")?
-        .payload_log()
-        .ok_or("recovery source is not a queue history")?
-        .source;
+    // Queue payloads are records of the source queue log.
+    let source_kind = fibril_broker::recovery::RecoveryReadSource::Log;
     let report = source_report(plan)?;
     let request = RecoveryReadRequest {
         seal: report.seal.request.clone(),

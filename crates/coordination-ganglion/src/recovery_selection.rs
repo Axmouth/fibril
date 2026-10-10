@@ -27,9 +27,8 @@ pub(crate) struct RecordedQueueSelection {
     pub(crate) previous_activation: [u8; 32],
     pub(crate) source_node: String,
     pub(crate) source_history: [u8; 32],
-    pub(crate) event_next: u64,
-    pub(crate) message_head: u64,
-    pub(crate) message_next: u64,
+    /// Selected applied boundary, equal to the source seal log tail.
+    pub(crate) next: u64,
     pub(crate) snapshot_digest: [u8; 32],
     pub(crate) snapshot_bytes: u64,
     pub(crate) state_digest: [u8; 32],
@@ -40,25 +39,22 @@ impl QueueRecoverySelection {
     pub fn source_node(&self) -> &str {
         &self.0.source_node
     }
-    pub fn event_next(&self) -> u64 {
-        self.0.event_next
-    }
-    pub fn message_next(&self) -> u64 {
-        self.0.message_next
+    pub fn next(&self) -> u64 {
+        self.0.next
     }
     pub fn snapshot_digest(&self) -> [u8; 32] {
         self.0.snapshot_digest
     }
     pub fn digest(&self) -> Result<[u8; 32], String> {
         let mut hash = blake3::Hasher::new();
-        hash.update(b"fibril-queue-recovery-selection-v1\0");
+        hash.update(b"fibril-queue-recovery-selection-v2\0");
         hash.update(&serde_json::to_vec(self).map_err(|e| e.to_string())?);
         Ok(*hash.finalize().as_bytes())
     }
 }
 
 impl RecoveryWitnessSet {
-    /// Choose a complete source that covers both observed tails. All supplied
+    /// Choose a complete source that covers the longest observed tail. All supplied
     /// witnesses must be compared with that source; contradictory overlaps block
     /// selection. Artifacts and comparisons must come from local sealed-source
     /// verification, not peer-supplied assertions or heartbeat labels.
@@ -135,27 +131,26 @@ impl RecoveryWitnessSet {
                     .ok_or("queue source selection received a stream history")
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
-        let event_next = logs
+        let next = logs
             .values()
             .map(|log| log.next)
             .max()
             .ok_or("no sealed witnesses")?;
-        // Queues have no separate message lane.
-        let message_next = 0;
         for (node, artifact) in artifacts {
             let seal = &reports
                 .get(node)
                 .ok_or("artifact is not from a collected witness")?
                 .seal;
-            let log = &logs[node];
+            let log = logs
+                .get(node)
+                .ok_or("artifact is not from a collected witness")?;
             let evidence = artifact.evidence();
-            if evidence.log_layout != fibril_broker::recovery::QueueLogLayout::Combined
-                || Some(&evidence.payload_log) != seal.history.payload_log().as_ref()
+            // Evidence must replay its whole sealed log, so its applied
+            // boundary is that seal's tail.
+            if evidence.log != *log
                 || evidence.version != 2
                 || evidence.history_id != seal.history.id
-                || evidence.event_next != log.next
-                || evidence.message_next != 0
-                || artifact.message_head() != 0
+                || evidence.next != log.next
                 || evidence.live_payload_digest.is_none()
             {
                 return Err("artifact does not cover its complete sealed source".into());
@@ -163,12 +158,9 @@ impl RecoveryWitnessSet {
         }
         let (source_node, source) = artifacts
             .iter()
-            .find(|(_, artifact)| {
-                artifact.evidence().event_next == event_next
-                    && artifact.evidence().message_next == message_next
-            })
+            .find(|(_, artifact)| artifact.evidence().next == next)
             .ok_or(
-                "no verified single source covers both observed tails; reconstruction required",
+                "no verified single source covers the longest observed tail; reconstruction required",
             )?;
         let source_seal = &reports[source_node].seal;
         for (node, report) in reports {
@@ -195,22 +187,20 @@ impl RecoveryWitnessSet {
                     seal.history.queue_log().map(|log| (log.head, log.next))
                 };
                 if pair.transition != command.transition
-                    || pair.messages.left_range != (0, 0)
-                    || pair.messages.right_range != (0, 0)
-                    || Some(pair.events.left_range) != range(left)
-                    || Some(pair.events.right_range) != range(right)
+                    || Some(pair.log.left_range) != range(left)
+                    || Some(pair.log.right_range) != range(right)
                 {
                     return Err("comparison does not identify the exact sealed witnesses".into());
                 }
-                if matches!(pair.messages.overlap, RecoveryOverlap::Divergent { .. })
-                    || matches!(pair.events.overlap, RecoveryOverlap::Divergent { .. })
-                {
+                // Payloads are records of the one queue log, so one overlap
+                // check covers both payload and state history.
+                if matches!(pair.log.overlap, RecoveryOverlap::Divergent { .. }) {
                     return Err(
                         "authoritative sealed histories diverge; source selection blocked".into(),
                     );
                 }
                 if let Some([a, b]) = &pair.queue_replay {
-                    if a.event_next != b.event_next
+                    if a.next != b.next
                         || a.lease_normalized_state_digest != b.lease_normalized_state_digest
                         || a.live_payload_digest != b.live_payload_digest
                     {
@@ -223,7 +213,7 @@ impl RecoveryWitnessSet {
             if let Some(other) = artifacts.get(node) {
                 let a = source.evidence();
                 let b = other.evidence();
-                if a.event_next == b.event_next
+                if a.next == b.next
                     && (a.lease_normalized_state_digest != b.lease_normalized_state_digest
                         || a.live_payload_digest != b.live_payload_digest)
                 {
@@ -236,9 +226,7 @@ impl RecoveryWitnessSet {
             previous_activation: accepted.activation,
             source_node: source_node.clone(),
             source_history: source_seal.history.id,
-            event_next,
-            message_head: source.message_head(),
-            message_next,
+            next,
             snapshot_digest: source.snapshot_digest(),
             snapshot_bytes: source.snapshot_bytes(),
             state_digest: source.evidence().lease_normalized_state_digest,
@@ -253,8 +241,7 @@ impl RecoveryWitnessSet {
             partition = command.partition.id(),
             group = command.group.as_deref(),
             source = source_node,
-            event_next,
-            message_next,
+            next,
             witnesses = reports.len(),
             "verified queue recovery source selected; installation and activation still required"
         );

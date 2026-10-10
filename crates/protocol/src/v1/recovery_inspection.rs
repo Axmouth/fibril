@@ -585,25 +585,20 @@ async fn inspect_pair_inner<T: Send + 'static>(
         }
         let (evidence, artifact) =
             inspection_work(deadline, "inspection finish", move || finish(*inspector)).await?;
-        for (source, log) in [
-            ("messages", &evidence.messages),
-            ("events", &evidence.events),
-        ] {
-            if let RecoveryOverlap::Divergent { first, .. } = &log.overlap {
-                let hex = |id: &[u8; 32]| {
-                    id.iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect::<String>()
-                };
-                tracing::warn!(left_replica=left.node_id, right_replica=right.node_id,
-                    topic=command.topic, partition=command.partition.id(), group=command.group.as_deref(),
-                    source, offset=first.offset, left_record_id=%hex(&first.left_id), right_record_id=%hex(&first.right_id),
-                    "sealed histories differ at a shared offset; authority remains unresolved");
-            }
+        if let RecoveryOverlap::Divergent { first, .. } = &evidence.log.overlap {
+            let hex = |id: &[u8; 32]| {
+                id.iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            };
+            tracing::warn!(left_replica=left.node_id, right_replica=right.node_id,
+                topic=command.topic, partition=command.partition.id(), group=command.group.as_deref(),
+                offset=first.offset, left_record_id=%hex(&first.left_id), right_record_id=%hex(&first.right_id),
+                "sealed histories differ at a shared offset; authority remains unresolved");
         }
         tracing::info!(left_replica=left.node_id,right_replica=right.node_id,
             topic=command.topic,partition=command.partition.id(),group=command.group.as_deref(),
-            messages=?evidence.messages,events=?evidence.events,references=?evidence.references,queue_replay=?evidence.queue_replay,remaining_proofs=?evidence.remaining_proofs,
+            log=?evidence.log,references=?evidence.references,queue_replay=?evidence.queue_replay,remaining_proofs=?evidence.remaining_proofs,
             pages=evidence.pages,records=evidence.records,bytes=evidence.bytes,cached_pages,fetched_pages,
             "sealed history inspection complete; unresolved proofs remain explicit");
         Ok((

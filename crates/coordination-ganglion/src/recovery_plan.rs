@@ -21,6 +21,8 @@ use crate::{
 };
 
 const PREFIX: &str = "fibril/queue-recovery-plan/";
+/// Plan record version. Version 2 records one queue log position.
+const VERSION: u32 = 2;
 
 /// Historical, payload-free intent. Deserialization alone conveys no authority:
 /// installation must verify this exact record through fresh consensus first.
@@ -32,16 +34,6 @@ pub struct QueueRecoveryPlan {
     selected: RecordedQueueSelection,
     witnesses: BTreeMap<String, RetainedHistoryIdentity>,
     binding: StorageHistoryBinding,
-}
-
-/// Digest of an empty retained log, which the stage spec still expects for
-/// the queue message lane. It goes away together with that spec field.
-fn empty_message_lane_digest() -> [u8; 32] {
-    let mut hash = blake3::Hasher::new();
-    hash.update(b"fibril-retained-log-v1\0");
-    hash.update(&0u64.to_be_bytes());
-    hash.update(&0u64.to_be_bytes());
-    *hash.finalize().as_bytes()
 }
 
 fn error(message: impl ToString) -> OpenraftAdapterError {
@@ -70,11 +62,7 @@ impl QueueRecoveryPlan {
             binding: self.binding.clone(),
             fence_epoch: assignment.epoch,
             source_history: s.source_history,
-            payload_log: source.payload_log().ok_or("recovery source is not a queue history")?,
-            message_head: s.message_head,
-            message_next: s.message_next,
-            event_next: s.event_next,
-            message_digest: empty_message_lane_digest(),
+            log: *source.queue_log().ok_or("recovery source is not a queue history")?,
             snapshot_digest: s.snapshot_digest,
             snapshot_bytes: s.snapshot_bytes,
             state_digest: s.state_digest,
@@ -88,7 +76,7 @@ impl QueueRecoveryPlan {
         assignment: &ganglion_core::PartitionAssignment,
     ) -> Result<(), String> {
         let resource = &self.pending.proposed.resource;
-        if self.version != 1
+        if self.version != VERSION
             || resource.namespace != crate::QUEUE_NAMESPACE
             || !snapshot.resources.contains(resource)
             || self.pending.resource_incarnation
@@ -139,15 +127,13 @@ impl QueueRecoveryPlan {
     pub fn snapshot_digest(&self) -> [u8; 32] {
         self.selected.snapshot_digest
     }
-    pub fn event_next(&self) -> u64 {
-        self.selected.event_next
-    }
-    pub fn message_next(&self) -> u64 {
-        self.selected.message_next
+    /// Selected applied boundary, equal to the source seal log tail.
+    pub fn next(&self) -> u64 {
+        self.selected.next
     }
     pub fn digest(&self) -> Result<[u8; 32], String> {
         let mut h = blake3::Hasher::new();
-        h.update(b"fibril-queue-recovery-plan-v1\0");
+        h.update(b"fibril-queue-recovery-plan-v2\0");
         h.update(&serde_json::to_vec(self).map_err(|e| e.to_string())?);
         Ok(*h.finalize().as_bytes())
     }
@@ -157,13 +143,10 @@ impl QueueRecoveryPlan {
     pub fn verify_artifact(&self, artifact: &RecoveryQueueStateArtifact) -> Result<(), String> {
         let evidence = artifact.evidence();
         let source = self.source_history().ok_or("recovery source is missing")?;
-        if evidence.log_layout != fibril_broker::recovery::QueueLogLayout::Combined
-            || Some(&evidence.payload_log) != source.payload_log().as_ref()
+        if Some(&evidence.log) != source.queue_log()
             || evidence.version != 2
             || evidence.history_id != self.selected.source_history
-            || evidence.event_next != self.event_next()
-            || evidence.message_next != self.message_next()
-            || artifact.message_head() != self.selected.message_head
+            || evidence.next != self.next()
             || artifact.snapshot_digest() != self.selected.snapshot_digest
             || artifact.state_snapshot().len() as u64 != self.selected.snapshot_bytes
             || evidence.lease_normalized_state_digest != self.selected.state_digest
@@ -188,7 +171,7 @@ impl QueueRecoveryPlan {
             .as_ref()
             .ok_or("recovery installation requires an enrolled incarnation")?;
         let plan = Self {
-            version: 1,
+            version: VERSION,
             pending: pending.clone(),
             selected: selection.0.clone(),
             witnesses: witnesses
@@ -207,7 +190,9 @@ impl QueueRecoveryPlan {
     }
 
     fn validate(&self, snapshot: &CoordinationSnapshot) -> Result<(), String> {
-        if self.version != 1 || self.pending.previous.resource.namespace != crate::QUEUE_NAMESPACE {
+        if self.version != VERSION
+            || self.pending.previous.resource.namespace != crate::QUEUE_NAMESPACE
+        {
             return Err("unsupported queue recovery plan".into());
         }
         let mut witnesses = RecoveryWitnessSet::new(snapshot, &self.pending)?;
@@ -262,9 +247,7 @@ impl QueueRecoveryPlan {
         if selected.transition != self.pending.transition_digest()?
             || selected.previous_activation != accepted.activation
             || selected.source_history != source.id
-            || selected.message_head != 0
-            || selected.message_next != 0
-            || Some(selected.event_next) != next(source)
+            || Some(selected.next) != next(source)
             || selected.witnesses
                 != self
                     .witnesses
@@ -274,7 +257,7 @@ impl QueueRecoveryPlan {
             || self
                 .witnesses
                 .values()
-                .any(|history| next(history).is_none_or(|next| next > selected.event_next))
+                .any(|history| next(history).is_none_or(|next| next > selected.next))
         {
             return Err("recovery plan source differs from the verified witness selection".into());
         }
@@ -461,8 +444,7 @@ impl GanglionCoordination {
                         partition = pending.previous.resource.partition,
                         group = pending.previous.resource.group.as_deref(),
                         plan = %blake3::Hash::from_bytes(plan.digest().map_err(error)?),
-                        source = plan.source_node(), event_next = plan.event_next(),
-                        message_next = plan.message_next(),
+                        source = plan.source_node(), next = plan.next(),
                         "queue recovery intent committed; replicas remain fenced during installation");
                     return Ok(plan);
                 }

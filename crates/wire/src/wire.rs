@@ -3756,7 +3756,9 @@ pub fn encode_recovery_transfer(
             "recovery transfer exceeds size limit",
         ));
     }
-    let mut out = payload_builder(b"RXT1");
+    // The opaque body holds queue recovery stage specs and receipts. Its
+    // version lives in this magic, bumped whenever their shape changes.
+    let mut out = payload_builder(b"RXT2");
     put_bytes(&mut out, &req.body)?;
     Ok(frame(
         if reply {
@@ -3783,7 +3785,7 @@ pub fn decode_recovery_transfer(f: &Frame, reply: bool) -> WireResult<crate::Rec
         ));
     }
     let mut r = Reader::new(&f.payload);
-    r.expect_magic(b"RXT1", "recovery transfer")?;
+    r.expect_magic(b"RXT2", "recovery transfer")?;
     let body = r.bytes()?.to_vec();
     r.finish()?;
     Ok(crate::RecoveryTransfer { body })
@@ -3811,6 +3813,11 @@ mod recovery_transfer_tests {
             body.push(0);
             trailing.payload = body.into();
             assert!(decode_recovery_transfer(&trailing, reply).is_err());
+            let mut old = encoded.clone();
+            let mut body = encoded.payload.to_vec();
+            body[..4].copy_from_slice(b"RXT1");
+            old.payload = body.into();
+            assert!(decode_recovery_transfer(&old, reply).is_err());
         }
     }
 }

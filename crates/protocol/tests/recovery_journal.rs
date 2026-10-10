@@ -264,9 +264,7 @@ async fn inspection_download_resumes_over_tcp_then_revalidates_without_source() 
             resource_incarnation: [1; 16], accepted_history: [9; 16], writer_session: [10; 16],
         },
         fence_epoch: 8, source_history: evidence.history_id,
-        payload_log: evidence.payload_log.clone(),
-        message_head: direct.message_head(), message_next: evidence.message_next,
-        event_next: evidence.event_next, message_digest: evidence.message_digest,
+        log: evidence.log,
         snapshot_digest: direct.snapshot_digest(), snapshot_bytes: direct.state_snapshot().len() as u64,
         state_digest: evidence.lease_normalized_state_digest,
         live_payload_digest: evidence.live_payload_digest.unwrap(),
@@ -278,11 +276,11 @@ async fn inspection_download_resumes_over_tcp_then_revalidates_without_source() 
         stroma_core::RecoveryStageLimits::incremental()).await.unwrap();
     let request_at = |from| fibril_broker::recovery::RecoveryReadRequest {
         seal: sealed.seal.request.clone(), history_id: sealed.seal.history.id,
-        source: evidence.payload_log.source, from, max_records: limits.page_records,
+        source: fibril_broker::recovery::RecoveryReadSource::Log, from, max_records: limits.page_records,
         max_bytes: limits.page_bytes,
     };
-    let mut next = spec.payload_log.head;
-    while next < spec.payload_log.next {
+    let mut next = spec.log.head;
+    while next < spec.log.next {
         let page = read_cached_recovery_page(&journal, &command, &sealed, &request_at(next), Duration::from_secs(10))
             .await.unwrap().expect("all inspected pages remain available offline");
         next = stage.append(page).await.unwrap();
