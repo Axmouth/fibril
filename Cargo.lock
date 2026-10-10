@@ -2328,6 +2328,8 @@ dependencies = [
  "fastrand",
  "fs2",
  "futures",
+ "libc",
+ "nix",
  "parking_lot",
  "serde",
  "serde_json",
