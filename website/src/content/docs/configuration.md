@@ -584,6 +584,67 @@ policy adoption, not a change to publish durability or an all-logs transaction.
 Fsync cadence, batching and adaptive-buffer settings remain startup-only. This
 endpoint has the same administrator authentication as other settings endpoints.
 
+## NVMe idle latency on Linux
+
+Bursty workloads can encounter slower storage synchronization after an idle
+gap. NVMe autonomous power-state transitions (APST) are one possible cause.
+Compare smooth traffic and bursts at the same average rate when investigating
+publish-confirmation latency. A desktop's performance power profile can leave
+the NVMe controller's separate latency policy unchanged.
+
+A September 2026 diagnostic on a Samsung 970 EVO Plus 2TB with Linux and ext4
+measured roughly 9 ms median `sync_data()` latency after one-second gaps.
+Temporarily disabling APST produced 2.69–2.73 ms medians in two repetitions of
+the same single-log workload. The test alternated approximately 106 and 212 kB
+writes, with 16 rounds per repetition and the first four excluded. These are
+isolated file-sync measurements on one machine. Application latency also includes
+batching, other persistence operations and replication. Test the policy on the
+target hardware before choosing a deployment default.
+
+### Temporary controller test
+
+Identify the controller backing the broker's data filesystem. For example,
+`nvme0n1p2` belongs to controller `nvme0`. Device numbering can differ across
+machines and boots.
+
+```sh
+lsblk -o NAME,TYPE,FSTYPE,MOUNTPOINTS,MODEL
+
+# Replace nvme0 with the controller identified above.
+nvme_controller=nvme0
+nvme_policy="/sys/class/nvme/$nvme_controller/power/pm_qos_latency_tolerance_us"
+nvme_original=$(cat "$nvme_policy")
+printf 'Original latency tolerance: %s\n' "$nvme_original"
+
+# Save the original value, then temporarily disable APST.
+printf '0\n' | sudo tee "$nvme_policy"
+```
+
+The Linux NVMe driver interprets zero as disabling APST. The control requires
+administrator access and may be absent when APST is unavailable. It applies to
+the controller and therefore affects other workloads using that controller.
+Higher idle power consumption and temperature are the principal tradeoffs,
+including reduced battery life on portable systems. Fsync and flush guarantees
+remain unchanged. This is a host setting, separate from Fibril's node-local
+storage API, and the command does not install a persistent boot configuration.
+
+Repeat the workload with everything else unchanged, then restore the saved value
+in the same shell and repeat again:
+
+```sh
+printf '%s\n' "$nvme_original" | sudo tee "$nvme_policy"
+```
+
+Record the controller, filesystem, power profile and policy with benchmark
+results. Compare both latency and sustained performance before making the
+setting persistent through deployment tooling. Keep the original value available
+if the shell is closed before restoration.
+
+The [Linux NVMe driver](https://github.com/torvalds/linux/blob/master/drivers/nvme/host/core.c)
+implements this in `nvme_set_latency_tolerance` and `nvme_configure_apst`.
+The [PM QoS documentation](https://docs.kernel.org/power/pm_qos_interface.html)
+describes the per-device latency control.
+
 ## Other Persisted Runtime Settings
 
 Some live settings are owned by storage-level state rather than the broker

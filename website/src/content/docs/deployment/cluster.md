@@ -11,6 +11,11 @@ nodes, and user accounts.
 
 Clustering is experimental and not yet production-ready high availability.
 
+Storage power policy can affect both owner and follower persistence latency.
+For Linux NVMe hosts, see the
+[idle-latency tuning procedure](/configuration/#nvme-idle-latency-on-linux)
+and test each host's storage before choosing a deployment policy.
+
 ## What every node needs
 
 - **The same cluster secret.** Nodes authenticate to each other with a shared

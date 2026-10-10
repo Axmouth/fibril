@@ -95,6 +95,10 @@ compiled defaults < TOML config file < environment variables < CLI arguments
 For the complete field reference, environment variables, CLI flags, runtime
 seed behavior, and runtime locks, see [configuration](/configuration/).
 
+For bursty workloads on Linux NVMe storage, see the
+[idle-latency tuning procedure](/configuration/#nvme-idle-latency-on-linux).
+It covers a temporary controller power-policy comparison and restoration.
+
 For sparse workloads, enable publisher idle expiry alongside queue cleanup;
 otherwise a long-lived connection that published to a queue can keep that queue
 active until the connection closes.

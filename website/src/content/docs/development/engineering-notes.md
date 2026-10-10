@@ -36,6 +36,15 @@ crash-boundary, learner, reseed and owner-loss coverage in
 [Fibril 886f239](https://github.com/Axmouth/fibril/commit/886f239), with a breaking
 fresh-storage requirement and unchanged stream storage.
 
+## NVMe idle persistence latency
+
+A standalone Linux/ext4 experiment reproduced slower syncs after idle gaps on a
+Samsung 970 EVO Plus, independently of the broker. Disabling NVMe APST reduced
+single-log idle sync medians from about 9 ms to 2.69–2.73 ms in two repetitions,
+while periodic manifest persistence remained a separate cost. The
+[deployment procedure](/configuration/#nvme-idle-latency-on-linux) explains
+the measured workload, power tradeoff and reversible controller setting.
+
 ## Bounded replication reads and preserved progress
 
 Owner replication reads now stop after the useful byte-bounded prefix and one
