@@ -12,6 +12,15 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Breaking changes
 
+- Queue storage moves to Stroma layout version 3. Learner checkpoint installs
+  and queue reseed completion records hold single queue log offsets. Storage
+  directories from earlier builds are refused at startup, with no migration.
+  Coordination records for queue learner admissions and reseeds also use one
+  log offset, and reseed records move to version 2, so a cluster needs fresh
+  coordination state. Internal ops 84 and 85 become `QueueCheckpointExport`
+  and `QueueCheckpointExportOk`, and the export reply carries one epoch and
+  one log range (`FQC1`).
+
 - Queue replication uses single-log internal frames. Ops 80 and 81 become
   `QueueReplicationRead` and `QueueReplicationReadOk`, and ops 93 to 98
   become the `QueuePush` family. The bodies carry new magics, so an older

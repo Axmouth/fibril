@@ -37,8 +37,12 @@ pub struct QueueReseed {
     pub instance: ReplicaHistoryInstance,
     owner_instance: ReplicaHistoryInstance,
     pub phase: ReseedPhase,
-    completed_cut: Option<(u64, u64)>,
+    /// Queue log end the installed replacement covered, once admitted.
+    completed_cut: Option<u64>,
 }
+
+/// Version 2 records name a single queue log cut.
+const RESEED_VERSION: u32 = 2;
 impl QueueReseed {
     pub fn digest(&self) -> Result<[u8; 32], String> {
         let mut h = blake3::Hasher::new();
@@ -53,7 +57,7 @@ impl QueueReseed {
         s: &CoordinationSnapshot,
         base: &AcceptedHistory,
     ) -> Result<(), String> {
-        if self.version != 1
+        if self.version != RESEED_VERSION
             || self.id == [0; 16]
             || self.assignment.resource.namespace != crate::QUEUE_NAMESPACE
             || s.assignments.get(&self.assignment.resource) != Some(&self.assignment)
@@ -214,7 +218,7 @@ impl GanglionCoordination {
             }
         }
         let value = QueueReseed {
-            version: 1,
+            version: RESEED_VERSION,
             id: *uuid::Uuid::now_v7().as_bytes(),
             assignment: a.clone(),
             activation: base.activation,
@@ -310,8 +314,7 @@ impl GanglionCoordination {
         &self,
         intent: &QueueReseed,
         engine: &StromaEngine,
-        message: u64,
-        event: u64,
+        next: u64,
     ) -> Result<(), OpenraftAdapterError> {
         self.authorize_queue_reseed(intent).await?;
         let r = &intent.assignment.resource;
@@ -320,8 +323,7 @@ impl GanglionCoordination {
                 intent.receipt(),
                 intent.digest().map_err(error)?,
                 intent.assignment.epoch,
-                message,
-                event,
+                next,
             )
             .await
             .map_err(error)?;
@@ -334,17 +336,16 @@ impl GanglionCoordination {
                 r.partition as u32,
                 r.group.as_deref(),
                 intent.assignment.epoch,
-                message,
-                event,
+                next,
             )
             .await
             .map_err(error)?;
         let s = self.node.committed_snapshot();
         intent.validate_live(&s).map_err(error)?;
-        let mut next = intent.clone();
-        next.phase = ReseedPhase::Admitted;
-        next.completed_cut = Some((message, event));
-        self.store_reseed(&s, &next).await
+        let mut admitted = intent.clone();
+        admitted.phase = ReseedPhase::Admitted;
+        admitted.completed_cut = Some(next);
+        self.store_reseed(&s, &admitted).await
     }
     pub(crate) fn validate_reseed_read(
         &self,

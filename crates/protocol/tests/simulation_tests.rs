@@ -121,11 +121,11 @@ fn broker_runs_inside_turmoil_host() {
         }
 
         let checkpoint = broker
-            .export_owner_state_checkpoint(topic, Partition::new(0), None)
+            .export_queue_state_checkpoint(topic, Partition::new(0), None)
             .await
             .unwrap();
         assert_eq!(
-            checkpoint.message_next_offset, 2,
+            checkpoint.next_offset, 2,
             "both publishes are durable on the simulated host"
         );
 
@@ -389,7 +389,7 @@ fn owner_partition_fails_over_to_caught_up_follower() {
             .follower_replication_worker_snapshot(topic, Partition::new(0), None)
             .await
             .expect("worker snapshot after catch-up");
-        let replicated_message_next = owner_checkpoint.message_next_offset;
+        let replicated_message_next = queue_cursor(&owner_checkpoint.cursor);
         assert_eq!(
             replicated_message_next, 2,
             "the follower replicated exactly the owner's two messages"
@@ -444,11 +444,11 @@ fn owner_partition_fails_over_to_caught_up_follower() {
         // No data loss: the promoted log is exactly the replicated history plus
         // the one post-failover publish.
         let promoted_checkpoint = broker
-            .export_owner_state_checkpoint(topic, Partition::new(0), None)
+            .export_queue_state_checkpoint(topic, Partition::new(0), None)
             .await
             .unwrap();
         assert_eq!(
-            promoted_checkpoint.message_next_offset,
+            promoted_checkpoint.next_offset,
             replicated_message_next + 1,
             "promoted log continues from the replicated tails with no loss"
         );
@@ -851,10 +851,10 @@ fn ganglion_returning_old_owner_is_demoted_under_simulated_partition() {
             tokio::time::timeout(Duration::from_secs(60), async {
                 loop {
                     if let Ok(checkpoint) = broker
-                        .export_owner_state_checkpoint(topic, Partition::new(0), None)
+                        .export_queue_state_checkpoint(topic, Partition::new(0), None)
                         .await
                     {
-                        if checkpoint.message_epoch >= 1 {
+                        if checkpoint.epoch >= 1 {
                             break;
                         }
                     }
@@ -1081,7 +1081,7 @@ fn ganglion_returning_old_owner_is_demoted_under_simulated_partition() {
 async fn run_drain_controller(
     coordination: Arc<GanglionCoordination>,
     queue: QueueIdentity,
-    follower_tails: Arc<std::sync::Mutex<Option<(u64, u64)>>>,
+    follower_tails: Arc<std::sync::Mutex<Option<u64>>>,
     owner_draining: Arc<AtomicBool>,
     done: Arc<AtomicBool>,
 ) {
@@ -1113,13 +1113,16 @@ async fn run_drain_controller(
             // fibril-facing snapshot.
             let committed_nodes = coordination.consensus_node().committed_snapshot().nodes;
             let tails = *follower_tails.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((messages, events)) = tails {
+            if let Some(next) = tails {
                 let published = committed_nodes
                     .get("b-follower")
                     .is_some_and(|node| node.labels.contains_key(&tail_label));
                 if !published {
                     let mut labels = BTreeMap::new();
-                    labels.insert(tail_label.clone(), format!("{messages}:{events}"));
+                    labels.insert(
+                        tail_label.clone(),
+                        fibril_coordination_ganglion::encode_queue_applied_tail(next),
+                    );
                     coordination
                         .register_self_with_labels(&split_brain_node_info("b-follower"), labels)
                         .await
@@ -1183,7 +1186,7 @@ fn ganglion_draining_owner_hands_off_before_stopping() {
     let caught_up = Arc::new(AtomicBool::new(false));
     let handed_off = Arc::new(AtomicBool::new(false));
     let done = Arc::new(AtomicBool::new(false));
-    let follower_tails: Arc<std::sync::Mutex<Option<(u64, u64)>>> =
+    let follower_tails: Arc<std::sync::Mutex<Option<u64>>> =
         Arc::new(std::sync::Mutex::new(None));
     let owner_draining = Arc::new(AtomicBool::new(false));
 
@@ -1255,10 +1258,10 @@ fn ganglion_draining_owner_hands_off_before_stopping() {
             tokio::time::timeout(Duration::from_secs(60), async {
                 loop {
                     if let Ok(checkpoint) = broker
-                        .export_owner_state_checkpoint(topic, Partition::new(0), None)
+                        .export_queue_state_checkpoint(topic, Partition::new(0), None)
                         .await
                     {
-                        if checkpoint.message_epoch >= 1 {
+                        if checkpoint.epoch >= 1 {
                             break;
                         }
                     }
@@ -1391,7 +1394,7 @@ fn ganglion_draining_owner_hands_off_before_stopping() {
                         .await;
                     if let Some(state) = state {
                         if state.status == FollowerReplicationWorkerStatus::CaughtUp {
-                            break (state.message_next_offset, state.event_next_offset);
+                            break queue_cursor(&state.cursor);
                         }
                     }
                     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1399,7 +1402,7 @@ fn ganglion_draining_owner_hands_off_before_stopping() {
             })
             .await
             .expect("follower catches up");
-            assert_eq!(replicated_message_next.0, 2);
+            assert_eq!(replicated_message_next, 2);
 
             *follower_tails.lock().unwrap_or_else(|e| e.into_inner()) =
                 Some(replicated_message_next);
@@ -1443,10 +1446,10 @@ fn ganglion_draining_owner_hands_off_before_stopping() {
             // No loss: the promoted log is the replicated history plus the
             // one post-drain publish.
             let promoted = broker
-                .export_owner_state_checkpoint(topic, Partition::new(0), None)
+                .export_queue_state_checkpoint(topic, Partition::new(0), None)
                 .await
                 .unwrap();
-            assert_eq!(promoted.message_next_offset, replicated_message_next.0 + 1);
+            assert_eq!(promoted.next_offset, replicated_message_next + 1);
             handed_off.store(true, Ordering::SeqCst);
 
             tokio::time::timeout(Duration::from_secs(120), async {
@@ -1896,7 +1899,7 @@ fn follower_installs_checkpoint_after_owner_truncates() {
         // tail-replay and must install a checkpoint instead.
         broker
             .engine()
-            .truncate_messages_before(topic, 0, None, 3)
+            .truncate_queue_before(topic, 0, None, 3)
             .await
             .unwrap();
 
@@ -1945,7 +1948,7 @@ fn follower_installs_checkpoint_after_owner_truncates() {
                     .await;
                 if state.as_ref().is_some_and(|s| {
                     s.status == FollowerReplicationWorkerStatus::CaughtUp
-                        && s.message_next_offset == 6
+                        && queue_cursor(&s.cursor) == 6
                 }) {
                     break;
                 }
@@ -2182,4 +2185,12 @@ fn repartition_cutover_waits_for_delayed_topology_ack() {
         "cutover finalizes once the delayed topology exchange completes"
     );
     assert!(done.load(Ordering::SeqCst), "scenario runs to completion");
+}
+
+/// Queue log position of a follower worker cursor.
+fn queue_cursor(cursor: &fibril_broker::broker::FollowerCursor) -> u64 {
+    match cursor {
+        fibril_broker::broker::FollowerCursor::Queue { next_offset } => *next_offset,
+        other => panic!("expected a queue cursor, got {other:?}"),
+    }
 }

@@ -83,8 +83,10 @@ pub enum Op {
     QueueReplicationReadOk = 81,
     // 82 and 83 carried a follower push apply with a two-lane body. They are
     // retired and must not be reused.
-    ReplicationCheckpointExport = 84,
-    ReplicationCheckpointExportOk = 85,
+    /// follower->owner: export the owner queue state for a learner.
+    QueueCheckpointExport = 84,
+    /// owner->follower: the exported queue state.
+    QueueCheckpointExportOk = 85,
 
     // 86 and 87 carried an unauthorized follower checkpoint install. They are
     // retired and must not be reused.
@@ -194,8 +196,8 @@ impl Op {
         Op::ReconcileResult,
         Op::QueueReplicationRead,
         Op::QueueReplicationReadOk,
-        Op::ReplicationCheckpointExport,
-        Op::ReplicationCheckpointExportOk,
+        Op::QueueCheckpointExport,
+        Op::QueueCheckpointExportOk,
         Op::RecoverySeal,
         Op::RecoverySealOk,
         Op::Topology,
@@ -235,7 +237,7 @@ impl Op {
             self,
             Op::QueueReplicationRead
                 | Op::StreamReplicationRead
-                | Op::ReplicationCheckpointExport
+                | Op::QueueCheckpointExport
                 | Op::QueuePushStart
                 | Op::QueuePushProgress
                 | Op::QueuePushReset
@@ -254,7 +256,7 @@ impl Op {
     pub const fn replication_kind(self) -> Option<ReplicationOpKind> {
         match self {
             Op::QueueReplicationRead
-            | Op::ReplicationCheckpointExport
+            | Op::QueueCheckpointExport
             | Op::QueuePushStart
             | Op::QueuePushProgress
             | Op::QueuePushReset
@@ -279,7 +281,7 @@ impl Op {
         match self {
             Op::QueueReplicationRead => Some(b"FQR1"),
             Op::StreamReplicationRead => Some(b"FSQ1"),
-            Op::ReplicationCheckpointExport => Some(b"FCE1"),
+            Op::QueueCheckpointExport => Some(b"FCE1"),
             Op::QueuePushStart => Some(b"FQS1"),
             _ => None,
         }
@@ -968,30 +970,22 @@ pub struct QueuePushEnd {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReplicationCheckpointExport {
+pub struct QueueCheckpointExport {
     pub topic: String,
     pub group: Option<String>,
     pub partition: Partition,
 }
 
+/// Op 85: owner queue state at one coherent point, for a learner install.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReplicationStateCheckpoint {
-    /// Whether payloads share the queue event log.
-    pub combined_log: bool,
-    /// First physical event record to backfill. State replay starts at event_next_offset.
-    pub event_start_offset: u64,
-    pub message_epoch: u64,
-    pub event_epoch: u64,
-    pub message_checkpoint_offset: u64,
-    pub message_next_offset: u64,
-    pub event_next_offset: u64,
-    pub applied_event_offset: u64,
+pub struct QueueCheckpointExportOk {
+    /// Source log epoch. The learner must be fenced at it before install.
+    pub epoch: u64,
+    /// First record to backfill: the lowest offset the state may reference.
+    pub start_offset: u64,
+    /// Exclusive applied boundary, equal to the owner log tail at capture.
+    pub next_offset: u64,
     pub state_snapshot: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReplicationCheckpointExportOk {
-    pub checkpoint: ReplicationStateCheckpoint,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

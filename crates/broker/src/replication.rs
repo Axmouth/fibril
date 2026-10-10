@@ -22,8 +22,9 @@ use stroma_core::{Message, OwnerReplicationRead, StromaEvent};
 use crate::broker::{Broker, BrokerConfig, BrokerError, FOLLOWER_STREAM_BUFFER_BATCHES, QueueKey};
 use crate::coordination::PartitionAssignment;
 use crate::queue_engine::{
-    KDurability, OwnerStateCheckpoint, QueueEngine, QueuePromotionOutcome, ReplicatedAppendOutcome,
-    ReplicatedEventBatch, ReplicatedMessageBatch, ReplicatedStreamApplyOutcome, StromaEngine,
+    KDurability, QueueEngine, QueuePromotionOutcome, QueueStateCheckpoint, ReplicatedAppendOutcome,
+    ReplicatedEventBatch, ReplicatedMessageBatch, ReplicatedStreamApplyOutcome, StreamPromotionOutcome,
+    StromaEngine,
 };
 
 // Protect transient lag, while allowing an offline/stuck replica to fall back
@@ -269,12 +270,12 @@ pub trait BrokerOwnerReplicationPeer: Send + Sync {
         )
     }
 
-    fn export_owner_state_checkpoint<'a>(
+    fn export_queue_state_checkpoint<'a>(
         &'a self,
         topic: &'a str,
         partition: Partition,
         group: Option<&'a str>,
-    ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>>;
+    ) -> BoxFuture<'a, Result<QueueStateCheckpoint, BrokerError>>;
 
     /// Run a credit-based queue push from this owner, applying batches
     /// through `apply` until the push ends. The default reports it unsupported
@@ -395,17 +396,17 @@ impl BrokerOwnerReplicationPeer for AssignmentReplicationPeer<'_> {
             Ok(records)
         })
     }
-    fn export_owner_state_checkpoint<'a>(
+    fn export_queue_state_checkpoint<'a>(
         &'a self,
         topic: &'a str,
         partition: Partition,
         group: Option<&'a str>,
-    ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
+    ) -> BoxFuture<'a, Result<QueueStateCheckpoint, BrokerError>> {
         Box::pin(async move {
             self.check_history()?;
             let checkpoint = self
                 .peer
-                .export_owner_state_checkpoint(topic, partition, group)
+                .export_queue_state_checkpoint(topic, partition, group)
                 .await?;
             self.check_history()?;
             Ok(checkpoint)
@@ -736,7 +737,7 @@ impl BrokerQueuePushApply for WorkerQueuePushApply {
             let outcomes = self
                 .broker
                 .engine
-                .apply_open_replicated_queue_log_batch(
+                .apply_open_replicated_queue_batch(
                     &self.topic,
                     self.partition.id(),
                     self.group.as_deref(),
@@ -898,7 +899,18 @@ pub enum FollowerReplicationWorkerStatus {
     Idle,
     CaughtUp,
     PendingRetry,
-    CheckpointRequired {
+    CheckpointRequired { required: CheckpointRequirement },
+}
+
+/// What the owner no longer holds, by resource kind. A queue needs one log
+/// position. A stream reports each of its two logs.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CheckpointRequirement {
+    Queue {
+        log: BrokerReplicationCheckpointRequired,
+    },
+    Stream {
         messages: Option<BrokerReplicationCheckpointRequired>,
         events: Option<BrokerReplicationCheckpointRequired>,
     },
@@ -1035,8 +1047,7 @@ impl FollowerReplicationWorkerState {
             BrokerQueueCatchUp::CheckpointRequired { progress, required } => (
                 progress,
                 FollowerReplicationWorkerStatus::CheckpointRequired {
-                    messages: None,
-                    events: Some(required.clone()),
+                    required: CheckpointRequirement::Queue { log: required.clone() },
                 },
                 cfg.checkpoint_retry_poll_ms,
             ),
@@ -1072,8 +1083,10 @@ impl FollowerReplicationWorkerState {
             } => {
                 self.apply_stream_progress(progress);
                 self.status = FollowerReplicationWorkerStatus::CheckpointRequired {
-                    messages: messages.clone(),
-                    events: events.clone(),
+                    required: CheckpointRequirement::Stream {
+                        messages: messages.clone(),
+                        events: events.clone(),
+                    },
                 };
                 self.next_delay_ms = cfg.checkpoint_retry_poll_ms;
             }
@@ -1835,13 +1848,7 @@ pub(crate) struct QueueDependencies {
 
 impl QueueDependencies {
     pub(crate) fn record(&mut self, commit: stroma_core::QueuePublishCommit) {
-        // A commit whose two coordinate pairs disagree did not come from the
-        // single queue log. Recording no boundary keeps visibility behind it.
-        if !commit.is_single_log() {
-            tracing::warn!(?commit, "ignoring a queue commit with two different lanes");
-            return;
-        }
-        let next = commit.next();
+        let next = commit.next;
         if next > self.committed {
             let at = self.boundaries.partition_point(|boundary| *boundary < next);
             if self.boundaries.get(at) != Some(&next) {
@@ -2014,12 +2021,7 @@ impl ReplicationConfirmGate {
         let Some(assignment) = expected_assignment else {
             return Ok(());
         };
-        if dependency.is_some_and(|d| !d.is_single_log()) {
-            return Err(BrokerError::InvalidArgument(
-                "queue publication dependency names two different lanes".into(),
-            ));
-        }
-        if dependency.is_some_and(|d| d.epoch() != assignment.epoch) {
+        if dependency.is_some_and(|d| d.epoch != assignment.epoch) {
             return Err(BrokerError::Unknown(
                 "publication belongs to a different replication epoch".into(),
             ));
@@ -2106,7 +2108,7 @@ impl ReplicationConfirmGate {
                             // A queue record needs the whole publication that
                             // carried it in the follower's copy of the log.
                             (Some(d), DurableProgress::Queue { next }) => {
-                                next > offset && next >= d.next()
+                                next > offset && next >= d.next
                             }
                             // A stream record needs the record log only.
                             (None, DurableProgress::Stream { message_next, .. }) => {
@@ -2728,16 +2730,16 @@ impl Broker<StromaEngine> {
         Ok(())
     }
 
-    pub async fn export_owner_state_checkpoint(
+    pub async fn export_queue_state_checkpoint(
         &self,
         topic: &str,
         partition: Partition,
         group: Option<&str>,
-    ) -> Result<OwnerStateCheckpoint, BrokerError> {
+    ) -> Result<QueueStateCheckpoint, BrokerError> {
         self.ensure_replication_source_owner(topic, partition, group)?;
         Ok(self
             .engine
-            .export_owner_state_checkpoint(topic, partition.id(), group)
+            .export_queue_state_checkpoint(topic, partition.id(), group)
             .await?)
     }
 
@@ -2775,7 +2777,7 @@ impl Broker<StromaEngine> {
         let outcome = match queue_apply_batch(read) {
             Some(batch) => Some(
                 engine
-                    .apply_replicated_queue_log_batch(topic, partition.id(), group, batch)
+                    .apply_replicated_queue_batch(topic, partition.id(), group, batch)
                     .await?,
             ),
             None => {
@@ -2937,17 +2939,10 @@ impl Broker<StromaEngine> {
         topic: &str,
         partition: Partition,
         group: Option<&str>,
-        expected_message_next_offset: Offset,
-        expected_event_next_offset: Offset,
+        expected_next: Offset,
     ) -> Result<QueuePromotionOutcome, BrokerError> {
         self.engine
-            .promote_queue_follower_if_caught_up(
-                topic,
-                partition.id(),
-                group,
-                expected_message_next_offset,
-                expected_event_next_offset,
-            )
+            .promote_queue_follower_if_caught_up(topic, partition.id(), group, expected_next)
             .await
             .map_err(BrokerError::from)
     }
@@ -2999,7 +2994,7 @@ impl Broker<StromaEngine> {
         offset: Offset,
         dependency: stroma_core::QueuePublishCommit,
     ) -> Result<(), BrokerError> {
-        if !dependency.is_single_log() || offset >= dependency.next() {
+        if offset >= dependency.next {
             return Err(BrokerError::InvalidArgument(
                 "offset outside queue publication dependency".into(),
             ));
@@ -3023,7 +3018,7 @@ impl Broker<StromaEngine> {
         topic: &str,
         partition: Partition,
         epoch: u64,
-    ) -> Result<QueuePromotionOutcome, BrokerError> {
+    ) -> Result<StreamPromotionOutcome, BrokerError> {
         self.engine
             .promote_stream_follower_to_local_tail(topic, partition.id(), epoch)
             .await
@@ -3778,14 +3773,14 @@ impl BrokerOwnerReplicationPeer for Broker<StromaEngine> {
         })
     }
 
-    fn export_owner_state_checkpoint<'a>(
+    fn export_queue_state_checkpoint<'a>(
         &'a self,
         topic: &'a str,
         partition: Partition,
         group: Option<&'a str>,
-    ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
+    ) -> BoxFuture<'a, Result<QueueStateCheckpoint, BrokerError>> {
         Box::pin(async move {
-            Broker::<StromaEngine>::export_owner_state_checkpoint(self, topic, partition, group)
+            Broker::<StromaEngine>::export_queue_state_checkpoint(self, topic, partition, group)
                 .await
         })
     }
@@ -3887,14 +3882,14 @@ where
         )
     }
 
-    fn export_owner_state_checkpoint<'a>(
+    fn export_queue_state_checkpoint<'a>(
         &'a self,
         topic: &'a str,
         partition: Partition,
         group: Option<&'a str>,
-    ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
+    ) -> BoxFuture<'a, Result<QueueStateCheckpoint, BrokerError>> {
         self.as_ref()
-            .export_owner_state_checkpoint(topic, partition, group)
+            .export_queue_state_checkpoint(topic, partition, group)
     }
 
     fn push_queue_replication_fenced<'a>(
@@ -4084,15 +4079,36 @@ impl<
         };
         let assignment_guard = self.assignment_cache.get(&key)?;
         let assignment = assignment_guard.clone();
+        // The partition's own kind must match the session kind, so stream
+        // progress can never release queue confirms or the reverse. An open
+        // stream channel, a stream declared in coordination or the durable
+        // kind marker identifies a stream, even before it is materialized.
+        let is_stream = group.is_none()
+            && (self.is_stream(topic, partition.id())
+                || self.stream_declared_in_coordination(topic)
+                || self.engine.durable_is_stream(topic, partition.id()));
         let owns = match kind {
-            ReplicationResourceKind::Queue => self.owns_queue_partition(topic, partition, group),
-            ReplicationResourceKind::Stream => {
-                group.is_none() && self.owns_stream(topic, partition.id())
+            ReplicationResourceKind::Queue => {
+                !is_stream && self.owns_queue_partition(topic, partition, group)
             }
+            ReplicationResourceKind::Stream => is_stream && self.owns_stream(topic, partition.id()),
         };
         if assignment.epoch != epoch || !assignment.is_followed_by(follower) || !owns {
             return None;
         }
+        drop(assignment_guard);
+        Some(self.open_progress_session(key, assignment, kind, follower))
+    }
+
+    /// Register a fresh session for `follower`, replacing any earlier one.
+    /// Callers have checked authority and the partition kind.
+    fn open_progress_session(
+        &self,
+        key: QueueKey,
+        assignment: PartitionAssignment,
+        kind: ReplicationResourceKind,
+        follower: &str,
+    ) -> ReplicationProgressSession {
         let cell = self
             .replication_progress
             .entry(key.clone())
@@ -4108,14 +4124,14 @@ impl<
             },
         );
         cell.changed.notify_waiters();
-        Some(ReplicationProgressSession {
+        ReplicationProgressSession {
             key,
             assignment,
             follower: follower.to_string(),
             kind,
             cell,
             id,
-        })
+        }
     }
 
     /// Record a durable report on `session`. A report whose kind differs from
@@ -4407,7 +4423,7 @@ mod queue_dependency_tests {
         }
     }
     fn commit(next: u64) -> stroma_core::QueuePublishCommit {
-        stroma_core::QueuePublishCommit::queue(next, 1)
+        stroma_core::QueuePublishCommit { next, epoch: 1 }
     }
     fn queue(next: u64) -> DurableProgress {
         DurableProgress::Queue { next }
@@ -4633,20 +4649,6 @@ mod queue_dependency_tests {
     }
 
     #[test]
-    fn two_lane_commits_record_no_boundary() {
-        let mut deps = QueueDependencies::default();
-        deps.record(stroma_core::QueuePublishCommit {
-            message_next: 0,
-            ..commit(5)
-        });
-        deps.record(stroma_core::QueuePublishCommit {
-            message_epoch: 2,
-            ..commit(5)
-        });
-        assert!(deps.boundaries.is_empty());
-    }
-
-    #[test]
     fn unavailable_replicas_keep_bounded_conservative_history() {
         let mut deps = QueueDependencies::default();
         for n in 1..=100_000 {
@@ -4785,16 +4787,49 @@ mod queue_dependency_tests {
             group: None,
         };
         let gate = broker.replication_confirm_gate();
-        let stream_session = broker
-            .begin_replication_progress_session(
-                "q",
-                Partition::new(0),
-                None,
-                ReplicationResourceKind::Stream,
-                "b",
-                1,
-            )
+        // A queue partition never opens a stream session.
+        assert!(
+            broker
+                .begin_replication_progress_session(
+                    "q",
+                    Partition::new(0),
+                    None,
+                    ReplicationResourceKind::Stream,
+                    "b",
+                    1,
+                )
+                .is_none()
+        );
+        // A stream partition never opens a queue session.
+        crate::queue_engine::StreamStore::create_stream(&broker.engine(), "s", 0, None)
+            .await
             .unwrap();
+        broker.cache_queue_assignment(&PartitionAssignment::new(
+            crate::coordination::QueueIdentity::new("s", Partition::new(0), None),
+            "a",
+            vec!["b".into()],
+            1,
+        ));
+        for (kind, opens) in [
+            (ReplicationResourceKind::Queue, false),
+            (ReplicationResourceKind::Stream, true),
+        ] {
+            assert_eq!(
+                broker
+                    .begin_replication_progress_session("s", Partition::new(0), None, kind, "b", 1)
+                    .is_some(),
+                opens,
+                "{kind:?}"
+            );
+        }
+        // Force a stream session on the queue anyway to check that the confirm
+        // gate still keeps the kinds apart if a session were ever misrouted.
+        let stream_session = broker.open_progress_session(
+            key.clone(),
+            assignment.clone(),
+            ReplicationResourceKind::Stream,
+            "b",
+        );
         assert_eq!(stream_session.kind(), ReplicationResourceKind::Stream);
         broker.record_replication_session_progress(
             &stream_session,
@@ -4876,13 +4911,13 @@ mod queue_dependency_tests {
             .await
             .unwrap()
             .unwrap();
-        // A commit whose lanes disagree is refused outright.
+        // A commit written under another epoch is refused outright.
         assert!(
             gate.await_dependency(
                 &key,
                 0,
                 Some(stroma_core::QueuePublishCommit {
-                    message_next: 0,
+                    epoch: 2,
                     ..commit(2)
                 }),
                 Some(assignment.clone()),

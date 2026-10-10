@@ -48,10 +48,10 @@ pub struct QueueLearner {
 struct Admission {
     intent: QueueLearner,
     storage: PreparedStorageHistory,
-    message_target: u64,
-    event_target: u64,
-    message_next: u64,
-    event_next: u64,
+    /// Least queue log end the learner had to reach.
+    target: u64,
+    /// Queue log end the learner verified at admission.
+    next: u64,
 }
 impl QueueLearner {
     pub fn digest(&self) -> Result<[u8; 32], String> {
@@ -180,16 +180,16 @@ pub(crate) fn extend(
     let Some(raw) = snapshot.attributes.get(&admissions_key(base.activation)) else {
         return Ok(base);
     };
-    let admissions: BTreeMap<String, Admission> =
-        serde_json::from_str(raw).map_err(|e| e.to_string())?;
+    let admissions: BTreeMap<String, Admission> = serde_json::from_str(raw).map_err(|e| {
+        format!("learner admissions are unreadable, records from an older build need a fresh cluster: {e}")
+    })?;
     let original = base.clone();
     for (node, a) in admissions {
         a.intent.validate_base(snapshot, &original)?;
         if a.intent.assignment.resource != *resource
             || a.intent.node != node
             || a.intent.receipt(snapshot)? != a.storage
-            || a.message_next < a.message_target
-            || a.event_next < a.event_target
+            || a.next < a.target
         {
             return Err(
                 "learner admission differs from its prepared history and verified cut".into(),
@@ -412,8 +412,7 @@ impl GanglionCoordination {
         &self,
         intent: &QueueLearner,
         engine: &StromaEngine,
-        message_target: u64,
-        event_target: u64,
+        target: u64,
     ) -> Result<(), OpenraftAdapterError> {
         if intent.node != self.node_id || intent.process != self.history_process {
             return Err(error("only the learner process may request admission"));
@@ -425,8 +424,7 @@ impl GanglionCoordination {
                 u32::try_from(r.partition).map_err(error)?,
                 r.group.as_deref(),
                 intent.assignment.epoch,
-                message_target,
-                event_target,
+                target,
             )
             .await
             .map_err(error)?;
@@ -449,10 +447,8 @@ impl GanglionCoordination {
             let admission = Admission {
                 intent: intent.clone(),
                 storage,
-                message_target,
-                event_target,
-                message_next: ready.message_next,
-                event_next: ready.event_next,
+                target,
+                next: ready.next,
             };
             if let Some(old) = admissions.get(&self.node_id) {
                 if old.intent != *intent || old.storage != admission.storage {
@@ -555,10 +551,8 @@ mod tests {
         let admission = Admission {
             intent: intent.clone(),
             storage,
-            message_target: 3,
-            event_target: 5,
-            message_next: 3,
-            event_next: 5,
+            target: 5,
+            next: 5,
         };
         snapshot.attributes.insert(
             admissions_key(base.activation),
@@ -592,7 +586,7 @@ mod tests {
                 }
                 _ => {
                     let mut short = admission.clone();
-                    short.message_next = 2;
+                    short.next = 4;
                     bad.attributes.insert(
                         admissions_key(base.activation),
                         serde_json::to_string(&BTreeMap::from([("c", short)])).unwrap(),

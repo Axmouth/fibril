@@ -31,10 +31,8 @@ use fibril_protocol::v1::{
     DeclareQueueOk, Deliver, ERR_CONFLICT, ERR_INVALID, ErrorMsg, HEADER_SPECULATIVE, Hello,
     HelloOk, Nack, Op, PROTOCOL_V1, Publish, PublishDelayed, QueueDlqPolicy, QueueTopologyEntry,
     ReasonCode, ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult,
-    QueueReplicationRead, ReconcileSubscription, ReplicationCheckpointExport,
-    ReplicationCheckpointExportOk, ReplicationCheckpointRequired, ReplicationEventRead,
-    ReplicationEventRecord,
-    ReplicationStateCheckpoint, ResumeIdentity, ResumeOutcome, StreamDurability, StreamRetention,
+    QueueCheckpointExport, QueueCheckpointExportOk, QueueReplicationRead, ReconcileSubscription,
+    ReplicationCheckpointRequired, ReplicationEventRead, ReplicationEventRecord, ResumeIdentity, ResumeOutcome, StreamDurability, StreamRetention,
     StreamStart, Subscribe, SubscribeOk, SubscribeStream, SubscriptionClosed, TopologyOk,
     TopologyRequest, TopologyUpdateAck,
     frame::Frame,
@@ -295,7 +293,7 @@ fn tolerate_peer_disconnect(result: anyhow::Result<()>) -> anyhow::Result<()> {
 }
 
 async fn start_checkpoint_required_owner_server(
-    checkpoint: ReplicationStateCheckpoint,
+    checkpoint: QueueCheckpointExportOk,
     event_records: Vec<ReplicationEventRecord>,
     exports: Arc<std::sync::atomic::AtomicUsize>,
 ) -> (SocketAddr, tokio::task::JoinHandle<anyhow::Result<()>>) {
@@ -333,13 +331,13 @@ async fn start_checkpoint_required_owner_server(
                         let read: QueueReplicationRead = try_decode(&frame)?;
                         // This fake models an owner whose queue log has been
                         // compacted below the checkpoint.
-                        let response = if read.from < checkpoint.event_next_offset {
+                        let response = if read.from < checkpoint.next_offset {
                             ReplicationEventRead::CheckpointRequired(
                                 ReplicationCheckpointRequired {
-                                    epoch: checkpoint.event_epoch,
+                                    epoch: checkpoint.epoch,
                                     requested_offset: read.from,
-                                    head_offset: checkpoint.event_next_offset,
-                                    next_offset: checkpoint.event_next_offset,
+                                    head_offset: checkpoint.next_offset,
+                                    next_offset: checkpoint.next_offset,
                                 },
                             )
                         } else {
@@ -356,15 +354,13 @@ async fn start_checkpoint_required_owner_server(
                         )?)
                         .await?;
                     }
-                    x if x == Op::ReplicationCheckpointExport as u16 => {
-                        let _: ReplicationCheckpointExport = try_decode(&frame)?;
+                    x if x == Op::QueueCheckpointExport as u16 => {
+                        let _: QueueCheckpointExport = try_decode(&frame)?;
                         exports.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         conn.send(try_encode(
-                            Op::ReplicationCheckpointExportOk,
+                            Op::QueueCheckpointExportOk,
                             frame.request_id,
-                            &ReplicationCheckpointExportOk {
-                                checkpoint: checkpoint.clone(),
-                            },
+                            &checkpoint,
                         )?)
                         .await?;
                     }
@@ -380,7 +376,7 @@ async fn start_checkpoint_required_owner_server(
 }
 
 fn read_fake_event_batch(
-    checkpoint: &ReplicationStateCheckpoint,
+    checkpoint: &QueueCheckpointExportOk,
     event_records: &[ReplicationEventRecord],
     from: u64,
     max: u32,
@@ -393,7 +389,7 @@ fn read_fake_event_batch(
         .collect::<Vec<_>>();
     let next_offset = records.last().map_or(from, |record| record.offset + 1);
     ReplicationEventRead::Batch {
-        epoch: checkpoint.event_epoch,
+        epoch: checkpoint.epoch,
         requested_offset: from,
         next_offset,
         records,
@@ -1920,16 +1916,12 @@ async fn replication_read_and_apply_compose_for_manual_catch_up() {
     );
 
     let promoted = follower_broker
-        .promote_replication_follower_if_caught_up(topic, Partition::new(0), group.as_deref(), 0, 2)
+        .promote_replication_follower_if_caught_up(topic, Partition::new(0), group.as_deref(), 2)
         .await
         .unwrap();
     assert_eq!(
         promoted,
-        QueuePromotionOutcome::Promoted {
-            message_next_offset: 0,
-            event_next_offset: 2,
-            applied_event_offset: Some(1),
-        }
+        QueuePromotionOutcome::Promoted { next: 2 }
     );
 
     drop(peer);
@@ -1989,16 +1981,12 @@ async fn protocol_owner_replication_peer_exports_checkpoint() {
 
     let peer = ProtocolOwnerReplicationPeer::new(owner_framed);
     let checkpoint = peer
-        .export_owner_state_checkpoint(topic, Partition::new(0), group.as_deref())
+        .export_queue_state_checkpoint(topic, Partition::new(0), group.as_deref())
         .await
         .unwrap();
 
-    // The payload lives at event offset 0, so the event frontier alone
-    // covers it and the message lane stays empty.
-    assert_eq!(checkpoint.message_checkpoint_offset, 0);
-    assert_eq!(checkpoint.message_next_offset, 0);
-    assert_eq!(checkpoint.event_next_offset, 1);
-    assert_eq!(checkpoint.applied_event_offset, 0);
+    // The payload lives at offset 0 of the single queue log.
+    assert_eq!((checkpoint.start_offset, checkpoint.next_offset), (0, 1));
     assert!(!checkpoint.state_snapshot.is_empty());
 
     drop(peer);
@@ -2525,7 +2513,7 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
         reply.await.unwrap().unwrap();
     }
     let owner_checkpoint = owner_broker
-        .export_owner_state_checkpoint(topic, Partition::new(0), None)
+        .export_queue_state_checkpoint(topic, Partition::new(0), None)
         .await
         .unwrap();
     let (owner_addr, server_task, _owner_dir, owner_broker) = start_protocol_listener_for_broker(
@@ -2644,18 +2632,13 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
             topic,
             Partition::new(0),
             None,
-            owner_checkpoint.message_next_offset,
-            owner_checkpoint.event_next_offset,
+            owner_checkpoint.next_offset,
         )
         .await
         .unwrap();
     assert_eq!(
         promoted,
-        QueuePromotionOutcome::Promoted {
-            message_next_offset: owner_checkpoint.message_next_offset,
-            event_next_offset: owner_checkpoint.event_next_offset,
-            applied_event_offset: Some(owner_checkpoint.applied_event_offset),
-        }
+        QueuePromotionOutcome::Promoted { next: owner_checkpoint.next_offset }
     );
 
     coordination.consensus_node().shutdown().await.unwrap();
@@ -2713,7 +2696,7 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
         reply.await.unwrap().unwrap();
     }
     let owner_checkpoint = owner_broker
-        .export_owner_state_checkpoint(topic, Partition::new(0), None)
+        .export_queue_state_checkpoint(topic, Partition::new(0), None)
         .await
         .unwrap();
     let (owner_addr, server_task, _owner_dir, owner_broker) = start_protocol_listener_for_broker(
@@ -2876,18 +2859,17 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
     // The promoted log continued from exactly the replicated tail. The new
     // publish takes the first event offset after the replicated history, so
     // nothing was lost or duplicated across the failover.
-    assert_eq!(owner_checkpoint.message_next_offset, 0);
     assert_eq!(
-        post_failover_id, owner_checkpoint.event_next_offset,
+        post_failover_id, owner_checkpoint.next_offset,
         "the post-failover publish id follows the replicated history"
     );
     let promoted_checkpoint = follower_broker
-        .export_owner_state_checkpoint(topic, Partition::new(0), None)
+        .export_queue_state_checkpoint(topic, Partition::new(0), None)
         .await
         .unwrap();
     assert_eq!(
-        promoted_checkpoint.event_next_offset,
-        owner_checkpoint.event_next_offset + 1,
+        promoted_checkpoint.next_offset,
+        owner_checkpoint.next_offset + 1,
         "exactly the replicated history plus the post-failover publish"
     );
 
@@ -3002,11 +2984,10 @@ async fn ganglion_returning_old_owner_is_demoted_and_refuses_publishes() {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Ok(checkpoint) = owner_broker
-                .export_owner_state_checkpoint(topic, Partition::new(0), None)
+                .export_queue_state_checkpoint(topic, Partition::new(0), None)
                 .await
             {
-                if checkpoint.message_epoch == first.epoch && checkpoint.event_epoch == first.epoch
-                {
+                if checkpoint.epoch == first.epoch {
                     break;
                 }
             }
@@ -3102,7 +3083,7 @@ async fn follower_worker_loop_catches_up_over_static_protocol_resolver() {
         reply.await.unwrap().unwrap();
     }
     let owner_checkpoint = owner_broker
-        .export_owner_state_checkpoint(topic, Partition::new(0), group.as_deref())
+        .export_queue_state_checkpoint(topic, Partition::new(0), group.as_deref())
         .await
         .unwrap();
 
@@ -3181,18 +3162,13 @@ async fn follower_worker_loop_catches_up_over_static_protocol_resolver() {
             topic,
             Partition::new(0),
             group.as_deref(),
-            owner_checkpoint.message_next_offset,
-            owner_checkpoint.event_next_offset,
+            owner_checkpoint.next_offset,
         )
         .await
         .unwrap();
     assert_eq!(
         promoted,
-        QueuePromotionOutcome::Promoted {
-            message_next_offset: owner_checkpoint.message_next_offset,
-            event_next_offset: owner_checkpoint.event_next_offset,
-            applied_event_offset: Some(owner_checkpoint.applied_event_offset),
-        }
+        QueuePromotionOutcome::Promoted { next: owner_checkpoint.next_offset }
     );
 
     resolver.close_all().await;
@@ -3234,10 +3210,9 @@ async fn follower_worker_loop_reports_checkpoint_requirement_without_history() {
         reply.await.unwrap().unwrap();
     }
     let owner_checkpoint = owner_broker
-        .export_owner_state_checkpoint(topic, Partition::new(0), group.as_deref())
+        .export_queue_state_checkpoint(topic, Partition::new(0), group.as_deref())
         .await
         .unwrap();
-    assert!(owner_checkpoint.combined_log);
     let owner_records = owner_broker
         .read_owner_queue_records(topic, Partition::new(0), group.as_deref(), 0, 8, usize::MAX, 0)
         .await
@@ -3254,15 +3229,10 @@ async fn follower_worker_loop_reports_checkpoint_requirement_without_history() {
         })
         .collect::<Vec<_>>();
 
-    let checkpoint = ReplicationStateCheckpoint {
-        combined_log: owner_checkpoint.combined_log,
-        event_start_offset: owner_checkpoint.event_start_offset,
-        message_epoch: owner_checkpoint.message_epoch,
-        event_epoch: owner_checkpoint.event_epoch,
-        message_checkpoint_offset: owner_checkpoint.message_checkpoint_offset,
-        message_next_offset: owner_checkpoint.message_next_offset,
-        event_next_offset: owner_checkpoint.event_next_offset,
-        applied_event_offset: owner_checkpoint.applied_event_offset,
+    let checkpoint = QueueCheckpointExportOk {
+        epoch: owner_checkpoint.epoch,
+        start_offset: owner_checkpoint.start_offset,
+        next_offset: owner_checkpoint.next_offset,
         state_snapshot: owner_checkpoint.state_snapshot.clone(),
     };
     let exports = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -3355,13 +3325,12 @@ async fn follower_worker_loop_reports_checkpoint_requirement_without_history() {
             topic,
             Partition::new(0),
             group.as_deref(),
-            owner_checkpoint.message_next_offset,
-            owner_checkpoint.event_next_offset,
+            owner_checkpoint.next_offset,
         )
         .await
         .unwrap();
     assert!(
-        matches!(promoted, QueuePromotionOutcome::EventLogBehind { local_next_offset: 0, .. }),
+        matches!(promoted, QueuePromotionOutcome::LogBehind { local_next: 0, .. }),
         "{promoted:?}"
     );
 
@@ -5016,9 +4985,9 @@ async fn replication_checkpoint_export_composes_with_catch_up() {
     owner_framed
         .send(
             try_encode(
-                Op::ReplicationCheckpointExport,
+                Op::QueueCheckpointExport,
                 4,
-                &ReplicationCheckpointExport {
+                &QueueCheckpointExport {
                     topic: topic.into(),
                     group: group.clone(),
                     partition: Partition::new(0),
@@ -5029,8 +4998,8 @@ async fn replication_checkpoint_export_composes_with_catch_up() {
         .await
         .unwrap();
     let frame = recv_frame(&mut owner_framed).await;
-    assert_eq!(frame.opcode, Op::ReplicationCheckpointExportOk as u16);
-    let export: ReplicationCheckpointExportOk = try_decode(&frame).unwrap();
+    assert_eq!(frame.opcode, Op::QueueCheckpointExportOk as u16);
+    let export: QueueCheckpointExportOk = try_decode(&frame).unwrap();
 
     let (follower_broker, _follower_dir) = open_test_broker().await;
     follower_broker
@@ -5038,33 +5007,26 @@ async fn replication_checkpoint_export_composes_with_catch_up() {
         .await
         .unwrap();
 
-    assert!(export.checkpoint.combined_log);
-    assert_eq!(export.checkpoint.message_next_offset, 0);
-    assert_eq!(export.checkpoint.event_next_offset, 2);
+    assert_eq!(export.next_offset, 2);
 
     // Ordinary catch-up reaches the exported frontier.
     let peer = ProtocolOwnerReplicationPeer::new(owner_framed);
     let (next, _) =
         pull_queue_log_into_follower(&peer, &follower_broker, topic, group.as_deref(), 10).await;
-    assert_eq!(next, export.checkpoint.event_next_offset);
+    assert_eq!(next, export.next_offset);
 
     let promoted = follower_broker
         .promote_replication_follower_if_caught_up(
             topic,
             Partition::new(0),
             group.as_deref(),
-            export.checkpoint.message_next_offset,
-            export.checkpoint.event_next_offset,
+            export.next_offset,
         )
         .await
         .unwrap();
     assert_eq!(
         promoted,
-        QueuePromotionOutcome::Promoted {
-            message_next_offset: export.checkpoint.message_next_offset,
-            event_next_offset: export.checkpoint.event_next_offset,
-            applied_event_offset: Some(export.checkpoint.applied_event_offset),
-        }
+        QueuePromotionOutcome::Promoted { next: export.next_offset }
     );
 
     drop(peer);
@@ -6709,7 +6671,7 @@ async fn recovery_seal_requires_node_auth_and_exact_committed_authority_over_tcp
         .await
         .unwrap();
     engine
-        .apply_replicated_queue_log_batch(&request.topic, 0, None, stroma_core::ReplicatedEventBatch {
+        .apply_replicated_queue_batch(&request.topic, 0, None, stroma_core::ReplicatedEventBatch {
                 epoch: pending.previous.epoch,
                 first_offset: 0,
                 events: vec![StromaEvent::PayloadEnqueue {
@@ -7046,7 +7008,7 @@ async fn assert_replication_controls_forbidden(conn: &mut Conn) {
     for required in [
         Op::QueueReplicationRead,
         Op::StreamReplicationRead,
-        Op::ReplicationCheckpointExport,
+        Op::QueueCheckpointExport,
         Op::QueuePushStart,
         Op::QueuePushProgress,
         Op::QueuePushReset,
@@ -7154,15 +7116,10 @@ async fn replication_controls_reject_anonymous_and_ordinary_users() {
                     Partition::new(0),
                     None,
                     0,
-                    0,
                 )
                 .await
                 .unwrap(),
-            QueuePromotionOutcome::Promoted {
-                message_next_offset: 0,
-                event_next_offset: 0,
-                applied_event_offset: None,
-            }
+            QueuePromotionOutcome::Promoted { next: 0 }
         );
         drop(conn);
         task.await.unwrap().unwrap();
@@ -7441,7 +7398,7 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
         ];
         let first = if checkpoints { index + 3 } else { 4 };
         engine
-            .apply_replicated_queue_log_batch(&command.topic, 0, None, stroma_core::ReplicatedEventBatch {
+            .apply_replicated_queue_batch(&command.topic, 0, None, stroma_core::ReplicatedEventBatch {
                     epoch: pending.previous.epoch,
                     first_offset: 0,
                     durability: None,
@@ -7461,7 +7418,7 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
         }
         if !suffix.is_empty() {
             engine
-                .apply_replicated_queue_log_batch(&command.topic, 0, None, stroma_core::ReplicatedEventBatch {
+                .apply_replicated_queue_batch(&command.topic, 0, None, stroma_core::ReplicatedEventBatch {
                         epoch: pending.previous.epoch,
                         first_offset: first as u64,
                         durability: None,
@@ -8580,7 +8537,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
             .unwrap();
         assert!(
             providers[2]
-                .admit_queue_learner(&intent, &engines[2], 2, 2)
+                .admit_queue_learner(&intent, &engines[2], 2)
                 .await
                 .is_err()
         );
@@ -8610,7 +8567,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
                 .unwrap(),
         );
         let cut = learner_peer
-            .export_owner_state_checkpoint("initial-wire", Partition::new(0), None)
+            .export_queue_state_checkpoint("initial-wire", Partition::new(0), None)
             .await
             .unwrap();
         let caught = brokers[2]
@@ -8677,8 +8634,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
                 providers[2].admit_queue_learner(
                     &intent,
                     &engines[2],
-                    cut.message_next_offset,
-                    cut.event_next_offset,
+                    cut.next_offset,
                 )
             };
             let (pending, admission) = if learner == LearnerCase::RecoveryFirst || isolated {
@@ -8704,12 +8660,12 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
             if !isolated {
                 assert!(
                     learner_peer
-                        .export_owner_state_checkpoint("initial-wire", Partition::new(0), None)
+                        .export_queue_state_checkpoint("initial-wire", Partition::new(0), None)
                         .await
                         .is_err()
                 );
                 assert!(
-                    peer.export_owner_state_checkpoint("initial-wire", Partition::new(0), None)
+                    peer.export_queue_state_checkpoint("initial-wire", Partition::new(0), None)
                         .await
                         .is_err()
                 );
@@ -8815,8 +8771,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
             providers[2].admit_queue_learner(
                 &intent,
                 &engines[2],
-                cut.message_next_offset,
-                cut.event_next_offset,
+                cut.next_offset,
             )
         })
         .await;
@@ -8894,11 +8849,11 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
                 .unwrap(),
         );
         let from = engines[2]
-            .verify_queue_learner_caught_up("initial-wire", 0, None, 1, 0, 0)
+            .verify_queue_learner_caught_up("initial-wire", 0, None, 1, 0)
             .await
             .unwrap();
         let caught = brokers[2]
-            .catch_up_queue_follower_with_checkpoint(&new_peer, "initial-wire", Partition::new(0), None, QueueCatchUpOptions { from: from.event_next, ..Default::default() })
+            .catch_up_queue_follower_with_checkpoint(&new_peer, "initial-wire", Partition::new(0), None, QueueCatchUpOptions { from: from.next, ..Default::default() })
             .await
             .unwrap();
         assert!(matches!(caught, BrokerQueueCatchUp::CaughtUp(_)));
@@ -8935,7 +8890,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
             .unwrap();
         assert!(
             providers[2]
-                .admit_queue_learner(&intent, &engines[2], 0, 0)
+                .admit_queue_learner(&intent, &engines[2], 0)
                 .await
                 .is_err()
         );
@@ -9554,7 +9509,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
         .queue_durable_commit("initial-wire", 0, None)
         .await
         .unwrap();
-    assert_eq!(durable.next(), 3);
+    assert_eq!(durable.next, 3);
     // Seal the recovered generation under a second transition. Its authority
     // comes from the recovered quorum, rather than the old initial assignment.
     let again = persist_pending(&providers, &resource, recovered.digest().unwrap(), "b").await;

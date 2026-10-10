@@ -15,16 +15,18 @@ use stroma_core::{
 pub use stroma_core::{
     AdaptiveStagingConfig, AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, DestroyOutcome,
     DiskUsedBreakdownEntry, RecoveryDiskUsage, EmptyBufferResize, EnqueuedStreamAppend, EvictOutcome,
-    FollowerStateCheckpointInstall, FollowerStateCheckpointInstallOutcome, GlobalDLQ,
+    GlobalDLQ,
     GlobalDlqSnapshot, GlobalDlqUpdateOutcome, GlobalKey, GlobalStore, GlobalValue, InspectMode,
     IoError, KDurability, KeratinAppendCompletion, KeratinConfig, LogRuntimeConfig,
     LogRuntimeSettings, LogRuntimeSnapshot, LogRuntimeStatus, Message, MessageContentType,
     MessageHeaders, MessageInspectionPage, MessageInspectionStatus, OwnerReplicationBatch,
-    OwnerReplicationRead, OwnerStateCheckpoint, PartitionKind, PreparedQueueRecovery,
+    OwnerReplicationRead, PartitionKind, PreparedQueueRecovery,
     QueueCheckpointBase, QueueCheckpointPin, QueueCheckpointTarget, QueueCheckpointContents,
     QueueCheckpointCapsule, QueueCheckpointBuildLimits,
     PreparedStorageHistory, PutOutcome, QuarantineInfo, QueueInspectionState,
-    QueuePromotionOutcome, QueueRecoveryStage, QueueRecoveryStageReceipt, QueueRecoveryStageSpec,
+    QueueDemotionOutcome, QueuePromotionOutcome, QueuePublishCommit, QueueRecoveryStage,
+    QueueRecoveryStageReceipt, QueueRecoveryStageSpec, QueueStateCheckpoint,
+    QueueStateCheckpointInstallOutcome, StreamPromotionOutcome,
     RecoveryMismatchPolicy, RecoveryStageLimits, ReplicatedAppendOutcome, ReplicatedEventBatch,
     ReplicatedMessageBatch, ReplicatedStreamApplyOutcome, RetentionConfig, SnapshotConfig,
     StorageHistoryBinding, Stroma, StromaError, StromaEvent, StromaKeratinConfig,
@@ -661,8 +663,8 @@ impl StromaEngine {
     pub async fn install_queue_learner_checkpoint(
         &self,
         receipt: PreparedStorageHistory,
-        install: FollowerStateCheckpointInstall,
-    ) -> Result<FollowerStateCheckpointInstallOutcome, StromaError> {
+        install: QueueStateCheckpoint,
+    ) -> Result<QueueStateCheckpointInstallOutcome, StromaError> {
         self.inner
             .install_queue_learner_checkpoint(receipt, install)
             .await
@@ -672,7 +674,7 @@ impl StromaEngine {
         &self,
         receipt: &PreparedStorageHistory,
         intent: [u8; 32],
-    ) -> Result<Option<(u64, u64, u64)>, StromaError> {
+    ) -> Result<Option<(u64, u64)>, StromaError> {
         self.inner.installed_queue_reseed_cut(receipt, intent)
     }
 
@@ -696,11 +698,10 @@ impl StromaEngine {
         receipt: PreparedStorageHistory,
         intent: [u8; 32],
         epoch: u64,
-        messages: u64,
-        events: u64,
+        target: u64,
     ) -> Result<(), StromaError> {
         self.inner
-            .install_queue_reseed_storage(receipt, intent, epoch, messages, events)
+            .install_queue_reseed_storage(receipt, intent, epoch, target)
             .await
     }
 
@@ -734,11 +735,10 @@ impl StromaEngine {
         part: u32,
         group: Option<&str>,
         epoch: u64,
-        message_target: u64,
-        event_target: u64,
-    ) -> Result<stroma_core::QueuePublishCommit, StromaError> {
+        target: u64,
+    ) -> Result<QueuePublishCommit, StromaError> {
         self.inner
-            .verify_queue_learner_caught_up(tp, part, group, epoch, message_target, event_target)
+            .verify_queue_learner_caught_up(tp, part, group, epoch, target)
             .await
     }
 
@@ -877,11 +877,12 @@ impl StromaEngine {
         self.inner.snapshot_partition(tp, part, group).await
     }
 
-    /// Truncate the message log so offsets below `before` are no longer retained,
-    /// advancing the log head. An operational primitive (retention/cleanup); a
-    /// follower that requests an offset below the new head must install a
-    /// checkpoint rather than tail-replay.
-    pub async fn truncate_messages_before(
+    /// Truncate the queue log so offsets below `before` are no longer retained,
+    /// advancing the log head. Stroma never truncates past live payloads,
+    /// protected followers or checkpoint pins. A follower that requests an
+    /// offset below the new head must install a checkpoint rather than
+    /// tail-replay.
+    pub async fn truncate_queue_before(
         &self,
         tp: &str,
         part: u32,
@@ -889,7 +890,7 @@ impl StromaEngine {
         before: Offset,
     ) -> Result<u64, StromaError> {
         self.inner
-            .truncate_messages_before(tp, part, group, before)
+            .truncate_queue_before(tp, part, group, before)
             .await
     }
 
@@ -1006,14 +1007,14 @@ impl StromaEngine {
             .await
     }
 
-    pub async fn export_owner_state_checkpoint(
+    pub async fn export_queue_state_checkpoint(
         &self,
         tp: &str,
         part: u32,
         group: Option<&str>,
-    ) -> Result<OwnerStateCheckpoint, StromaError> {
+    ) -> Result<QueueStateCheckpoint, StromaError> {
         self.inner
-            .export_owner_state_checkpoint(tp, part, group)
+            .export_queue_state_checkpoint(tp, part, group)
             .await
     }
 
@@ -1130,21 +1131,20 @@ impl StromaEngine {
         tp: &str,
         part: u32,
         group: Option<&str>,
-    ) -> Result<(), StromaError> {
+    ) -> Result<QueueDemotionOutcome, StromaError> {
         self.inner
             .demote_queue_owner_to_follower(tp, part, group)
-            .await?;
-        Ok(())
+            .await
     }
 
-    pub async fn apply_open_replicated_queue_log_batch(
+    pub async fn apply_open_replicated_queue_batch(
         &self, tp: &str, part: u32, group: Option<&str>,
         frames: futures::stream::BoxStream<'_, Result<ReplicatedEventBatch, StromaError>>,
     ) -> Result<Vec<ReplicatedAppendOutcome>, StromaError> {
-        self.inner.apply_open_replicated_queue_log_batch(tp, part, group, frames).await
+        self.inner.apply_open_replicated_queue_batch(tp, part, group, frames).await
     }
 
-    pub async fn apply_replicated_queue_log_batch(
+    pub async fn apply_replicated_queue_batch(
         &self,
         tp: &str,
         part: u32,
@@ -1152,7 +1152,7 @@ impl StromaEngine {
         batch: ReplicatedEventBatch,
     ) -> Result<ReplicatedAppendOutcome, StromaError> {
         self.inner
-            .apply_replicated_queue_log_batch(tp, part, group, batch)
+            .apply_replicated_queue_batch(tp, part, group, batch)
             .await
     }
 
@@ -1161,17 +1161,10 @@ impl StromaEngine {
         tp: &str,
         part: u32,
         group: Option<&str>,
-        expected_message_next_offset: Offset,
-        expected_event_next_offset: Offset,
+        expected_next: Offset,
     ) -> Result<QueuePromotionOutcome, StromaError> {
         self.inner
-            .promote_queue_follower_if_caught_up(
-                tp,
-                part,
-                group,
-                expected_message_next_offset,
-                expected_event_next_offset,
-            )
+            .promote_queue_follower_if_caught_up(tp, part, group, expected_next)
             .await
     }
 
@@ -1189,7 +1182,7 @@ impl StromaEngine {
             .await
     }
 
-    /// Fence both queue logs at the assignment epoch (persisted, monotonic).
+    /// Fence the queue log at the assignment epoch (persisted, monotonic).
     pub async fn advance_queue_epoch(
         &self,
         tp: &str,
@@ -1282,7 +1275,7 @@ impl StromaEngine {
         tp: &str,
         part: u32,
         epoch: u64,
-    ) -> Result<QueuePromotionOutcome, StromaError> {
+    ) -> Result<StreamPromotionOutcome, StromaError> {
         self.inner
             .promote_stream_follower_to_local_tail(tp, part, epoch)
             .await

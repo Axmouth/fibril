@@ -6,7 +6,7 @@ use fibril_broker::{
         Broker, BrokerError, BrokerOwnerReplicationPeer, BrokerQueueCatchUp, QueueCatchUpOptions,
     },
     queue_engine::{
-        OwnerReplicationBatch, OwnerReplicationRead, OwnerStateCheckpoint, StromaEngine,
+        OwnerReplicationBatch, OwnerReplicationRead, QueueStateCheckpoint, StromaEngine,
         StromaEvent,
     },
 };
@@ -96,14 +96,14 @@ impl BrokerOwnerReplicationPeer for CutPeer<'_> {
             Ok(cap_read(read, self.cut))
         })
     }
-    fn export_owner_state_checkpoint<'a>(
+    fn export_queue_state_checkpoint<'a>(
         &'a self,
         topic: &'a str,
         partition: Partition,
         group: Option<&'a str>,
-    ) -> futures::future::BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
+    ) -> futures::future::BoxFuture<'a, Result<QueueStateCheckpoint, BrokerError>> {
         self.owner
-            .export_owner_state_checkpoint(topic, partition, group)
+            .export_queue_state_checkpoint(topic, partition, group)
     }
 }
 
@@ -172,20 +172,11 @@ impl CatchUpAuthority {
         &self,
         provider: &GanglionCoordination,
         engine: &StromaEngine,
-        messages: u64,
-        events: u64,
+        next: u64,
     ) -> Result<(), String> {
         match self {
-            Self::Learner(i) => {
-                provider
-                    .admit_queue_learner(i, engine, messages, events)
-                    .await
-            }
-            Self::Reseed(i) => {
-                provider
-                    .admit_queue_reseed(i, engine, messages, events)
-                    .await
-            }
+            Self::Learner(i) => provider.admit_queue_learner(i, engine, next).await,
+            Self::Reseed(i) => provider.admit_queue_reseed(i, engine, next).await,
         }
         .map_err(|e| e.to_string())
     }
@@ -234,14 +225,14 @@ pub async fn learn_queue_once(
     }
     let live_engine = broker.engine();
     if let CatchUpAuthority::Reseed(reseed) = &intent {
-        if let Some((epoch, messages, events)) = live_engine
+        if let Some((epoch, next)) = live_engine
             .installed_queue_reseed_cut(&reseed.receipt(), reseed.digest()?)
             .map_err(|e| e.to_string())?
         {
             if epoch != reseed.assignment.epoch {
                 return Err("installed reseed epoch differs".into());
             }
-            return intent.admit(provider, &live_engine, messages, events).await;
+            return intent.admit(provider, &live_engine, next).await;
         }
     }
     let (engine, receipt) = intent.prepare(provider, &live_engine).await?;
@@ -263,17 +254,11 @@ pub async fn learn_queue_once(
     .with_history_session(session);
     let part = Partition::new(u32::try_from(resource.partition).map_err(|e| e.to_string())?);
     let mut cut = peer
-        .export_owner_state_checkpoint(&resource.name, part, resource.group.as_deref())
+        .export_queue_state_checkpoint(&resource.name, part, resource.group.as_deref())
         .await
         .map_err(|e| e.to_string())?;
-    if cut.message_epoch != intent.assignment().epoch
-        || cut.event_epoch != intent.assignment().epoch
-    {
+    if cut.epoch != intent.assignment().epoch {
         return Err("learner checkpoint has another epoch".into());
-    }
-    // The learner follows one cursor in the single queue log.
-    if !cut.combined_log || cut.message_next_offset != 0 {
-        return Err("learner checkpoint has a separate message log".into());
     }
     intent.authorize(provider).await?;
     engine
@@ -297,25 +282,12 @@ pub async fn learn_queue_once(
             resource.group.as_deref(),
             intent.assignment().epoch,
             0,
-            0,
         )
         .await
         .is_err()
     {
         engine
-            .install_queue_learner_checkpoint(
-                receipt.clone(),
-                fibril_broker::queue_engine::FollowerStateCheckpointInstall {
-                    combined_log: cut.combined_log,
-                    event_start_offset: cut.event_start_offset,
-                    message_epoch: cut.message_epoch,
-                    event_epoch: cut.event_epoch,
-                    message_next_offset: cut.message_checkpoint_offset,
-                    event_next_offset: cut.event_next_offset,
-                    applied_event_offset: cut.applied_event_offset,
-                    state_snapshot: cut.state_snapshot.clone(),
-                },
-            )
+            .install_queue_learner_checkpoint(receipt.clone(), cut.clone())
             .await
             .map_err(|e| e.to_string())?;
     }
@@ -328,15 +300,8 @@ pub async fn learn_queue_once(
             return Err("broker is shutting down".into());
         }
         // The cut is fixed at the start; publishing does not need an idle gap.
-        if from >= cut.event_next_offset {
-            intent
-                .admit(
-                    provider,
-                    &live_engine,
-                    cut.message_next_offset,
-                    cut.event_next_offset,
-                )
-                .await?;
+        if from >= cut.next_offset {
+            intent.admit(provider, &live_engine, cut.next_offset).await?;
             tracing::info!(
                 topic = resource.name,
                 partition = resource.partition,
@@ -348,7 +313,7 @@ pub async fn learn_queue_once(
         }
         let cut_peer = CutPeer {
             owner: &peer,
-            cut: cut.event_next_offset,
+            cut: cut.next_offset,
         };
         let outcome = broker
             .catch_up_queue_follower_using_engine(
@@ -376,31 +341,14 @@ pub async fn learn_queue_once(
                 // continues serving. Only fresh non-voting authority permits reset.
                 intent.authorize(provider).await?;
                 let checkpoint = peer
-                    .export_owner_state_checkpoint(&resource.name, part, resource.group.as_deref())
+                    .export_queue_state_checkpoint(&resource.name, part, resource.group.as_deref())
                     .await
                     .map_err(|e| e.to_string())?;
-                if checkpoint.message_epoch != intent.assignment().epoch
-                    || checkpoint.event_epoch != intent.assignment().epoch
-                {
+                if checkpoint.epoch != intent.assignment().epoch {
                     return Err("learner checkpoint epoch changed".into());
                 }
-                if !checkpoint.combined_log || checkpoint.message_next_offset != 0 {
-                    return Err("learner checkpoint has a separate message log".into());
-                }
                 engine
-                    .install_queue_learner_checkpoint(
-                        receipt.clone(),
-                        fibril_broker::queue_engine::FollowerStateCheckpointInstall {
-                            combined_log: checkpoint.combined_log,
-                            event_start_offset: checkpoint.event_start_offset,
-                            message_epoch: checkpoint.message_epoch,
-                            event_epoch: checkpoint.event_epoch,
-                            message_next_offset: checkpoint.message_checkpoint_offset,
-                            event_next_offset: checkpoint.event_next_offset,
-                            applied_event_offset: checkpoint.applied_event_offset,
-                            state_snapshot: checkpoint.state_snapshot.clone(),
-                        },
-                    )
+                    .install_queue_learner_checkpoint(receipt.clone(), checkpoint.clone())
                     .await
                     .map_err(|e| e.to_string())?;
                 cut = checkpoint;

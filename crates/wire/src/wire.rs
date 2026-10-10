@@ -11,9 +11,9 @@ use crate::{
     QueueTopologyEntry, ReasonCode, ReconcileAction, ReconcileClient, ReconcilePolicy,
     ReconcileResult, ReconcileServer, ReconcileSubscription, ReconcileSubscriptionResult, Redirect,
     QueuePushEnd, QueuePushProgress, QueuePushReset, QueuePushStart, QueueReplicationRead,
-    QueueReplicationReadOk, ReplicationCheckpointExport, ReplicationCheckpointExportOk,
+    QueueCheckpointExport, QueueCheckpointExportOk, QueueReplicationReadOk,
     ReplicationCheckpointRequired, ReplicationEventRead, ReplicationEventRecord,
-    ReplicationMessageRead, ReplicationMessageRecord, ReplicationStateCheckpoint,
+    ReplicationMessageRead, ReplicationMessageRecord,
     ResumeIdentity, ResumeOutcome, StreamReplicationRead, StreamReplicationReadOk,
     StreamDurability, StreamRetention, StreamStart, StreamTopologyEntry, Subscribe, SubscribeOk,
     SubscribeStream, SubscriptionClosed, TopologyOk, TopologyRequest, TopologyUpdateAck,
@@ -1091,9 +1091,9 @@ pub fn decode_queue_push_end(frame: &Frame) -> WireResult<QueuePushEnd> {
     Ok(end)
 }
 
-pub fn encode_replication_checkpoint_export(
+pub fn encode_queue_checkpoint_export(
     request_id: u64,
-    export: &ReplicationCheckpointExport,
+    export: &QueueCheckpointExport,
 ) -> WireResult<Frame> {
     let mut out = payload_builder(b"FCE1");
     put_queue_key(
@@ -1102,50 +1102,52 @@ pub fn encode_replication_checkpoint_export(
         export.partition,
         export.group.as_deref(),
     )?;
-    Ok(frame(
-        Op::ReplicationCheckpointExport,
-        request_id,
-        out.freeze(),
-    ))
+    Ok(frame(Op::QueueCheckpointExport, request_id, out.freeze()))
 }
 
-pub fn decode_replication_checkpoint_export(
-    frame: &Frame,
-) -> WireResult<ReplicationCheckpointExport> {
-    expect_op(frame, Op::ReplicationCheckpointExport)?;
+pub fn decode_queue_checkpoint_export(frame: &Frame) -> WireResult<QueueCheckpointExport> {
+    expect_op(frame, Op::QueueCheckpointExport)?;
     let mut reader = Reader::new(&frame.payload);
-    reader.expect_magic(b"FCE1", "replication checkpoint export")?;
+    reader.expect_magic(b"FCE1", "queue checkpoint export")?;
     let (topic, partition, group) = reader.queue_key()?;
     reader.finish()?;
-    Ok(ReplicationCheckpointExport {
+    Ok(QueueCheckpointExport {
         topic,
         group,
         partition,
     })
 }
 
-pub fn encode_replication_checkpoint_export_ok(
+pub fn encode_queue_checkpoint_export_ok(
     request_id: u64,
-    ok: &ReplicationCheckpointExportOk,
+    ok: &QueueCheckpointExportOk,
 ) -> WireResult<Frame> {
-    let mut out = payload_builder(b"FCO1");
-    put_replication_state_checkpoint(&mut out, &ok.checkpoint)?;
-    Ok(frame(
-        Op::ReplicationCheckpointExportOk,
-        request_id,
-        out.freeze(),
-    ))
+    let mut out = payload_builder(b"FQC1");
+    out.put_u64(ok.epoch);
+    out.put_u64(ok.start_offset);
+    out.put_u64(ok.next_offset);
+    put_bytes(&mut out, &ok.state_snapshot)?;
+    Ok(frame(Op::QueueCheckpointExportOk, request_id, out.freeze()))
 }
 
-pub fn decode_replication_checkpoint_export_ok(
-    frame: &Frame,
-) -> WireResult<ReplicationCheckpointExportOk> {
-    expect_op(frame, Op::ReplicationCheckpointExportOk)?;
+/// Refuses a start past the applied boundary, which no owner can export.
+pub fn decode_queue_checkpoint_export_ok(frame: &Frame) -> WireResult<QueueCheckpointExportOk> {
+    expect_op(frame, Op::QueueCheckpointExportOk)?;
     let mut reader = Reader::new(&frame.payload);
-    reader.expect_magic(b"FCO1", "replication checkpoint export ok")?;
-    let checkpoint = reader.replication_state_checkpoint()?;
+    reader.expect_magic(b"FQC1", "queue checkpoint export ok")?;
+    let ok = QueueCheckpointExportOk {
+        epoch: reader.u64()?,
+        start_offset: reader.u64()?,
+        next_offset: reader.u64()?,
+        state_snapshot: reader.bytes()?.to_vec(),
+    };
     reader.finish()?;
-    Ok(ReplicationCheckpointExportOk { checkpoint })
+    if ok.start_offset > ok.next_offset {
+        return Err(WireError::InvalidRecordSequence(
+            "queue checkpoint starts past its applied boundary",
+        ));
+    }
+    Ok(ok)
 }
 
 fn put_publish_common(out: &mut BytesMut, publish: &Publish) -> WireResult<()> {
@@ -1533,22 +1535,6 @@ fn put_replication_event_read(out: &mut BytesMut, read: &ReplicationEventRead) -
             put_replication_checkpoint_required(out, required);
         }
     }
-    Ok(())
-}
-
-fn put_replication_state_checkpoint(
-    out: &mut BytesMut,
-    checkpoint: &ReplicationStateCheckpoint,
-) -> WireResult<()> {
-    out.put_u8(u8::from(checkpoint.combined_log));
-    out.put_u64(checkpoint.event_start_offset);
-    out.put_u64(checkpoint.message_epoch);
-    out.put_u64(checkpoint.event_epoch);
-    out.put_u64(checkpoint.message_checkpoint_offset);
-    out.put_u64(checkpoint.message_next_offset);
-    out.put_u64(checkpoint.event_next_offset);
-    out.put_u64(checkpoint.applied_event_offset);
-    put_bytes(out, &checkpoint.state_snapshot)?;
     Ok(())
 }
 
@@ -1979,20 +1965,6 @@ impl<'a> Reader<'a> {
                 value,
             }),
         }
-    }
-
-    fn replication_state_checkpoint(&mut self) -> WireResult<ReplicationStateCheckpoint> {
-        Ok(ReplicationStateCheckpoint {
-            combined_log: self.bool()?,
-            event_start_offset: self.u64()?,
-            message_epoch: self.u64()?,
-            event_epoch: self.u64()?,
-            message_checkpoint_offset: self.u64()?,
-            message_next_offset: self.u64()?,
-            event_next_offset: self.u64()?,
-            applied_event_offset: self.u64()?,
-            state_snapshot: self.bytes()?.to_vec(),
-        })
     }
 
     fn bool(&mut self) -> WireResult<bool> {
@@ -3558,7 +3530,7 @@ mod history_replication_tests {
             // travel the other way and are never dispatched by the server.
             let reply_or_push = name.ends_with("Ok")
                 || matches!(op, Op::QueuePushBatch | Op::QueuePushEnd);
-            let internal = ["Replication", "Recovery", "History", "QueuePush"]
+            let internal = ["Replication", "Recovery", "History", "QueuePush", "QueueCheckpoint"]
                 .iter()
                 .any(|family| name.contains(family));
             if internal && !reply_or_push {
@@ -3610,8 +3582,8 @@ mod history_replication_tests {
             | Op::ReconcileResult
             | Op::QueueReplicationRead
             | Op::QueueReplicationReadOk
-            | Op::ReplicationCheckpointExport
-            | Op::ReplicationCheckpointExportOk
+            | Op::QueueCheckpointExport
+            | Op::QueueCheckpointExportOk
             | Op::RecoverySeal
             | Op::RecoverySealOk
             | Op::Topology

@@ -145,16 +145,12 @@ pub fn try_encode<T: Serialize + Any>(op: Op, req_id: u64, msg: &T) -> ProtocolR
         Op::StreamReplicationReadOk => encode_typed(msg, "StreamReplicationReadOk", |msg| {
             wire::encode_stream_replication_read_ok(req_id, msg)
         }),
-        Op::ReplicationCheckpointExport => {
-            encode_typed(msg, "ReplicationCheckpointExport", |msg| {
-                wire::encode_replication_checkpoint_export(req_id, msg)
-            })
-        }
-        Op::ReplicationCheckpointExportOk => {
-            encode_typed(msg, "ReplicationCheckpointExportOk", |msg| {
-                wire::encode_replication_checkpoint_export_ok(req_id, msg)
-            })
-        }
+        Op::QueueCheckpointExport => encode_typed(msg, "QueueCheckpointExport", |msg| {
+            wire::encode_queue_checkpoint_export(req_id, msg)
+        }),
+        Op::QueueCheckpointExportOk => encode_typed(msg, "QueueCheckpointExportOk", |msg| {
+            wire::encode_queue_checkpoint_export_ok(req_id, msg)
+        }),
         Op::Topology => encode_typed(msg, "TopologyRequest", |msg| {
             wire::encode_topology_request(req_id, msg)
         }),
@@ -322,13 +318,11 @@ pub fn try_decode<T: for<'de> Deserialize<'de> + Any>(frame: &Frame) -> Protocol
                 .map_err(wire_decode_error)
                 .and_then(cast_decoded)
         }
-        x if x == Op::ReplicationCheckpointExport as u16 => {
-            wire::decode_replication_checkpoint_export(frame)
-                .map_err(wire_decode_error)
-                .and_then(cast_decoded)
-        }
-        x if x == Op::ReplicationCheckpointExportOk as u16 => {
-            wire::decode_replication_checkpoint_export_ok(frame)
+        x if x == Op::QueueCheckpointExport as u16 => wire::decode_queue_checkpoint_export(frame)
+            .map_err(wire_decode_error)
+            .and_then(cast_decoded),
+        x if x == Op::QueueCheckpointExportOk as u16 => {
+            wire::decode_queue_checkpoint_export_ok(frame)
                 .map_err(wire_decode_error)
                 .and_then(cast_decoded)
         }
@@ -486,9 +480,9 @@ mod tests {
         QueueTopologyEntry, ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult,
         ReconcileServer, ReconcileSubscription, ReconcileSubscriptionResult, Redirect,
         QueuePushProgress, QueueReplicationRead, QueueReplicationReadOk,
-        ReplicationCheckpointExport, ReplicationCheckpointExportOk, ReplicationCheckpointRequired,
+        QueueCheckpointExport, QueueCheckpointExportOk, ReplicationCheckpointRequired,
         ReplicationEventRead, ReplicationEventRecord, ReplicationMessageRead,
-        ReplicationMessageRecord, ReplicationStateCheckpoint, StreamReplicationRead,
+        ReplicationMessageRecord, StreamReplicationRead,
         StreamReplicationReadOk, ResumeIdentity, ResumeOutcome, Subscribe, SubscribeOk,
         TopologyOk,
     };
@@ -925,42 +919,43 @@ mod tests {
 
     #[test]
     fn replication_checkpoint_export_roundtrips() {
-        let msg = ReplicationCheckpointExport {
+        let msg = QueueCheckpointExport {
             topic: "orders".into(),
             group: Some("workers".into()),
             partition: Partition::new(3),
         };
 
-        let frame = try_encode(Op::ReplicationCheckpointExport, 19, &msg).unwrap();
-        assert_eq!(frame.opcode, Op::ReplicationCheckpointExport as u16);
-        assert_eq!(
-            try_decode::<ReplicationCheckpointExport>(&frame).unwrap(),
-            msg
-        );
+        let frame = try_encode(Op::QueueCheckpointExport, 19, &msg).unwrap();
+        assert_eq!(frame.opcode, Op::QueueCheckpointExport as u16);
+        assert_eq!(try_decode::<QueueCheckpointExport>(&frame).unwrap(), msg);
     }
 
     #[test]
     fn replication_checkpoint_export_ok_roundtrips() {
-        let msg = ReplicationCheckpointExportOk {
-            checkpoint: ReplicationStateCheckpoint {
-                combined_log: false,
-                event_start_offset: 30,
-                message_epoch: 2,
-                event_epoch: 3,
-                message_checkpoint_offset: 10,
-                message_next_offset: 20,
-                event_next_offset: 30,
-                applied_event_offset: 29,
-                state_snapshot: b"snapshot".to_vec(),
-            },
+        let msg = QueueCheckpointExportOk {
+            epoch: 3,
+            start_offset: 10,
+            next_offset: 30,
+            state_snapshot: b"snapshot".to_vec(),
         };
 
-        let frame = try_encode(Op::ReplicationCheckpointExportOk, 20, &msg).unwrap();
-        assert_eq!(frame.opcode, Op::ReplicationCheckpointExportOk as u16);
-        assert_eq!(
-            try_decode::<ReplicationCheckpointExportOk>(&frame).unwrap(),
-            msg
-        );
+        let frame = try_encode(Op::QueueCheckpointExportOk, 20, &msg).unwrap();
+        assert_eq!(frame.opcode, Op::QueueCheckpointExportOk as u16);
+        assert_eq!(&frame.payload[..4], b"FQC1");
+        assert_eq!(try_decode::<QueueCheckpointExportOk>(&frame).unwrap(), msg);
+        for length in 0..frame.payload.len() {
+            let mut short = frame.clone();
+            short.payload = short.payload.slice(..length);
+            assert!(try_decode::<QueueCheckpointExportOk>(&short).is_err());
+        }
+
+        // A start past the applied boundary is refused.
+        let bad = QueueCheckpointExportOk {
+            start_offset: 31,
+            ..msg
+        };
+        let frame = try_encode(Op::QueueCheckpointExportOk, 21, &bad).unwrap();
+        assert!(try_decode::<QueueCheckpointExportOk>(&frame).is_err());
     }
 }
 

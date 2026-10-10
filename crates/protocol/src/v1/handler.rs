@@ -28,7 +28,7 @@ use fibril_broker::{
     },
     queue_engine::{
         DLQDiscardPolicyWire, DeclareMeta, GlobalDLQ, Message, MessageContentType, MessageHeaders,
-        OwnerReplicationRead, OwnerStateCheckpoint, QueueEngine,
+        OwnerReplicationRead, QueueStateCheckpoint, QueueEngine,
         RetentionConfig, StreamStore, StromaEngine, StromaError, StromaEvent,
     },
     stream::{
@@ -706,16 +706,11 @@ impl queue_push::OwnerPushSource for BrokerOwnerPushSource {
     }
 }
 
-fn to_replication_state_checkpoint(checkpoint: OwnerStateCheckpoint) -> ReplicationStateCheckpoint {
-    ReplicationStateCheckpoint {
-        combined_log: checkpoint.combined_log,
-        event_start_offset: checkpoint.event_start_offset,
-        message_epoch: checkpoint.message_epoch,
-        event_epoch: checkpoint.event_epoch,
-        message_checkpoint_offset: checkpoint.message_checkpoint_offset,
-        message_next_offset: checkpoint.message_next_offset,
-        event_next_offset: checkpoint.event_next_offset,
-        applied_event_offset: checkpoint.applied_event_offset,
+fn to_queue_checkpoint_export_ok(checkpoint: QueueStateCheckpoint) -> QueueCheckpointExportOk {
+    QueueCheckpointExportOk {
+        epoch: checkpoint.epoch,
+        start_offset: checkpoint.start_offset,
+        next_offset: checkpoint.next_offset,
         state_snapshot: checkpoint.state_snapshot,
     }
 }
@@ -3707,17 +3702,17 @@ where
                 }
             }
 
-            // -------- REPLICATION CHECKPOINT EXPORT ------------------------
-            x if x == Op::ReplicationCheckpointExport as u16 => {
-                let export: ReplicationCheckpointExport = decode_or_400!(
+            // -------- QUEUE CHECKPOINT EXPORT ------------------------------
+            x if x == Op::QueueCheckpointExport as u16 => {
+                let export: QueueCheckpointExport = decode_wire_or_400!(
                     frame,
                     frame_tx_high_prio,
                     metrics,
-                    ReplicationCheckpointExport
+                    wire::decode_queue_checkpoint_export
                 );
 
                 match broker
-                    .export_owner_state_checkpoint(
+                    .export_queue_state_checkpoint(
                         &export.topic,
                         export.partition,
                         export.group.as_deref(),
@@ -3725,14 +3720,10 @@ where
                     .await
                 {
                     Ok(checkpoint) => {
-                        let response = ReplicationCheckpointExportOk {
-                            checkpoint: to_replication_state_checkpoint(checkpoint),
-                        };
                         frame_tx_high_prio
-                            .send(try_encode(
-                                Op::ReplicationCheckpointExportOk,
+                            .send(wire::encode_queue_checkpoint_export_ok(
                                 frame.request_id,
-                                &response,
+                                &to_queue_checkpoint_export_ok(checkpoint),
                             )?)
                             .await?;
                     }

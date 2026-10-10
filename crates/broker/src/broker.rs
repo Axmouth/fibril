@@ -29,6 +29,7 @@ use crate::coordination::{
 };
 use crate::queue_engine::{
     DeclareMeta, DestroyOutcome, EvictOutcome, QueueEngine, QueuePromotionOutcome, StreamStore,
+    StreamPromotionOutcome,
     StromaEngine,
 };
 use crate::stream::{StreamChannel, StreamDurability};
@@ -2282,7 +2283,7 @@ impl<
                         .engine
                         .queue_durable_commit(&key.tp, key.part.id(), key.group.as_deref())
                         .await?;
-                    if commit.epoch() == assignment.epoch {
+                    if commit.epoch == assignment.epoch {
                         let mut dependencies = cell
                             .dependencies
                             .lock()
@@ -2566,8 +2567,7 @@ impl<
                 let observer = Box::new(move |commit: stroma_core::QueuePublishCommit| {
                     let _ = batch_commit.set((commit, admitted_assignment));
                     if let Some(assignment) = assignments.get(&key) {
-                        if commit.is_single_log()
-                            && assignment.epoch == commit.epoch()
+                        if assignment.epoch == commit.epoch
                             && assignment
                                 .durability_requirement()
                                 .is_ok_and(|r| r.nodes > 1)
@@ -5289,18 +5289,13 @@ impl Broker<StromaEngine> {
                     )
                     .await?
                 {
-                    QueuePromotionOutcome::Promoted {
-                        message_next_offset,
-                        event_next_offset,
-                        ..
-                    } => {
+                    QueuePromotionOutcome::Promoted { next } => {
                         tracing::info!(
                             topic,
                             partition = transition.queue.partition.id(),
                             group = ?group,
                             stopped_worker,
-                            message_next_offset,
-                            event_next_offset,
+                            next,
                             "promoted follower to owner at local tails"
                         );
                         Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
@@ -5493,7 +5488,7 @@ impl Broker<StromaEngine> {
                     .promote_stream_follower_to_local_tail(&topic, partition, assignment_epoch)
                     .await?
                 {
-                    QueuePromotionOutcome::Promoted {
+                    StreamPromotionOutcome::Promoted {
                         message_next_offset,
                         event_next_offset,
                         ..

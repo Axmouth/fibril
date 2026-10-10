@@ -413,8 +413,7 @@ mod checkpoint_agreement {
             format!("fibril/learner-admissions/{activation}"),
             serde_json::to_string(&serde_json::json!({"c": {
                 "intent": intent, "storage": storage,
-                "message_target": 5, "event_target": 10,
-                "message_next": 5, "event_next": 10
+                "target": 10, "next": 10
             }}))
             .unwrap(),
         );

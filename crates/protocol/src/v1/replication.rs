@@ -15,7 +15,7 @@ use fibril_broker::{
     },
     coordination::{Coordination, NodeInfo, PartitionAssignment},
     queue_engine::{
-        Message, OwnerReplicationBatch, OwnerReplicationRead, OwnerStateCheckpoint, StromaEvent,
+        Message, OwnerReplicationBatch, OwnerReplicationRead, QueueStateCheckpoint, StromaEvent,
     },
     replication::StreamApplyTunablesFn,
 };
@@ -29,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 use crate::v1::{
     Auth, ERR_NOT_OWNER, ErrorMsg, Hello, HelloOk, Op, PROTOCOL_V1, QueuePushProgress,
     QueuePushReset, QueuePushStart, QueueReplicationRead, QueueReplicationReadOk,
-    ReplicationCheckpointExport, ReplicationCheckpointExportOk, ReplicationEventRead,
+    QueueCheckpointExport, ReplicationEventRead,
     ReplicationMessageRead, StreamReplicationRead, StreamReplicationReadOk,
     frame::Frame,
     helper::{self, Conn, try_decode, try_encode},
@@ -966,12 +966,12 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
         })
     }
 
-    fn export_owner_state_checkpoint<'a>(
+    fn export_queue_state_checkpoint<'a>(
         &'a self,
         topic: &'a str,
         partition: Partition,
         group: Option<&'a str>,
-    ) -> futures::future::BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
+    ) -> futures::future::BoxFuture<'a, Result<QueueStateCheckpoint, BrokerError>> {
         Box::pin(async move {
             let _request_guard = tokio::select! {
                 biased;
@@ -985,10 +985,9 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
             if let Err(err) = conn
                 .send(
                     self.history_frame(
-                        try_encode(
-                            Op::ReplicationCheckpointExport,
+                        wire::encode_queue_checkpoint_export(
                             request_id,
-                            &ReplicationCheckpointExport {
+                            &QueueCheckpointExport {
                                 topic: topic.to_string(),
                                 group: group.map(str::to_string),
                                 partition,
@@ -1004,16 +1003,18 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
                 )));
             }
 
-            let export: ReplicationCheckpointExportOk = match tokio::select! {
+            let export = match tokio::select! {
                 biased;
                 _ = self.close_token.cancelled() => {
                     Err(ProtocolReplicationRequestError::ConnectionClosed)
                 }
-                response = recv_response(
-                    &mut conn,
-                    request_id,
-                    Op::ReplicationCheckpointExportOk,
-                ) => {
+                response = async {
+                    let frame =
+                        recv_response_frame(&mut conn, request_id, Op::QueueCheckpointExportOk)
+                            .await?;
+                    wire::decode_queue_checkpoint_export_ok(&frame)
+                        .map_err(|err| ProtocolReplicationRequestError::Decode(err.to_string()))
+                } => {
                     response
                 }
             } {
@@ -1028,16 +1029,11 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
                 }
             };
             self.restore_conn(conn).await;
-            Ok(OwnerStateCheckpoint {
-                combined_log: export.checkpoint.combined_log,
-                event_start_offset: export.checkpoint.event_start_offset,
-                message_epoch: export.checkpoint.message_epoch,
-                event_epoch: export.checkpoint.event_epoch,
-                message_checkpoint_offset: export.checkpoint.message_checkpoint_offset,
-                message_next_offset: export.checkpoint.message_next_offset,
-                event_next_offset: export.checkpoint.event_next_offset,
-                applied_event_offset: export.checkpoint.applied_event_offset,
-                state_snapshot: export.checkpoint.state_snapshot,
+            Ok(QueueStateCheckpoint {
+                epoch: export.epoch,
+                start_offset: export.start_offset,
+                next_offset: export.next_offset,
+                state_snapshot: export.state_snapshot,
             })
         })
     }

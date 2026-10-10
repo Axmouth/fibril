@@ -464,8 +464,7 @@ async fn automatic_recovery_repeats_and_preserves_confirmed_messages() {
         .unwrap();
         assert!(provider.pending_recoveries().unwrap().is_empty());
         let durable = engine.queue_durable_commit("q", 0, None).await.unwrap();
-        assert!(durable.is_single_log());
-        assert_eq!(durable.next(), cycle + 1);
+        assert_eq!(durable.next, cycle + 1);
     }
     // The same production stage guards feed the admin snapshot. Wait for the
     // attempt's final guard as activation can become visible just before it drops.
@@ -692,7 +691,6 @@ async fn three_node_owner_loss_with_history(
         brokers.push(broker);
         listeners.push(listener);
     }
-    let message_tail = |_: u64| 0;
     let coordinator = &providers[leader as usize - 1];
     coordinator
         .register_queue(&QueueIdentity::new("q", Partition::new(0), None))
@@ -844,7 +842,7 @@ async fn three_node_owner_loss_with_history(
                     .await
                     .unwrap();
                 let cut = peer
-                    .export_owner_state_checkpoint("q", Partition::new(0), None)
+                    .export_queue_state_checkpoint("q", Partition::new(0), None)
                     .await
                     .unwrap();
                 brokers[2]
@@ -856,23 +854,14 @@ async fn three_node_owner_loss_with_history(
                     .engine()
                     .install_queue_learner_checkpoint(
                         receipt.clone(),
-                        fibril_broker::queue_engine::FollowerStateCheckpointInstall {
-                            combined_log: cut.combined_log,
-                            event_start_offset: cut.event_start_offset,
-                            message_epoch: cut.message_epoch,
-                            event_epoch: cut.event_epoch,
-                            message_next_offset: cut.message_checkpoint_offset,
-                            event_next_offset: cut.event_next_offset,
-                            applied_event_offset: cut.applied_event_offset,
-                            state_snapshot: cut.state_snapshot,
-                        },
+                        cut,
                     )
                     .await
                     .unwrap();
                 assert!(
                     brokers[2]
                         .engine()
-                        .verify_queue_learner_caught_up("q", 0, None, 1, 0, 4)
+                        .verify_queue_learner_caught_up("q", 0, None, 1, 4)
                         .await
                         .is_err()
                 );
@@ -988,7 +977,7 @@ async fn three_node_owner_loss_with_history(
                         );
                         assert!(
                             providers[2]
-                                .admit_queue_learner(&renewed, &brokers[2].engine(), message_tail(4), 4)
+                                .admit_queue_learner(&renewed, &brokers[2].engine(), 4)
                                 .await
                                 .is_err()
                         );
@@ -1060,7 +1049,7 @@ async fn three_node_owner_loss_with_history(
         assert_eq!(joined.history.as_ref().unwrap().replicas.len(), 3);
         brokers[2]
             .engine()
-            .verify_queue_learner_caught_up("q", 0, None, 1, message_tail(4), 4)
+            .verify_queue_learner_caught_up("q", 0, None, 1, 4)
             .await
             .unwrap();
         learner_worker.unwrap().abort();
@@ -1554,8 +1543,13 @@ async fn three_node_owner_loss_with_history(
             assert_eq!(rejoined.epoch, assignment.epoch);
             assert_eq!(rejoined.durability, ReplicationDurabilityPolicy::MajorityDurable);
             assert!(rejoined.history.as_ref().unwrap().replicas.contains_key("a"));
-            brokers[0].engine().verify_queue_learner_caught_up("q", 0, None,
-                assignment.epoch, 0, 16 + copy_history.unwrap().records).await.unwrap();
+            brokers[0].engine().verify_queue_learner_caught_up(
+                "q",
+                0,
+                None,
+                assignment.epoch,
+                16 + copy_history.unwrap().records,
+).await.unwrap();
             eprintln!("old owner rejoined after large recovery: elapsed={:?}", rejoin_started.elapsed());
         }
         if copy_history.is_some() {
@@ -1690,7 +1684,6 @@ async fn admitted_replica_reseed(
             result.unwrap();
         }
     }
-    let message_tail = |_: u64| 0;
     let original = providers[0]
         .snapshot()
         .assignment_for("q", Partition::new(0), None)
@@ -1805,7 +1798,7 @@ async fn admitted_replica_reseed(
                 })
             })
         }
-        fn export_owner_state_checkpoint<'a>(
+        fn export_queue_state_checkpoint<'a>(
             &'a self,
             _: &'a str,
             _: Partition,
@@ -1813,7 +1806,7 @@ async fn admitted_replica_reseed(
         ) -> futures::future::BoxFuture<
             'a,
             Result<
-                fibril_broker::queue_engine::OwnerStateCheckpoint,
+                fibril_broker::queue_engine::QueueStateCheckpoint,
                 fibril_broker::broker::BrokerError,
             >,
         > {
@@ -1887,7 +1880,7 @@ async fn admitted_replica_reseed(
             .unwrap(),
     );
     let cut = peer
-        .export_owner_state_checkpoint("q", Partition::new(0), None)
+        .export_queue_state_checkpoint("q", Partition::new(0), None)
         .await
         .unwrap();
     view.become_queue_follower_with_epoch("q", 0, None, 1)
@@ -1895,21 +1888,17 @@ async fn admitted_replica_reseed(
         .unwrap();
     view.install_queue_learner_checkpoint(
         intent.receipt(),
-        fibril_broker::queue_engine::FollowerStateCheckpointInstall {
-            combined_log: cut.combined_log,
-            event_start_offset: cut.event_start_offset,
-            message_epoch: 1,
-            event_epoch: 1,
-            message_next_offset: cut.message_checkpoint_offset,
-            event_next_offset: cut.event_next_offset,
-            applied_event_offset: cut.applied_event_offset,
+        fibril_broker::queue_engine::QueueStateCheckpoint {
+            epoch: 1,
+            start_offset: cut.start_offset,
+            next_offset: cut.next_offset,
             state_snapshot: cut.state_snapshot,
         },
     )
     .await
     .unwrap();
     assert!(
-        view.verify_queue_learner_caught_up("q", 0, None, 1, message_tail(4), 4)
+        view.verify_queue_learner_caught_up("q", 0, None, 1, 4)
             .await
             .is_err(),
         "checkpoint is incomplete until payload backfill finishes"
@@ -1989,7 +1978,7 @@ async fn admitted_replica_reseed(
     );
     brokers[2]
         .engine()
-        .verify_queue_learner_caught_up("q", 0, None, 1, message_tail(5), 5)
+        .verify_queue_learner_caught_up("q", 0, None, 1, 5)
         .await
         .unwrap();
     let confirm = publisher
@@ -2036,6 +2025,6 @@ async fn admitted_replica_reseed(
     }).await.unwrap();
     for worker in workers {worker.abort();}
     for i in 1..3 {
-        brokers[i].engine().verify_queue_learner_caught_up("q",0,None,1,message_tail(6),6).await.unwrap();
+        brokers[i].engine().verify_queue_learner_caught_up("q", 0, None, 1, 6).await.unwrap();
     }
 }

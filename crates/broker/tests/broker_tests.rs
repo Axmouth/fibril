@@ -15,7 +15,8 @@ use fibril_broker::{
         Broker, BrokerAssignmentTransitionApply, BrokerConfig, BrokerError,
         BrokerOwnerReplicationPeer, BrokerOwnerReplicationPeerResolver, BrokerOwnerStreamRecords,
         BrokerQueueCatchUp, BrokerQueueFollowerApply, BrokerReplicationCheckpointRequired,
-        BrokerStreamCatchUp, CatchUpProgress, ConsumerConfig, DurableProgress, FollowerCatchUp,
+        BrokerStreamCatchUp, CatchUpProgress, CheckpointRequirement, ConsumerConfig, DurableProgress,
+        FollowerCatchUp,
         FollowerCursor, QueueCatchUpOptions,
         QueueCatchUpProgress, StreamCatchUpOptions, StreamCatchUpProgress,
         FollowerReplicationWorkerConfig, FollowerReplicationWorkerLoopExit,
@@ -30,8 +31,8 @@ use fibril_broker::{
     },
     queue_engine::{
         Deliverable, DestroyOutcome, DiskUsedBreakdownEntry, EvictOutcome,
-        FollowerStateCheckpointInstall, InspectMode, IoError, KeratinAppendCompletion, Message,
-        MessageHeaders, OwnerReplicationBatch, OwnerReplicationRead, OwnerStateCheckpoint,
+        InspectMode, IoError, KeratinAppendCompletion, Message,
+        MessageHeaders, OwnerReplicationBatch, OwnerReplicationRead, QueueStateCheckpoint,
         QueueEngine, QueuePromotionOutcome, ReplayDeadLetterOutcome, ReplayDeadLettersReport,
         SettleRequest as EngineSettleRequest, StromaEngine,
     },
@@ -2330,15 +2331,12 @@ async fn catch_up_rejects_stale_append_without_recording_ready_state() {
     assert_eq!(queue.state.ready_count, 0);
 
     let not_promoted = follower
-        .promote_replication_follower_if_caught_up(topic, Partition::new(0), None, 0, 1)
+        .promote_replication_follower_if_caught_up(topic, Partition::new(0), None, 1)
         .await
         .unwrap();
     assert!(matches!(
         not_promoted,
-        QueuePromotionOutcome::EventLogBehind {
-            local_next_offset: 0,
-            expected_next_offset: 1,
-        }
+        QueuePromotionOutcome::LogBehind { local_next: 0, expected_next: 1 }
     ));
 
     owner.shutdown().await;
@@ -2641,7 +2639,6 @@ async fn demote_owner_to_follower_requeues_broker_tracked_deliveries() {
             "transition-demote-inflight",
             Partition::new(0),
             Some("workers"),
-            0,
             2,
         )
         .await
@@ -2650,11 +2647,7 @@ async fn demote_owner_to_follower_requeues_broker_tracked_deliveries() {
     assert!(
         matches!(
             promoted,
-            QueuePromotionOutcome::Promoted {
-                message_next_offset: 0,
-                event_next_offset: 2,
-                ..
-            }
+            QueuePromotionOutcome::Promoted { next: 2 }
         ),
         "unexpected promotion outcome: {promoted:?}"
     );
@@ -3552,8 +3545,7 @@ async fn broker_replication_read_applies_to_follower_and_promotes() {
         .read_owner_queue_records("catchup", Partition::new(0), None, 0, 10, usize::MAX, 0)
         .await
         .unwrap();
-    let expected_message_next_offset = 0;
-    let expected_event_next_offset = match &records {
+    let expected_next = match &records {
         OwnerReplicationRead::Batch(batch) => batch.next_offset,
         OwnerReplicationRead::CheckpointRequired { .. } => {
             panic!("fresh follower unexpectedly needed an event checkpoint")
@@ -3571,18 +3563,13 @@ async fn broker_replication_read_applies_to_follower_and_promotes() {
             "catchup",
             Partition::new(0),
             None,
-            expected_message_next_offset,
-            expected_event_next_offset,
+            expected_next,
         )
         .await
         .unwrap();
     assert_eq!(
         promotion,
-        QueuePromotionOutcome::Promoted {
-            message_next_offset: 0,
-            event_next_offset: 2,
-            applied_event_offset: Some(1),
-        }
+        QueuePromotionOutcome::Promoted { next: 2 }
     );
 
     let mut sub = follower
@@ -3922,28 +3909,15 @@ async fn broker_state_checkpoint_export_installs_then_messages_catch_up() {
     }
 
     let checkpoint = owner
-        .export_owner_state_checkpoint("checkpoint", Partition::new(0), None)
+        .export_queue_state_checkpoint("checkpoint", Partition::new(0), None)
         .await
         .unwrap();
-    assert!(checkpoint.combined_log);
-    assert_eq!(checkpoint.message_checkpoint_offset, 0);
-    assert_eq!(checkpoint.message_next_offset, 0);
-    assert_eq!(checkpoint.event_next_offset, 2);
-    assert_eq!(checkpoint.applied_event_offset, 1);
+    assert_eq!(checkpoint.next_offset, 2);
     // Both live payloads are still referenced, so backfill starts at the
     // first payload record.
-    assert_eq!(checkpoint.event_start_offset, 0);
+    assert_eq!(checkpoint.start_offset, 0);
 
-    let install = FollowerStateCheckpointInstall {
-        combined_log: checkpoint.combined_log,
-        event_start_offset: checkpoint.event_start_offset,
-        message_epoch: checkpoint.message_epoch,
-        event_epoch: checkpoint.event_epoch,
-        message_next_offset: checkpoint.message_checkpoint_offset,
-        event_next_offset: checkpoint.event_next_offset,
-        applied_event_offset: checkpoint.applied_event_offset,
-        state_snapshot: checkpoint.state_snapshot,
-    };
+    let install = checkpoint.clone();
     let receipt = prepare_test_queue_learner(&follower, "checkpoint", None).await;
     follower
         .become_replication_follower("checkpoint", Partition::new(0), None)
@@ -3957,14 +3931,14 @@ async fn broker_state_checkpoint_export_installs_then_messages_catch_up() {
     assert!(
         follower
             .engine()
-            .verify_queue_learner_caught_up("checkpoint", 0, None, 0, 0, 2)
+            .verify_queue_learner_caught_up("checkpoint", 0, None, 0, 2)
             .await
             .is_err(),
         "installed state is incomplete until its payloads are backfilled"
     );
 
     let records = owner
-        .read_owner_queue_records("checkpoint", Partition::new(0), None, checkpoint.event_start_offset, 10, usize::MAX, 0)
+        .read_owner_queue_records("checkpoint", Partition::new(0), None, checkpoint.start_offset, 10, usize::MAX, 0)
         .await
         .unwrap();
     let apply = follower
@@ -3974,7 +3948,7 @@ async fn broker_state_checkpoint_export_installs_then_messages_catch_up() {
     assert!(matches!(apply, BrokerQueueFollowerApply::Applied(_)));
     follower
         .engine()
-        .verify_queue_learner_caught_up("checkpoint", 0, None, 0, 0, 2)
+        .verify_queue_learner_caught_up("checkpoint", 0, None, 0, 2)
         .await
         .unwrap();
 
@@ -3983,18 +3957,13 @@ async fn broker_state_checkpoint_export_installs_then_messages_catch_up() {
             "checkpoint",
             Partition::new(0),
             None,
-            checkpoint.message_next_offset,
-            checkpoint.event_next_offset,
+            checkpoint.next_offset,
         )
         .await
         .unwrap();
     assert_eq!(
         promotion,
-        QueuePromotionOutcome::Promoted {
-            message_next_offset: 0,
-            event_next_offset: 2,
-            applied_event_offset: Some(1),
-        }
+        QueuePromotionOutcome::Promoted { next: 2 }
     );
 
     let mut sub = follower
@@ -4142,16 +4111,12 @@ async fn broker_replication_catch_up_loop_handles_multiple_passes() {
     );
 
     let promotion = follower
-        .promote_replication_follower_if_caught_up("multi-pass", Partition::new(0), None, 0, 5)
+        .promote_replication_follower_if_caught_up("multi-pass", Partition::new(0), None, 5)
         .await
         .unwrap();
     assert!(matches!(
         promotion,
-        QueuePromotionOutcome::Promoted {
-            message_next_offset: 0,
-            event_next_offset: 5,
-            applied_event_offset: Some(4),
-        }
+        QueuePromotionOutcome::Promoted { next: 5 }
     ));
 
     let mut sub = follower
@@ -4324,15 +4289,12 @@ async fn checkpoint_aware_catch_up_refuses_unauthorized_reset_of_overlapping_pre
             .is_err()
     );
     let promotion = follower
-        .promote_replication_follower_if_caught_up(topic, partition, None, 0, 3)
+        .promote_replication_follower_if_caught_up(topic, partition, None, 3)
         .await
         .unwrap();
     assert_eq!(
         promotion,
-        QueuePromotionOutcome::EventLogBehind {
-            local_next_offset: 1,
-            expected_next_offset: 3,
-        }
+        QueuePromotionOutcome::LogBehind { local_next: 1, expected_next: 3 }
     );
     let records = owner
         .read_owner_queue_records(topic, partition, None, 0, 10, usize::MAX, 0)
@@ -4545,8 +4507,10 @@ fn follower_worker_state_records_checkpoint_requirement() {
     assert_eq!(
         state.status,
         FollowerReplicationWorkerStatus::CheckpointRequired {
-            messages: Some(checkpoint),
-            events: None,
+            required: CheckpointRequirement::Stream {
+                messages: Some(checkpoint),
+                events: None,
+            },
         }
     );
     assert_eq!(state.last_progress, Some(CatchUpProgress::Stream(progress)));
@@ -4721,12 +4685,12 @@ impl BrokerOwnerReplicationPeer for EmptyOwnerPeer {
         })
     }
 
-    fn export_owner_state_checkpoint<'a>(
+    fn export_queue_state_checkpoint<'a>(
         &'a self,
         _topic: &'a str,
         _partition: fibril_broker::storage::Partition,
         _group: Option<&'a str>,
-    ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
+    ) -> BoxFuture<'a, Result<QueueStateCheckpoint, BrokerError>> {
         Box::pin(async {
             Err(BrokerError::Unknown(
                 "empty owner peer does not export checkpoints".into(),
@@ -4862,12 +4826,12 @@ impl BrokerOwnerReplicationPeer for NotOwnerPeer {
         })
     }
 
-    fn export_owner_state_checkpoint<'a>(
+    fn export_queue_state_checkpoint<'a>(
         &'a self,
         _topic: &'a str,
         _partition: fibril_broker::storage::Partition,
         _group: Option<&'a str>,
-    ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
+    ) -> BoxFuture<'a, Result<QueueStateCheckpoint, BrokerError>> {
         Box::pin(async {
             Err(BrokerError::Unknown(
                 "not-owner peer does not export checkpoints".into(),
@@ -4938,12 +4902,12 @@ impl BrokerOwnerReplicationPeer for CountingEmptyOwnerPeer {
         })
     }
 
-    fn export_owner_state_checkpoint<'a>(
+    fn export_queue_state_checkpoint<'a>(
         &'a self,
         _topic: &'a str,
         _partition: fibril_broker::storage::Partition,
         _group: Option<&'a str>,
-    ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
+    ) -> BoxFuture<'a, Result<QueueStateCheckpoint, BrokerError>> {
         Box::pin(async {
             Err(BrokerError::Unknown(
                 "counting owner peer does not export checkpoints".into(),
@@ -5005,12 +4969,12 @@ impl BrokerOwnerReplicationPeer for BlockingOwnerPeer {
         Box::pin(std::future::pending())
     }
 
-    fn export_owner_state_checkpoint<'a>(
+    fn export_queue_state_checkpoint<'a>(
         &'a self,
         _topic: &'a str,
         _partition: fibril_broker::storage::Partition,
         _group: Option<&'a str>,
-    ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
+    ) -> BoxFuture<'a, Result<QueueStateCheckpoint, BrokerError>> {
         Box::pin(std::future::pending())
     }
 }
@@ -8743,8 +8707,7 @@ async fn queue_dependency_boundary(prefix: u64) {
         .unwrap();
     // Each published item is its own payload record, so the batch occupies
     // event offsets prefix and prefix + 1. Its dependency covers both records.
-    assert!(dependency.is_single_log());
-    assert_eq!(dependency.next(), prefix + 2);
+    assert_eq!(dependency.next, prefix + 2);
     // Real owner-read path. Only the first new payload record fits.
     let records = owner
         .read_owner_queue_records(topic, Partition::new(0), None, event_from, 1, 8 * 1024 * 1024, 0)
@@ -8788,7 +8751,7 @@ async fn queue_dependency_boundary(prefix: u64) {
         None,
         "follower-c",
         DurableProgress::Queue {
-            next: dependency.next() - 1,
+            next: dependency.next - 1,
         },
     );
     assert!(
@@ -8808,7 +8771,7 @@ async fn queue_dependency_boundary(prefix: u64) {
     let fibril_broker::replication::QueuePushApply::Applied { next } = outcome else {
         panic!("expected durable suffix")
     };
-    assert_eq!(next, dependency.next());
+    assert_eq!(next, dependency.next);
     owner.record_follower_replication_progress(
         topic,
         Partition::new(0),
@@ -8864,7 +8827,7 @@ async fn replication_progress_sessions_fence_reset_reconnect_and_assignment() {
     let first = broker
         .begin_replication_progress_session(topic, part, None, ReplicationResourceKind::Queue, "b", 1)
         .unwrap();
-    let dep = stroma_core::QueuePublishCommit::queue(4, 1);
+    let dep = stroma_core::QueuePublishCommit { next: 4, epoch: 1 };
     // A later report after a reset replaces the earlier position instead of
     // keeping its maximum.
     broker.record_replication_session_progress(&first, DurableProgress::Queue { next: 8 });
@@ -8919,7 +8882,7 @@ async fn replication_progress_sessions_fence_reset_reconnect_and_assignment() {
             .is_none()
     );
     broker.record_replication_session_progress(&second, DurableProgress::Queue { next: 99 });
-    let dep = stroma_core::QueuePublishCommit::queue(4, 2);
+    let dep = stroma_core::QueuePublishCommit { next: 4, epoch: 2 };
     let wait = broker.await_queue_replication_confirm(topic, part, None, 3, dep);
     tokio::pin!(wait);
     assert!(
@@ -8978,7 +8941,7 @@ async fn queue_visibility_waits_for_enqueue_on_the_payload_replica() {
                 .unwrap();
             // The payload record is also the enqueue, so one log position
             // tracks publication.
-            if d.next() == 1 {
+            if d.next == 1 {
                 break d;
             }
             tokio::task::yield_now().await;
@@ -8986,7 +8949,6 @@ async fn queue_visibility_waits_for_enqueue_on_the_payload_replica() {
     })
     .await
     .unwrap();
-    assert!(dep.is_single_log());
     // Followers that hold nothing of the publication neither confirm nor
     // expose it.
     broker.record_follower_replication_progress(topic, part, None, "b", DurableProgress::Queue { next: 0 });
@@ -9011,7 +8973,7 @@ async fn queue_visibility_waits_for_enqueue_on_the_payload_replica() {
             .await
             .is_err()
     );
-    broker.record_follower_replication_progress(topic, part, None, "b", DurableProgress::Queue { next: dep.next() });
+    broker.record_follower_replication_progress(topic, part, None, "b", DurableProgress::Queue { next: dep.next });
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(1), confirmed)
             .await
@@ -9098,7 +9060,7 @@ async fn durable_batch_wakes_replication_while_earlier_confirm_waits() {
                 .queue_durable_commit(topic, 0, None)
                 .await
                 .unwrap();
-            if d.next() == 1 {
+            if d.next == 1 {
                 break d;
             }
             tokio::task::yield_now().await;
@@ -9106,7 +9068,6 @@ async fn durable_batch_wakes_replication_while_earlier_confirm_waits() {
     })
     .await
     .unwrap();
-    assert!(initial.is_single_log());
     assert!(
         tokio::time::timeout(Duration::from_millis(30), &mut first)
             .await
@@ -9118,7 +9079,7 @@ async fn durable_batch_wakes_replication_while_earlier_confirm_waits() {
     let reader_broker = broker.clone();
     let mut reader = tokio::spawn(async move {
         reader_broker
-            .read_owner_queue_records(topic, part, None, initial.next(), 10, usize::MAX, 10_000)
+            .read_owner_queue_records(topic, part, None, initial.next, 10, usize::MAX, 10_000)
             .await
     });
     assert!(
@@ -9146,7 +9107,7 @@ async fn durable_batch_wakes_replication_while_earlier_confirm_waits() {
         panic!("event checkpoint");
     };
     assert_eq!(event_payloads(&events), vec![(1, vec![2])]);
-    assert!(events.next_offset > initial.next());
+    assert!(events.next_offset > initial.next);
     assert!(
         tokio::time::timeout(Duration::from_millis(30), &mut first)
             .await
