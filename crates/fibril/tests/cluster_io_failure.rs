@@ -561,10 +561,10 @@ async fn run_case(all: bool, after_sync: bool) {
         .unwrap();
     let next = brokers[1]
         .engine()
-        .queue_durable_frontiers("q", 0, None)
+        .queue_durable_commit("q", 0, None)
         .await
         .unwrap()
-        .event_next;
+        .next();
     let confirmation = publisher
         .publish(
             99u64.to_le_bytes().to_vec(),

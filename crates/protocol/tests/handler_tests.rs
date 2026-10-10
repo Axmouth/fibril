@@ -1837,6 +1837,35 @@ async fn replication_read_returns_owner_log_records() {
         }
     }
 
+    // A queue read whose message lane cursor is not zero names a layout the
+    // queue does not have, so the owner refuses it.
+    framed
+        .send(
+            try_encode(
+                Op::ReplicationRead,
+                4,
+                &ReplicationRead {
+                    reporter_epoch: None,
+                    topic: "replication.read.tcp".into(),
+                    group: Some("workers".into()),
+                    partition: Partition::new(0),
+                    message_from: 1,
+                    event_from: 0,
+                    max_messages: 10,
+                    max_events: 10,
+                    max_bytes: 1024 * 1024,
+                    max_wait_ms: 0,
+                    reporter_node_id: None,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let frame = recv_frame(&mut framed).await;
+    assert_eq!(frame.opcode, Op::Error as u16);
+    assert_eq!(frame.request_id, 4);
+
     drop(framed);
     server_task.await.unwrap().unwrap();
 }
@@ -2790,8 +2819,8 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
     assert!(
         progress
             .iter()
-            .any(|(node, (message_next, _))| node == "b-follower"
-                && *message_next >= owner_checkpoint.message_next_offset),
+            .any(|(node, progress)| node == "b-follower"
+                && matches!(progress, fibril_broker::broker::DurableProgress::Queue { .. })),
         "owner must have follower progress from stamped reads: {progress:?}"
     );
 
@@ -3633,8 +3662,8 @@ async fn replica_durable_confirm_over_wire(stream_enabled: bool) {
             .find(|(node, _)| node == "follower-a")
             .expect("owner recorded follower progress over the wire");
         assert!(
-            follower.1.0 > 0,
-            "follower durable message_next must pass the published offset"
+            follower.1.queue_next().is_some_and(|next| next > 0),
+            "follower durable queue position must pass the published offset"
         );
 
         shutdown.cancel();
@@ -3757,8 +3786,8 @@ async fn replica_durable_confirm_stays_pending_until_follower_connects() {
             .find(|(node, _)| node == "follower-a")
             .expect("owner recorded follower progress over the wire");
         assert!(
-            follower.1.0 > 0,
-            "follower durable message_next must pass the published offset"
+            follower.1.queue_next().is_some_and(|next| next > 0),
+            "follower durable queue position must pass the published offset"
         );
 
         shutdown.cancel();
@@ -8762,7 +8791,14 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
         );
         assert!(
             brokers[0]
-                .begin_replication_progress_session("initial-wire", Partition::new(0), None, "c", 1)
+                .begin_replication_progress_session(
+                    "initial-wire",
+                    Partition::new(0),
+                    None,
+                    ReplicationResourceKind::Queue,
+                    "c",
+                    1,
+                )
                 .is_none()
         );
         engines[2]
@@ -9742,10 +9778,10 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
     );
     retry_metadata(|| providers[1].admit_local_queue_recovery(&recovered, &engines[1])).await;
     let durable = engines[1]
-        .queue_durable_frontiers("initial-wire", 0, None)
+        .queue_durable_commit("initial-wire", 0, None)
         .await
         .unwrap();
-    assert_eq!((durable.message_next, durable.event_next), (0, 3));
+    assert_eq!(durable.next(), 3);
     // Seal the recovered generation under a second transition. Its authority
     // comes from the recovered quorum, rather than the old initial assignment.
     let again = persist_pending(&providers, &resource, recovered.digest().unwrap(), "b").await;

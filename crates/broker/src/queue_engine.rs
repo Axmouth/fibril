@@ -80,9 +80,6 @@ pub enum ReplayDeadLetterOutcome {
 
 #[async_trait]
 pub trait QueueEngine {
-    fn partition_payloads_in_event_log(&self, _tp: &str, _part: u32, _group: Option<&str>) -> bool {
-        false
-    }
     fn set_queue_replication_retention(
         &self,
         _source: Arc<dyn stroma_core::QueueReplicationRetention>,
@@ -185,7 +182,8 @@ pub trait QueueEngine {
         observer: stroma_core::QueuePublishObserver,
     ) -> Result<(), StromaError>;
 
-    async fn queue_durable_frontiers(
+    /// Durable end of the single queue log and its epoch.
+    async fn queue_durable_commit(
         &self,
         tp: &str,
         part: u32,
@@ -1404,9 +1402,6 @@ fn skipped_replay(offset: Offset, reason: impl Into<String>) -> ReplayDeadLetter
 
 #[async_trait]
 impl QueueEngine for StromaEngine {
-    fn partition_payloads_in_event_log(&self, tp: &str, part: u32, group: Option<&str>) -> bool {
-        self.inner.partition_payloads_in_event_log(tp, part, group)
-    }
     fn set_queue_replication_retention(
         &self,
         source: Arc<dyn stroma_core::QueueReplicationRetention>,
@@ -1584,13 +1579,13 @@ impl QueueEngine for StromaEngine {
             .await
     }
 
-    async fn queue_durable_frontiers(
+    async fn queue_durable_commit(
         &self,
         tp: &str,
         part: u32,
         group: Option<&str>,
     ) -> Result<stroma_core::QueuePublishCommit, StromaError> {
-        self.inner.queue_durable_frontiers(tp, part, group).await
+        self.inner.queue_durable_commit(tp, part, group).await
     }
 
     async fn next_expiry_hint(&self) -> Result<Option<UnixMillis>, StromaError> {

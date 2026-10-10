@@ -35,18 +35,19 @@ const RESEED_RETENTION_GRACE: Duration = Duration::from_secs(120);
 struct RetentionObservation {
     assignment: PartitionAssignment,
     since: Instant,
-    followers: std::collections::HashMap<String, ((u64, u64), Instant)>,
+    followers: std::collections::HashMap<String, (u64, Instant)>,
 }
 impl RetentionObservation {
+    /// Exclusive queue log position the protected followers still need.
     fn floor(
         &mut self,
         progress: &std::collections::HashMap<String, FollowerProgress>,
         now: Instant,
-    ) -> (u64, u64) {
+    ) -> u64 {
         self.assignment
             .followers
             .iter()
-            .fold((u64::MAX, u64::MAX), |floor, node| {
+            .fold(u64::MAX, |floor, node| {
                 if self
                     .assignment
                     .history
@@ -56,7 +57,7 @@ impl RetentionObservation {
                     // Give an active repair a bounded interval to copy its fixed
                     // checkpoint without source compaction continually overtaking it.
                     return if now.duration_since(self.since) < RESEED_RETENTION_GRACE {
-                        (0, 0)
+                        0
                     } else {
                         floor
                     };
@@ -64,13 +65,12 @@ impl RetentionObservation {
                 if !self.assignment.is_followed_by(node) {
                     return floor;
                 }
-                let pair = progress
-                    .get(node)
-                    .map(|p| (p.message_next, p.event_next))
-                    .unwrap_or((0, 0));
-                let observed = self.followers.entry(node.clone()).or_insert((pair, now));
-                if observed.0 != pair {
-                    *observed = (pair, now);
+                // Only queue progress names a position in the queue log. Any
+                // other report protects everything.
+                let next = progress.get(node).map_or(0, |p| p.progress.queue_next().unwrap_or(0));
+                let observed = self.followers.entry(node.clone()).or_insert((next, now));
+                if observed.0 != next {
+                    *observed = (next, now);
                 }
                 // Idle but connected replicas refresh their report without
                 // moving offsets. They still need protection when traffic resumes.
@@ -78,7 +78,7 @@ impl RetentionObservation {
                 if now.saturating_duration_since(last_active) >= FOLLOWER_RETENTION_GRACE {
                     return floor;
                 }
-                (floor.0.min(pair.0), floor.1.min(pair.1))
+                floor.min(next)
             })
     }
 }
@@ -121,15 +121,15 @@ where
         + Sync
         + 'static,
 {
-    fn retained_from(
+    fn retained_next(
         &self,
         topic: &str,
         partition: u32,
         group: Option<&str>,
         binding: Option<&stroma_core::StorageHistoryBinding>,
-    ) -> stroma_core::Result<(u64, u64)> {
+    ) -> stroma_core::Result<u64> {
         let Some(broker) = self.broker.upgrade() else {
-            return Ok((0, 0));
+            return Ok(0);
         };
         let key = QueueKey {
             tp: topic.into(),
@@ -137,11 +137,7 @@ where
             group: group.map(str::to_owned),
         };
         let Some(assignment) = broker.assignment_cache.get(&key).map(|a| a.clone()) else {
-            return Ok(if binding.is_some() {
-                (0, 0)
-            } else {
-                (u64::MAX, u64::MAX)
-            });
+            return Ok(if binding.is_some() { 0 } else { u64::MAX });
         };
         if binding.is_some_and(|binding| {
             assignment
@@ -150,7 +146,7 @@ where
                 .is_none_or(|h| &h.binding != binding)
         }) || !broker.owns_queue_partition(topic, Partition::new(partition), group)
         {
-            return Ok((0, 0));
+            return Ok(0);
         }
         let now = Instant::now();
         let mut observations = self
@@ -1714,41 +1710,87 @@ pub struct ReplicationConfirmGate {
     pub(crate) timing: Arc<ReplicationTimingMetrics>,
 }
 
+/// Durable follower position, reported over a progress session whose kind is
+/// fixed when the session opens. A queue names one position in its single
+/// log. A stream names its record log and its cursor-event log separately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DurableProgress {
+    Queue { next: Offset },
+    Stream { message_next: Offset, event_next: Offset },
+}
+
+impl DurableProgress {
+    /// Nothing proven yet for a session of `kind`.
+    pub fn zero(kind: ReplicationResourceKind) -> Self {
+        match kind {
+            ReplicationResourceKind::Queue => Self::Queue { next: 0 },
+            ReplicationResourceKind::Stream => Self::Stream {
+                message_next: 0,
+                event_next: 0,
+            },
+        }
+    }
+
+    pub fn kind(&self) -> ReplicationResourceKind {
+        match self {
+            Self::Queue { .. } => ReplicationResourceKind::Queue,
+            Self::Stream { .. } => ReplicationResourceKind::Stream,
+        }
+    }
+
+    /// Exclusive position that releases confirms: the queue log, or stream
+    /// records. Cursor-commit events never release a stream record.
+    pub fn confirm_next(&self) -> Offset {
+        match *self {
+            Self::Queue { next } => next,
+            Self::Stream { message_next, .. } => message_next,
+        }
+    }
+
+    /// Queue log position, or `None` for stream progress.
+    pub fn queue_next(&self) -> Option<Offset> {
+        match *self {
+            Self::Queue { next } => Some(next),
+            Self::Stream { .. } => None,
+        }
+    }
+}
+
 /// One follower's last-reported durable progress, with the report time used to
 /// decide in-sync membership (a follower that stopped reporting falls out).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FollowerProgress {
-    pub(crate) message_next: Offset,
-    pub(crate) event_next: Offset,
+    pub(crate) progress: DurableProgress,
     pub(crate) last_report: std::time::Instant,
     session: u64,
 }
 
-/// Pending enqueue boundaries. Once quorum covers a prefix, its proof can be
-/// folded into one frontier; offline followers do not retain per-batch history.
+/// Completed publication boundaries in the single queue log. A boundary is
+/// the exclusive end of one publish batch. Visibility only ever advances to a
+/// boundary, so a follower that holds part of a batch exposes none of it.
+/// Once quorum covers a prefix, its proof folds into one frontier, so offline
+/// followers do not retain per-batch history.
 #[derive(Debug, Default)]
 pub(crate) struct QueueDependencies {
     pub(crate) initialized: bool,
     committed: Offset,
-    boundaries: std::collections::VecDeque<(Offset, Offset)>,
+    boundaries: std::collections::VecDeque<Offset>,
 }
 
 impl QueueDependencies {
     pub(crate) fn record(&mut self, commit: stroma_core::QueuePublishCommit) {
-        if commit.message_next > self.committed {
-            let at = self
-                .boundaries
-                .partition_point(|(message, _)| *message < commit.message_next);
-            if let Some((message, event)) = self
-                .boundaries
-                .get_mut(at)
-                .filter(|(m, _)| *m == commit.message_next)
-            {
-                let _ = message;
-                *event = (*event).max(commit.event_next);
-            } else {
-                self.boundaries
-                    .insert(at, (commit.message_next, commit.event_next));
+        // A commit whose two coordinate pairs disagree did not come from the
+        // single queue log. Recording no boundary keeps visibility behind it.
+        if !commit.is_single_log() {
+            tracing::warn!(?commit, "ignoring a queue commit with two different lanes");
+            return;
+        }
+        let next = commit.next();
+        if next > self.committed {
+            let at = self.boundaries.partition_point(|boundary| *boundary < next);
+            if self.boundaries.get(at) != Some(&next) {
+                self.boundaries.insert(at, next);
             }
         }
         // Keep bounded history during an arbitrarily long replica outage.
@@ -1758,15 +1800,18 @@ impl QueueDependencies {
         }
     }
 
+    /// Last completed boundary this follower covers. Never the follower
+    /// position itself, which may sit inside a publish batch.
     fn covered_next(&self, progress: &FollowerProgress) -> Offset {
-        let covered_count = self.boundaries.partition_point(|(message, event)| {
-            *message <= progress.message_next && *event <= progress.event_next
-        });
+        let Some(next) = progress.progress.queue_next() else {
+            return self.committed;
+        };
+        let covered_count = self.boundaries.partition_point(|boundary| *boundary <= next);
         let covered = covered_count
             .checked_sub(1)
-            .map(|i| self.boundaries[i].0)
+            .map(|i| self.boundaries[i])
             .unwrap_or(self.committed);
-        covered.min(progress.message_next).max(self.committed)
+        covered.min(next).max(self.committed)
     }
 
     pub(crate) fn visibility(
@@ -1795,7 +1840,7 @@ impl QueueDependencies {
         while self
             .boundaries
             .front()
-            .is_some_and(|(message, _)| *message <= self.committed)
+            .is_some_and(|boundary| *boundary <= self.committed)
         {
             self.boundaries.pop_front();
         }
@@ -1820,8 +1865,17 @@ pub struct ReplicationProgressSession {
     key: QueueKey,
     assignment: PartitionAssignment,
     follower: String,
+    /// Fixed at open. Reports of the other kind are dropped, so stream
+    /// cursor events can never stand in for queue or record progress.
+    kind: ReplicationResourceKind,
     cell: Arc<ReplicationProgressCell>,
     id: u64,
+}
+
+impl ReplicationProgressSession {
+    pub fn kind(&self) -> ReplicationResourceKind {
+        self.kind
+    }
 }
 
 impl Drop for ReplicationProgressSession {
@@ -1867,11 +1921,12 @@ async fn wait_for_replication_progress(
 }
 
 impl ReplicationConfirmGate {
-    /// Wait until the queue's assignment durability policy is satisfied for a
-    /// message at `offset` (the owner's own durable write already counts). No
-    /// cached assignment (standalone) or `local_durable` returns immediately.
-    /// Fails with a descriptive error on timeout.
-    pub(crate) async fn await_confirm(
+    /// Wait until the stream's assignment durability policy is satisfied for
+    /// the record at `offset` (the owner's own durable write already counts).
+    /// Only stream progress over the record log counts. No cached assignment
+    /// (standalone) or `local_durable` returns immediately. Fails with a
+    /// descriptive error on timeout.
+    pub(crate) async fn await_stream_confirm(
         &self,
         key: &QueueKey,
         offset: Offset,
@@ -1880,6 +1935,8 @@ impl ReplicationConfirmGate {
         self.await_dependency(key, offset, None, assignment).await
     }
 
+    /// Wait for a queue record at `offset` when `dependency` is its
+    /// publication, or for a stream record when it is `None`.
     pub(crate) async fn await_dependency(
         &self,
         key: &QueueKey,
@@ -1902,9 +1959,12 @@ impl ReplicationConfirmGate {
         let Some(assignment) = expected_assignment else {
             return Ok(());
         };
-        if dependency.is_some_and(|d| {
-            d.message_epoch != assignment.epoch || d.event_epoch != assignment.epoch
-        }) {
+        if dependency.is_some_and(|d| !d.is_single_log()) {
+            return Err(BrokerError::InvalidArgument(
+                "queue publication dependency names two different lanes".into(),
+            ));
+        }
+        if dependency.is_some_and(|d| d.epoch() != assignment.epoch) {
             return Err(BrokerError::Unknown(
                 "publication belongs to a different replication epoch".into(),
             ));
@@ -1986,10 +2046,21 @@ impl ReplicationConfirmGate {
                 .iter()
                 .filter(|follower| {
                     if !current.is_followed_by(follower) { return false; }
-                    followers
-                        .get(*follower)
-                        .is_some_and(|progress| progress.message_next > offset
-                            && dependency.is_none_or(|d| progress.message_next >= d.message_next && progress.event_next >= d.event_next))
+                    followers.get(*follower).is_some_and(|follower| {
+                        match (dependency, follower.progress) {
+                            // A queue record needs the whole publication that
+                            // carried it in the follower's copy of the log.
+                            (Some(d), DurableProgress::Queue { next }) => {
+                                next > offset && next >= d.next()
+                            }
+                            // A stream record needs the record log only.
+                            (None, DurableProgress::Stream { message_next, .. }) => {
+                                message_next > offset
+                            }
+                            // Progress of the other kind proves nothing here.
+                            _ => false,
+                        }
+                    })
                 })
                 .count()
                 >= required_followers
@@ -2859,7 +2930,7 @@ impl Broker<StromaEngine> {
             group: group.map(str::to_string),
         };
         self.replication_confirm_gate()
-            .await_confirm(&key, offset)
+            .await_stream_confirm(&key, offset)
             .await
     }
 
@@ -2873,7 +2944,7 @@ impl Broker<StromaEngine> {
         offset: Offset,
         dependency: stroma_core::QueuePublishCommit,
     ) -> Result<(), BrokerError> {
-        if offset >= dependency.message_next {
+        if !dependency.is_single_log() || offset >= dependency.next() {
             return Err(BrokerError::InvalidArgument(
                 "offset outside queue publication dependency".into(),
             ));
@@ -3941,20 +4012,14 @@ impl<
         + 'static,
 > Broker<E>
 {
-    fn partition_payloads_in_event_log(&self, topic: &str, partition: u32, group: Option<&str>) -> bool {
-        // A cold stream assignment can precede its local kind marker and handle.
-        // Coordination already knows its kind, even before the first publish.
-        if group.is_none() && self.stream_declared_in_coordination(topic) {
-            return false;
-        }
-        self.engine.partition_payloads_in_event_log(topic, partition, group)
-    }
-
+    /// Open a progress session for `follower` under assignment `epoch`. The
+    /// session reports only `kind` progress for the rest of its life.
     pub fn begin_replication_progress_session(
         &self,
         topic: &str,
         partition: Partition,
         group: Option<&str>,
+        kind: ReplicationResourceKind,
         follower: &str,
         epoch: u64,
     ) -> Option<ReplicationProgressSession> {
@@ -3965,11 +4030,13 @@ impl<
         };
         let assignment_guard = self.assignment_cache.get(&key)?;
         let assignment = assignment_guard.clone();
-        if assignment.epoch != epoch
-            || !assignment.is_followed_by(follower)
-            || !(self.owns_queue_partition(topic, partition, group)
-                || (group.is_none() && self.owns_stream(topic, partition.id())))
-        {
+        let owns = match kind {
+            ReplicationResourceKind::Queue => self.owns_queue_partition(topic, partition, group),
+            ReplicationResourceKind::Stream => {
+                group.is_none() && self.owns_stream(topic, partition.id())
+            }
+        };
+        if assignment.epoch != epoch || !assignment.is_followed_by(follower) || !owns {
             return None;
         }
         let cell = self
@@ -3981,8 +4048,7 @@ impl<
         cell.lock_followers().insert(
             follower.to_string(),
             FollowerProgress {
-                message_next: 0,
-                event_next: 0,
+                progress: DurableProgress::zero(kind),
                 last_report: Instant::now(),
                 session: id,
             },
@@ -3992,17 +4058,29 @@ impl<
             key,
             assignment,
             follower: follower.to_string(),
+            kind,
             cell,
             id,
         })
     }
 
+    /// Record a durable report on `session`. A report whose kind differs from
+    /// the session's is dropped.
     pub fn record_replication_session_progress(
         &self,
         session: &ReplicationProgressSession,
-        message_next: Offset,
-        event_next: Offset,
+        progress: DurableProgress,
     ) {
+        if progress.kind() != session.kind {
+            tracing::warn!(
+                topic = %session.key.tp,
+                partition = session.key.part.id(),
+                follower = %session.follower,
+                ?progress,
+                "dropping replication progress of the wrong kind for its session"
+            );
+            return;
+        }
         let Some(assignment_guard) = self.assignment_cache.get(&session.key) else {
             return;
         };
@@ -4014,9 +4092,6 @@ impl<
         {
             return;
         }
-        let combined = self.partition_payloads_in_event_log(
-            &session.key.tp, session.key.part.id(), session.key.group.as_deref(),
-        );
         {
             let mut followers = session.cell.lock_followers();
             let Some(p) = followers
@@ -4025,12 +4100,10 @@ impl<
             else {
                 return;
             };
-            // Reports on a session are ordered. Replace the PAIR; taking each
-            // coordinate's max can combine progress from before and after reset.
-            // Transport offsets remain independent. For combined queues the
-            // event frontier proves the payload prefix used by confirms/delivery.
-            p.message_next = if combined { event_next } else { message_next };
-            p.event_next = event_next;
+            // Reports on a session are ordered. Replace the whole position:
+            // taking a maximum could combine progress from before and after
+            // a reset.
+            p.progress = progress;
             p.last_report = Instant::now();
         }
         drop(assignment_guard);
@@ -4044,22 +4117,22 @@ impl<
     ///
     /// Record a follower's durable replication progress (from a stamped
     /// replication read: followers apply durably, so their pull offsets are
-    /// durable watermarks). Wakes any publish confirms waiting on policy.
+    /// durable watermarks). Wakes any publish confirms waiting on policy. A
+    /// report whose kind differs from the follower's recorded progress is
+    /// dropped.
     pub fn record_follower_replication_progress(
         &self,
         topic: &str,
         partition: Partition,
         group: Option<&str>,
         follower_node_id: &str,
-        durable_message_next: Offset,
-        durable_event_next: Offset,
+        progress: DurableProgress,
     ) {
         let key = QueueKey {
             tp: topic.to_string(),
             part: partition,
             group: group.map(str::to_string),
         };
-        let combined = self.partition_payloads_in_event_log(topic, partition.id(), group);
         let cell = self
             .replication_progress
             .entry(key.clone())
@@ -4070,13 +4143,21 @@ impl<
             let entry = followers
                 .entry(follower_node_id.to_string())
                 .or_insert(FollowerProgress {
-                    message_next: 0,
-                    event_next: 0,
+                    progress: DurableProgress::zero(progress.kind()),
                     last_report: std::time::Instant::now(),
                     session: 0,
                 });
-            entry.message_next = if combined { durable_event_next } else { durable_message_next };
-            entry.event_next = durable_event_next;
+            if entry.progress.kind() != progress.kind() {
+                tracing::warn!(
+                    topic,
+                    partition = partition.id(),
+                    follower = follower_node_id,
+                    ?progress,
+                    "dropping replication progress of the wrong kind for this follower"
+                );
+                return;
+            }
+            entry.progress = progress;
             entry.last_report = std::time::Instant::now();
         }
         self.replication_timing.record_follower_progress_report();
@@ -4092,7 +4173,7 @@ impl<
         topic: &str,
         partition: Partition,
         group: Option<&str>,
-    ) -> Vec<(String, (Offset, Offset))> {
+    ) -> Vec<(String, DurableProgress)> {
         let key = QueueKey {
             tp: topic.to_string(),
             part: partition,
@@ -4104,9 +4185,7 @@ impl<
                 let followers = cell.lock_followers();
                 followers
                     .iter()
-                    .map(|(node, progress)| {
-                        (node.clone(), (progress.message_next, progress.event_next))
-                    })
+                    .map(|(node, progress)| (node.clone(), progress.progress))
                     .collect()
             })
             .unwrap_or_default()
@@ -4155,9 +4234,17 @@ impl<
                             ) = match progress {
                                 Some(progress) => {
                                     let age = now.duration_since(progress.last_report);
+                                    // A queue position covers its payloads
+                                    // and events at once.
+                                    let (message, event) = match progress.progress {
+                                        DurableProgress::Queue { next } => (next, next),
+                                        DurableProgress::Stream { message_next, event_next } => {
+                                            (message_next, event_next)
+                                        }
+                                    };
                                     (
-                                        progress.message_next,
-                                        progress.event_next,
+                                        message,
+                                        event,
                                         Some(age.as_millis().min(u64::MAX as u128) as u64),
                                         age <= isr_timeout,
                                     )
@@ -4263,21 +4350,28 @@ impl<
 #[cfg(test)]
 mod queue_dependency_tests {
     use super::*;
-    fn progress(message_next: u64, event_next: u64) -> FollowerProgress {
+    fn progress(next: u64) -> FollowerProgress {
         FollowerProgress {
-            message_next,
-            event_next,
+            progress: DurableProgress::Queue { next },
             last_report: Instant::now(),
             session: 0,
         }
     }
-    fn commit(message_next: u64, event_next: u64) -> stroma_core::QueuePublishCommit {
-        stroma_core::QueuePublishCommit {
-            message_next,
-            event_next,
-            message_epoch: 1,
-            event_epoch: 1,
+    fn stream_progress(message_next: u64, event_next: u64) -> FollowerProgress {
+        FollowerProgress {
+            progress: DurableProgress::Stream {
+                message_next,
+                event_next,
+            },
+            last_report: Instant::now(),
+            session: 0,
         }
+    }
+    fn commit(next: u64) -> stroma_core::QueuePublishCommit {
+        stroma_core::QueuePublishCommit::queue(next, 1)
+    }
+    fn queue(next: u64) -> DurableProgress {
+        DurableProgress::Queue { next }
     }
     fn accepted_assignment() -> PartitionAssignment {
         use crate::history_replication::{AcceptedHistory, ReplicaHistoryInstance};
@@ -4323,47 +4417,47 @@ mod queue_dependency_tests {
             followers: Default::default(),
         };
         let mut followers = std::collections::HashMap::new();
-        assert_eq!(observation.floor(&followers, now), (0, 0));
-        followers.insert("b".into(), progress(10, 20));
-        followers.insert("c".into(), progress(8, 16));
-        assert_eq!(
-            observation.floor(&followers, now + Duration::from_secs(1)),
-            (8, 16)
-        );
-        assert_eq!(
-            observation.floor(&followers, now + Duration::from_secs(60)),
-            (8, 16)
-        );
+        assert_eq!(observation.floor(&followers, now), 0);
+        followers.insert("b".into(), progress(20));
+        followers.insert("c".into(), progress(16));
+        assert_eq!(observation.floor(&followers, now + Duration::from_secs(1)), 16);
+        assert_eq!(observation.floor(&followers, now + Duration::from_secs(60)), 16);
         assert_eq!(
             observation.floor(&followers, now + Duration::from_secs(61)),
-            (u64::MAX, u64::MAX)
+            u64::MAX
         );
-        followers.insert("b".into(), progress(11, 21));
-        assert_eq!(
-            observation.floor(&followers, now + Duration::from_secs(62)),
-            (11, 21)
-        );
+        followers.insert("b".into(), progress(21));
+        assert_eq!(observation.floor(&followers, now + Duration::from_secs(62)), 21);
         Arc::make_mut(observation.assignment.history.as_mut().unwrap())
             .suspended_replicas
             .insert("c".into());
-        assert_eq!(
-            observation.floor(&followers, now + Duration::from_secs(63)),
-            (0, 0)
-        );
-        assert_eq!(
-            observation.floor(&followers, now + Duration::from_secs(121)),
-            (11, 21)
-        );
+        assert_eq!(observation.floor(&followers, now + Duration::from_secs(63)), 0);
+        assert_eq!(observation.floor(&followers, now + Duration::from_secs(121)), 21);
+    }
+
+    #[test]
+    fn retention_never_reads_a_queue_position_from_stream_progress() {
+        let now = Instant::now();
+        let mut observation = RetentionObservation {
+            assignment: accepted_assignment(),
+            since: now,
+            followers: Default::default(),
+        };
+        let followers = std::collections::HashMap::from([
+            ("b".into(), progress(20)),
+            ("c".into(), stream_progress(50, 90)),
+        ]);
+        assert_eq!(observation.floor(&followers, now), 0);
     }
 
     #[test]
     fn idle_connected_follower_keeps_retention_when_traffic_resumes() {
         let now=Instant::now();
         let mut observation=RetentionObservation {assignment:accepted_assignment(),since:now,followers:Default::default()};
-        let mut followers=std::collections::HashMap::from([("b".into(),progress(9,9)),("c".into(),progress(9,9))]);
-        assert_eq!(observation.floor(&followers,now),(9,9));
+        let mut followers=std::collections::HashMap::from([("b".into(),progress(9)),("c".into(),progress(9))]);
+        assert_eq!(observation.floor(&followers,now),9);
         for progress in followers.values_mut() {progress.last_report=now+Duration::from_secs(300);}
-        assert_eq!(observation.floor(&followers,now+Duration::from_secs(301)),(9,9));
+        assert_eq!(observation.floor(&followers,now+Duration::from_secs(301)),9);
     }
 
     #[tokio::test]
@@ -4384,44 +4478,44 @@ mod queue_dependency_tests {
             crate::coordination::ReplicationDurabilityPolicy::ReplicaDurable { nodes: 3 };
         broker.cache_queue_assignment(&assignment);
         let before=assignment.clone();
-        let b = broker.begin_replication_progress_session("q",0.into(),None,"b",1).unwrap();
+        let b = broker.begin_replication_progress_session("q", 0.into(), None, ReplicationResourceKind::Queue, "b", 1).unwrap();
         let old = broker
-            .begin_replication_progress_session("q", 0.into(), None, "c", 1)
+            .begin_replication_progress_session("q", 0.into(), None, ReplicationResourceKind::Queue, "c", 1)
             .unwrap();
         Arc::make_mut(assignment.history.as_mut().unwrap())
             .suspended_replicas
             .insert("c".into());
         Arc::make_mut(assignment.history.as_mut().unwrap()).replica_generations.insert("c".into(),[8;32]);
         broker.cache_queue_assignment(&assignment);
-        broker.record_replication_session_progress(&old, 10, 10);
-        assert_eq!(broker.follower_replication_progress("q",0.into(),None),vec![("b".into(),(0,0))]);
-        broker.record_replication_session_progress(&b, 10, 10);
+        broker.record_replication_session_progress(&old, DurableProgress::Queue { next: 10 });
+        assert_eq!(broker.follower_replication_progress("q",0.into(),None),vec![("b".into(), queue(0))]);
+        broker.record_replication_session_progress(&b, DurableProgress::Queue { next: 10 });
         let key = QueueKey {
             tp: "q".into(),
             part: 0.into(),
             group: None,
         };
         let gate = broker.replication_confirm_gate();
-        let wait = gate.await_dependency(&key, 0, Some(commit(1, 1)), Some(before.clone()));
+        let wait = gate.await_dependency(&key, 0, Some(commit(1)), Some(before.clone()));
         tokio::pin!(wait);
         assert!(
             futures::poll!(&mut wait).is_pending(),
             "one follower cannot meet the two-follower requirement"
         );
         let mut deps = QueueDependencies::default();
-        deps.record(commit(1, 1));
+        deps.record(commit(1));
         let followers = std::collections::HashMap::from([
-            ("b".into(), progress(10, 10)),
-            ("c".into(), progress(10, 10)),
+            ("b".into(), progress(10)),
+            ("c".into(), progress(10)),
         ]);
         assert_eq!(deps.visibility(&assignment, &followers, 2), 0);
         assert_eq!(deps.visibility(&assignment, &followers, 1), 1);
         Arc::make_mut(assignment.history.as_mut().unwrap()).suspended_replicas.remove("c");
         broker.cache_queue_assignment(&assignment);
-        broker.record_replication_session_progress(&old,10,10);
+        broker.record_replication_session_progress(&old, DurableProgress::Queue { next: 10 });
         assert!(futures::poll!(&mut wait).is_pending(),"old c session cannot satisfy a waiting confirm after re-admission");
-        let c=broker.begin_replication_progress_session("q",0.into(),None,"c",1).unwrap();
-        broker.record_replication_session_progress(&c,10,10);
+        let c=broker.begin_replication_progress_session("q", 0.into(), None, ReplicationResourceKind::Queue, "c", 1).unwrap();
+        broker.record_replication_session_progress(&c, DurableProgress::Queue { next: 10 });
         tokio::time::timeout(Duration::from_secs(1),wait).await.unwrap().unwrap();
         assert_eq!(broker.follower_replication_progress("q",0.into(),None).len(),2);
         broker.shutdown().await;
@@ -4436,36 +4530,97 @@ mod queue_dependency_tests {
             1,
         );
         let mut deps = QueueDependencies::default();
-        deps.record(commit(2, 1));
-        deps.record(commit(4, 3));
+        deps.record(commit(2));
+        deps.record(commit(4));
         let mut followers = std::collections::HashMap::from([
-            ("b".into(), progress(4, 1)),
-            ("c".into(), progress(1, 3)),
+            ("b".into(), progress(3)),
+            ("c".into(), progress(1)),
         ]);
+        // b holds the first batch and part of the second, so visibility stops
+        // at the first boundary instead of the follower position.
         assert_eq!(deps.visibility(&a, &followers, 1), 2);
         assert_eq!(deps.boundaries.len(), 1);
-        followers.insert("b".into(), progress(4, 3));
+        followers.insert("b".into(), progress(4));
         assert_eq!(deps.visibility(&a, &followers, 1), 4);
         assert!(deps.boundaries.is_empty());
-        deps.record(commit(6, 5));
-        followers.insert("b".into(), progress(0, 0));
+        deps.record(commit(6));
+        followers.insert("b".into(), progress(0));
         assert_eq!(
             deps.visibility(&a, &followers, 1),
             4,
             "previously proved prefix survives a reconnect"
         );
-        assert_eq!(deps.covered_next(&progress(6, 4)), 4);
+        assert_eq!(deps.covered_next(&progress(5)), 4);
     }
+
+    #[test]
+    fn visibility_only_lands_on_publication_boundaries() {
+        let a = PartitionAssignment::new(
+            crate::coordination::QueueIdentity::new("t", Partition::new(0), None),
+            "a",
+            vec!["b".into()],
+            1,
+        );
+        let mut deps = QueueDependencies::default();
+        for boundary in [3, 7, 12] {
+            deps.record(commit(boundary));
+        }
+        // Recording the same boundary twice keeps one entry.
+        deps.record(commit(7));
+        assert_eq!(deps.boundaries, [3, 7, 12]);
+        let mut seen = Vec::new();
+        for next in 0..=13 {
+            let followers = std::collections::HashMap::from([("b".into(), progress(next))]);
+            let visible = deps.visibility(&a, &followers, 1);
+            assert!([0, 3, 7, 12].contains(&visible), "{next} exposed {visible}");
+            assert!(visible <= next.max(seen.last().copied().unwrap_or(0)));
+            seen.push(visible);
+        }
+        assert_eq!(seen.last(), Some(&12));
+    }
+
+    #[test]
+    fn stream_progress_covers_no_queue_boundary() {
+        let a = PartitionAssignment::new(
+            crate::coordination::QueueIdentity::new("t", Partition::new(0), None),
+            "a",
+            vec!["b".into()],
+            1,
+        );
+        let mut deps = QueueDependencies::default();
+        deps.record(commit(2));
+        let followers = std::collections::HashMap::from([("b".into(), stream_progress(9, 9))]);
+        assert_eq!(deps.visibility(&a, &followers, 1), 0);
+    }
+
+    #[test]
+    fn two_lane_commits_record_no_boundary() {
+        let mut deps = QueueDependencies::default();
+        deps.record(stroma_core::QueuePublishCommit {
+            message_next: 0,
+            ..commit(5)
+        });
+        deps.record(stroma_core::QueuePublishCommit {
+            message_epoch: 2,
+            ..commit(5)
+        });
+        assert!(deps.boundaries.is_empty());
+    }
+
     #[test]
     fn unavailable_replicas_keep_bounded_conservative_history() {
         let mut deps = QueueDependencies::default();
         for n in 1..=100_000 {
-            deps.record(commit(n, 2 * n));
+            deps.record(commit(2 * n));
         }
         assert!(deps.boundaries.len() <= 4096);
-        assert_eq!(deps.covered_next(&progress(100_000, 1)), 0);
-        assert_eq!(deps.covered_next(&progress(100_000, 200_000)), 100_000);
+        // The dropped early boundaries fold into the retained later ones, so a
+        // follower at an early boundary proves nothing, conservatively.
+        assert_eq!(deps.covered_next(&progress(1)), 0);
+        assert_eq!(deps.covered_next(&progress(200_000)), 200_000);
+        assert_eq!(deps.covered_next(&progress(199_999)), 199_998);
     }
+
     #[tokio::test]
     async fn additive_admission_preserves_waiting_confirmation_and_original_progress_session() {
         use crate::history_replication::{AcceptedHistory, ReplicaHistoryInstance};
@@ -4515,14 +4670,14 @@ mod queue_dependency_tests {
         broker.cache_queue_assignment(&before);
         assert!(
             broker
-                .begin_replication_progress_session("q", key.part, None, "c", 1)
+                .begin_replication_progress_session("q", key.part, None, ReplicationResourceKind::Queue, "c", 1)
                 .is_none()
         );
         let original = broker
-            .begin_replication_progress_session("q", key.part, None, "b", 1)
+            .begin_replication_progress_session("q", key.part, None, ReplicationResourceKind::Queue, "b", 1)
             .unwrap();
         let gate = broker.replication_confirm_gate();
-        let wait = gate.await_dependency(&key, 0, Some(commit(1, 1)), Some(before.clone()));
+        let wait = gate.await_dependency(&key, 0, Some(commit(1)), Some(before.clone()));
         tokio::pin!(wait);
         assert!(futures::poll!(&mut wait).is_pending());
         let mut after = before.clone();
@@ -4532,14 +4687,14 @@ mod queue_dependency_tests {
         assert!(after.preserves_replication_contract(&before));
         assert!(!before.preserves_replication_contract(&after));
         broker.cache_queue_assignment(&after);
-        broker.record_replication_session_progress(&original, 1, 1);
+        broker.record_replication_session_progress(&original, DurableProgress::Queue { next: 1 });
         tokio::time::timeout(Duration::from_secs(1), wait)
             .await
             .unwrap()
             .unwrap();
         assert!(
             broker
-                .begin_replication_progress_session("q", key.part, None, "c", 1)
+                .begin_replication_progress_session("q", key.part, None, ReplicationResourceKind::Queue, "c", 1)
                 .is_some()
         );
         for mutation in 0..5 {
@@ -4565,6 +4720,142 @@ mod queue_dependency_tests {
     }
 
     #[tokio::test]
+    async fn progress_session_kind_is_fixed_and_never_crosses_confirm_kinds() {
+        let dir = stroma_core::test_dir!("progress_session_kind");
+        let engine = StromaEngine::open(
+            &dir.root,
+            stroma_core::StromaKeratinConfig::from_message_log(
+                stroma_core::KeratinConfig::test_default(),
+            ),
+            stroma_core::SnapshotConfig::default(),
+        )
+        .await
+        .unwrap();
+        let broker = Broker::new(engine, BrokerConfig::default(), None);
+        let assignment = PartitionAssignment::new(
+            crate::coordination::QueueIdentity::new("q", Partition::new(0), None),
+            "a",
+            vec!["b".into()],
+            1,
+        )
+        .with_durability(crate::coordination::ReplicationDurabilityPolicy::MajorityDurable);
+        broker.cache_queue_assignment(&assignment);
+        let key = QueueKey {
+            tp: "q".into(),
+            part: Partition::new(0),
+            group: None,
+        };
+        let gate = broker.replication_confirm_gate();
+        let stream_session = broker
+            .begin_replication_progress_session(
+                "q",
+                Partition::new(0),
+                None,
+                ReplicationResourceKind::Stream,
+                "b",
+                1,
+            )
+            .unwrap();
+        assert_eq!(stream_session.kind(), ReplicationResourceKind::Stream);
+        broker.record_replication_session_progress(
+            &stream_session,
+            DurableProgress::Stream {
+                message_next: 100,
+                event_next: 100,
+            },
+        );
+        let queue_wait = gate.await_dependency(&key, 0, Some(commit(1)), Some(assignment.clone()));
+        tokio::pin!(queue_wait);
+        assert!(
+            futures::poll!(&mut queue_wait).is_pending(),
+            "stream progress cannot release a queue record"
+        );
+        // A queue report on a stream session is dropped and changes nothing.
+        broker.record_replication_session_progress(&stream_session, queue(100));
+        assert!(futures::poll!(&mut queue_wait).is_pending());
+        assert_eq!(
+            broker.follower_replication_progress("q", Partition::new(0), None),
+            vec![(
+                "b".to_string(),
+                DurableProgress::Stream {
+                    message_next: 100,
+                    event_next: 100
+                }
+            )]
+        );
+        // Stream confirms count records only, never cursor events.
+        gate.await_stream_confirm(&key, 0).await.unwrap();
+        broker.record_replication_session_progress(
+            &stream_session,
+            DurableProgress::Stream {
+                message_next: 0,
+                event_next: 50,
+            },
+        );
+        let stream_wait = gate.await_stream_confirm(&key, 0);
+        tokio::pin!(stream_wait);
+        assert!(
+            futures::poll!(&mut stream_wait).is_pending(),
+            "cursor events past the records cannot release a stream record"
+        );
+        // A queue session replaces the stream one for this follower. The old
+        // session can no longer report, and queue progress releases the queue
+        // record but not the stream one.
+        let queue_session = broker
+            .begin_replication_progress_session(
+                "q",
+                Partition::new(0),
+                None,
+                ReplicationResourceKind::Queue,
+                "b",
+                1,
+            )
+            .unwrap();
+        broker.record_replication_session_progress(
+            &stream_session,
+            DurableProgress::Stream {
+                message_next: 100,
+                event_next: 100,
+            },
+        );
+        assert_eq!(
+            broker.follower_replication_progress("q", Partition::new(0), None),
+            vec![("b".to_string(), queue(0))]
+        );
+        broker.record_replication_session_progress(&queue_session, queue(1));
+        tokio::time::timeout(Duration::from_secs(1), queue_wait)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(futures::poll!(&mut stream_wait).is_pending());
+        // A follower one record short of the publication end never confirms.
+        let short_wait = gate.await_dependency(&key, 0, Some(commit(2)), Some(assignment.clone()));
+        tokio::pin!(short_wait);
+        assert!(futures::poll!(&mut short_wait).is_pending());
+        broker.record_replication_session_progress(&queue_session, queue(2));
+        tokio::time::timeout(Duration::from_secs(1), short_wait)
+            .await
+            .unwrap()
+            .unwrap();
+        // A commit whose lanes disagree is refused outright.
+        assert!(
+            gate.await_dependency(
+                &key,
+                0,
+                Some(stroma_core::QueuePublishCommit {
+                    message_next: 0,
+                    ..commit(2)
+                }),
+                Some(assignment.clone()),
+            )
+            .await
+            .is_err()
+        );
+        drop(stream_wait);
+        broker.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn removed_assignment_cannot_become_a_local_confirmation() {
         let assignments = Arc::new(DashMap::new());
         let key = QueueKey {
@@ -4585,7 +4876,7 @@ mod queue_dependency_tests {
             timing: Arc::new(ReplicationTimingMetrics::default()),
         };
         assert!(
-            gate.await_dependency(&key, 0, Some(commit(1, 1)), Some(a))
+            gate.await_dependency(&key, 0, Some(commit(1)), Some(a))
                 .await
                 .is_err()
         );

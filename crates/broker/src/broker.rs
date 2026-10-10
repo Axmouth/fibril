@@ -2275,19 +2275,19 @@ impl<
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .initialized;
                 if !initialized {
-                    let mut frontier = self
+                    // The recovered backlog is one dependency ending at the
+                    // durable log tail, until new publications supply exact
+                    // batch boundaries.
+                    let commit = self
                         .engine
-                        .queue_durable_frontiers(&key.tp, key.part.id(), key.group.as_deref())
+                        .queue_durable_commit(&key.tp, key.part.id(), key.group.as_deref())
                         .await?;
-                    if frontier.message_epoch == assignment.epoch
-                        && frontier.event_epoch == assignment.epoch
-                    {
+                    if commit.epoch() == assignment.epoch {
                         let mut dependencies = cell
                             .dependencies
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        frontier.message_next = frontier.event_next;
-                        dependencies.record(frontier);
+                        dependencies.record(commit);
                         dependencies.initialized = true;
                     }
                     self.refresh_visibility_ceiling(key);
@@ -2566,8 +2566,8 @@ impl<
                 let observer = Box::new(move |commit: stroma_core::QueuePublishCommit| {
                     let _ = batch_commit.set((commit, admitted_assignment));
                     if let Some(assignment) = assignments.get(&key) {
-                        if assignment.epoch == commit.message_epoch
-                            && assignment.epoch == commit.event_epoch
+                        if commit.is_single_log()
+                            && assignment.epoch == commit.epoch()
                             && assignment
                                 .durability_requirement()
                                 .is_ok_and(|r| r.nodes > 1)

@@ -463,9 +463,9 @@ async fn automatic_recovery_repeats_and_preserves_confirmed_messages() {
         .await
         .unwrap();
         assert!(provider.pending_recoveries().unwrap().is_empty());
-        let durable = engine.queue_durable_frontiers("q", 0, None).await.unwrap();
-        assert_eq!(durable.message_next, 0);
-        assert_eq!(durable.event_next, cycle + 1);
+        let durable = engine.queue_durable_commit("q", 0, None).await.unwrap();
+        assert!(durable.is_single_log());
+        assert_eq!(durable.next(), cycle + 1);
     }
     // The same production stage guards feed the admin snapshot. Wait for the
     // attempt's final guard as activation can become visible just before it drops.

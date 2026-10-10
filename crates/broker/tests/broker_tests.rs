@@ -15,7 +15,7 @@ use fibril_broker::{
         Broker, BrokerAssignmentTransitionApply, BrokerConfig, BrokerError,
         BrokerOwnerReplicationPeer, BrokerOwnerReplicationPeerResolver, BrokerOwnerStreamRecords,
         BrokerQueueCatchUp, BrokerQueueFollowerApply, BrokerReplicationCheckpointRequired,
-        BrokerStreamCatchUp, ConsumerConfig, FollowerCatchUp, QueueCatchUpOptions,
+        BrokerStreamCatchUp, ConsumerConfig, DurableProgress, FollowerCatchUp, QueueCatchUpOptions,
         QueueCatchUpProgress, StreamCatchUpOptions, StreamCatchUpProgress,
         FollowerReplicationWorkerConfig, FollowerReplicationWorkerLoopExit,
         FollowerReplicationWorkerState, FollowerReplicationWorkerStatus, OwnedQueue,
@@ -256,7 +256,7 @@ impl QueueEngine for FailingPublishEngine {
         self.publish_batch(tp, part, group, items).await
     }
 
-    async fn queue_durable_frontiers(
+    async fn queue_durable_commit(
         &self,
         _tp: &str,
         _part: u32,
@@ -1866,14 +1866,7 @@ async fn publish_confirm_waits_for_follower_durable_progress() {
     let reporter = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(100)).await;
         // Both messages (offsets 0 and 1) durably applied on the follower.
-        progress_broker.record_follower_replication_progress(
-            topic,
-            Partition::new(0),
-            None,
-            "follower-b",
-            2,
-            2,
-        );
+        progress_broker.record_follower_replication_progress(topic, Partition::new(0), None, "follower-b", DurableProgress::Queue { next: 2 });
     });
     let reply = publisher
         .publish(
@@ -2032,7 +2025,7 @@ async fn stale_follower_excluded_from_in_sync_set() {
         ),
     );
     // The follower has reported, but with isr_timeout 0 it never counts as fresh.
-    broker.record_follower_replication_progress(topic, Partition::new(0), None, "follower-b", 5, 5);
+    broker.record_follower_replication_progress(topic, Partition::new(0), None, "follower-b", DurableProgress::Queue { next: 5 });
 
     let publisher = broker
         .get_publisher(topic, Partition::new(0), &None)
@@ -2087,7 +2080,7 @@ async fn publish_admitted_once_in_sync_floor_met() {
     );
     // Fresh report past the first offset satisfies both the ISR floor and the
     // durability requirement.
-    broker.record_follower_replication_progress(topic, Partition::new(0), None, "follower-b", 5, 5);
+    broker.record_follower_replication_progress(topic, Partition::new(0), None, "follower-b", DurableProgress::Queue { next: 5 });
 
     let publisher = broker
         .get_publisher(topic, Partition::new(0), &None)
@@ -2138,7 +2131,7 @@ async fn owner_replica_observability_reports_follower_lag_and_isr() {
         ),
     );
     // Only follower-b has reported; follower-c is silent.
-    broker.record_follower_replication_progress(topic, Partition::new(0), None, "follower-b", 5, 5);
+    broker.record_follower_replication_progress(topic, Partition::new(0), None, "follower-b", DurableProgress::Queue { next: 5 });
 
     let report = broker.sparse_queue_observability_report();
     assert_eq!(report.owned_replica_summary.owned_queue_count, 1);
@@ -3848,8 +3841,10 @@ async fn durable_stream_publish_confirm_waits_for_follower_progress() {
         Partition::new(0),
         None,
         "follower-b",
-        1,
-        0,
+        DurableProgress::Stream {
+            message_next: 1,
+            event_next: 0,
+        },
     );
     broker
         .await_stream_replication_confirm("events", Partition::new(0), None, 0)
@@ -3858,12 +3853,44 @@ async fn durable_stream_publish_confirm_waits_for_follower_progress() {
 
     // Network sessions must also keep payload and cursor progress independent.
     // Cursor events alone cannot prove a stream payload was persisted.
-    let session = broker.begin_replication_progress_session(
-        "events", Partition::new(0), None, "follower-b", 1,
-    ).unwrap();
-    broker.record_replication_session_progress(&session, 0, 10);
+    let session = broker
+        .begin_replication_progress_session(
+            "events",
+            Partition::new(0),
+            None,
+            ReplicationResourceKind::Stream,
+            "follower-b",
+            1,
+        )
+        .unwrap();
+    broker.record_replication_session_progress(
+        &session,
+        DurableProgress::Stream {
+            message_next: 0,
+            event_next: 10,
+        },
+    );
     assert!(broker.await_stream_replication_confirm("events", Partition::new(0), None, 0).await.is_err());
-    broker.record_replication_session_progress(&session, 1, 0);
+    // A queue-shaped report on a stream session is dropped, whatever it claims.
+    broker.record_replication_session_progress(&session, DurableProgress::Queue { next: 10 });
+    assert!(broker.await_stream_replication_confirm("events", Partition::new(0), None, 0).await.is_err());
+    assert_eq!(
+        broker.follower_replication_progress("events", Partition::new(0), None),
+        vec![(
+            "follower-b".to_string(),
+            DurableProgress::Stream {
+                message_next: 0,
+                event_next: 10
+            }
+        )]
+    );
+    broker.record_replication_session_progress(
+        &session,
+        DurableProgress::Stream {
+            message_next: 1,
+            event_next: 0,
+        },
+    );
     broker.await_stream_replication_confirm("events", Partition::new(0), None, 0).await.unwrap();
 
     broker.shutdown().await;
@@ -8669,10 +8696,8 @@ async fn queue_dependency_boundary(prefix: u64) {
         .unwrap();
     // Each published item is its own payload record, so the batch occupies
     // event offsets prefix and prefix + 1. Its dependency covers both records.
-    assert_eq!(
-        (dependency.message_next, dependency.event_next),
-        (prefix + 2, prefix + 2)
-    );
+    assert!(dependency.is_single_log());
+    assert_eq!(dependency.next(), prefix + 2);
     // Real owner-read path. Only the first new payload record fits.
     let records = owner
         .read_owner_queue_records(topic, Partition::new(0), None, event_from, 1, 8 * 1024 * 1024, 0)
@@ -8686,18 +8711,16 @@ async fn queue_dependency_boundary(prefix: u64) {
         .apply_queue_push_batch(topic, Partition::new(0), None, records)
         .await
         .unwrap();
-    let fibril_broker::replication::QueuePushApply::Applied { next: event_next } = outcome else {
+    let fibril_broker::replication::QueuePushApply::Applied { next } = outcome else {
         panic!("expected durable apply")
     };
-    let message_next = 0;
-    assert_eq!((message_next, event_next), (0, prefix + 1));
+    assert_eq!(next, prefix + 1);
     owner.record_follower_replication_progress(
         topic,
         Partition::new(0),
         None,
         "follower-b",
-        message_next,
-        event_next,
+        DurableProgress::Queue { next },
     );
     let confirm =
         owner.await_queue_replication_confirm(topic, Partition::new(0), None, prefix, dependency);
@@ -8710,40 +8733,41 @@ async fn queue_dependency_boundary(prefix: u64) {
             .is_err(),
         "a partial publish batch must not confirm"
     );
-    // A message-lane coordinate is not payload progress for a queue.
+    // A second follower one record short of the end of the batch does not
+    // complete the quorum either.
     owner.record_follower_replication_progress(
         topic,
         Partition::new(0),
         None,
         "follower-c",
-        dependency.message_next,
-        prefix,
+        DurableProgress::Queue {
+            next: dependency.next() - 1,
+        },
     );
     assert!(
         tokio::time::timeout(Duration::from_millis(30), &mut confirm)
             .await
             .is_err(),
-        "a message-lane report must not confirm a queue publish"
+        "a follower short of the batch end must not confirm a queue publish"
     );
     let suffix = owner
-        .read_owner_queue_records(topic, Partition::new(0), None, event_next, 2048, 8 * 1024 * 1024, 0)
+        .read_owner_queue_records(topic, Partition::new(0), None, next, 2048, 8 * 1024 * 1024, 0)
         .await
         .unwrap();
     let outcome = follower
         .apply_queue_push_batch(topic, Partition::new(0), None, suffix)
         .await
         .unwrap();
-    let fibril_broker::replication::QueuePushApply::Applied { next: event_next } = outcome else {
+    let fibril_broker::replication::QueuePushApply::Applied { next } = outcome else {
         panic!("expected durable suffix")
     };
-    assert_eq!(event_next, dependency.event_next);
+    assert_eq!(next, dependency.next());
     owner.record_follower_replication_progress(
         topic,
         Partition::new(0),
         None,
         "follower-b",
-        message_next,
-        event_next,
+        DurableProgress::Queue { next },
     );
     tokio::time::timeout(Duration::from_secs(2), &mut confirm)
         .await
@@ -8782,28 +8806,22 @@ async fn replication_progress_sessions_fence_reset_reconnect_and_assignment() {
     broker.cache_queue_assignment(&assignment);
     assert!(
         broker
-            .begin_replication_progress_session(topic, part, None, "stranger", 1)
+            .begin_replication_progress_session(topic, part, None, ReplicationResourceKind::Queue, "stranger", 1)
             .is_none()
     );
     assert!(
         broker
-            .begin_replication_progress_session(topic, part, None, "b", 0)
+            .begin_replication_progress_session(topic, part, None, ReplicationResourceKind::Queue, "b", 0)
             .is_none()
     );
     let first = broker
-        .begin_replication_progress_session(topic, part, None, "b", 1)
+        .begin_replication_progress_session(topic, part, None, ReplicationResourceKind::Queue, "b", 1)
         .unwrap();
-    let dep = stroma_core::QueuePublishCommit {
-        message_next: 4,
-        event_next: 4,
-        message_epoch: 1,
-        event_epoch: 1,
-    };
-    // Queue payloads live in the event log, so the event frontier is the only
-    // coordinate that proves payload coverage. A later report after a reset
-    // replaces the earlier frontier instead of keeping its maximum.
-    broker.record_replication_session_progress(&first, 8, 8);
-    broker.record_replication_session_progress(&first, 0, 2);
+    let dep = stroma_core::QueuePublishCommit::queue(4, 1);
+    // A later report after a reset replaces the earlier position instead of
+    // keeping its maximum.
+    broker.record_replication_session_progress(&first, DurableProgress::Queue { next: 8 });
+    broker.record_replication_session_progress(&first, DurableProgress::Queue { next: 2 });
     let wait = broker.await_queue_replication_confirm(topic, part, None, 3, dep);
     tokio::pin!(wait);
     assert!(
@@ -8812,17 +8830,27 @@ async fn replication_progress_sessions_fence_reset_reconnect_and_assignment() {
             .is_err(),
         "reset must replace the reported frontier, not keep its maximum"
     );
-    broker.record_replication_session_progress(&first, 99, 2);
+    broker.record_replication_session_progress(
+        &first,
+        DurableProgress::Stream {
+            message_next: 99,
+            event_next: 99,
+        },
+    );
     assert!(
         tokio::time::timeout(Duration::from_millis(20), &mut wait)
             .await
             .is_err(),
-        "a message-lane coordinate cannot stand in for queue payload progress"
+        "stream-shaped progress cannot stand in for queue progress"
+    );
+    assert_eq!(
+        broker.follower_replication_progress(topic, part, None),
+        vec![("b".to_string(), DurableProgress::Queue { next: 2 })]
     );
     let second = broker
-        .begin_replication_progress_session(topic, part, None, "b", 1)
+        .begin_replication_progress_session(topic, part, None, ReplicationResourceKind::Queue, "b", 1)
         .unwrap();
-    broker.record_replication_session_progress(&first, 8, 8);
+    broker.record_replication_session_progress(&first, DurableProgress::Queue { next: 8 });
     assert!(
         tokio::time::timeout(Duration::from_millis(20), &mut wait)
             .await
@@ -8830,7 +8858,7 @@ async fn replication_progress_sessions_fence_reset_reconnect_and_assignment() {
         "replaced session cannot restore stale progress"
     );
     drop(first);
-    broker.record_replication_session_progress(&second, 4, 4);
+    broker.record_replication_session_progress(&second, DurableProgress::Queue { next: 4 });
     tokio::time::timeout(Duration::from_secs(1), &mut wait)
         .await
         .unwrap()
@@ -8840,15 +8868,11 @@ async fn replication_progress_sessions_fence_reset_reconnect_and_assignment() {
     broker.cache_queue_assignment(&next);
     assert!(
         broker
-            .begin_replication_progress_session(topic, part, None, "b", 1)
+            .begin_replication_progress_session(topic, part, None, ReplicationResourceKind::Queue, "b", 1)
             .is_none()
     );
-    broker.record_replication_session_progress(&second, 99, 99);
-    let dep = stroma_core::QueuePublishCommit {
-        message_epoch: 2,
-        event_epoch: 2,
-        ..dep
-    };
+    broker.record_replication_session_progress(&second, DurableProgress::Queue { next: 99 });
+    let dep = stroma_core::QueuePublishCommit::queue(4, 2);
     let wait = broker.await_queue_replication_confirm(topic, part, None, 3, dep);
     tokio::pin!(wait);
     assert!(
@@ -8858,9 +8882,9 @@ async fn replication_progress_sessions_fence_reset_reconnect_and_assignment() {
         "old assignment proof cannot confirm reused offsets"
     );
     let third = broker
-        .begin_replication_progress_session(topic, part, None, "b", 2)
+        .begin_replication_progress_session(topic, part, None, ReplicationResourceKind::Queue, "b", 2)
         .unwrap();
-    broker.record_replication_session_progress(&third, 4, 4);
+    broker.record_replication_session_progress(&third, DurableProgress::Queue { next: 4 });
     tokio::time::timeout(Duration::from_secs(1), &mut wait)
         .await
         .unwrap()
@@ -8902,12 +8926,12 @@ async fn queue_visibility_waits_for_enqueue_on_the_payload_replica() {
         loop {
             let d = broker
                 .engine()
-                .queue_durable_frontiers(topic, 0, None)
+                .queue_durable_commit(topic, 0, None)
                 .await
                 .unwrap();
-            // The payload record is also the enqueue, so the event frontier
-            // alone tracks publication.
-            if d.event_next == 1 {
+            // The payload record is also the enqueue, so one log position
+            // tracks publication.
+            if d.next() == 1 {
                 break d;
             }
             tokio::task::yield_now().await;
@@ -8915,17 +8939,32 @@ async fn queue_visibility_waits_for_enqueue_on_the_payload_replica() {
     })
     .await
     .unwrap();
-    assert_eq!(dep.message_next, 0);
-    // A message-lane coordinate does not prove the payload record replicated.
-    broker.record_follower_replication_progress(topic, part, None, "b", 1, 0);
-    broker.record_follower_replication_progress(topic, part, None, "c", 1, 0);
+    assert!(dep.is_single_log());
+    // Followers that hold nothing of the publication neither confirm nor
+    // expose it.
+    broker.record_follower_replication_progress(topic, part, None, "b", DurableProgress::Queue { next: 0 });
+    broker.record_follower_replication_progress(topic, part, None, "c", DurableProgress::Queue { next: 0 });
     assert!(recv_with_timeout(&mut sub, 30).await.is_none());
     assert!(
         tokio::time::timeout(Duration::from_millis(30), &mut confirmed)
             .await
             .is_err()
     );
-    broker.record_follower_replication_progress(topic, part, None, "b", 0, dep.event_next);
+    // Stream-shaped reports for these followers are dropped, so a record
+    // position claimed outside the queue log cannot release the publish.
+    let stream_claim = DurableProgress::Stream {
+        message_next: 1,
+        event_next: 1,
+    };
+    broker.record_follower_replication_progress(topic, part, None, "b", stream_claim);
+    broker.record_follower_replication_progress(topic, part, None, "c", stream_claim);
+    assert!(recv_with_timeout(&mut sub, 30).await.is_none());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), &mut confirmed)
+            .await
+            .is_err()
+    );
+    broker.record_follower_replication_progress(topic, part, None, "b", DurableProgress::Queue { next: dep.next() });
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(1), confirmed)
             .await
@@ -9009,10 +9048,10 @@ async fn durable_batch_wakes_replication_while_earlier_confirm_waits() {
         loop {
             let d = broker
                 .engine()
-                .queue_durable_frontiers(topic, 0, None)
+                .queue_durable_commit(topic, 0, None)
                 .await
                 .unwrap();
-            if d.event_next == 1 {
+            if d.next() == 1 {
                 break d;
             }
             tokio::task::yield_now().await;
@@ -9020,7 +9059,7 @@ async fn durable_batch_wakes_replication_while_earlier_confirm_waits() {
     })
     .await
     .unwrap();
-    assert_eq!(initial.message_next, 0);
+    assert!(initial.is_single_log());
     assert!(
         tokio::time::timeout(Duration::from_millis(30), &mut first)
             .await
@@ -9032,7 +9071,7 @@ async fn durable_batch_wakes_replication_while_earlier_confirm_waits() {
     let reader_broker = broker.clone();
     let mut reader = tokio::spawn(async move {
         reader_broker
-            .read_owner_queue_records(topic, part, None, initial.event_next, 10, usize::MAX, 10_000)
+            .read_owner_queue_records(topic, part, None, initial.next(), 10, usize::MAX, 10_000)
             .await
     });
     assert!(
@@ -9060,7 +9099,7 @@ async fn durable_batch_wakes_replication_while_earlier_confirm_waits() {
         panic!("event checkpoint");
     };
     assert_eq!(event_payloads(&events), vec![(1, vec![2])]);
-    assert!(events.next_offset > initial.event_next);
+    assert!(events.next_offset > initial.next());
     assert!(
         tokio::time::timeout(Duration::from_millis(30), &mut first)
             .await
@@ -9072,7 +9111,7 @@ async fn durable_batch_wakes_replication_while_earlier_confirm_waits() {
             .is_err()
     );
 
-    broker.record_follower_replication_progress(topic, part, None, "b", 0, events.next_offset);
+    broker.record_follower_replication_progress(topic, part, None, "b", DurableProgress::Queue { next: events.next_offset });
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(1), first)
             .await

@@ -22,7 +22,8 @@ use fibril_broker::{
     broker::{
         Broker, BrokerError, BrokerOwnerStreamRecords, BrokerQueueFollowerApply,
         ConsumerCloseCause, ConsumerConfig, ConsumerHandle, ConsumerLease,
-        ExclusiveAssignmentUpdate, PublisherHandle, SettleRequest,
+        DurableProgress, ExclusiveAssignmentUpdate, PublisherHandle, ReplicationResourceKind,
+        SettleRequest,
         SettleType,
     },
     queue_engine::{
@@ -729,12 +730,14 @@ impl replication_stream::OwnerStreamSource for BrokerOwnerStreamSource {
         {
             return;
         }
+        // The two-lane push progress carries the queue log as its event lane.
+        let Ok(next) = queue_wire_cursor(durable_message_next, durable_event_next) else {
+            tracing::warn!(topic, partition = partition.id(), reporter, "dropping queue push progress with a message lane");
+            return;
+        };
         if let Some(session) = &self.progress {
-            self.broker.record_replication_session_progress(
-                session,
-                durable_message_next,
-                durable_event_next,
-            );
+            self.broker
+                .record_replication_session_progress(session, DurableProgress::Queue { next });
         }
     }
 }
@@ -2930,8 +2933,11 @@ where
     > = HashMap::new();
     let mut owner_streams: HashMap<u64, mpsc::Sender<replication_stream::OwnerStreamControl>> =
         HashMap::new();
+    // Pull reads stamp progress on a session per resource and reporter. The
+    // session's kind follows the read op, so a queue and a stream read never
+    // share one.
     let mut pull_progress: HashMap<
-        (String, Partition, Option<String>, String),
+        (String, Partition, Option<String>, String, ReplicationResourceKind),
         (u64, fibril_broker::replication::ReplicationProgressSession),
     > = HashMap::new();
 
@@ -3308,6 +3314,7 @@ where
                         read.partition,
                         read.group.clone(),
                         reporter.clone(),
+                        ReplicationResourceKind::Queue,
                     );
                     if pull_progress
                         .get(&key)
@@ -3320,6 +3327,7 @@ where
                             &read.topic,
                             read.partition,
                             read.group.as_deref(),
+                            ReplicationResourceKind::Queue,
                             reporter,
                             epoch,
                         ) {
@@ -3329,8 +3337,7 @@ where
                     if let Some((_, session)) = pull_progress.get(&key) {
                         broker.record_replication_session_progress(
                             session,
-                            read.message_from,
-                            read.event_from,
+                            DurableProgress::Queue { next: from },
                         );
                     }
                 }
@@ -3431,6 +3438,7 @@ where
                         read.partition,
                         read.group.clone(),
                         reporter.clone(),
+                        ReplicationResourceKind::Stream,
                     );
                     if pull_progress
                         .get(&key)
@@ -3443,6 +3451,7 @@ where
                             &read.topic,
                             read.partition,
                             read.group.as_deref(),
+                            ReplicationResourceKind::Stream,
                             reporter,
                             epoch,
                         ) {
@@ -3452,8 +3461,10 @@ where
                     if let Some((_, session)) = pull_progress.get(&key) {
                         broker.record_replication_session_progress(
                             session,
-                            read.message_from,
-                            read.event_from,
+                            DurableProgress::Stream {
+                                message_next: read.message_from,
+                                event_next: read.event_from,
+                            },
                         );
                     }
                 }
@@ -3561,6 +3572,7 @@ where
                             &start.topic,
                             start.partition,
                             start.group.as_deref(),
+                            ReplicationResourceKind::Queue,
                             reporter,
                             epoch,
                         )
