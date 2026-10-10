@@ -1,7 +1,9 @@
 [server]
 # Node root. Holds the fibril-node marker plus node/, coordination/, storage/
 # and cache/. First boot needs a missing or empty directory (lost+found is
-# allowed), later boots need the same coordination.node_id.
+# allowed), later boots need the same coordination.node_id. To copy files such
+# as cluster.secret in before the first start, run fibrilctl node init first
+# and place them under <data_dir>/node.
 data_dir = "server_data"
 
 [broker.listener]
@@ -38,7 +40,8 @@ allow_default_loopback = true
 
 # [coordination]
 # Cluster shared secret for node-to-node authentication, required in
-# ganglion mode. Generate with: fibrilctl secret generate
+# ganglion mode. Generate with: fibrilctl secret generate, or copy one into
+# <data_dir>/node/cluster.secret after fibrilctl node init.
 # secret_path = "/etc/fibril/cluster.secret"
 
 [tls]

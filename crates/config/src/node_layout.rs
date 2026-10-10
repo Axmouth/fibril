@@ -167,6 +167,15 @@ fn io_err<'a>(
     }
 }
 
+/// What [`NodeLayout::open_or_init_with_outcome`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutOutcome {
+    /// The data dir was fresh and the layout was created.
+    Created,
+    /// The data dir already belonged to this node.
+    Opened,
+}
+
 /// Paths of a node's data dir. Building one does no I/O. Use
 /// [`NodeLayout::open_or_init`] to validate or create the directory first.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,12 +242,21 @@ impl NodeLayout {
     /// directory is fresh. Refuses older layouts, other nodes' data dirs,
     /// unknown versions and unknown top-level entries.
     pub fn open_or_init(root: impl Into<PathBuf>, node_id: &str) -> Result<Self> {
-        let layout = Self::new(root);
-        layout.prepare(node_id)?;
-        Ok(layout)
+        Self::open_or_init_with_outcome(root, node_id).map(|(layout, _)| layout)
     }
 
-    fn prepare(&self, node_id: &str) -> Result<()> {
+    /// [`NodeLayout::open_or_init`], also reporting whether the layout was
+    /// created by this call.
+    pub fn open_or_init_with_outcome(
+        root: impl Into<PathBuf>,
+        node_id: &str,
+    ) -> Result<(Self, LayoutOutcome)> {
+        let layout = Self::new(root);
+        let outcome = layout.prepare(node_id)?;
+        Ok((layout, outcome))
+    }
+
+    fn prepare(&self, node_id: &str) -> Result<LayoutOutcome> {
         let root = &self.root;
         match fs::metadata(root) {
             Ok(meta) if meta.is_dir() => {}
@@ -265,7 +283,8 @@ impl NodeLayout {
                 .filter(|name| *name != LOST_AND_FOUND && **name != marker_temp)
                 .collect();
             if others.is_empty() {
-                return self.init_fresh(node_id);
+                self.init_fresh(node_id)?;
+                return Ok(LayoutOutcome::Created);
             }
             let legacy: Vec<&str> = others
                 .iter()
@@ -338,7 +357,8 @@ impl NodeLayout {
                 });
             }
         }
-        self.create_subdirs()
+        self.create_subdirs()?;
+        Ok(LayoutOutcome::Opened)
     }
 
     fn only_empty_dirs_besides_marker(&self, entries: &[String]) -> Result<bool> {
@@ -833,6 +853,48 @@ mod tests {
             ),
             "{err}"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn outcome_reports_created_then_opened() {
+        let root = temp_root("outcome");
+        let (_, outcome) = NodeLayout::open_or_init_with_outcome(&root, "n").unwrap();
+        assert_eq!(outcome, LayoutOutcome::Created);
+        let (_, outcome) = NodeLayout::open_or_init_with_outcome(&root, "n").unwrap();
+        assert_eq!(outcome, LayoutOutcome::Opened);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn operator_files_under_node_survive_reopen() {
+        // Prepared offline, then files copied in before the first start.
+        let root = temp_root("copied");
+        let layout = NodeLayout::open_or_init(&root, "n").unwrap();
+        fs::write(layout.cluster_secret(), "copied-secret\n").unwrap();
+        fs::create_dir(layout.generated_tls()).unwrap();
+        fs::write(layout.generated_tls().join("ca.pem"), "ca").unwrap();
+        fs::create_dir(layout.provided_tls()).unwrap();
+        fs::write(layout.provided_tls().join("server.pem"), "cert").unwrap();
+
+        let (layout, outcome) = NodeLayout::open_or_init_with_outcome(&root, "n").unwrap();
+        assert_eq!(outcome, LayoutOutcome::Opened);
+        assert_eq!(
+            fs::read_to_string(layout.cluster_secret()).unwrap(),
+            "copied-secret\n"
+        );
+        assert!(layout.generated_tls().join("ca.pem").is_file());
+        assert!(layout.provided_tls().join("server.pem").is_file());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn files_copied_into_a_fresh_dir_are_refused() {
+        // Without the marker, a copied secret makes the dir foreign.
+        let root = temp_root("copied-fresh");
+        fs::write(root.join("cluster.secret"), "s").unwrap();
+        let err = NodeLayout::open_or_init(&root, "n").unwrap_err();
+        assert!(matches!(err, NodeLayoutError::OldLayout { .. }), "{err}");
         let _ = fs::remove_dir_all(root);
     }
 

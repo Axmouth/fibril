@@ -63,8 +63,9 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   with the node id and the subdirectories `node/` (setup marker, config
   overlay, cluster secret and TLS material), `coordination/`, `storage/` and
   `cache/`. Data directories from earlier builds are refused at startup, with
-  no migration. Start from an empty data directory, and place a
-  pre-generated `cluster.secret` in `node/`. A configured coordination
+  no migration. Start from an empty data directory, or prepare it with
+  `fibrilctl node init` and place a pre-generated `cluster.secret` in
+  `node/`. A configured coordination
   directory gets its own marker bound to the raft node id.
 
 - The internal follower checkpoint install operations 86 and 87 are retired.
@@ -136,6 +137,13 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   recoveries that need an operator under `attention`, and logs a warning when
   one appears. A stream pending recovery is flagged as unsupported for
   automatic resolution.
+
+- `fibrilctl node init` prepares a data directory for the configured node id
+  before the first start, so files such as `cluster.secret` or a shared CA
+  can be copied into `node/`. It is safe to rerun, refuses directories that
+  belong to another node or hold other files, and prints where each file
+  goes. A cluster secret already in `node/` is kept when first-boot setup is
+  asked to generate one.
 
 - Automatic queue recovery resumes completed local inspection phases and staged
   offsets without a total-history record/byte budget or whole-attempt deadline.

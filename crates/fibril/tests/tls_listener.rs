@@ -60,6 +60,16 @@ async fn boot_server(tag: &str, tls_auto: bool) -> BootedServer {
 }
 
 async fn boot_server_with(tag: &str, configure: impl FnOnce(&mut ServerConfig)) -> BootedServer {
+    boot_server_prepared(tag, configure, |_| {}).await
+}
+
+/// [`boot_server_with`], running `prepare` on each attempt's config before
+/// the server starts, to stage files in the data dir.
+async fn boot_server_prepared(
+    tag: &str,
+    configure: impl FnOnce(&mut ServerConfig),
+    prepare: impl Fn(&ServerConfig),
+) -> BootedServer {
     let _boot_permit = BOOT_PERMITS.acquire().await.expect("boot permit");
     // free_loopback_addr binds :0, closes it, and hands back the port, so a
     // parallel test can grab that port before this server binds it - the server
@@ -77,6 +87,7 @@ async fn boot_server_with(tag: &str, configure: impl FnOnce(&mut ServerConfig)) 
         let broker_addr = config.broker.listener.bind;
         let admin_addr = config.admin.listener.bind;
         let data_dir = config.server.data_dir.clone();
+        prepare(&config);
 
         let boot_error = Arc::new(std::sync::Mutex::new(None));
         let sink = boot_error.clone();
@@ -834,4 +845,61 @@ async fn first_boot_setup_creates_admin_user_and_cluster_secret() {
     client.shutdown().await;
 
     handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_boot_adopts_files_copied_into_an_initialized_data_dir() {
+    // A shared CA from another deployment, as an operator would copy it.
+    let source = temp_root("shared-ca-source").join("tls");
+    fibril_tls::ensure_generated_material(&source, &[]).expect("source CA");
+    let ca_pem = std::fs::read(source.join("ca.pem")).expect("read ca.pem");
+    let ca_key = std::fs::read(source.join("ca.key")).expect("read ca.key");
+
+    let server = boot_server_prepared(
+        "init-copied",
+        |config| {
+            config.tls.enabled = true;
+            config.tls.auto_self_signed = true;
+        },
+        |config| {
+            // What fibrilctl node init does, then the operator's copies.
+            let layout = fibril_config::NodeLayout::open_or_init(
+                &config.server.data_dir,
+                &config.coordination.node_id,
+            )
+            .expect("init data dir");
+            std::fs::write(layout.cluster_secret(), "copied-secret\n").expect("copy secret");
+            std::fs::create_dir(layout.generated_tls()).expect("tls dir");
+            std::fs::write(layout.generated_tls().join("ca.pem"), &ca_pem).expect("copy ca.pem");
+            std::fs::write(layout.generated_tls().join("ca.key"), &ca_key).expect("copy ca.key");
+        },
+    )
+    .await;
+
+    let node_dir = server.data_dir.join("node");
+    assert_eq!(
+        std::fs::read_to_string(node_dir.join("cluster.secret")).expect("read secret"),
+        "copied-secret\n"
+    );
+    let tls_dir = node_dir.join("tls");
+    assert_eq!(
+        std::fs::read(tls_dir.join("ca.pem")).expect("ca.pem"),
+        ca_pem
+    );
+    assert!(
+        tls_dir.join("server.pem").exists(),
+        "server cert minted from the copied CA"
+    );
+
+    // The original CA file verifies the served certificate.
+    let connector = tls_connector(Some(&source.join("ca.pem")));
+    let tcp = TcpStream::connect(server.broker_addr)
+        .await
+        .expect("tcp connect");
+    let name = rustls::pki_types::ServerName::try_from("localhost").expect("server name");
+    let mut stream = connector.connect(name, tcp).await.expect("tls handshake");
+    write_all(&mut stream, &hello_frame(9)).await;
+    let frame = read_frame(&mut stream).await;
+    assert_eq!(frame.opcode, Op::HelloOk as u16);
+    server.handle.abort();
 }

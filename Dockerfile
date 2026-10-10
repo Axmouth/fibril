@@ -39,7 +39,8 @@ COPY --from=builder /app/target/release/fibril-demo /usr/local/bin/fibril-demo
 
 # Node data dir (server.data_dir). It must start empty, and later boots need the
 # same coordination.node_id. Node files such as the cluster secret and TLS
-# material live in /app/server_data/node.
+# material live in /app/server_data/node. To copy them in before the first
+# start, run fibrilctl node init on the volume first.
 VOLUME ["/app/server_data"]
 EXPOSE 9876 8081
 

@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use fibril_client::{ClientOptions, NewMessage, QueueConfig};
-use fibril_config::{NodeLayout, ServerConfig, node_layout};
+use fibril_config::{NodeLayout, ServerConfig, node_layout, node_layout::LayoutOutcome};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Parser)]
@@ -64,6 +64,27 @@ enum Command {
         #[command(subcommand)]
         command: SecretCommand,
     },
+    /// Node data dir operations.
+    Node {
+        #[command(subcommand)]
+        command: NodeCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum NodeCommand {
+    /// Prepare the data dir for the configured node id before the first
+    /// start, so files such as cluster.secret or a shared CA can be copied
+    /// into <data_dir>/node. Does nothing on a dir already initialized for
+    /// this node, and refuses any other non-empty dir.
+    Init(NodeInitArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct NodeInitArgs {
+    /// Data directory to prepare. Defaults to the configured server.data_dir.
+    #[arg(long)]
+    data_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -512,6 +533,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 UserCommand::List => print_json(admin.list_users().await?)?,
             }
         }
+        Command::Node { command } => match command {
+            NodeCommand::Init(args) => {
+                let data_dir = args.data_dir.unwrap_or(config.server.data_dir);
+                print!("{}", init_node(&data_dir, &config.coordination.node_id)?);
+            }
+        },
         Command::Secret { command } => match command {
             SecretCommand::Generate(args) => {
                 let data_dir = args.data_dir.unwrap_or(config.server.data_dir);
@@ -1216,9 +1243,108 @@ fn print_topology(topology: &serde_json::Value) {
     }
 }
 
+/// Create or validate the node layout, returning the report to print. The
+/// layout rules live in fibril_config so the server applies the same ones on
+/// start.
+fn init_node(data_dir: &std::path::Path, node_id: &str) -> anyhow::Result<String> {
+    let (layout, outcome) = NodeLayout::open_or_init_with_outcome(data_dir, node_id)?;
+    let root = layout.root().display();
+    let mut out = match outcome {
+        LayoutOutcome::Created => format!("Initialized data dir {root} for node `{node_id}`.\n"),
+        LayoutOutcome::Opened => {
+            format!("Data dir {root} is already initialized for node `{node_id}`, nothing to do.\n")
+        }
+    };
+    let tls = layout.generated_tls();
+    let provided = layout.provided_tls();
+    out.push_str(&format!(
+        "\n\
+         Optional files to copy in before the first start:\n\
+         \x20 cluster secret         {secret}\n\
+         \x20 shared CA              {ca_pem} and {ca_key}\n\
+         \x20                        (used with tls.auto_self_signed, this node mints its\n\
+         \x20                        own server certificate from it)\n\
+         \x20 your own certificate   {cert} and {key}\n\
+         \x20                        (set tls.cert_path and tls.key_path to these paths)\n\
+         Create the tls/ or tls-provided/ directory if you use it, and keep keys and\n\
+         the secret readable only by the user that runs the server (chmod 600).\n\
+         \n\
+         Then start the server with the same config and data dir.\n",
+        secret = layout.cluster_secret().display(),
+        ca_pem = tls.join("ca.pem").display(),
+        ca_key = tls.join("ca.key").display(),
+        cert = provided.join("server.pem").display(),
+        key = provided.join("server.key").display(),
+    ));
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_data_dir(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        std::env::temp_dir().join(format!(
+            "fibrilctl-node-init-{tag}-{}-{nanos}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn node_init_prepares_an_empty_dir_and_reruns_cleanly() {
+        let root = temp_data_dir("empty");
+        std::fs::create_dir_all(&root).unwrap();
+        let report = init_node(&root, "node-1").unwrap();
+        assert!(report.contains("Initialized data dir"), "{report}");
+        assert!(report.contains("cluster.secret"), "{report}");
+        assert!(report.contains("tls-provided"), "{report}");
+        for entry in ["fibril-node", "node", "storage", "cache"] {
+            assert!(root.join(entry).exists(), "{entry} missing");
+        }
+        // Nothing beyond the node layout is created offline.
+        assert!(!root.join("coordination").exists());
+        assert!(!root.join("node").join("tls").exists());
+
+        let secret = root.join("node").join("cluster.secret");
+        std::fs::write(&secret, "copied\n").unwrap();
+        let report = init_node(&root, "node-1").unwrap();
+        assert!(report.contains("already initialized"), "{report}");
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "copied\n");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn node_init_refuses_another_nodes_dir() {
+        let root = temp_data_dir("foreign-node");
+        init_node(&root, "node-1").unwrap();
+        let err = init_node(&root, "node-2").unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("belongs to node `node-1`"), "{text}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn node_init_refuses_foreign_and_old_dirs() {
+        let root = temp_data_dir("foreign-files");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("notes.txt"), "x").unwrap();
+        let text = format!("{:#}", init_node(&root, "node-1").unwrap_err());
+        assert!(text.contains("no fibril-node marker"), "{text}");
+        assert!(!root.join("fibril-node").exists());
+        let _ = std::fs::remove_dir_all(&root);
+
+        // A secret copied in before init makes the dir look like the old layout.
+        let root = temp_data_dir("copied-early");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("cluster.secret"), "x").unwrap();
+        let text = format!("{:#}", init_node(&root, "node-1").unwrap_err());
+        assert!(text.contains("older Fibril data layout"), "{text}");
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn unspecified_bind_connects_to_loopback() {
