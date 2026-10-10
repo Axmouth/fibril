@@ -101,6 +101,21 @@ fn history_and_witness_requirement(
     Ok((history, required))
 }
 
+/// Whether a legacy resource whose write requirement is one copy may change
+/// owner on liveness alone. The rule follows the durability tier: ephemeral
+/// streams confirm before any write is durable, so a new owner breaks no
+/// promise. Speculative and durable streams and every queue confirm only
+/// after the owner persisted the write, so a move could drop confirmed data.
+/// A stream whose config is missing or unreadable counts as durable.
+fn owner_move_loses_nothing(snapshot: &CoordinationSnapshot, resource: &ResourceIdentity) -> bool {
+    resource.namespace == super::STREAM_NAMESPACE
+        && snapshot
+            .attributes
+            .get(&super::stream_config_key(&resource.name))
+            .and_then(|raw| serde_json::from_str::<super::StreamConfig>(raw).ok())
+            .is_some_and(|config| config.durability == super::STREAM_DURABILITY_EPHEMERAL)
+}
+
 /// Hold changes affecting a replicated confirmation contract and persist the
 /// original configuration beside the proposed replacement in the same CAS.
 /// Existing requests are immutable across controller retries and restarts.
@@ -144,6 +159,17 @@ pub(crate) fn retain_unproven_assignments(
             // the new owner renews preparation while retaining the origin IDs.
             continue;
         }
+        if !enrolled
+            && previous.owner != proposed.owner
+            && crate::operator_override::owner_loss_accepted(committed, previous)
+        {
+            // An operator gave up the writes only the old owner kept. The
+            // acceptance is spent on this move.
+            desired
+                .attributes
+                .remove(&crate::operator_override::accepted_owner_loss_key(resource));
+            continue;
+        }
         // Liveness can temporarily expose only one survivor during a Raft
         // election. Recomputing a majority over that smaller placement must not
         // silently lower the active queue's confirmation requirement. Leave the
@@ -168,6 +194,18 @@ pub(crate) fn retain_unproven_assignments(
         } else {
             same_configuration(previous, proposed) || old_writes == 1 && new_writes == 1
         } {
+            if !enrolled
+                && previous.owner != proposed.owner
+                && !owner_move_loses_nothing(committed, resource)
+            {
+                // Only the owner is known to hold every confirmed write. Wait
+                // for it to return, or for an operator to accept the loss,
+                // rather than serve from a copy that may lack confirmed data.
+                tracing::debug!(topic = resource.name, partition = resource.partition,
+                    owner = previous.owner, "owner-only durable resource held until its owner returns");
+                *proposed = previous.clone();
+                held += 1;
+            }
             continue;
         }
         if !replaced.is_empty() {
@@ -312,6 +350,91 @@ mod tests {
             retain_unproven_assignments(&old, &mut identical).unwrap(),
             0
         );
+    }
+
+    fn local(mut a: PartitionAssignment) -> PartitionAssignment {
+        a.durability = ReplicationDurabilityPolicy::LocalDurable;
+        a
+    }
+
+    fn stream(owner: &str, tier: Option<u8>) -> CoordinationSnapshot {
+        let mut a = local(assignment(owner, &[]));
+        a.resource.namespace = super::super::STREAM_NAMESPACE.into();
+        let mut s = snapshot(a);
+        if let Some(durability) = tier {
+            let config = crate::StreamConfig {
+                partition_count: 1,
+                partitioning_version: 1,
+                durability,
+                retention: Default::default(),
+                replication_factor: Some(0),
+            };
+            s.attributes.insert(
+                crate::stream_config_key("q"),
+                serde_json::to_string(&config).unwrap(),
+            );
+        }
+        s
+    }
+
+    #[test]
+    fn legacy_single_writer_queues_hold_owner_moves_but_allow_follower_changes() {
+        for followers in [&[][..], &["b"][..]] {
+            let old = snapshot(local(assignment("a", followers)));
+            let mut moved = snapshot(local(assignment("c", &[])));
+            assert_eq!(retain_unproven_assignments(&old, &mut moved).unwrap(), 1);
+            assert_eq!(moved.assignments, old.assignments);
+            assert!(moved.attributes.is_empty(), "a hold writes no recovery request");
+        }
+        let old = snapshot(local(assignment("a", &["b"])));
+        let mut refilled = snapshot(local(assignment("a", &["c"])));
+        assert_eq!(retain_unproven_assignments(&old, &mut refilled).unwrap(), 0);
+        assert_eq!(refilled.assignments.values().next().unwrap().followers, vec!["c"]);
+    }
+
+    #[test]
+    fn accepted_owner_loss_releases_one_held_move() {
+        let old = snapshot(local(assignment("a", &["b"])));
+        let resource = old.assignments.keys().next().unwrap().clone();
+        let mut accepted = old.clone();
+        let marker = crate::operator_override::AcceptedOwnerLoss {
+            version: 1,
+            resource: resource.clone(),
+            owner: "a".into(),
+            epoch: 3,
+        };
+        let key = crate::operator_override::accepted_owner_loss_key(&resource);
+        accepted.attributes.insert(key.clone(), serde_json::to_string(&marker).unwrap());
+        let mut moved = accepted.clone();
+        moved.assignments = snapshot(local(assignment("b", &[]))).assignments;
+        assert_eq!(retain_unproven_assignments(&accepted, &mut moved).unwrap(), 0);
+        assert_eq!(moved.assignments[&resource].owner, "b");
+        assert!(!moved.attributes.contains_key(&key), "the acceptance is spent");
+
+        // A replicated legacy resource moves without a recovery request too.
+        let old = snapshot(assignment("a", &["b", "c"]));
+        let mut accepted = old.clone();
+        accepted.attributes.insert(key.clone(), serde_json::to_string(&marker).unwrap());
+        let mut moved = accepted.clone();
+        moved.assignments = snapshot(assignment("b", &["c"])).assignments;
+        assert_eq!(retain_unproven_assignments(&accepted, &mut moved).unwrap(), 0);
+        assert!(moved.attributes.is_empty());
+    }
+
+    #[test]
+    fn owner_only_streams_move_only_without_a_durability_promise() {
+        for (tier, held) in [(Some(0), 0), (Some(1), 1), (Some(2), 1), (None, 1)] {
+            let old = stream("a", tier);
+            let mut desired = old.clone();
+            desired.assignments = stream("b", tier).assignments;
+            assert_eq!(
+                retain_unproven_assignments(&old, &mut desired).unwrap(),
+                held,
+                "tier {tier:?}"
+            );
+            let owner = &desired.assignments.values().next().unwrap().owner;
+            assert_eq!(owner, if held == 0 { "b" } else { "a" });
+        }
     }
 
     #[test]

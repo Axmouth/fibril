@@ -2802,21 +2802,37 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
         "b-follower".to_string(),
         node("b-follower", "127.0.0.1:1".parse().unwrap()),
     );
-    let committed = coordination
-        .control_iteration(
-            &fibril_broker::coordination::DeterministicPartitionPlacement,
-            &coordination.registered_queues(),
-            &fibril_broker::coordination::DeterministicStreamPlacement,
-            &coordination.registered_streams(),
-            1,
-            1,
-            ReplicationDurabilityPolicy::LocalDurable,
-            &live_after_death,
-            8,
-        )
+    // Only the owner held every confirmed write, so the queue waits for it
+    // until an operator accepts losing what only the owner kept.
+    let iterate = || async {
+        coordination
+            .control_iteration(
+                &fibril_broker::coordination::DeterministicPartitionPlacement,
+                &coordination.registered_queues(),
+                &fibril_broker::coordination::DeterministicStreamPlacement,
+                &coordination.registered_streams(),
+                1,
+                1,
+                ReplicationDurabilityPolicy::LocalDurable,
+                &live_after_death,
+                8,
+            )
+            .await
+            .unwrap()
+            .expect("failover iteration")
+    };
+    let held = iterate().await;
+    assert_eq!(held.assignment_for(topic, Partition::new(0), None), Some(&first));
+    coordination
+        .accept_owner_loss(&ganglion_core::ResourceIdentity::new(
+            "fibril/queue",
+            topic,
+            0,
+            None,
+        ))
         .await
-        .unwrap()
-        .expect("failover iteration");
+        .unwrap();
+    let committed = iterate().await;
     let moved = committed
         .assignment_for(topic, Partition::new(0), None)
         .expect("still assigned")
@@ -3006,21 +3022,37 @@ async fn ganglion_returning_old_owner_is_demoted_and_refuses_publishes() {
     // moved on, now its watcher sees the fenced assignment).
     let mut live_without_owner = std::collections::HashMap::new();
     live_without_owner.insert("b-follower".to_string(), node("b-follower", 9101));
-    let committed = coordination
-        .control_iteration(
-            &fibril_broker::coordination::DeterministicPartitionPlacement,
-            &coordination.registered_queues(),
-            &fibril_broker::coordination::DeterministicStreamPlacement,
-            &coordination.registered_streams(),
-            1,
-            1,
-            ReplicationDurabilityPolicy::LocalDurable,
-            &live_without_owner,
-            8,
-        )
+    // Only the owner held every confirmed write, so the queue waits for it
+    // until an operator accepts losing what only the owner kept.
+    let iterate = || async {
+        coordination
+            .control_iteration(
+                &fibril_broker::coordination::DeterministicPartitionPlacement,
+                &coordination.registered_queues(),
+                &fibril_broker::coordination::DeterministicStreamPlacement,
+                &coordination.registered_streams(),
+                1,
+                1,
+                ReplicationDurabilityPolicy::LocalDurable,
+                &live_without_owner,
+                8,
+            )
+            .await
+            .unwrap()
+            .expect("failover iteration")
+    };
+    let held = iterate().await;
+    assert_eq!(held.assignment_for(topic, Partition::new(0), None), Some(&first));
+    coordination
+        .accept_owner_loss(&ganglion_core::ResourceIdentity::new(
+            "fibril/queue",
+            topic,
+            0,
+            None,
+        ))
         .await
-        .unwrap()
-        .expect("failover iteration");
+        .unwrap();
+    let committed = iterate().await;
     let moved = committed
         .assignment_for(topic, Partition::new(0), None)
         .expect("assigned")

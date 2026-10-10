@@ -35,6 +35,7 @@ pub mod recovery_selection;
 pub mod recovery_plan;
 pub mod recovery_activation;
 mod eager_failover;
+pub mod operator_override;
 mod recovery_candidate;
 pub mod queue_learner;
 pub mod queue_reseed;
@@ -465,6 +466,10 @@ pub struct StreamRetentionConfig {
 /// `StreamDurability` ordinals: 0 ephemeral, 1 speculative, 2 durable). Only the
 /// durable tier replicates across nodes.
 pub const STREAM_DURABILITY_DURABLE: u8 = 2;
+
+/// Stream durability tier ordinal for the ephemeral tier, which confirms
+/// before a record is durable and so makes no durability promise.
+pub const STREAM_DURABILITY_EPHEMERAL: u8 = 0;
 
 /// A stream's full declared configuration, replicated through coordination so any
 /// owner can open its partitions with the correct partitioning, durability tier,
@@ -1164,14 +1169,9 @@ impl GanglionCoordination {
 
     /// Add a queue to the cluster catalogue (forwarded merge; idempotent).
     pub async fn register_queue(&self, queue: &QueueIdentity) -> Result<(), OpenraftAdapterError> {
-        if cfg!(unix) {
-            self.register_initial_history_resource(&to_ganglion_resource(queue))
-                .await.map(|_| ())
-        } else {
-            // Preserve the existing platform behavior until durable history
-            // metadata is supported. These queues make no accepted-origin claim.
-            self.forward_merge(history_identity::registration(to_ganglion_resource(queue))?).await
-        }
+        self.register_initial_history_resource(&to_ganglion_resource(queue))
+            .await
+            .map(|_| ())
     }
 
     /// Legacy-only fixture for tests of the pre-enrollment controller surface.
@@ -3036,6 +3036,9 @@ impl GanglionCoordination {
 
             let held = promotion::retain_unproven_assignments(&committed, &mut desired)
                 .map_err(|error| ControlError::Consensus(OpenraftAdapterError::Storage(error)))?;
+            operator_override::clear_settled_owner_losses(&mut desired, |node| {
+                live_nodes.contains_key(node) && !draining.contains(node)
+            });
             recovery_candidate::replace_unavailable(&mut desired, |node| {
                 live_nodes.contains_key(node) && !draining.contains(node)
             })
@@ -3718,6 +3721,14 @@ mod tests {
 
         // Standbys never act as controller.
         let queue = QueueIdentity::new("orders", Partition::new(0), Some("workers"));
+        // An ephemeral stream makes no durability promise, so it may move on
+        // liveness alone. The legacy queue keeps only its owner's copy and
+        // must wait for that owner.
+        let ticks = StreamIdentity::new("ticks", Partition::new(0));
+        controller
+            .declare_stream("ticks", 1, STREAM_DURABILITY_EPHEMERAL, Default::default(), None)
+            .await
+            .expect("declare ephemeral stream");
         let live_node = |id: &str, port: u16| NodeInfo {
             node_id: id.to_string(),
             broker_addr: format!("127.0.0.1:{port}"),
@@ -3750,7 +3761,7 @@ mod tests {
                 &DeterministicPartitionPlacement,
                 std::slice::from_ref(&queue),
                 &DeterministicStreamPlacement,
-                &[],
+                std::slice::from_ref(&ticks),
                 1,
                 1,
                 ReplicationDurabilityPolicy::LocalDurable,
@@ -3766,6 +3777,11 @@ mod tests {
             .clone();
         assert_eq!(first.epoch, 1, "fresh assignment starts at epoch 1");
         assert_eq!(first.replica_set_size(), 2);
+        let first_stream = assigned
+            .stream_assignment_for("ticks", Partition::new(0))
+            .expect("stream assigned")
+            .clone();
+        assert_eq!(first_stream.owner, first.owner, "both land on the first node");
 
         // A follower provider observes the committed assignment via watch.
         let mut stream = standby.watch();
@@ -3789,7 +3805,7 @@ mod tests {
                 &DeterministicPartitionPlacement,
                 std::slice::from_ref(&queue),
                 &DeterministicStreamPlacement,
-                &[],
+                std::slice::from_ref(&ticks),
                 1,
                 1,
                 ReplicationDurabilityPolicy::LocalDurable,
@@ -3799,19 +3815,24 @@ mod tests {
             .await
             .expect("failover iteration should commit")
             .expect("leader runs the iteration");
-        let second = reassigned
+        let held = reassigned
             .assignment_for("orders", Partition::new(0), Some("workers"))
             .expect("queue still assigned")
             .clone();
-        assert_ne!(second.owner, first.owner, "ownership must move");
-        assert_eq!(second.epoch, first.epoch + 1, "owner change must fence");
+        assert_eq!(held, first, "owner-only durable queue waits for its owner");
+        let second = reassigned
+            .stream_assignment_for("ticks", Partition::new(0))
+            .expect("stream still assigned")
+            .clone();
+        assert_ne!(second.owner, first_stream.owner, "ownership must move");
+        assert_eq!(second.epoch, first_stream.epoch + 1, "owner change must fence");
 
         // The standby's watch converges on the failover assignment.
         tokio::time::timeout(timeout, async {
             loop {
                 let epoch = stream
                     .borrow_and_update()
-                    .assignment_for("orders", Partition::new(0), Some("workers"))
+                    .stream_assignment_for("ticks", Partition::new(0))
                     .map(|assignment| assignment.epoch);
                 if epoch == Some(second.epoch) {
                     break;
@@ -4518,6 +4539,16 @@ mod tests {
             .expect("b");
         let queue = QueueIdentity::new("orders", Partition::new(0), None);
         provider.register_legacy_queue(&queue).await.expect("queue");
+        // Only the ephemeral stream may leave a dead owner. The legacy queue
+        // keeps confirmed data on its owner alone.
+        provider
+            .declare_stream("ticks", 1, STREAM_DURABILITY_EPHEMERAL, Default::default(), None)
+            .await
+            .expect("declare stream");
+        provider
+            .register_stream(&StreamIdentity::new("ticks", Partition::new(0)))
+            .await
+            .expect("stream");
 
         let (controller, status) = provider.spawn_controller(
             std::sync::Arc::new(DeterministicPartitionPlacement),
@@ -4538,7 +4569,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(10), async {
             while stream
                 .borrow_and_update()
-                .assignment_for("orders", Partition::new(0), None)
+                .stream_assignment_for("ticks", Partition::new(0))
                 .is_none()
             {
                 stream.changed().await.expect("stream open");
@@ -4553,6 +4584,12 @@ mod tests {
             .expect("assigned");
         assert_eq!(first.epoch, 1);
         assert_eq!(first.replica_set_size(), 2, "owner + follower");
+        let first_stream = provider
+            .snapshot()
+            .stream_assignment_for("ticks", Partition::new(0))
+            .cloned()
+            .expect("stream assigned");
+        assert_eq!(first_stream.owner, first.owner);
         // Status updates just after the write returns; poll briefly.
         tokio::time::timeout(Duration::from_secs(5), async {
             while !status.read().unwrap().active {
@@ -4600,16 +4637,18 @@ mod tests {
 
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                if let Some(assignment) =
-                    provider
-                        .snapshot()
-                        .assignment_for("orders", Partition::new(0), None)
-                {
+                let snapshot = provider.snapshot();
+                if let Some(assignment) = snapshot.stream_assignment_for("ticks", Partition::new(0)) {
                     if assignment.owner == survivor {
                         assert_eq!(
                             assignment.epoch,
-                            first.epoch + 1,
+                            first_stream.epoch + 1,
                             "ownership move must fence"
+                        );
+                        assert_eq!(
+                            snapshot.assignment_for("orders", Partition::new(0), None),
+                            Some(&first),
+                            "owner-only durable queue waits for its owner"
                         );
                         return;
                     }
@@ -4832,7 +4871,7 @@ mod tests {
                 &provider.registered_streams(),
                 2,
                 2,
-                ReplicationDurabilityPolicy::LocalDurable,
+                ReplicationDurabilityPolicy::MajorityDurable,
                 &all_live,
                 8,
             )
@@ -4859,17 +4898,22 @@ mod tests {
                 &provider.registered_streams(),
                 2,
                 2,
-                ReplicationDurabilityPolicy::LocalDurable,
+                ReplicationDurabilityPolicy::MajorityDurable,
                 &live,
                 8,
             )
             .await
             .expect("failover")
             .expect("leader");
-        let moved = committed
-            .assignment_for("orders", Partition::new(0), None)
-            .expect("assigned")
-            .clone();
+        // The change parks as a recovery request. Its proposed owner is the
+        // node that drives recovery, and the tails decide it.
+        assert_eq!(
+            committed.assignment_for("orders", Partition::new(0), None),
+            Some(&first)
+        );
+        let pending = provider.pending_recoveries().expect("pending");
+        assert_eq!(pending.len(), 1);
+        let moved = &pending[0].proposed;
         assert_eq!(
             moved.owner, "c-fast",
             "candidate selection must prefer the most caught-up follower"
@@ -5143,7 +5187,7 @@ mod tests {
                         &provider.registered_streams(),
                         2,
                         2,
-                        ReplicationDurabilityPolicy::LocalDurable,
+                        ReplicationDurabilityPolicy::MajorityDurable,
                         &live,
                         8,
                     )
@@ -5168,11 +5212,10 @@ mod tests {
             .register_self_with_labels(&info("a-owner", 9000), draining_labels)
             .await
             .expect("mark draining");
-        let committed = iterate(live.clone()).await;
-        let moved = committed
-            .assignment_for("orders", Partition::new(0), None)
-            .expect("assigned")
-            .clone();
+        iterate(live.clone()).await;
+        let pending = provider.pending_recoveries().expect("pending");
+        assert_eq!(pending.len(), 1);
+        let moved = &pending[0].proposed;
         assert_eq!(
             moved.owner, "c-fast",
             "evacuate to the most caught-up follower"

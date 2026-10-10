@@ -721,6 +721,18 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- The controller no longer moves a resource that only its owner is known to
+  hold (owner-only speculative and durable streams, and legacy queues whose
+  write requirement is one copy) just because the owner stopped heartbeating.
+  The assignment waits for the owner to return. Ephemeral streams make no
+  durability promise and still move. `GanglionCoordination::accept_owner_loss`
+  records an operator decision to move such a resource anyway, bound to the
+  exact owner and epoch and spent by the move.
+
+- Cluster queues enroll in the accepted-history protocol on every platform.
+  Non-Unix builds registered them as legacy queues while directory sync was a
+  no-op there. Keratin now syncs directories on Windows too.
+
 - Replication progress and byte limits select the partition layout in mixed
   queue and stream deployments. Stream confirms use payload progress even when
   single-log queues are enabled or a stream assignment is still cold.

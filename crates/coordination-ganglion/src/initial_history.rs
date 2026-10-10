@@ -1354,7 +1354,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn consensus_preparation_survives_restart_without_granting_writer_permission() {
         use fibril_broker::{
