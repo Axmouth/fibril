@@ -1662,13 +1662,22 @@ fn apply_setup_submission(
         }
     });
 
-    if let Some(choice) = submission.cluster_secret {
-        let secret = match choice {
-            ClusterSecretChoice::Generate => generate_cluster_secret(),
-            ClusterSecretChoice::Provided(value) => value,
-        };
-        write_cluster_secret(layout, &secret)?;
-        summary.push("Cluster secret written to the node dir.".to_string());
+    match submission.cluster_secret {
+        // A secret copied in before the first start (for example after
+        // fibrilctl node init) is shared with other nodes, so generating a
+        // new one would split the cluster.
+        Some(ClusterSecretChoice::Generate) if layout.cluster_secret().exists() => {
+            summary.push("Kept the cluster secret already in the node dir.".to_string());
+        }
+        Some(choice) => {
+            let secret = match choice {
+                ClusterSecretChoice::Generate => generate_cluster_secret(),
+                ClusterSecretChoice::Provided(value) => value,
+            };
+            write_cluster_secret(layout, &secret)?;
+            summary.push("Cluster secret written to the node dir.".to_string());
+        }
+        None => {}
     }
 
     let overlay = fibril_config::ConfigOverlay {
@@ -3026,6 +3035,36 @@ mod tests {
 
         let error = format!("{result:#}");
         assert!(error.contains("admin listener failed"), "{error}");
+    }
+
+    #[test]
+    fn setup_generate_keeps_a_cluster_secret_copied_in_before_first_start() {
+        use fibril_admin::setup::{ClusterSecretChoice, SetupSubmission, TlsSetupChoice};
+        let root = temp_root("setup-keeps-secret");
+        let layout = NodeLayout::open_or_init(root.join("data"), "local").expect("init layout");
+        std::fs::write(layout.cluster_secret(), "copied-secret\n").expect("copy secret");
+
+        let applied = apply_setup_submission(
+            &layout,
+            &[],
+            SetupSubmission {
+                tls: TlsSetupChoice::SkipTls,
+                admin_credentials: None,
+                cluster_secret: Some(ClusterSecretChoice::Generate),
+            },
+        )
+        .expect("setup applies");
+        assert!(
+            applied.summary.contains("Kept the cluster secret"),
+            "{}",
+            applied.summary
+        );
+        assert_eq!(
+            std::fs::read_to_string(layout.cluster_secret()).expect("read secret"),
+            "copied-secret\n"
+        );
+        assert!(layout.setup_marker().exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
