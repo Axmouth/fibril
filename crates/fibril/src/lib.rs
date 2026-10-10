@@ -515,6 +515,62 @@ impl fibril_admin::BrokerTestPublisher for AdminTestPublisher {
     }
 }
 
+/// Operator overrides for held placements, behind the admin recovery routes.
+pub struct GanglionRecoveryOverrideManager {
+    coordination: Arc<TcpGanglionCoordination>,
+}
+
+impl GanglionRecoveryOverrideManager {
+    pub fn new(coordination: Arc<TcpGanglionCoordination>) -> Self {
+        Self { coordination }
+    }
+}
+
+#[async_trait]
+impl fibril_admin::RecoveryOverrideManager for GanglionRecoveryOverrideManager {
+    async fn withdraw_pending_recovery(
+        &self,
+        kind: fibril_admin::RecoveryResourceKind,
+        topic: String,
+        partition: u32,
+        group: Option<String>,
+    ) -> Result<serde_json::Value, String> {
+        let resource = fibril_coordination_ganglion::operator_override::operator_resource(
+            kind == fibril_admin::RecoveryResourceKind::Stream,
+            &topic,
+            partition,
+            group,
+        )?;
+        let withdrawn = self
+            .coordination
+            .withdraw_pending_recovery(&resource)
+            .await
+            .map_err(|error| error.to_string())?;
+        serde_json::to_value(withdrawn).map_err(|error| error.to_string())
+    }
+
+    async fn accept_owner_loss(
+        &self,
+        kind: fibril_admin::RecoveryResourceKind,
+        topic: String,
+        partition: u32,
+        group: Option<String>,
+    ) -> Result<serde_json::Value, String> {
+        let resource = fibril_coordination_ganglion::operator_override::operator_resource(
+            kind == fibril_admin::RecoveryResourceKind::Stream,
+            &topic,
+            partition,
+            group,
+        )?;
+        let accepted = self
+            .coordination
+            .accept_owner_loss(&resource)
+            .await
+            .map_err(|error| error.to_string())?;
+        serde_json::to_value(accepted).map_err(|error| error.to_string())
+    }
+}
+
 /// Live-repartition trigger for the admin endpoint: decides grow vs shrink from
 /// the queue's current count and calls the matching coordination operation.
 pub struct GanglionQueueRepartitionManager {
@@ -2387,6 +2443,9 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
                     parts.coordination.clone(),
                 )))
                 .with_queue_repartition(Arc::new(GanglionQueueRepartitionManager::new(
+                    parts.coordination.clone(),
+                )))
+                .with_recovery_overrides(Arc::new(GanglionRecoveryOverrideManager::new(
                     parts.coordination.clone(),
                 )))
                 .with_runtime_settings_cluster(Arc::new(GanglionRuntimeSettingsStore::new(

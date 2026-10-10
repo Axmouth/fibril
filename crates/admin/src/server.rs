@@ -66,6 +66,37 @@ pub trait QueueRepartitionManager: Send + Sync + 'static {
     ) -> Result<serde_json::Value, String>;
 }
 
+/// Operator overrides for placement holds that automatic recovery cannot
+/// resolve. `kind` is `queue` or `stream`. Errors are shown verbatim.
+#[async_trait]
+pub trait RecoveryOverrideManager: Send + Sync + 'static {
+    /// Remove a pending recovery that no automatic stage has acted on.
+    async fn withdraw_pending_recovery(
+        &self,
+        kind: RecoveryResourceKind,
+        topic: String,
+        partition: u32,
+        group: Option<String>,
+    ) -> Result<serde_json::Value, String>;
+
+    /// Let a resource held on a missing owner move, giving up any writes only
+    /// that owner kept.
+    async fn accept_owner_loss(
+        &self,
+        kind: RecoveryResourceKind,
+        topic: String,
+        partition: u32,
+        group: Option<String>,
+    ) -> Result<serde_json::Value, String>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryResourceKind {
+    Queue,
+    Stream,
+}
+
 /// Operator-triggered drain: announce a planned restart or upgrade to connected
 /// clients (a `GoingAway` push) so they settle in-flight work and reconnect,
 /// redirecting to the post-drain owner. Returns how many clients were notified.
@@ -278,6 +309,8 @@ pub struct AdminServer {
     pub coordination_membership: Option<Arc<dyn CoordinationMembershipManager>>,
     /// Optional live-repartition trigger (grow/shrink a queue's partition count).
     pub queue_repartition: Option<Arc<dyn QueueRepartitionManager>>,
+    /// Optional operator overrides for held placements and pending recoveries.
+    pub recovery_overrides: Option<Arc<dyn RecoveryOverrideManager>>,
     /// Optional cluster-authoritative runtime-settings store. When absent,
     /// runtime settings are local-only and use the node's Stroma global store.
     pub runtime_settings_cluster: Option<Arc<dyn RuntimeSettingsClusterStore>>,
@@ -368,6 +401,7 @@ impl AdminServer {
             cohorts: None,
             coordination_membership: None,
             queue_repartition: None,
+            recovery_overrides: None,
             runtime_settings_cluster: None,
             streams: None,
             users: None,
@@ -523,6 +557,12 @@ impl AdminServer {
         self
     }
 
+    /// Attach the operator overrides behind `POST /admin/api/recovery/*`.
+    pub fn with_recovery_overrides(mut self, manager: Arc<dyn RecoveryOverrideManager>) -> Self {
+        self.recovery_overrides = Some(manager);
+        self
+    }
+
     pub fn with_local_storage_settings(
         mut self,
         settings: Arc<fibril_broker::local_storage_settings::LocalStorageSettings>,
@@ -653,6 +693,14 @@ impl AdminServer {
             .route(
                 "/admin/api/repartition",
                 axum::routing::post(routes::repartition_queue),
+            )
+            .route(
+                "/admin/api/recovery/withdraw",
+                axum::routing::post(routes::withdraw_pending_recovery),
+            )
+            .route(
+                "/admin/api/recovery/accept-owner-loss",
+                axum::routing::post(routes::accept_owner_loss),
             )
             .route("/admin/api/drain", axum::routing::post(routes::drain))
             .route("/admin/api/events", axum::routing::get(crate::events::events))
@@ -1961,6 +2009,81 @@ mod tests {
             .unwrap();
         let text = String::from_utf8_lossy(&bytes);
         assert!(text.contains("partion_count"), "error should name the field: {text}");
+    }
+
+    #[derive(Default)]
+    struct RecordingOverrides(std::sync::Mutex<Vec<(String, RecoveryResourceKind, String, u32)>>);
+    #[async_trait::async_trait]
+    impl RecoveryOverrideManager for RecordingOverrides {
+        async fn withdraw_pending_recovery(
+            &self,
+            kind: RecoveryResourceKind,
+            topic: String,
+            partition: u32,
+            _group: Option<String>,
+        ) -> Result<serde_json::Value, String> {
+            self.0.lock().unwrap().push(("withdraw".into(), kind, topic, partition));
+            Ok(serde_json::json!({}))
+        }
+        async fn accept_owner_loss(
+            &self,
+            kind: RecoveryResourceKind,
+            topic: String,
+            partition: u32,
+            _group: Option<String>,
+        ) -> Result<serde_json::Value, String> {
+            self.0.lock().unwrap().push(("accept".into(), kind, topic, partition));
+            Err("resource has a pending recovery; withdraw it before accepting loss".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_overrides_require_confirmation_for_data_loss() {
+        let overrides = Arc::new(RecordingOverrides::default());
+        let server = Arc::try_unwrap(test_server(RuntimeSettingsLocks::default()).await)
+            .ok()
+            .expect("sole owner")
+            .with_recovery_overrides(overrides.clone());
+        let app = AdminServer::router(Arc::new(server));
+        let post = |uri: &str, body: &str| {
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let target = r#""kind":"stream","topic":"ticks","partition":1"#;
+        let unconfirmed = app
+            .clone()
+            .oneshot(post("/admin/api/recovery/accept-owner-loss", &format!("{{{target}}}")))
+            .await
+            .unwrap();
+        assert_eq!(unconfirmed.status(), StatusCode::BAD_REQUEST);
+        assert!(overrides.0.lock().unwrap().is_empty(), "nothing reaches coordination");
+
+        let refused = app
+            .clone()
+            .oneshot(post(
+                "/admin/api/recovery/accept-owner-loss",
+                &format!("{{{target},\"confirm_data_loss\":true}}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+
+        let withdrawn = app
+            .oneshot(post("/admin/api/recovery/withdraw", &format!("{{{target}}}")))
+            .await
+            .unwrap();
+        assert_eq!(withdrawn.status(), StatusCode::OK);
+        assert_eq!(
+            *overrides.0.lock().unwrap(),
+            vec![
+                ("accept".to_string(), RecoveryResourceKind::Stream, "ticks".to_string(), 1),
+                ("withdraw".to_string(), RecoveryResourceKind::Stream, "ticks".to_string(), 1),
+            ]
+        );
     }
 
     struct NoopStreamAdmin;

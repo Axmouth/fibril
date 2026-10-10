@@ -107,7 +107,7 @@ fn history_and_witness_requirement(
 /// promise. Speculative and durable streams and every queue confirm only
 /// after the owner persisted the write, so a move could drop confirmed data.
 /// A stream whose config is missing or unreadable counts as durable.
-fn owner_move_loses_nothing(snapshot: &CoordinationSnapshot, resource: &ResourceIdentity) -> bool {
+pub(crate) fn owner_move_loses_nothing(snapshot: &CoordinationSnapshot, resource: &ResourceIdentity) -> bool {
     resource.namespace == super::STREAM_NAMESPACE
         && snapshot
             .attributes

@@ -1,7 +1,10 @@
 //! Operator decisions that relax a placement hold. Each one is bound to the
 //! exact assignment the operator saw, so a decision about one owner can never
 //! release a later, different hold.
-use crate::{GanglionCoordination, promotion::pending_recovery_key};
+use crate::{
+    GanglionCoordination,
+    promotion::{PendingRecovery, pending_recovery_key},
+};
 use ganglion_core::{CoordinationSnapshot, PartitionAssignment, ResourceIdentity};
 use ganglion_openraft::{MetadataRaftCommand, OpenraftAdapterError};
 use serde::{Deserialize, Serialize};
@@ -25,6 +28,27 @@ pub fn accepted_owner_loss_key(resource: &ResourceIdentity) -> String {
         "{ACCEPTED_OWNER_LOSS_PREFIX}{}",
         serde_json::to_string(resource).expect("resource identity serializes")
     )
+}
+
+/// Coordination identity of a queue or stream partition named by an operator.
+pub fn operator_resource(
+    stream: bool,
+    topic: &str,
+    partition: u32,
+    group: Option<String>,
+) -> Result<ResourceIdentity, String> {
+    if stream && group.is_some() {
+        return Err("streams have no group".into());
+    }
+    if group.as_deref().is_some_and(|g| g.is_empty() || g == "default") {
+        return Err("the default group is written without a group".into());
+    }
+    let namespace = if stream {
+        crate::STREAM_NAMESPACE
+    } else {
+        crate::QUEUE_NAMESPACE
+    };
+    Ok(ResourceIdentity::new(namespace, topic, u64::from(partition), group))
 }
 
 /// Whether an operator accepted losing the owner of exactly this assignment.
@@ -120,6 +144,113 @@ impl GanglionCoordination {
     }
 }
 
+/// Something placement cannot resolve without an operator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RecoveryAttention {
+    pub resource: ResourceIdentity,
+    pub reason: &'static str,
+    pub action: &'static str,
+}
+
+/// List pending recoveries the automatic driver will never finish and
+/// assignments held on a missing owner. Read-only, for status and logs.
+pub fn recovery_attention(
+    snapshot: &CoordinationSnapshot,
+    owner_serving: impl Fn(&str) -> bool,
+) -> Vec<RecoveryAttention> {
+    let mut out = Vec::new();
+    for (key, raw) in &snapshot.attributes {
+        if !key.starts_with(crate::promotion::PENDING_RECOVERY_PREFIX) {
+            continue;
+        }
+        let Ok(pending) = serde_json::from_str::<PendingRecovery>(raw) else {
+            continue;
+        };
+        // The driver only recovers queues with an accepted history.
+        if pending.previous_activation.is_some() {
+            continue;
+        }
+        let stream = pending.previous.resource.namespace == crate::STREAM_NAMESPACE;
+        out.push(RecoveryAttention {
+            resource: pending.previous.resource.clone(),
+            reason: if stream {
+                "stream pending recovery is unsupported for automatic resolution"
+            } else {
+                "legacy queue pending recovery is unsupported for automatic resolution"
+            },
+            action: "withdraw it once the owner serves again, or withdraw it and accept owner loss",
+        });
+    }
+    for (resource, current) in &snapshot.assignments {
+        if owner_serving(&current.owner)
+            || snapshot.attributes.contains_key(&pending_recovery_key(resource))
+            || owner_loss_accepted(snapshot, current)
+            || crate::promotion::owner_move_loses_nothing(snapshot, resource)
+            || crate::promotion::write_requirement(current) != Ok(1)
+            || crate::history_identity::resource_incarnation(snapshot, resource)
+                .map_or(true, |id| id.is_some_and(|id| id.version == 2))
+        {
+            continue;
+        }
+        out.push(RecoveryAttention {
+            resource: resource.clone(),
+            reason: "only the missing owner holds every confirmed write, so the assignment waits for it",
+            action: "bring the owner back, or accept owner loss to move it",
+        });
+    }
+    out.sort_by(|a, b| {
+        serde_json::to_string(&a.resource)
+            .unwrap_or_default()
+            .cmp(&serde_json::to_string(&b.resource).unwrap_or_default())
+    });
+    out
+}
+
+impl GanglionCoordination {
+    /// Remove a pending recovery that no automatic stage has acted on, so the
+    /// controller can plan the resource again. Refused for queues with an
+    /// accepted history: their replicas may already hold durable seals for
+    /// the request, which coordination cannot see or undo.
+    pub async fn withdraw_pending_recovery(
+        &self,
+        resource: &ResourceIdentity,
+    ) -> Result<PendingRecovery, OpenraftAdapterError> {
+        let snapshot = self.node.committed_snapshot();
+        let key = pending_recovery_key(resource);
+        let raw = snapshot
+            .attributes
+            .get(&key)
+            .ok_or_else(|| error("resource has no pending recovery"))?;
+        let pending: PendingRecovery = serde_json::from_str(raw).map_err(error)?;
+        if pending.previous_activation.is_some() {
+            return Err(error(
+                "recovery of an accepted queue history cannot be withdrawn; replicas may already be sealed for it",
+            ));
+        }
+        if snapshot
+            .attributes
+            .contains_key(&crate::recovery_plan::key(&pending).map_err(error)?)
+        {
+            return Err(error("recovery already recorded a plan and cannot be withdrawn"));
+        }
+        let current = snapshot
+            .assignments
+            .get(resource)
+            .ok_or_else(|| error("resource has no assignment"))?
+            .clone();
+        self.forward_command(MetadataRaftCommand::UpdatePartitionGuarded {
+            expected_generation: snapshot.generation,
+            assignment: current,
+            attributes: std::collections::BTreeMap::from([
+                (key, None),
+                (crate::recovery_candidate::key(&pending).map_err(error)?, None),
+            ]),
+        })
+        .await?;
+        Ok(pending)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,6 +285,20 @@ mod tests {
         assert!(owner_loss_accepted(&snapshot, &assignment("a", 3)));
         assert!(!owner_loss_accepted(&snapshot, &assignment("a", 4)));
         assert!(!owner_loss_accepted(&snapshot, &assignment("b", 3)));
+    }
+
+    #[test]
+    fn attention_flags_a_durable_resource_held_on_a_missing_owner() {
+        let mut current = assignment("a", 3);
+        current.durability = ganglion_core::ReplicationDurabilityPolicy::LocalDurable;
+        let mut snapshot = CoordinationSnapshot::default();
+        snapshot.assignments.insert(current.resource.clone(), current.clone());
+        assert!(recovery_attention(&snapshot, |_| true).is_empty());
+        let flagged = recovery_attention(&snapshot, |_| false);
+        assert_eq!(flagged.len(), 1);
+        assert!(flagged[0].action.contains("accept owner loss"));
+        accept(&mut snapshot, "a", 3);
+        assert!(recovery_attention(&snapshot, |_| false).is_empty(), "already decided");
     }
 
     #[test]

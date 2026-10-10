@@ -113,6 +113,22 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- `fibrilctl admin recovery withdraw` and `POST /admin/api/recovery/withdraw`
+  remove a pending recovery that no automatic stage has acted on, such as a
+  stream request that automatic recovery never resolves. Requests against a
+  queue with an accepted history are refused because its replicas may
+  already be sealed.
+
+- `fibrilctl admin recovery accept-owner-loss --confirm-data-loss` and
+  `POST /admin/api/recovery/accept-owner-loss` (with `confirm_data_loss`)
+  let a resource held on a missing owner move, giving up writes only that
+  owner stored. Refused while a recovery request is pending.
+
+- The controller status in the topology JSON lists holds and pending
+  recoveries that need an operator under `attention`, and logs a warning when
+  one appears. A stream pending recovery is flagged as unsupported for
+  automatic resolution.
+
 - Automatic queue recovery resumes completed local inspection phases and staged
   offsets without a total-history record/byte budget or whole-attempt deadline.
   Per-page, retained-state, concurrency and free-space admission remain bounded.

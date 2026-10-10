@@ -149,6 +149,20 @@ pub struct RepartitionQueueRequest {
     pub partition_count: u32,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryResourceRequest {
+    pub kind: crate::server::RecoveryResourceKind,
+    pub topic: String,
+    pub partition: u32,
+    #[serde(default)]
+    pub group: Option<String>,
+    /// Required `true` for accepting owner loss, which can drop confirmed
+    /// writes. Ignored by withdraw.
+    #[serde(default)]
+    pub confirm_data_loss: bool,
+}
+
 #[derive(Serialize)]
 pub struct QueueDlqResponse {
     pub status: &'static str,
@@ -959,6 +973,79 @@ pub async fn repartition_queue(
             "repartition_failed",
             error,
         )),
+    }
+}
+
+/// POST /admin/api/recovery/withdraw: remove a pending recovery that no
+/// automatic stage has acted on (for example a stream request the recovery
+/// driver never resolves).
+pub async fn withdraw_pending_recovery(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<RecoveryResourceRequest>,
+) -> Result<Response, StatusCode> {
+    recovery_override(server, headers, request, false).await
+}
+
+/// POST /admin/api/recovery/accept-owner-loss: let a resource held on a
+/// missing owner move. Requires `confirm_data_loss: true`.
+pub async fn accept_owner_loss(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<RecoveryResourceRequest>,
+) -> Result<Response, StatusCode> {
+    recovery_override(server, headers, request, true).await
+}
+
+async fn recovery_override(
+    server: Arc<AdminServer>,
+    headers: axum::http::HeaderMap,
+    request: RecoveryResourceRequest,
+    accept_loss: bool,
+) -> Result<Response, StatusCode> {
+    check_auth(&server, &headers).await?;
+    if accept_loss && !request.confirm_data_loss {
+        return Ok(admin_error(
+            StatusCode::BAD_REQUEST,
+            "confirmation_required",
+            "accepting owner loss can drop confirmed writes; resend with confirm_data_loss set to true",
+        ));
+    }
+    let Some(manager) = &server.recovery_overrides else {
+        return Ok(admin_error(
+            StatusCode::NOT_FOUND,
+            "recovery_overrides_unavailable",
+            "recovery overrides are not available (requires ganglion coordination)",
+        ));
+    };
+    let group = normalize_group(request.group);
+    let target = format!(
+        "{:?} {}/{}{}",
+        request.kind,
+        request.topic,
+        request.partition,
+        group.as_deref().map(|g| format!(" group {g}")).unwrap_or_default()
+    );
+    let result = if accept_loss {
+        manager
+            .accept_owner_loss(request.kind, request.topic, request.partition, group)
+            .await
+    } else {
+        manager
+            .withdraw_pending_recovery(request.kind, request.topic, request.partition, group)
+            .await
+    };
+    let action = if accept_loss {
+        "accept_owner_loss"
+    } else {
+        "withdraw_pending_recovery"
+    };
+    match result {
+        Ok(value) => {
+            server.audit.record(action, "warning", target, format!("{action} committed"));
+            Ok(Json(serde_json::json!({ action: value })).into_response())
+        }
+        Err(error) => Ok(admin_error(StatusCode::CONFLICT, "recovery_override_refused", error)),
     }
 }
 

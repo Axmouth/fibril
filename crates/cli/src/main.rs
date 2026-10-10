@@ -210,6 +210,53 @@ enum AdminCommand {
     /// Re-read the broker's TLS certificate and key and serve the new pair to
     /// subsequent handshakes (same-CA leaf rotation without a restart).
     ReloadTls,
+    /// Operator overrides for placements automatic recovery cannot resolve.
+    /// `admin topology --json` lists them under consensus.controller.attention.
+    Recovery {
+        #[command(subcommand)]
+        command: RecoveryCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RecoveryCommand {
+    /// Withdraw a pending recovery that no automatic stage has acted on, so
+    /// the controller plans the partition again. Use it for stream requests,
+    /// which automatic recovery never resolves, once the owner serves again.
+    /// Refused for queues with an accepted history.
+    Withdraw(RecoveryTargetArgs),
+    /// Move a partition held on a missing owner to another node. DATA LOSS:
+    /// writes that only the old owner stored, including confirmed ones, are
+    /// given up. The decision covers the current owner and epoch only.
+    AcceptOwnerLoss(AcceptOwnerLossArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct RecoveryTargetArgs {
+    /// Topic of the queue or stream.
+    topic: String,
+
+    /// Partition number.
+    partition: u32,
+
+    /// Queue group (part of the queue identity). Streams have no group.
+    #[arg(long)]
+    group: Option<String>,
+
+    /// Target a stream partition instead of a queue partition.
+    #[arg(long)]
+    stream: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct AcceptOwnerLossArgs {
+    #[command(flatten)]
+    target: RecoveryTargetArgs,
+
+    /// Confirm that confirmed writes held only by the missing owner may be
+    /// lost. Required.
+    #[arg(long, required = true)]
+    confirm_data_loss: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -629,6 +676,22 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 },
                 AdminCommand::Repartition(args) => print_json(admin.repartition(args).await?)?,
                 AdminCommand::ReloadTls => print_json(admin.reload_tls().await?)?,
+                AdminCommand::Recovery { command } => match command {
+                    RecoveryCommand::Withdraw(args) => print_json(
+                        admin
+                            .recovery_override("/admin/api/recovery/withdraw", args, false)
+                            .await?,
+                    )?,
+                    RecoveryCommand::AcceptOwnerLoss(args) => print_json(
+                        admin
+                            .recovery_override(
+                                "/admin/api/recovery/accept-owner-loss",
+                                args.target,
+                                args.confirm_data_loss,
+                            )
+                            .await?,
+                    )?,
+                },
             }
         }
     }
@@ -823,6 +886,16 @@ struct RemoveCoordinationVotingMemberRequest {
 }
 
 #[derive(Debug, Serialize)]
+struct RecoveryOverrideRequest {
+    kind: &'static str,
+    topic: String,
+    partition: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    group: Option<String>,
+    confirm_data_loss: bool,
+}
+
+#[derive(Debug, Serialize)]
 struct RepartitionRequest {
     topic: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -956,6 +1029,25 @@ impl AdminClient {
                 topic: args.topic,
                 group: normalize_group_arg(args.group.as_deref()).map(str::to_string),
                 partition_count: args.partition_count,
+            },
+        )
+        .await
+    }
+
+    async fn recovery_override(
+        &self,
+        path: &str,
+        args: RecoveryTargetArgs,
+        confirm_data_loss: bool,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.post_json(
+            path,
+            &RecoveryOverrideRequest {
+                kind: if args.stream { "stream" } else { "queue" },
+                topic: args.topic,
+                partition: args.partition,
+                group: normalize_group_arg(args.group.as_deref()).map(str::to_string),
+                confirm_data_loss,
             },
         )
         .await
@@ -1176,6 +1268,24 @@ mod tests {
             admin.url("/admin/api/messages"),
             "http://127.0.0.1:9090/admin/api/messages"
         );
+    }
+
+    #[test]
+    fn accept_owner_loss_requires_explicit_confirmation() {
+        let base = ["fibrilctl", "admin", "recovery", "accept-owner-loss", "ticks", "2", "--stream"];
+        assert!(Cli::try_parse_from(base).is_err());
+        let cli = Cli::try_parse_from(base.iter().copied().chain(["--confirm-data-loss"])).unwrap();
+        let Command::Admin {
+            command:
+                AdminCommand::Recovery {
+                    command: RecoveryCommand::AcceptOwnerLoss(args),
+                },
+        } = cli.command
+        else {
+            panic!("expected accept-owner-loss");
+        };
+        assert!(args.confirm_data_loss && args.target.stream);
+        assert_eq!((args.target.topic.as_str(), args.target.partition), ("ticks", 2));
     }
 
     #[test]

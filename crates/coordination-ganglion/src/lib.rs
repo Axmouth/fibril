@@ -1001,6 +1001,8 @@ pub struct ControllerStatus {
     pub last_error: Option<String>,
     /// Assignment changes held until confirmed-history recovery can complete.
     pub pending_recoveries: Vec<promotion::PendingRecovery>,
+    /// Holds and pending recoveries that need an operator decision.
+    pub attention: Vec<operator_override::RecoveryAttention>,
     pub eager_suspects: Vec<eager_failover::EagerSuspect>,
 }
 
@@ -2445,6 +2447,7 @@ impl GanglionCoordination {
             let mut transport = provider.node.peer_transport_failures();
             let mut detector = eager_failover::Detector::default();
             let mut previous_suspects = std::collections::BTreeSet::new();
+            let mut previous_attention = Vec::new();
             loop {
                 let queues = provider.registered_queues();
                 let streams = provider.registered_streams();
@@ -2519,6 +2522,16 @@ impl GanglionCoordination {
                                 Ok(requests) => status.pending_recoveries = requests,
                                 Err(error) => status.last_error = Some(error.to_string()),
                             }
+                            let attention = operator_override::recovery_attention(
+                                &provider.node.committed_snapshot(),
+                                |node| live.contains_key(node),
+                            );
+                            for item in attention.iter().filter(|item| !previous_attention.contains(*item)) {
+                                tracing::warn!(topic = item.resource.name, partition = item.resource.partition,
+                                    namespace = item.resource.namespace, action = item.action, "{}", item.reason);
+                            }
+                            previous_attention = attention.clone();
+                            status.attention = attention;
                         }
                         Ok(None) => status.active = false,
                         Err(error) => {
@@ -5334,6 +5347,114 @@ mod tests {
             .shutdown()
             .await
             .expect("shutdown");
+    }
+
+    /// A replicated stream ownership change parks forever because automatic
+    /// recovery does not handle streams. The controller flags it, an operator
+    /// can withdraw it and then accept losing the old owner.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn operator_resolves_a_stuck_stream_recovery() {
+        let router = InProcessRouter::new();
+        let raft_node = RaftMetadataNode::start(1, default_raft_config().unwrap(), &router)
+            .await
+            .unwrap();
+        raft_node
+            .initialize(BTreeMap::from([(1u64, ganglion_openraft::openraft::BasicNode::new("n1"))]))
+            .await
+            .unwrap();
+        raft_node.wait_for_leader(1, Duration::from_secs(10)).await.unwrap();
+        let provider = GanglionCoordination::new("a-owner", raft_node);
+        let info = |id: &str| NodeInfo {
+            node_id: id.into(),
+            broker_addr: "127.0.0.1:9000".into(),
+            admin_addr: None,
+        };
+        for id in ["a-owner", "b-follower", "c-spare"] {
+            provider.register_self(&info(id)).await.unwrap();
+        }
+        provider
+            .declare_stream("ticks", 1, STREAM_DURABILITY_DURABLE, Default::default(), Some(1))
+            .await
+            .unwrap();
+        let stream = StreamIdentity::new("ticks", Partition::new(0));
+        provider.register_stream(&stream).await.unwrap();
+        let iterate = |live: HashMap<String, NodeInfo>| {
+            let provider = &provider;
+            async move {
+                provider
+                    .control_iteration(
+                        &fibril_broker::coordination::DeterministicPartitionPlacement,
+                        &[],
+                        &DeterministicStreamPlacement,
+                        &provider.registered_streams(),
+                        1,
+                        1,
+                        ReplicationDurabilityPolicy::LocalDurable,
+                        &live,
+                        8,
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+        };
+        let all: HashMap<_, _> = ["a-owner", "b-follower", "c-spare"]
+            .into_iter()
+            .map(|id| (id.to_string(), info(id)))
+            .collect();
+        let first = iterate(all.clone()).await.stream_assignment_for("ticks", Partition::new(0)).unwrap().clone();
+        assert_eq!(first.owner, "a-owner");
+        let mut survivors = all.clone();
+        survivors.remove("a-owner");
+        iterate(survivors.clone()).await;
+        let resource = to_ganglion_stream_resource(&stream);
+        let snapshot = provider.consensus_node().committed_snapshot();
+        assert!(snapshot.attributes.contains_key(&promotion::pending_recovery_key(&resource)));
+        let attention = operator_override::recovery_attention(&snapshot, |n| survivors.contains_key(n));
+        assert_eq!(attention.len(), 1);
+        assert!(attention[0].reason.contains("unsupported for automatic resolution"));
+
+        // A pending request blocks accepting loss until it is withdrawn.
+        assert!(provider.accept_owner_loss(&resource).await.is_err());
+        provider.withdraw_pending_recovery(&resource).await.unwrap();
+        assert!(provider.pending_recoveries().unwrap().is_empty());
+        assert!(provider.withdraw_pending_recovery(&resource).await.is_err());
+        provider.accept_owner_loss(&resource).await.unwrap();
+        let moved = iterate(survivors).await.stream_assignment_for("ticks", Partition::new(0)).unwrap().clone();
+        assert_eq!(moved.owner, "b-follower");
+        assert_eq!(moved.epoch, first.epoch + 1);
+        assert!(provider.pending_recoveries().unwrap().is_empty());
+        let snapshot = provider.consensus_node().committed_snapshot();
+        assert!(!snapshot.attributes.contains_key(&operator_override::accepted_owner_loss_key(&resource)));
+
+        // A request against an accepted queue history may already have
+        // sealed replicas and is never withdrawn by hand.
+        let mut sealed = promotion::PendingRecovery {
+            version: 1,
+            resource_incarnation: None,
+            previous_activation: Some([1; 32]),
+            requested_generation: snapshot.generation,
+            previous: snapshot.assignments[&resource].clone(),
+            proposed: snapshot.assignments[&resource].clone(),
+            previous_write_nodes: 2,
+            proposed_write_nodes: 2,
+            required_old_witnesses: 1,
+        };
+        sealed.proposed.epoch += 1;
+        let mut with_sealed = snapshot.clone();
+        with_sealed
+            .attributes
+            .insert(promotion::pending_recovery_key(&resource), serde_json::to_string(&sealed).unwrap());
+        provider
+            .consensus_node()
+            .write_snapshot_guarded(snapshot.generation, with_sealed)
+            .await
+            .unwrap();
+        let refused = provider.withdraw_pending_recovery(&resource).await.unwrap_err();
+        assert!(refused.to_string().contains("cannot be withdrawn"), "{refused}");
+        assert!(!provider.pending_recoveries().unwrap().is_empty());
+
+        provider.consensus_node().shutdown().await.unwrap();
     }
 
     /// Self-registration merges into the shared node table (no clobbering)

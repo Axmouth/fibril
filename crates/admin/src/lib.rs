@@ -13,6 +13,7 @@ pub mod setup;
 pub use server::{
     AdminConfig, AdminServer, AdminServerError, AdminUserInfo, BrokerDrainController,
     BrokerTestPublisher, CertInfoProvider, CoordinationMembershipManager, DrainOutcome,
-    QueueRepartitionManager, RuntimeSettingsClusterStore, RuntimeSettingsClusterUpdateOutcome,
+    QueueRepartitionManager, RecoveryOverrideManager, RecoveryResourceKind,
+    RuntimeSettingsClusterStore, RuntimeSettingsClusterUpdateOutcome,
     StartupConfigSummary, TestPublishOutcome, UserAdmin,
 };
