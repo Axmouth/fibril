@@ -3166,21 +3166,37 @@ impl GanglionCoordination {
                 });
                 match best {
                     Some(best_follower) => {
-                        if planned.owner != best_follower {
-                            let displaced =
-                                std::mem::replace(&mut planned.owner, best_follower.clone());
-                            // Keep the replica set coherent: the chosen follower
-                            // leaves the follower list; the planner's displaced
-                            // pick joins it (if live and distinct).
-                            planned
-                                .followers
-                                .retain(|follower| *follower != best_follower);
+                        let displaced =
+                            std::mem::replace(&mut planned.owner, best_follower.clone());
+                        planned.followers.retain(|follower| *follower != best_follower);
+                        let mut fresh_free = planned.clone();
+                        fresh_free
+                            .followers
+                            .retain(|follower| current.followers.contains(follower));
+                        let keeps_writes = promotion::write_requirement(&fresh_free).ok()
+                            >= promotion::write_requirement(current).ok();
+                        if keeps_writes {
+                            // Recovery installs every proposed member before
+                            // the new owner serves, so a node without a copy,
+                            // the planner's pick or its fill, would put a full
+                            // copy on the critical path. Copy holders alone
+                            // still meet the write requirement, so normal
+                            // planning adds the rest after activation.
+                            *planned = fresh_free;
                             if displaced != best_follower
-                                && live_nodes.contains_key(&displaced)
+                                && current.followers.contains(&displaced)
                                 && !planned.followers.contains(&displaced)
                             {
                                 planned.followers.push(displaced);
                             }
+                        } else if displaced != best_follower
+                            && live_nodes.contains_key(&displaced)
+                            && !planned.followers.contains(&displaced)
+                        {
+                            // Too few copy holders survive to keep the write
+                            // requirement, which promotion never lowers on
+                            // liveness alone. A fresh node has to join now.
+                            planned.followers.push(displaced);
                         }
                     }
                     // A draining owner with no live follower keeps the
@@ -5581,6 +5597,68 @@ mod tests {
         );
     }
 
+    /// The node the planner picked before the label override chose a
+    /// follower does not join the proposed replica set: it holds no copy and
+    /// would have to be built before the new owner serves.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn displaced_planner_pick_stays_out_of_the_recovery_set() {
+        let router = InProcessRouter::new();
+        let raft_node = RaftMetadataNode::start(1, default_raft_config().unwrap(), &router)
+            .await
+            .unwrap();
+        raft_node
+            .initialize(BTreeMap::from([(1u64, ganglion_openraft::openraft::BasicNode::new("n1"))]))
+            .await
+            .unwrap();
+        raft_node.wait_for_leader(1, Duration::from_secs(10)).await.unwrap();
+        let provider = GanglionCoordination::new("b", raft_node);
+        let queue = QueueIdentity::new("orders", Partition::new(0), None);
+        let info = |id: &str| NodeInfo {
+            node_id: id.into(),
+            broker_addr: "127.0.0.1:9000".into(),
+            admin_addr: None,
+        };
+        let tails = |next| BTreeMap::from([(applied_tail_label(&queue), encode_queue_applied_tail(next))]);
+        provider.register_legacy_queue(&queue).await.unwrap();
+        let iterate = |ids: &'static [&'static str]| {
+            let provider = &provider;
+            async move {
+                let live: HashMap<String, NodeInfo> =
+                    ids.iter().map(|id| (id.to_string(), info(id))).collect();
+                provider
+                    .control_iteration(
+                        &fibril_broker::coordination::DeterministicPartitionPlacement,
+                        &provider.registered_queues(),
+                        &DeterministicStreamPlacement,
+                        &[],
+                        2,
+                        2,
+                        ReplicationDurabilityPolicy::MajorityDurable,
+                        &live,
+                        8,
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+        };
+        provider.register_self(&info("b")).await.unwrap();
+        provider.register_self_with_labels(&info("c"), tails(5)).await.unwrap();
+        provider.register_self_with_labels(&info("d"), tails(9)).await.unwrap();
+        let first = iterate(&["b", "c", "d"]).await.assignment_for("orders", Partition::new(0), None).unwrap().clone();
+        assert_eq!(first.owner, "b");
+        assert_eq!(first.followers, vec!["c", "d"]);
+        // "a" joins later and sorts first, so the planner picks it for the
+        // dead owner's partition. The labels choose "d".
+        provider.register_self(&info("a")).await.unwrap();
+        iterate(&["a", "c", "d"]).await;
+        let pending = provider.pending_recoveries().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].proposed.owner, "d");
+        assert_eq!(pending[0].proposed.followers, vec!["c"]);
+        provider.consensus_node().shutdown().await.unwrap();
+    }
+
     /// With no applied-tail labels, a dead owner's partition goes to a live
     /// committed follower rather than the planner's round-robin pick, which
     /// would have to copy the whole history first.
@@ -5636,6 +5714,9 @@ mod tests {
         let pending = provider.pending_recoveries().unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].proposed.owner, "c");
+        // "c" alone cannot meet the old write requirement of two copies, so
+        // the fresh node joins the recovery set.
+        assert_eq!(pending[0].proposed.followers, vec!["a"]);
         provider.consensus_node().shutdown().await.unwrap();
     }
 

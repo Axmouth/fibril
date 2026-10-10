@@ -745,6 +745,12 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- When the controller hands a dead or draining owner's partition to a
+  follower, the proposed replica set keeps only nodes that already hold a
+  copy, as long as they still meet the write requirement. The planner's
+  displaced pick and any fresh fill no longer have to be built before the new
+  owner serves, and join later through normal planning.
+
 - Stream failover candidates rank by record tail first and cursor-event tail
   second. Ranking by the event tail alone could prefer a follower that is
   ahead on consumer progress but missing confirmed records.
