@@ -213,6 +213,77 @@ protocol, or out-of-band payload framing, would each save only a slice of
 that. Not worth the churn now. If it is ever revisited, it belongs with the
 protocol versioning and freeze work (#110).
 
+## D. Single-client engine ceiling (audit 2026-07-05)
+
+Scope: the Rust client engine in `crates/client/src/lib.rs`. One engine task
+per connection owns the socket and runs one `select!` loop over the command
+channel, inbound frames, the flush tick and the heartbeat. Publish encode,
+feed and flush, inbound decode, confirm dispatch and delivery dispatch all
+serialize through that one task.
+
+Bench: `steady_c --rate-per-sec 0` publishes as fast as the client allows (no
+interval tick), so a saturation run measures the client and not the rate
+limiter. The ticked path read ~100k/s where saturate mode reads ~173k/s,
+matching the tight-loop preload.
+
+Baselines (1KB, single client, saturate, batch-drain and the raised write
+flush boundary already in):
+
+| Run | Rate |
+| --- | --- |
+| publish-only unconfirmed | ~173k/s |
+| publish-only confirmed (window 1024) | ~159k/s, confirm p50 2ms / p99 3ms |
+| mixed, 1 writer + 1 reader (separate connections) | ~164k/s each way |
+| consume-drain, single reader | ~112-148k/s |
+
+The client sits at ~1 core while the broker sits at ~57%, so the ceiling is
+the client engine. Growing the 8192 command channel does not help, the engine
+is CPU bound, not capacity bound.
+
+### D1. Split the client engine into read and write tasks. OPEN
+
+Plan, each step proved on the bench before the next:
+
+1. Split the stream and codec halves. `Framed` becomes `FramedRead` plus
+   `FramedWrite` (plain TCP via `into_split`, TLS via `tokio::io::split`,
+   which keeps some coupling inside rustls, so expect a smaller TLS win).
+   Keep one loop over both halves and keep the write backpressure boundary.
+   Must be bench neutral.
+2. Two tasks. The write task owns `FramedWrite`, the command channel with
+   batch-drain, request id allocation, the flush thresholds and the
+   heartbeat ping and timeout. The read task owns `FramedRead`, delivery and
+   reply dispatch and topology pushes. Shared state stays small: `waiters`
+   and `subs` behind a std `Mutex` (or a sharded map, measure both), and
+   `last_seen` as an `AtomicU64`. Insert a waiter before feeding its frame so
+   a reply can never arrive first. Lock guards must never cross an await (the
+   Ack and Nack handlers read `subs` across a send today and need to copy
+   the fields out first). Either task records the first fatal error and
+   cancels both. A supervisor awaits both tasks and runs teardown once (fail
+   waiters, clear subs, notify shutdown). Reconnect reuses the same spawn.
+3. Settle without a spawn. Manual-ack `InflightMessage` sends `Ack` or `Nack`
+   on a command sender clone, removing the per-delivery task and oneshot.
+4. Delivery `try_send` into the sub channel. The channel is sized to the
+   broker credit window, so a full channel is a credit violation and should
+   fail loudly instead of stalling the whole connection.
+5. Optional, only if step 2 pays: vectored writes for the header and the
+   payload `Bytes`, saving the second payload copy (~4% CPU at 1KB).
+
+Win-or-shelve gate: after step 2, with the full client test suite plus TLS,
+auth and redirect tests green, saturate publish-only and mixed at one client
+must clear ~220k/s on the same hardware with client CPU above one core. If
+not, shelve the split and keep only the neutral step 1. Before any merge,
+run the full matrix: publish-only unconfirmed and confirmed (window 1024 and
+4096), consume-only and mixed at 1 and 10 clients (1KB plus a 16KB spot
+check), confirmed p50 and p99 at a fixed 50k/s within noise of main, RSS per
+connection, and correctness checks for fatal mid-batch (every pending confirm
+fails, no hang), per-partition order, heartbeat timeout, reconnect and
+resume, and clean shutdown under traffic. After the Rust client, measure the
+TS and Python clients the same way and look for the same two flaws (forced
+small flushes and a serialized read and write path).
+
+An earlier attempt at steps 1 and 2 was archived as
+`archive/client-dispatch-batching-retest` without a gate result.
+
 ## S. Plexus stream fan-out (audit 2026-07-03)
 
 Scope: the stream publish-to-fanout-to-deliver path in

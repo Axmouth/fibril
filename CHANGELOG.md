@@ -114,6 +114,10 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- `steady_c --rate-per-sec 0` publishes as fast as the client allows with no
+  interval pacing, so a saturation run measures the client instead of the
+  bench rate limiter. Any other rate keeps the paced behavior.
+
 - Controller startup grace. After a node becomes the coordination leader it
   moves no partition owner until every registered node has a fresh heartbeat
   or `coordination.ganglion.controller_startup_grace_ms` (default 30000, 0
