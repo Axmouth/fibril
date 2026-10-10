@@ -3,6 +3,8 @@ title: Live rebalancing and replica moves
 description: Proposed learner-based replica moves, planned owner handoff and a load score for placement.
 ---
 
+import BrokerStory from "../../../components/BrokerStory.astro";
+
 This design note records proposed work. None of it is implemented. Current
 placement is described in [clustering](/concepts/clustering/), recovery in
 [failover and recovery](/reliability/recovery-sealing/), and cooperative owner
@@ -59,6 +61,13 @@ coordination write.
 ## Moving a follower: two steps
 
 Moving the follower copy of one partition from node R to node T.
+
+The story below walks through one move with C as R and D as T. Position 500
+stands for boundary B. Choose **Recovery cancels the move** for the abort path
+and **Planned owner handoff** for the owner move described further down. Like
+the rest of this note, the story is proposed and not implemented.
+
+<BrokerStory scene="rebalance" />
 
 ### Step 0: add T as a learner
 

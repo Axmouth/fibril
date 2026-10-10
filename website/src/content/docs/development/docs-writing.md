@@ -88,8 +88,9 @@ the linked records.
 `BrokerStory.astro` renders the shared server enclosures, controls and transcript.
 `broker-story/scenarios.mjs` owns the stage descriptions, assignments, message
 paths and illustrative persistence windows. `player.mjs` supplies playback and
-frame export. Embed `<BrokerStory scene="failover" />`, `scene="delivery"` or
-`scene="placement"` or `scene="checkpoint"` in the relevant MDX page. The branding build copies canonical
+frame export. Embed `<BrokerStory scene="failover" />`, `scene="delivery"`,
+`scene="placement"`, `scene="checkpoint"` or `scene="rebalance"` in the relevant
+MDX page. The branding build copies canonical
 mascot frames from the real dashboard. New sprite variants belong in that shared
 artwork source.
 

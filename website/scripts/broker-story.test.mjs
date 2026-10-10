@@ -5,6 +5,7 @@ import {
   model,
   failoverSteps,
   checkpointSteps,
+  rebalanceSteps,
   assignments,
   delivery,
   scenes,
@@ -144,4 +145,87 @@ test("conflicting checkpoint evidence cannot become an accepted base or authoriz
   assert.match(steps.at(-1).text, /previous accepted checkpoint/);
   assert.equal(model("checkpoint", "conflict", 1000).history.accepted, false);
   assert.equal(model("checkpoint", "retry", 1000).history.accepted, true);
+});
+
+const rebalanceVariants = scenes.rebalance.variants.map((v) => v.id);
+
+test("every rebalance step is labelled as proposed work", () => {
+  assert.match(scenes.rebalance.badge, /^Proposed/);
+  assert.match(scenes.rebalance.note, /not implemented/);
+  for (const id of rebalanceVariants) {
+    const steps = rebalanceSteps(id);
+    assert(steps.length > 0);
+    for (const s of steps) assert.equal(s.proposed, true, s.title);
+    for (const time of [0, 7, 1000])
+      assert.match(model("rebalance", id, time).badge, /Proposed/);
+  }
+});
+
+test("a learner never counts toward confirms and the write set keeps its size", () => {
+  for (const id of rebalanceVariants)
+    for (const s of rebalanceSteps(id)) {
+      const m = s.move;
+      for (const n of m.learners) {
+        assert(!m.counting.includes(n), `${id}: ${s.title}`);
+        assert(!s.roles[n.charCodeAt(0) - 97].includes("Owner"));
+      }
+      for (const n of [...m.leaving, ...m.removed])
+        assert(!m.counting.includes(n), `${id}: ${s.title}`);
+      assert(m.counting.length <= 3, "W stays 2 of at most 3 counted copies");
+    }
+});
+
+test("D is admitted before it counts, and C leaves only after D covers the boundary", () => {
+  const steps = rebalanceSteps("grow");
+  const counts = steps.findIndex((s) => s.move.counting.includes("d"));
+  assert(counts > 0);
+  assert(steps[counts - 1].move.eligible.includes("d"));
+  assert(steps[counts - 1].move.learners.includes("d"));
+  assert.equal(steps[counts].move.boundary, "recorded");
+  const waiting = steps.findIndex((s) => s.move.boundary === "waiting");
+  const covered = steps.findIndex((s) => s.move.boundary === "covered");
+  const removed = steps.findIndex((s) => s.move.removed.includes("c"));
+  assert(counts < waiting && waiting < covered && covered < removed);
+  for (const s of steps.slice(0, removed)) {
+    assert(s.move.eligible.includes("c"), s.title);
+    assert(!s.move.removed.length, s.title);
+  }
+  assert(steps.at(-1).move.removed.includes("c"));
+  assert(!steps.at(-1).move.eligible.includes("c"));
+});
+
+test("a pending recovery cancels the move without removing any copy", () => {
+  const steps = rebalanceSteps("abort");
+  const pending = steps.filter((s) => s.move.recovery === "pending");
+  assert(pending.length >= 2);
+  for (const s of steps) {
+    assert.deepEqual(s.move.removed, [], s.title);
+    assert.deepEqual(s.move.leaving, [], s.title);
+    assert(!s.move.counting.includes("d"), s.title);
+    assert(!s.move.eligible.includes("d"), s.title);
+  }
+  for (const s of pending) {
+    assert(s.dead.includes("a"));
+    assert(!s.roles.some((r) => r.startsWith("Owner")), s.title);
+  }
+  const first = steps.indexOf(pending[0]);
+  const active = steps.findIndex((s) => s.roles[1].startsWith("Owner"));
+  assert(active > steps.indexOf(pending.at(-1)));
+  const retry = steps.findIndex((s, i) => i > first && s.move.learners.includes("d"));
+  assert(retry > active, "the move retries only after activation");
+});
+
+test("a planned handoff commits a new owner only after admission closes at a final boundary", () => {
+  const steps = rebalanceSteps("handoff");
+  const owner = (s) => s.roles.findIndex((r) => r.startsWith("Owner"));
+  const moved = steps.findIndex((s) => owner(s) === 3);
+  assert(moved > 0);
+  assert(steps.slice(0, moved).every((s) => owner(s) === 0));
+  assert.equal(steps[moved - 1].move.boundary, "final");
+  assert.equal(steps[moved - 1].move.admission, "closed");
+  for (const s of steps) {
+    assert(!s.dead?.length, "no failure and no seal in a planned handoff");
+    assert(s.move.counting.includes("d"), "the new owner was already counted");
+    assert.equal(s.move.counting.length, 3);
+  }
 });

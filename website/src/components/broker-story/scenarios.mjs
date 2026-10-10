@@ -544,7 +544,310 @@ export function checkpointSteps(variant = "agreement") {
   ].map((frame, i) => ({ ...frame, title: `${String(i + 1).padStart(2, "0")} / ${frame.title.split(" / ")[1]}` }));
   return agreement;
 }
-export const scenes = { failover, delivery, placement, checkpoint };
+/** @type {import("./types").RebalanceScene} */
+export const rebalance = {
+  title: "A new broker joins. A copy moves without a fence.",
+  badge: "Proposed · not implemented",
+  layout: "rebalance",
+  note: "Proposed design, not implemented. One queue partition, replication factor 3 with a majority policy, so W = 2 counted copies including the owner. Position 500 stands for the switch boundary. Load bars and step lengths are illustrative.",
+  nodes: ["Broker A", "Broker B", "Broker C", "Broker D"],
+  variants: [
+    { id: "grow", label: "Move a follower to D" },
+    { id: "abort", label: "Recovery cancels the move" },
+    { id: "handoff", label: "Planned owner handoff" },
+  ],
+};
+/**
+ * Every rebalance step is proposed work. The flag drives the on-stage label.
+ * @param {string} title
+ * @param {string} text
+ * @param {string[]} roles
+ * @param {import('./types').Flow[]} flows
+ * @param {Partial<import('./types').MoveState>} state
+ * @param {import('./types').StepExtras} extra
+ * @returns {import('./types').Step}
+ */
+const proposed = (title, text, roles, flows, state, extra = {}) =>
+  step(title, text, roles, flows, {
+    proposed: true,
+    move: {
+      counting: ["a", "b", "c"],
+      learners: [],
+      leaving: [],
+      eligible: ["a", "b", "c"],
+      removed: [],
+      load: [0.85, 0.75, 0.75, 0.05],
+      ...state,
+    },
+    ...extra,
+  });
+/** @param {string} [variant]
+ * @returns {import("./types").Step[]} */
+export function rebalanceSteps(variant = "grow") {
+  const joined = proposed(
+    "01 / A new broker joins empty",
+    "D registers with the cluster and holds no partitions. The load score adds up owned and followed partitions, retained history, traffic and transfers in progress. A, B and C sit above the cluster mean. D sits far below it.",
+    ["Owner · epoch 8", "Follower", "Follower", "New · empty"],
+    [
+      flow("client", "a", "publish"),
+      flow("a", "b", "durable records"),
+      flow("a", "c", "durable records"),
+    ],
+    {},
+  );
+  const learner = proposed(
+    "02 / Add D as a learner",
+    "One guarded coordination write adds D to the learners list. It needs no pending recovery, a matching assignment and room in the sync budget. W stays 2 because it comes from the configured replication factor, not from the number of assigned copies. The queue keeps serving.",
+    ["Owner · epoch 8", "Follower", "Follower", "Learner · not counted"],
+    [
+      flow("b", "a", "durable progress", "ack"),
+      flow("a", "client", "confirm: A + B or C", "ack"),
+      flow("a", "d", "learner assigned", "control"),
+    ],
+    { learners: ["d"] },
+  );
+  const catchUp = proposed(
+    "03 / D catches up in the background",
+    "D copies a checkpoint if the owner has truncated, then follows the log tail. The sync budget caps transfers per node and per cluster, and recovery always comes first. Publishes keep confirming from A plus B or C. D's progress is not confirm evidence.",
+    ["Owner · serving", "Follower", "Follower", "Learner · catching up"],
+    [
+      flow("a", "d", "checkpoint + log tail"),
+      flow("client", "a", "publish"),
+      flow("c", "a", "durable progress", "ack"),
+    ],
+    { learners: ["d"], sync: true, load: [0.85, 0.75, 0.75, 0.3] },
+  );
+  if (variant === "abort")
+    return [
+      joined,
+      learner,
+      catchUp,
+      proposed(
+        "04 / A fails while D is still a learner",
+        "A stops responding before D is admitted. The controller opens a pending recovery for this partition. A pending recovery cancels any move in progress and pauses rebalancing.",
+        ["Offline", "Follower", "Follower", "Learner · not counted"],
+        [flow("c", "a", "verify contact", "failure")],
+        {
+          learners: ["d"],
+          recovery: "pending",
+          load: [0.85, 0.75, 0.75, 0.3],
+        },
+        { dead: ["a"] },
+      ),
+      proposed(
+        "05 / The move is cancelled",
+        "D is dropped from the learners here. It could also stay a learner. Either way it never counted toward a confirm, so the confirm contract never changed. No copy is removed. The queue is fenced, as in any failover, until recovery activates a replacement.",
+        ["Offline", "Candidate · fenced", "Follower", "Move cancelled"],
+        [flow("c", "b", "proposed epoch 9", "control")],
+        { recovery: "pending", load: [0.85, 0.75, 0.75, 0.1] },
+        { dead: ["a"] },
+      ),
+      proposed(
+        "06 / Recovery uses the eligible set",
+        "B and C seal their history and provide evidence. D was never admitted, so it is not in the eligible set and recovery does not wait for it. Installation, quorum receipts, consensus activation and local admission still have to succeed before B serves.",
+        ["Offline", "Install · fenced", "Sealed evidence", "Not assigned"],
+        [
+          flow("b", "c", "seal / inspect", "control"),
+          flow("c", "b", "history evidence", "control"),
+        ],
+        { recovery: "pending", load: [0.85, 0.75, 0.75, 0.1] },
+        { dead: ["a"] },
+      ),
+      proposed(
+        "07 / B activates at epoch 9",
+        "Consensus commits the replacement and B serves under epoch 9. Clients refresh topology and reattach. Rebalancing stayed paused the whole time the recovery was pending.",
+        ["Offline", "Owner · epoch 9", "Follower", "Not assigned"],
+        [flow("client", "b", "publish"), flow("b", "c", "durable records")],
+        {
+          counting: ["b", "c"],
+          eligible: ["b", "c"],
+          load: [0.1, 0.9, 0.75, 0.1],
+        },
+        { dead: ["a"] },
+      ),
+      proposed(
+        "08 / The move retries after activation",
+        "With no recovery pending, the planner adds D as a learner again under epoch 9 and runs the same steps. The same mechanism can also replace the copy lost with A. Which copy leaves is chosen again from fresh load scores.",
+        ["Offline", "Owner · epoch 9", "Follower", "Learner · not counted"],
+        [
+          flow("b", "d", "learner catch-up"),
+          flow("client", "b", "publish"),
+          flow("c", "b", "durable progress", "ack"),
+        ],
+        {
+          counting: ["b", "c"],
+          eligible: ["b", "c"],
+          learners: ["d"],
+          sync: true,
+          load: [0.1, 0.9, 0.75, 0.3],
+        },
+        { dead: ["a"] },
+      ),
+    ];
+  /** @type {import('./types').NodeId[]} */
+  const swapped = ["a", "b", "d"];
+  /** @type {import('./types').NodeId[]} */
+  const all = ["a", "b", "c", "d"];
+  if (variant === "handoff") {
+    const after = { counting: swapped, eligible: swapped };
+    return [
+      proposed(
+        "01 / The owner carries the most load",
+        "After the follower move, A still owns the partition and serves its traffic. D is an admitted, caught-up follower. Owners move only by a planned handoff to a replica like that.",
+        ["Owner · epoch 8", "Follower", "Other partitions", "Follower · admitted"],
+        [
+          flow("client", "a", "publish"),
+          flow("a", "b", "durable records"),
+          flow("a", "d", "durable records"),
+        ],
+        { ...after, load: [0.85, 0.7, 0.5, 0.5] },
+      ),
+      proposed(
+        "02 / Wait for a quiet point and close admission",
+        "At a quiet point A stops accepting state-changing work for this partition. New publishes wait. W, the counted copies and the eligible set stay the same.",
+        ["Owner · admission closed", "Follower", "Other partitions", "Follower · admitted"],
+        [flow("client", "a", "publish waits", "delivery")],
+        { ...after, admission: "closed", load: [0.85, 0.7, 0.5, 0.5] },
+      ),
+      proposed(
+        "03 / Drain and report a final boundary",
+        "A drains work already in flight and reports its final boundary. B and D report that they are durable at it. A failure before the next write cancels the handoff and A reopens admission.",
+        ["Owner · draining", "Follower", "Other partitions", "Follower · admitted"],
+        [
+          flow("a", "d", "final records"),
+          flow("b", "a", "durable at final", "ack"),
+          flow("d", "a", "durable at final", "ack"),
+        ],
+        {
+          ...after,
+          admission: "closed",
+          boundary: "final",
+          load: [0.85, 0.7, 0.5, 0.5],
+        },
+      ),
+      proposed(
+        "04 / Commit D as owner at epoch 9",
+        "One guarded write commits D as owner at epoch 9 with a continuation certificate. The final boundary is known and every counted copy holds it, so D activates without seal or inspection. A failure after this write falls back to ordinary recovery.",
+        ["Handing off", "Follower", "Other partitions", "Owner · epoch 9"],
+        [flow("a", "d", "continuation certificate", "control")],
+        {
+          ...after,
+          admission: "closed",
+          boundary: "final",
+          load: [0.75, 0.7, 0.5, 0.6],
+        },
+      ),
+      proposed(
+        "05 / Clients follow the new owner",
+        "D opens admission and serves. Clients refresh topology and reattach to D. A stays on as a follower, so the replica count and W never changed. The owner work now sits on D.",
+        ["Follower", "Follower", "Other partitions", "Owner · serving"],
+        [
+          flow("client", "d", "publish"),
+          flow("d", "a", "durable records"),
+          flow("d", "b", "durable records"),
+        ],
+        { ...after, load: [0.6, 0.65, 0.5, 0.65] },
+      ),
+    ];
+  }
+  return [
+    joined,
+    learner,
+    catchUp,
+    proposed(
+      "04 / D is admitted to the history",
+      "D has caught up. The existing admission path adds D's process and storage instance to the accepted history. Owner, epoch and W do not change, and D still does not count. The eligible set grows to four, so a recovery would need more seals. That is the safe direction.",
+      ["Owner · epoch 8", "Follower", "Follower", "Learner · admitted"],
+      [
+        flow("a", "d", "admitted", "control"),
+        flow("a", "b", "durable records"),
+        flow("a", "c", "durable records"),
+      ],
+      { learners: ["d"], eligible: all, load: [0.85, 0.75, 0.75, 0.4] },
+    ),
+    proposed(
+      "05 / Swap who counts",
+      "One guarded write moves D into the followers and marks C as leaving. From here A counts confirms only from A, B and D. A records the switch boundary, its confirmed tail at that moment, here position 500. Everything below 500 was confirmed on 2 copies of the old set, at most one of them on C. C keeps replicating and stays eligible.",
+      ["Owner · counts A, B, D", "Follower", "Leaving · not counted", "Follower · counted"],
+      [
+        flow("a", "d", "durable records"),
+        flow("a", "c", "still replicating"),
+        flow("d", "a", "durable progress", "ack"),
+      ],
+      {
+        counting: swapped,
+        leaving: ["c"],
+        eligible: all,
+        boundary: "recorded",
+        load: [0.85, 0.75, 0.7, 0.55],
+      },
+    ),
+    proposed(
+      "06 / Removal waits for D to cover 500",
+      "D is durable only up to 470. A message below 500 might be confirmed only on A and C. Remove C before D holds it, lose A, and that message is gone. C stays assigned and eligible until D is durable at or beyond 500.",
+      ["Owner · counts A, B, D", "Follower", "Leaving · kept", "Follower · durable 470"],
+      [
+        flow("a", "d", "records 470 to 500"),
+        flow("a", "c", "still replicating"),
+        flow("d", "a", "durable 470", "ack"),
+      ],
+      {
+        counting: swapped,
+        leaving: ["c"],
+        eligible: all,
+        boundary: "waiting",
+        load: [0.85, 0.75, 0.7, 0.55],
+      },
+    ),
+    proposed(
+      "07 / D covers the boundary",
+      "D reports durable progress at 500 or beyond. Every message confirmed before the swap now sits on at least 2 copies without C: one surviving old copy plus D. Every later message was counted only from A, B and D.",
+      ["Owner · counts A, B, D", "Follower", "Leaving · kept", "Follower · durable 500"],
+      [flow("d", "a", "durable ≥ 500", "ack")],
+      {
+        counting: swapped,
+        leaving: ["c"],
+        eligible: all,
+        boundary: "covered",
+        load: [0.85, 0.75, 0.7, 0.55],
+      },
+    ),
+    proposed(
+      "08 / Remove C, keep its data for a while",
+      "One guarded write removes C from the assignment and the eligible set. It needs no pending recovery and no other admission or removal in flight. C stops following but keeps its retained copy for a grace period, so an abandoned move, a recovery that starts right after, or a later move back can still use it.",
+      ["Owner · epoch 8", "Follower", "Removed · data kept", "Follower"],
+      [
+        flow("client", "a", "publish"),
+        flow("a", "b", "durable records"),
+        flow("a", "d", "durable records"),
+      ],
+      {
+        counting: swapped,
+        eligible: swapped,
+        removed: ["c"],
+        boundary: "covered",
+        load: [0.85, 0.75, 0.45, 0.55],
+      },
+    ),
+    proposed(
+      "09 / Repeat until the load evens out",
+      "The planner repeats follower moves under the sync budget, then hands off some owners. A move must improve the spread by a margin. Cooldowns stop a node that just received partitions from being drained again. The cluster settles near the mean.",
+      ["Owner · epoch 8", "Follower", "Other partitions", "Follower"],
+      [
+        flow("client", "a", "publish"),
+        flow("a", "b", "durable records"),
+        flow("a", "d", "durable records"),
+      ],
+      {
+        counting: swapped,
+        eligible: swapped,
+        removed: ["c"],
+        load: [0.62, 0.6, 0.58, 0.56],
+      },
+    ),
+  ];
+}
+export const scenes = { failover, delivery, placement, checkpoint, rebalance };
 /**
  * @param {import('./types').SceneId} scene
  * @param {string} variant
@@ -590,7 +893,9 @@ export function model(scene, variant, time) {
       ? placementSteps()
       : scene === "checkpoint"
         ? checkpointSteps(variant)
-        : failoverSteps(variant);
+        : scene === "rebalance"
+          ? rebalanceSteps(variant)
+          : failoverSteps(variant);
   const i = Math.min(steps.length - 1, Math.floor(Math.max(0, time) / 3));
   return {
     ...steps[i],

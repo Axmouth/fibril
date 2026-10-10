@@ -15,7 +15,13 @@ const bounds = (layout) =>
     ? ids
         .slice(0, 3)
         .map((id, i) => ({ id, x: 70 + i * 320, y: 110, w: 200, h: 205 }))
-    : ids.map((id, i) => ({ id, x: 20 + i * 240, y: 55, w: 200, h: 190 }));
+    : ids.map((id, i) => ({
+        id,
+        x: 20 + i * 240,
+        y: layout === "rebalance" ? 110 : 55,
+        w: 200,
+        h: 190,
+      }));
 function route(from, to, nodes, index = 0) {
   const a = nodes.find((n) => n.id === from),
     b = nodes.find((n) => n.id === to);
@@ -124,6 +130,65 @@ function checkpointHistory(h, progress) {
     <text x="70" y="532" class="diagram-note">LIVE PAYLOADS / INDEPENDENT OF THE EVENT CUT</text>
     ${[0, 1, 2, 3, 4, 5, 6, 7].map((i) => `<rect x="${70 + i * 106}" y="548" width="90" height="30" rx="4" fill="var(--story-${h.verified ? "ack" : "delivery"})" opacity=".22"/><text x="${115 + i * 106}" y="568" text-anchor="middle" font-size="11">${h.verified ? "verified ✓" : "live body"}</text>`).join("")}
     <text x="70" y="609" class="diagram-note">${h.verified ? "Required live bytes checked · activation barriers still remain" : "Unsettled messages retain their payloads even when their enqueue predates the cut"}</text>`;
+}
+// Per-node replica role, eligibility and load under the machines, plus the
+// barrier that currently holds the move back.
+function moveDiagram(m, nodes) {
+  const s = m.move;
+  const chip = (id) =>
+    m.dead?.includes(id)
+      ? ["offline", "failure"]
+      : s.removed.includes(id)
+        ? ["removed · grace copy", "line"]
+        : s.counting.includes(id)
+          ? ["counts toward W", "ack"]
+          : s.leaving.includes(id)
+            ? ["leaving · not counted", "delivery"]
+            : s.learners.includes(id)
+              ? ["learner · not counted", "control"]
+              : ["not assigned", "line"];
+  const mean = s.load.reduce((a, b) => a + b, 0) / s.load.length;
+  const barrier = s.recovery
+    ? ["PENDING RECOVERY · move cancelled · serving fenced until activation", "failure"]
+    : s.boundary === "final"
+      ? ["Final boundary reported · counted copies durable at it · no seal after commit", "ack"]
+      : s.admission
+        ? ["Admission closed · draining to a final boundary", "delivery"]
+        : s.boundary === "recorded"
+          ? ["Switch boundary 500 recorded · C stays until D is durable at 500", "control"]
+          : s.boundary === "waiting"
+            ? ["BARRIER · D durable at 470, below 500 · removing C is not allowed yet", "delivery"]
+            : s.boundary === "covered"
+              ? s.removed.length
+                ? ["C removed only after D covered 500 · C keeps a grace copy", "ack"]
+                : ["D durable at or beyond 500 ✓ · removing C is allowed", "ack"]
+              : s.sync
+                ? ["Sync budget · one transfer to D · recovery takes priority", "control"]
+                : ["No move barrier active · learners never count toward W", "line"];
+  return (
+    `<rect x="390" y="20" width="200" height="44" rx="22" class="machine"/><text x="490" y="47" text-anchor="middle" font-size="14">Client connection</text>` +
+    (m.proposed
+      ? `<text x="20" y="40" class="diagram-note" style="fill:var(--story-control)">PROPOSED · NOT IMPLEMENTED</text>`
+      : "") +
+    `<text x="960" y="40" text-anchor="end" class="diagram-note">RF 3 · majority · W = 2</text>` +
+    nodes
+      .map((n, i) => {
+        const [label, kind] = chip(n.id),
+          eligible = s.eligible.includes(n.id),
+          c = kind === "line" ? "var(--story-muted)" : color(kind);
+        return `<rect x="${n.x}" y="424" width="200" height="26" rx="5" fill="${c}" fill-opacity=".14" stroke="${c}"/>
+          <text x="${n.x + 100}" y="441" text-anchor="middle" font-size="11" style="fill:${c}">${esc(label)}</text>
+          <text x="${n.x + 100}" y="470" text-anchor="middle" class="diagram-note">${eligible ? "in eligible set" : "not in eligible set"}</text>
+          <rect x="${n.x}" y="498" width="200" height="14" rx="3" fill="var(--story-panel)"/>
+          <rect x="${n.x}" y="498" width="${200 * s.load[i]}" height="14" rx="3" fill="var(--story-data)" opacity=".45"/>
+          <path d="M${n.x + 200 * mean} 492v26" stroke="var(--story-text)" stroke-opacity=".45" stroke-dasharray="3 3"/>`;
+      })
+      .join("") +
+    `<text x="20" y="534" class="diagram-note">LOAD SCORE / ILLUSTRATIVE · dashed line = cluster mean</text>` +
+    `<rect x="20" y="552" width="920" height="32" rx="5" fill="${barrier[1] === "line" ? "var(--story-panel)" : color(barrier[1])}" fill-opacity=".14"/>
+     <text x="36" y="573" font-size="12">${esc(barrier[0])}</text>` +
+    `<text x="490" y="616" text-anchor="middle" class="diagram-note">Only counted copies confirm · removal waits for the boundary · recovery outranks rebalancing</text>`
+  );
 }
 export function registerStories() {
   if (customElements.get("broker-story")) return;
@@ -342,6 +407,8 @@ export function registerStories() {
           const extra = this.svg.querySelector("[data-extras]");
           if (this.scene === "failover")
             extra.innerHTML = `<rect x="390" y="20" width="200" height="44" rx="22" class="machine"/><text x="490" y="47" text-anchor="middle" font-size="14">Client connection</text>${m.checkpoint ? '<rect x="402" y="76" width="176" height="22" rx="5" fill="var(--story-control)" opacity=".13"/><text x="490" y="91" text-anchor="middle" class="diagram-note">verified checkpoint + suffix</text>' : ""}<text x="490" y="438" text-anchor="middle" class="diagram-note">${m.blocked ? "FENCED / no serving without the required evidence" : "Queue owner ≠ metadata leader · C hosts the controller in this story"}</text>`;
+          if (this.scene === "rebalance")
+            extra.innerHTML = moveDiagram(m, nodes);
           if (this.scene === "placement")
             extra.innerHTML =
               assignments

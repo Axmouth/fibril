@@ -2,14 +2,36 @@
 export type NodeId = "a" | "b" | "c" | "d";
 export type Endpoint = NodeId | "client";
 export type Ink = "data" | "control" | "ack" | "delivery" | "failure";
-export type SceneId = "failover" | "delivery" | "placement" | "checkpoint";
+export type SceneId = "failover" | "delivery" | "placement" | "checkpoint" | "rebalance";
 export interface Flow {
   from: Endpoint;
   to: Endpoint;
   label: string;
   kind: Ink;
 }
+/** Replica roles for one partition during a proposed move. */
+export interface MoveState {
+  /** Copies the owner counts toward the write requirement W, owner included. */
+  counting: NodeId[];
+  /** Copies that replicate but never count toward confirms. */
+  learners: NodeId[];
+  /** Copies marked to leave. They replicate but no longer count. */
+  leaving: NodeId[];
+  /** Copies a recovery would have to seal and inspect. */
+  eligible: NodeId[];
+  /** Copies taken out of the assignment that keep data for a grace period. */
+  removed: NodeId[];
+  /** Illustrative load score per node, 0 to 1, in node order. */
+  load: [number, number, number, number];
+  /** Switch boundary for a follower move, or the final boundary of a handoff. */
+  boundary?: "recorded" | "waiting" | "covered" | "final";
+  sync?: boolean;
+  recovery?: "pending";
+  admission?: "closed";
+}
 export interface StepExtras {
+  proposed?: boolean;
+  move?: MoveState;
   dead?: NodeId[];
   blocked?: boolean;
   checkpoint?: boolean;
@@ -56,6 +78,7 @@ export interface Scene<V extends Variant, L extends string> {
 }
 export type FailoverScene = Scene<Variant<"recover" | "fenced">, "cluster">;
 export type CheckpointScene = Scene<Variant<"agreement" | "retry" | "conflict">, "cluster">;
+export type RebalanceScene = Scene<Variant<"grow" | "abort" | "handoff">, "rebalance">;
 export type PlacementScene = Scene<Variant<"spread">, "placement">;
 export interface DeliveryScene extends Scene<DeliveryVariant, "delivery"> {
   lanes: string[];

@@ -32,6 +32,9 @@ is illustrative.
   watch owner loss, recovery, activation and rejoin, including a blocked attempt.
 - [Follow an agreed checkpoint](/reliability/replication/#agreed-recovery-checkpoints):
   see how replicas establish a shared recovery starting point.
+- [Watch a proposed replica move](/development/rebalancing-design/#moving-a-follower-two-steps):
+  see how a new broker could take over a follower copy without a recovery fence.
+  This is proposed design, not implemented.
 
 ## Operate and evaluate
 
