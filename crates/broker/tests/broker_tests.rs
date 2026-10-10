@@ -128,6 +128,9 @@ impl fibril_broker::queue_engine::StreamStore for FailingPublishEngine {
     ) -> Result<(Offset, Offset), StromaError> {
         Err(StromaError::Unsupported("no streams in test engine".into()))
     }
+    async fn stream_durable_next(&self, _tp: &str, _part: u32) -> Result<Offset, StromaError> {
+        Err(StromaError::Unsupported("no streams in test engine".into()))
+    }
     async fn stream_offset_at_or_after_time(
         &self,
         _tp: &str,

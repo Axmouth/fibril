@@ -439,7 +439,13 @@ pub trait StreamStore: Send + Sync {
         name: &str,
     ) -> Result<Option<Offset>, StromaError>;
 
+    /// `(head, tail)` of a stream. The tail is one past the last staged record,
+    /// which may not be durable or readable yet.
     async fn stream_head_tail(&self, tp: &str, part: u32) -> Result<(Offset, Offset), StromaError>;
+
+    /// Exclusive durable frontier of a stream's record log.
+    /// `read_stream_records` never returns a record at or above it.
+    async fn stream_durable_next(&self, tp: &str, part: u32) -> Result<Offset, StromaError>;
 
     /// A stream's durable cursors as (name, offset), name-sorted.
     async fn stream_cursors(
@@ -548,6 +554,10 @@ impl StreamStore for StromaEngine {
 
     async fn stream_head_tail(&self, tp: &str, part: u32) -> Result<(Offset, Offset), StromaError> {
         self.inner.stream_head_tail(tp, part).await
+    }
+
+    async fn stream_durable_next(&self, tp: &str, part: u32) -> Result<Offset, StromaError> {
+        self.inner.stream_durable_next(tp, part).await
     }
 
     async fn stream_cursors(

@@ -373,6 +373,14 @@ pub enum SubscribeStart {
 /// How many records to read per backfill batch from the durable log.
 const BACKFILL_BATCH: usize = 256;
 
+/// Longest a backfill waits for the durable frontier before checking again.
+/// Durability wakes normally end the wait sooner, this bounds a missed wake.
+const BACKFILL_DURABLE_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Pause before ending a leg whose log read came back empty below the durable
+/// frontier, so a persistent read problem cannot spin the driver.
+const BACKFILL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
+
 enum FanoutCmd {
     Publish {
         record: StreamRecord,
@@ -466,6 +474,10 @@ pub struct StreamChannel {
     /// Live-set evictions caused by full subscriber channels, mirrored out of
     /// the fan-out actor for observability.
     lag_evictions: Arc<std::sync::atomic::AtomicU64>,
+    /// Woken (`notify_waiters`) after more records or cursor commits become
+    /// durable. Backfill waits on it when the log trails the ring, and the
+    /// owner's replication long-poll uses it to wake caught-up followers.
+    durable_progress: Arc<tokio::sync::Notify>,
 }
 
 impl Drop for StreamChannel {
@@ -518,6 +530,7 @@ async fn run_cursor_committer(
     part: u32,
     cfg: Arc<ArcSwap<BrokerConfig>>,
     mut rx: mpsc::Receiver<CursorCommitMsg>,
+    durable_progress: Arc<tokio::sync::Notify>,
 ) {
     loop {
         // Block until the first message of a new window arrives.
@@ -588,12 +601,13 @@ async fn run_cursor_committer(
 
         if !pending.is_empty() {
             let commits: Vec<(String, Offset)> = pending.into_iter().collect();
-            if let Err(err) = engine.commit_stream_cursors(&tp, part, commits).await {
-                tracing::warn!(
+            match engine.commit_stream_cursors(&tp, part, commits).await {
+                Ok(()) => durable_progress.notify_waiters(),
+                Err(err) => tracing::warn!(
                     topic = %tp,
                     partition = part,
                     "stream cursor batch commit failed: {err}"
-                );
+                ),
             }
         }
         // Acknowledge flush waiters only after the durable commit completed.
@@ -623,6 +637,7 @@ impl StreamChannel {
         engine.create_stream(tp, part, retention.clone()).await?;
         let (_head, tail) = engine.stream_head_tail(tp, part).await?;
 
+        let durable_progress = Arc::new(tokio::sync::Notify::new());
         let (cmd_tx, mut cmd_rx) = mpsc::channel(256);
         let mut fanout = StreamFanout::new(ring_capacity, tail);
         let lag_evictions = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -742,6 +757,7 @@ impl StreamChannel {
         // path (a spawned task) so delivery is not gated by the flush.
         let drain_cmd_tx = cmd_tx.clone();
         let drain_durability = durability;
+        let drain_progress = durable_progress.clone();
         tokio::spawn(async move {
             while let Some(item) = durable_batch_rx.recv().await {
                 let DurableBatch {
@@ -765,6 +781,7 @@ impl StreamChannel {
                     // Fan out only once the batch is durable, in offset order.
                     match durable.await {
                         Ok(Ok(())) => {
+                            drain_progress.notify_waiters();
                             for (i, (headers, payload, confirm)) in items.into_iter().enumerate() {
                                 let record =
                                     StreamRecord::from_stored(base + i as u64, payload, headers);
@@ -810,9 +827,11 @@ impl StreamChannel {
                 }
                 // Resolve durability off the critical path so the next batch delivers
                 // without waiting for this batch's flush.
+                let progress = drain_progress.clone();
                 tokio::spawn(async move {
                     let result = durable.await;
                     if result.as_ref().map(|r| r.is_ok()).unwrap_or(false) {
+                        progress.notify_waiters();
                         for (off, confirm) in pending {
                             let _ = confirm.send(Ok(off));
                         }
@@ -838,6 +857,7 @@ impl StreamChannel {
             let flush_engine = engine.clone();
             let flush_tp = tp_arc.clone();
             let flush_gate = flush_dirty.clone();
+            let flush_progress = durable_progress.clone();
             Some(tokio::spawn(async move {
                 let mut tick = tokio::time::interval(EPHEMERAL_FLUSH_INTERVAL);
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -852,6 +872,7 @@ impl StreamChannel {
                     if flush_engine.sync_stream(&flush_tp, part).await.is_err() {
                         break;
                     }
+                    flush_progress.notify_waiters();
                 }
             }))
         } else {
@@ -870,6 +891,7 @@ impl StreamChannel {
                 part,
                 cfg,
                 cursor_commit_rx,
+                durable_progress.clone(),
             ));
         }
 
@@ -887,7 +909,15 @@ impl StreamChannel {
             last_used_ms: std::sync::atomic::AtomicU64::new(fibril_util::unix_millis()),
             active_subscriptions: std::sync::atomic::AtomicUsize::new(0),
             lag_evictions,
+            durable_progress,
         })
+    }
+
+    /// Woken after more of this stream's records or cursor commits become
+    /// durable. Create the `notified()` future before checking state, since
+    /// wakes go only to waiters that already exist.
+    pub fn durable_progress(&self) -> Arc<tokio::sync::Notify> {
+        self.durable_progress.clone()
     }
 
     fn touch(&self) {
@@ -932,7 +962,8 @@ impl StreamChannel {
         self.retention.as_ref()
     }
 
-    /// Current head and tail offsets from the durable log.
+    /// Current head and tail offsets. The tail is one past the last staged
+    /// record, which on the express tiers may not be durable or readable yet.
     pub async fn head_tail(&self) -> Result<(Offset, Offset), StromaError> {
         self.engine.stream_head_tail(&self.tp, self.part).await
     }
@@ -955,6 +986,7 @@ impl StreamChannel {
             .engine
             .append_stream_record(&self.tp, self.part, &headers, payload.clone())
             .await?;
+        self.durable_progress.notify_waiters();
         let record = StreamRecord::from_stored(offset, payload, headers);
         let (resp, rx) = oneshot::channel();
         self.cmd_tx
@@ -1018,6 +1050,7 @@ impl StreamChannel {
             engine: self.engine.clone(),
             filter,
             inner,
+            durable_progress: self.durable_progress.clone(),
         })
     }
 
@@ -1182,6 +1215,7 @@ pub struct StreamSubscription {
     engine: Arc<dyn StreamStore>,
     filter: Option<StreamFilter>,
     inner: Subscription,
+    durable_progress: Arc<tokio::sync::Notify>,
 }
 
 impl StreamSubscription {
@@ -1216,7 +1250,13 @@ impl StreamSubscription {
     ) -> LegEnd {
         let mut from = self.inner.log_backfill.start;
         let to = self.inner.log_backfill.end;
+        // The ring is only sent once the log range is fully delivered. On the
+        // express tiers the ring holds records that are staged but not durable,
+        // while log reads return durable records only, so the log can trail the
+        // ring. Skipping to the ring after a short read would lose the gap.
         while from < to {
+            // Created before the read so a wake during the read is not lost.
+            let durable_wake = self.durable_progress.notified();
             let want = BACKFILL_BATCH.min((to - from) as usize);
             let records = match self
                 .engine
@@ -1229,7 +1269,27 @@ impl StreamSubscription {
                 Err(_) => return LegEnd::LiveEnded,
             };
             if records.is_empty() {
-                break;
+                let durable_next = match self
+                    .engine
+                    .stream_durable_next(&self.tp, self.part)
+                    .await
+                {
+                    Ok(next) => next,
+                    Err(_) => return LegEnd::LiveEnded,
+                };
+                if from < durable_next {
+                    // Durable records should be readable here. End the leg so
+                    // the driver resumes from the watermark.
+                    tokio::time::sleep(BACKFILL_RETRY_DELAY).await;
+                    return LegEnd::LiveEnded;
+                }
+                // Not durable yet: wait for the frontier to move.
+                tokio::select! {
+                    _ = durable_wake => {}
+                    _ = tokio::time::sleep(BACKFILL_DURABLE_POLL) => {}
+                    _ = sink.closed() => return LegEnd::SinkClosed,
+                }
+                continue;
             }
             for (offset, payload, headers) in records {
                 if offset >= to {
@@ -1465,6 +1525,113 @@ mod channel_tests {
         }
     }
 
+    /// Delegates to a real store but hides records at or above `limit` from
+    /// reads and the durable frontier, standing in for records that are staged
+    /// but not durable yet.
+    struct GatedStore {
+        inner: Arc<dyn StreamStore>,
+        limit: std::sync::atomic::AtomicU64,
+    }
+
+    impl GatedStore {
+        fn limit(&self) -> Offset {
+            self.limit.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StreamStore for GatedStore {
+        async fn create_stream(
+            &self,
+            tp: &str,
+            part: u32,
+            retention: Option<RetentionConfig>,
+        ) -> Result<(), StromaError> {
+            self.inner.create_stream(tp, part, retention).await
+        }
+        async fn append_stream_record(
+            &self,
+            tp: &str,
+            part: u32,
+            headers: &MessageHeaders,
+            payload: Vec<u8>,
+        ) -> Result<Offset, StromaError> {
+            self.inner.append_stream_record(tp, part, headers, payload).await
+        }
+        async fn append_stream_records_enqueue(
+            &self,
+            tp: &str,
+            part: u32,
+            records: Vec<(MessageHeaders, Vec<u8>)>,
+            durability: Option<KDurability>,
+        ) -> Result<stroma_core::EnqueuedStreamAppend, StromaError> {
+            self.inner
+                .append_stream_records_enqueue(tp, part, records, durability)
+                .await
+        }
+        async fn sync_stream(&self, tp: &str, part: u32) -> Result<(), StromaError> {
+            self.inner.sync_stream(tp, part).await
+        }
+        async fn read_stream_records(
+            &self,
+            tp: &str,
+            part: u32,
+            from: Offset,
+            max: usize,
+        ) -> Result<Vec<(Offset, Vec<u8>, MessageHeaders)>, StromaError> {
+            let limit = self.limit();
+            let mut records = self.inner.read_stream_records(tp, part, from, max).await?;
+            records.retain(|(offset, _, _)| *offset < limit);
+            Ok(records)
+        }
+        async fn commit_stream_cursors(
+            &self,
+            tp: &str,
+            part: u32,
+            commits: Vec<(String, Offset)>,
+        ) -> Result<(), StromaError> {
+            self.inner.commit_stream_cursors(tp, part, commits).await
+        }
+        async fn stream_cursor(
+            &self,
+            tp: &str,
+            part: u32,
+            name: &str,
+        ) -> Result<Option<Offset>, StromaError> {
+            self.inner.stream_cursor(tp, part, name).await
+        }
+        async fn stream_head_tail(
+            &self,
+            tp: &str,
+            part: u32,
+        ) -> Result<(Offset, Offset), StromaError> {
+            self.inner.stream_head_tail(tp, part).await
+        }
+        async fn stream_durable_next(&self, tp: &str, part: u32) -> Result<Offset, StromaError> {
+            Ok(self.inner.stream_durable_next(tp, part).await?.min(self.limit()))
+        }
+        async fn stream_cursors(
+            &self,
+            tp: &str,
+            part: u32,
+        ) -> Result<Vec<(String, Offset)>, StromaError> {
+            self.inner.stream_cursors(tp, part).await
+        }
+        async fn stream_offset_at_or_after_time(
+            &self,
+            tp: &str,
+            part: u32,
+            ts_ms: u64,
+        ) -> Result<Offset, StromaError> {
+            self.inner
+                .stream_offset_at_or_after_time(tp, part, ts_ms)
+                .await
+        }
+        fn durable_is_stream(&self, tp: &str, part: u32) -> bool {
+            self.inner.durable_is_stream(tp, part)
+        }
+    }
+
     async fn collect(rx: &mut mpsc::Receiver<Arc<StreamRecord>>, n: usize) -> Vec<Offset> {
         let mut out = Vec::new();
         for _ in 0..n {
@@ -1596,6 +1763,72 @@ mod channel_tests {
             .expect("driver ended early");
         assert_eq!(record.offset, 50);
 
+        driver.abort();
+    }
+
+    #[tokio::test]
+    async fn express_backfill_waits_for_durability_instead_of_skipping_to_the_ring() {
+        let dir = temp_dir("stream_express_gap");
+        let gated = Arc::new(GatedStore {
+            inner: engine(&dir).await,
+            limit: std::sync::atomic::AtomicU64::new(u64::MAX),
+        });
+        // Ring of 4 on the speculative tier, so the ring holds staged records
+        // well past the durable frontier.
+        let ch = Arc::new(
+            StreamChannel::open(
+                gated.clone(),
+                "sensors",
+                0,
+                StreamDurability::Speculative,
+                None,
+                4,
+                64,
+                test_cfg(),
+            )
+            .await
+            .unwrap(),
+        );
+        // Only offsets below 3 count as durable. 3..10 are staged, 6..10 are in
+        // the ring.
+        gated.limit.store(3, std::sync::atomic::Ordering::SeqCst);
+        let mut confirms = Vec::new();
+        for i in 0..10u32 {
+            confirms.push(
+                ch.publish_pipelined(hdr(&[]), format!("m{i}").into_bytes())
+                    .await
+                    .unwrap(),
+            );
+        }
+        for confirm in confirms {
+            confirm.await.unwrap().unwrap();
+        }
+
+        let (tx, mut rx) = mpsc::channel(64);
+        let driver = tokio::spawn({
+            let ch = ch.clone();
+            async move {
+                ch.run_subscription(SubscribeStart::Earliest, None, tx)
+                    .await
+            }
+        });
+        assert_eq!(collect(&mut rx, 3).await, vec![0, 1, 2]);
+        // The log stops at the durable frontier. Nothing may arrive from the
+        // ring until 3..6 are readable.
+        let early =
+            tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
+        assert!(
+            early.is_err(),
+            "delivered {:?} past the durable frontier",
+            early.ok().flatten().map(|r| r.offset)
+        );
+        gated
+            .limit
+            .store(u64::MAX, std::sync::atomic::Ordering::SeqCst);
+        let rest = tokio::time::timeout(std::time::Duration::from_secs(5), collect(&mut rx, 7))
+            .await
+            .expect("backfill stalled after records became durable");
+        assert_eq!(rest, (3..10).collect::<Vec<Offset>>());
         driver.abort();
     }
 

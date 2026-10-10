@@ -764,6 +764,14 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- Subscribers on the speculative and ephemeral stream tiers could
+  permanently miss records. Those tiers put records in the in-memory ring
+  before they are durable, while log backfill reads durable records only. A
+  subscriber attaching or recovering from lag below the ring could get a
+  short log read at the durable frontier and jump to the ring, skipping the
+  records in between. Backfill now waits for those records to become durable
+  and never moves to the ring until the whole log range is delivered.
+
 - Equally ranked failover candidates are broken by fewest currently owned
   partitions, then by node id, so a failed node's partitions spread over its
   followers instead of all moving to the last one listed.
