@@ -727,9 +727,10 @@ h3 {
 @media (max-width: 640px) {
   .shell { width: min(100% - 24px, 1180px); }
   .nav { height: 58px; }
-  .nav-links a,
+  /* Keep the Docs link on phones, the other links live in the hero and footer. */
+  .nav-links a + a,
   .release-tag { display: none; }
-  .nav-links { gap: 10px; }
+  .nav-links { gap: 14px; }
   h1 { font-size: clamp(38px, 12vw, 52px); }
   .lead { font-size: 14.5px; }
   .hero {
