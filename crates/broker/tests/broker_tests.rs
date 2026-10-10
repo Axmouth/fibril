@@ -13,10 +13,10 @@ use fibril_broker::{
     CompletionPair,
     broker::{
         Broker, BrokerAssignmentTransitionApply, BrokerConfig, BrokerError,
-        BrokerFollowerReplicationApply, BrokerOwnerReplicationPeer,
-        BrokerOwnerReplicationPeerResolver, BrokerOwnerReplicationRecords,
-        BrokerReplicationCatchUp, BrokerReplicationCatchUpOptions,
-        BrokerReplicationCatchUpProgress, BrokerReplicationCheckpointRequired, ConsumerConfig,
+        BrokerOwnerReplicationPeer, BrokerOwnerReplicationPeerResolver, BrokerOwnerStreamRecords,
+        BrokerQueueCatchUp, BrokerQueueFollowerApply, BrokerReplicationCheckpointRequired,
+        BrokerStreamCatchUp, ConsumerConfig, FollowerCatchUp, QueueCatchUpOptions,
+        QueueCatchUpProgress, StreamCatchUpOptions, StreamCatchUpProgress,
         FollowerReplicationWorkerConfig, FollowerReplicationWorkerLoopExit,
         FollowerReplicationWorkerState, FollowerReplicationWorkerStatus, OwnedQueue,
         QueueEvictionAttempt, QueueEvictionSkip, ReplicationResourceKind, SettleRequest,
@@ -620,18 +620,6 @@ async fn open_test_engine() -> (StromaEngine, TempDir) {
     .unwrap();
 
     (engine, dir)
-}
-
-/// Queues keep payloads in the event log, so the message lane of an owner read
-/// is always an empty batch at offset 0. Returns the lane epoch.
-fn assert_empty_message_lane(messages: &OwnerReplicationRead<Message>) -> u64 {
-    let OwnerReplicationRead::Batch(batch) = messages else {
-        panic!("queue message lane must not require a checkpoint: {messages:?}");
-    };
-    assert_eq!(batch.requested_offset, 0);
-    assert_eq!(batch.next_offset, 0);
-    assert!(batch.records.is_empty());
-    batch.epoch
 }
 
 /// Single-log queues accept a checkpoint reset only for an explicitly
@@ -1459,17 +1447,7 @@ async fn assignment_transition_apply_can_make_queue_follower() {
     ));
 
     let err = broker
-        .read_owner_replication_records(
-            "transition-followed",
-            Partition::new(0),
-            Some("workers"),
-            0,
-            0,
-            1,
-            1,
-            usize::MAX,
-            0,
-        )
+        .read_owner_queue_records("transition-followed", Partition::new(0), Some("workers"), 0, 1, usize::MAX, 0)
         .await
         .expect_err("follower queue should reject owner replication reads");
     assert!(matches!(
@@ -1528,28 +1506,24 @@ async fn assignment_transition_apply_can_stop_follower() {
         .expect("stopped follower should remain materialized but frozen");
     assert_eq!(queue.role, QueueRole::Frozen);
 
-    let records = BrokerOwnerReplicationRecords {
-        messages: OwnerReplicationRead::Batch(OwnerReplicationBatch::<Message> {
-            epoch: 0,
-            requested_offset: 0,
-            next_offset: 0,
-            records: Vec::new(),
-        }),
-        events: OwnerReplicationRead::Batch(OwnerReplicationBatch {
-            epoch: 0,
-            requested_offset: 0,
-            next_offset: 0,
-            records: Vec::new(),
-        }),
-    };
+    // A read with no records appends nothing, so carry one payload record to
+    // reach the follower role check.
+    let records = OwnerReplicationRead::Batch(OwnerReplicationBatch {
+        epoch: 0,
+        requested_offset: 0,
+        next_offset: 1,
+        records: vec![(
+            0,
+            stroma_core::StromaEvent::PayloadEnqueue {
+                not_before: None,
+                expire_at: None,
+                headers: Vec::new(),
+                payload: b"payload".to_vec(),
+            },
+        )],
+    });
     let err = broker
-        .apply_follower_replication_records(
-            "transition-stop-follower",
-            Partition::new(0),
-            Some("workers"),
-            ReplicationResourceKind::Queue,
-            records,
-        )
+        .apply_follower_queue_records("transition-stop-follower", Partition::new(0), Some("workers"), records)
         .await
         .expect_err("stopped follower should reject replicated ingest");
     assert!(matches!(
@@ -1559,6 +1533,25 @@ async fn assignment_transition_apply_can_stop_follower() {
             actual: QueueRole::Frozen
         })
     ));
+    // A read with nothing to append is refused too, so it cannot report
+    // progress for a replica that no longer follows.
+    let empty = OwnerReplicationRead::Batch(OwnerReplicationBatch {
+        epoch: 0,
+        requested_offset: 0,
+        next_offset: 0,
+        records: Vec::new(),
+    });
+    assert!(
+        broker
+            .apply_follower_queue_records(
+                "transition-stop-follower",
+                Partition::new(0),
+                Some("workers"),
+                empty,
+            )
+            .await
+            .is_err()
+    );
 
     broker.shutdown().await;
 }
@@ -1785,35 +1778,18 @@ async fn refresh_follower_keeps_replication_worker_progress() {
     assert_eq!(after, before);
 
     let stale = owner
-        .read_owner_replication_records(
-            "transition-refresh-follower",
-            Partition::new(0),
-            Some("workers"),
-            0,
-            0,
-            10,
-            10,
-            usize::MAX,
-            0,
-        )
+        .read_owner_queue_records("transition-refresh-follower", Partition::new(0), Some("workers"), 0, 10, usize::MAX, 0)
         .await
         .unwrap();
     let stale = follower
-        .apply_follower_replication_records(
-            "transition-refresh-follower",
-            Partition::new(0),
-            Some("workers"),
-            ReplicationResourceKind::Queue,
-            stale,
-        )
+        .apply_follower_queue_records("transition-refresh-follower", Partition::new(0), Some("workers"), stale)
         .await
         .unwrap();
-    let BrokerFollowerReplicationApply::Applied(stale) = stale else {
+    let BrokerQueueFollowerApply::Applied(stale) = stale else {
         panic!("unexpected checkpoint requirement")
     };
-    assert_eq!(stale.message_log, None);
     assert!(matches!(
-        stale.event_log,
+        stale,
         Some(
             fibril_broker::queue_engine::ReplicatedAppendOutcome::StaleEpoch {
                 current_epoch: 1,
@@ -2226,7 +2202,7 @@ async fn epoch_fenced_follower_rejects_stale_owner_batches() {
         .unwrap();
     reply.await.unwrap().unwrap();
     let stale_records = owner
-        .read_owner_replication_records(topic, Partition::new(0), None, 0, 0, 10, 10, usize::MAX, 0)
+        .read_owner_queue_records(topic, Partition::new(0), None, 0, 10, usize::MAX, 0)
         .await
         .unwrap();
 
@@ -2239,22 +2215,15 @@ async fn epoch_fenced_follower_rejects_stale_owner_batches() {
 
     // Stale owner's batches (epoch 0) must be rejected, nothing applied.
     let outcome = follower
-        .apply_follower_replication_records(
-            topic,
-            Partition::new(0),
-            None,
-            ReplicationResourceKind::Queue,
-            stale_records,
-        )
+        .apply_follower_queue_records(topic, Partition::new(0), None, stale_records)
         .await
         .unwrap();
-    let BrokerFollowerReplicationApply::Applied(apply) = outcome else {
+    let BrokerQueueFollowerApply::Applied(apply) = outcome else {
         panic!("expected apply outcome, got {outcome:?}");
     };
-    assert_eq!(apply.message_log, None, "queues have no separate payload lane: {apply:?}");
     assert!(
         matches!(
-            apply.event_log,
+            apply,
             Some(ReplicatedAppendOutcome::StaleEpoch {
                 current_epoch: 2,
                 attempted_epoch: 0,
@@ -2265,10 +2234,10 @@ async fn epoch_fenced_follower_rejects_stale_owner_batches() {
     assert_eq!(
         follower
             .engine()
-            .queue_replication_next_offsets(topic, 0, None)
+            .queue_replication_next_offset(topic, 0, None)
             .await
             .unwrap(),
-        (0, 0),
+        0,
         "nothing from the stale batch may be appended"
     );
 
@@ -2279,33 +2248,27 @@ async fn epoch_fenced_follower_rejects_stale_owner_batches() {
         .await
         .unwrap();
     let fresh_records = owner
-        .read_owner_replication_records(topic, Partition::new(0), None, 0, 0, 10, 10, usize::MAX, 0)
+        .read_owner_queue_records(topic, Partition::new(0), None, 0, 10, usize::MAX, 0)
         .await
         .unwrap();
     let outcome = follower
-        .apply_follower_replication_records(
-            topic,
-            Partition::new(0),
-            None,
-            ReplicationResourceKind::Queue,
-            fresh_records,
-        )
+        .apply_follower_queue_records(topic, Partition::new(0), None, fresh_records)
         .await
         .unwrap();
-    let BrokerFollowerReplicationApply::Applied(apply) = outcome else {
+    let BrokerQueueFollowerApply::Applied(apply) = outcome else {
         panic!("expected apply outcome, got {outcome:?}");
     };
     assert!(
-        matches!(apply.event_log, Some(ReplicatedAppendOutcome::Applied(_))),
+        matches!(apply, Some(ReplicatedAppendOutcome::Applied(_))),
         "fenced-epoch batch must apply: {apply:?}"
     );
     assert_eq!(
         follower
             .engine()
-            .queue_replication_next_offsets(topic, 0, None)
+            .queue_replication_next_offset(topic, 0, None)
             .await
             .unwrap(),
-        (0, 1)
+        1
     );
 
     owner.shutdown().await;
@@ -2341,15 +2304,13 @@ async fn catch_up_rejects_stale_append_without_recording_ready_state() {
         .unwrap();
 
     let err = follower
-        .catch_up_replication_follower_from_owner(
+        .catch_up_queue_follower(
             &owner,
             topic,
             Partition::new(0),
             None,
-            ReplicationResourceKind::Queue,
-            BrokerReplicationCatchUpOptions {
-                max_messages_per_read: 10,
-                max_events_per_read: 10,
+            QueueCatchUpOptions {
+                max_records_per_read: 10,
                 max_iterations: 1,
                 ..Default::default()
             },
@@ -2360,7 +2321,7 @@ async fn catch_up_rejects_stale_append_without_recording_ready_state() {
     assert!(matches!(
         err,
         BrokerError::InvalidReplicationProgress {
-            stream: "event",
+            stream: "queue",
             ..
         }
     ));
@@ -2431,7 +2392,7 @@ async fn assignment_watcher_applies_snapshot_update_to_follower_role() {
 
     let err = broker
         .engine()
-        .read_owner_message_records("watched-followed", 0, Some("workers"), 0, 1)
+        .read_owner_queue_records("watched-followed", 0, Some("workers"), 0, 1, usize::MAX)
         .await
         .expect_err("watched follower queue should reject owner reads");
     assert!(matches!(err, StromaError::WrongQueueRole { .. }));
@@ -2485,7 +2446,7 @@ async fn assignment_transitions_use_cached_local_role_when_watch_skips_previous_
     ));
     let err = broker
         .engine()
-        .read_owner_message_records(topic, 0, group.as_deref(), 0, 1)
+        .read_owner_queue_records(topic, 0, group.as_deref(), 0, 1, usize::MAX)
         .await
         .expect_err("cached local owner role must be frozen even if watch skipped previous owner");
     assert!(matches!(err, StromaError::WrongQueueRole { .. }));
@@ -2898,23 +2859,12 @@ async fn owner_replication_read_returns_published_records() {
     reply.await.unwrap().unwrap();
 
     let records = broker
-        .read_owner_replication_records(
-            "replicated",
-            Partition::new(0),
-            None,
-            0,
-            0,
-            10,
-            10,
-            usize::MAX,
-            0,
-        )
+        .read_owner_queue_records("replicated", Partition::new(0), None, 0, 10, usize::MAX, 0)
         .await
         .unwrap();
 
-    assert_empty_message_lane(&records.messages);
 
-    let OwnerReplicationRead::Batch(events) = records.events else {
+    let OwnerReplicationRead::Batch(events) = records else {
         panic!("expected event records, got checkpoint required");
     };
     assert_eq!(events.requested_offset, 0);
@@ -2934,16 +2884,10 @@ async fn owner_replication_long_poll_wakes_after_publish() {
         .await
         .unwrap();
     let initial_records = broker
-        .read_owner_replication_records(topic, Partition::new(0), None, 0, 0, 10, 10, usize::MAX, 0)
+        .read_owner_queue_records(topic, Partition::new(0), None, 0, 10, usize::MAX, 0)
         .await
         .unwrap();
-    let message_from = match initial_records.messages {
-        OwnerReplicationRead::Batch(batch) => batch.next_offset,
-        OwnerReplicationRead::CheckpointRequired { .. } => {
-            panic!("fresh long-poll test queue unexpectedly needed a message checkpoint")
-        }
-    };
-    let event_from = match initial_records.events {
+    let event_from = match initial_records {
         OwnerReplicationRead::Batch(batch) => batch.next_offset,
         OwnerReplicationRead::CheckpointRequired { .. } => {
             panic!("fresh long-poll test queue unexpectedly needed an event checkpoint")
@@ -2953,17 +2897,7 @@ async fn owner_replication_long_poll_wakes_after_publish() {
     let reader_broker = broker.clone();
     let mut read_task = tokio::spawn(async move {
         reader_broker
-            .read_owner_replication_records(
-                topic,
-                Partition::new(0),
-                None,
-                message_from,
-                event_from,
-                10,
-                10,
-                usize::MAX,
-                5_000,
-            )
+            .read_owner_queue_records(topic, Partition::new(0), None, event_from, 10, usize::MAX, 5_000)
             .await
     });
 
@@ -2992,8 +2926,7 @@ async fn owner_replication_long_poll_wakes_after_publish() {
         .expect("long-poll read should wake after publish")
         .unwrap()
         .unwrap();
-    assert_empty_message_lane(&records.messages);
-    let OwnerReplicationRead::Batch(events) = records.events else {
+    let OwnerReplicationRead::Batch(events) = records else {
         panic!("expected event records, got checkpoint required");
     };
     assert_eq!(events.requested_offset, event_from);
@@ -3012,16 +2945,10 @@ async fn owner_replication_long_poll_ignores_local_only_wake() {
         .await
         .unwrap();
     let initial_records = broker
-        .read_owner_replication_records(topic, Partition::new(0), None, 0, 0, 10, 10, usize::MAX, 0)
+        .read_owner_queue_records(topic, Partition::new(0), None, 0, 10, usize::MAX, 0)
         .await
         .unwrap();
-    let message_from = match initial_records.messages {
-        OwnerReplicationRead::Batch(batch) => batch.next_offset,
-        OwnerReplicationRead::CheckpointRequired { .. } => {
-            panic!("fresh long-poll test queue unexpectedly needed a message checkpoint")
-        }
-    };
-    let event_from = match initial_records.events {
+    let event_from = match initial_records {
         OwnerReplicationRead::Batch(batch) => batch.next_offset,
         OwnerReplicationRead::CheckpointRequired { .. } => {
             panic!("fresh long-poll test queue unexpectedly needed an event checkpoint")
@@ -3031,17 +2958,7 @@ async fn owner_replication_long_poll_ignores_local_only_wake() {
     let reader_broker = broker.clone();
     let mut read_task = tokio::spawn(async move {
         reader_broker
-            .read_owner_replication_records(
-                topic,
-                Partition::new(0),
-                None,
-                message_from,
-                event_from,
-                10,
-                10,
-                usize::MAX,
-                5_000,
-            )
+            .read_owner_queue_records(topic, Partition::new(0), None, event_from, 10, usize::MAX, 5_000)
             .await
     });
 
@@ -3122,16 +3039,10 @@ async fn owner_replication_long_poll_wakes_after_ack_event() {
         .expect("message should be delivered before ack replication test");
 
     let initial_records = broker
-        .read_owner_replication_records(topic, Partition::new(0), None, 0, 0, 10, 10, usize::MAX, 0)
+        .read_owner_queue_records(topic, Partition::new(0), None, 0, 10, usize::MAX, 0)
         .await
         .unwrap();
-    let message_from = match initial_records.messages {
-        OwnerReplicationRead::Batch(batch) => batch.next_offset,
-        OwnerReplicationRead::CheckpointRequired { .. } => {
-            panic!("fresh long-poll test queue unexpectedly needed a message checkpoint")
-        }
-    };
-    let event_from = match initial_records.events {
+    let event_from = match initial_records {
         OwnerReplicationRead::Batch(batch) => batch.next_offset,
         OwnerReplicationRead::CheckpointRequired { .. } => {
             panic!("fresh long-poll test queue unexpectedly needed an event checkpoint")
@@ -3141,17 +3052,7 @@ async fn owner_replication_long_poll_wakes_after_ack_event() {
     let reader_broker = broker.clone();
     let mut read_task = tokio::spawn(async move {
         reader_broker
-            .read_owner_replication_records(
-                topic,
-                Partition::new(0),
-                None,
-                message_from,
-                event_from,
-                10,
-                10,
-                usize::MAX,
-                5_000,
-            )
+            .read_owner_queue_records(topic, Partition::new(0), None, event_from, 10, usize::MAX, 5_000)
             .await
     });
 
@@ -3175,7 +3076,7 @@ async fn owner_replication_long_poll_wakes_after_ack_event() {
         .expect("ACK event should wake long-poll")
         .unwrap()
         .unwrap();
-    let OwnerReplicationRead::Batch(events) = records.events else {
+    let OwnerReplicationRead::Batch(events) = records else {
         panic!("expected event records after ACK, got checkpoint required");
     };
     assert_eq!(events.requested_offset, event_from);
@@ -3210,13 +3111,11 @@ async fn cold_owner_materializes_at_cached_assignment_epoch() {
     reply.await.unwrap().unwrap();
 
     let records = broker
-        .read_owner_replication_records(topic, Partition::new(0), None, 0, 0, 10, 10, usize::MAX, 0)
+        .read_owner_queue_records(topic, Partition::new(0), None, 0, 10, usize::MAX, 0)
         .await
         .unwrap();
 
-    assert_eq!(assert_empty_message_lane(&records.messages), 7);
-
-    let OwnerReplicationRead::Batch(events) = records.events else {
+    let OwnerReplicationRead::Batch(events) = records else {
         panic!("expected event records, got checkpoint required");
     };
     assert_eq!(events.epoch, 7);
@@ -3422,21 +3321,10 @@ async fn publishes_route_to_independent_partition_logs() {
         let group = group.clone();
         async move {
             let records = broker
-                .read_owner_replication_records(
-                    topic,
-                    partition,
-                    group.as_deref(),
-                    0,
-                    0,
-                    10,
-                    10,
-                    usize::MAX,
-                    0,
-                )
+                .read_owner_queue_records(topic, partition, group.as_deref(), 0, 10, usize::MAX, 0)
                 .await
                 .unwrap();
-            assert_empty_message_lane(&records.messages);
-            let OwnerReplicationRead::Batch(events) = records.events else {
+            let OwnerReplicationRead::Batch(events) = records else {
                 panic!("expected event records for partition {partition}");
             };
             events
@@ -3596,17 +3484,7 @@ async fn owner_replication_read_serves_coordination_declared_stream() {
     }
 
     let records = broker
-        .read_owner_replication_records(
-            "events",
-            Partition::new(0),
-            None,
-            0,
-            0,
-            10,
-            10,
-            1,
-            0,
-        )
+        .read_owner_stream_records("events", Partition::new(0), 0, 0, 10, 10, 1, 0)
         .await
         .expect("stream owner must serve replication reads");
     // Reaching here is the regression: the guard admitted the stream
@@ -3617,17 +3495,7 @@ async fn owner_replication_read_serves_coordination_declared_stream() {
 
     // The queue guard still rejects topics owned by neither table.
     let err = broker
-        .read_owner_replication_records(
-            "plain",
-            Partition::new(0),
-            None,
-            0,
-            0,
-            10,
-            10,
-            usize::MAX,
-            0,
-        )
+        .read_owner_queue_records("plain", Partition::new(0), None, 0, 10, usize::MAX, 0)
         .await
         .expect_err("unowned topic unexpectedly served");
     assert!(matches!(err, BrokerError::NotOwner { .. }));
@@ -3641,17 +3509,7 @@ async fn owner_replication_read_rejects_unowned_queue_before_materializing() {
             .await;
 
     let err = broker
-        .read_owner_replication_records(
-            "unowned",
-            Partition::new(0),
-            None,
-            0,
-            0,
-            10,
-            10,
-            usize::MAX,
-            0,
-        )
+        .read_owner_queue_records("unowned", Partition::new(0), None, 0, 10, usize::MAX, 0)
         .await
         .expect_err("unowned queue unexpectedly served replication records");
 
@@ -3697,26 +3555,11 @@ async fn broker_replication_read_applies_to_follower_and_promotes() {
     }
 
     let records = owner
-        .read_owner_replication_records(
-            "catchup",
-            Partition::new(0),
-            None,
-            0,
-            0,
-            10,
-            10,
-            usize::MAX,
-            0,
-        )
+        .read_owner_queue_records("catchup", Partition::new(0), None, 0, 10, usize::MAX, 0)
         .await
         .unwrap();
-    let expected_message_next_offset = match &records.messages {
-        OwnerReplicationRead::Batch(batch) => batch.next_offset,
-        OwnerReplicationRead::CheckpointRequired { .. } => {
-            panic!("fresh follower unexpectedly needed a message checkpoint")
-        }
-    };
-    let expected_event_next_offset = match &records.events {
+    let expected_message_next_offset = 0;
+    let expected_event_next_offset = match &records {
         OwnerReplicationRead::Batch(batch) => batch.next_offset,
         OwnerReplicationRead::CheckpointRequired { .. } => {
             panic!("fresh follower unexpectedly needed an event checkpoint")
@@ -3724,16 +3567,10 @@ async fn broker_replication_read_applies_to_follower_and_promotes() {
     };
 
     let apply = follower
-        .apply_follower_replication_records(
-            "catchup",
-            Partition::new(0),
-            None,
-            ReplicationResourceKind::Queue,
-            records,
-        )
+        .apply_follower_queue_records("catchup", Partition::new(0), None, records)
         .await
         .unwrap();
-    assert!(matches!(apply, BrokerFollowerReplicationApply::Applied(_)));
+    assert!(matches!(apply, BrokerQueueFollowerApply::Applied(_)));
 
     let promotion = follower
         .promote_replication_follower_if_caught_up(
@@ -3864,13 +3701,11 @@ async fn stream_follower_catches_up_records_and_cursor_from_owner() {
 
     // Catch up the follower from the owner over the stream-mode pull path.
     let outcome = follower
-        .catch_up_replication_follower_from_owner(
+        .catch_up_stream_follower(
             owner.as_ref(),
             "events",
             Partition::new(0),
-            None,
-            ReplicationResourceKind::Stream,
-            BrokerReplicationCatchUpOptions {
+            StreamCatchUpOptions {
                 message_from: 0,
                 event_from: 0,
                 max_messages_per_read: 10,
@@ -3883,7 +3718,7 @@ async fn stream_follower_catches_up_records_and_cursor_from_owner() {
         .await
         .unwrap();
     let progress = match outcome {
-        BrokerReplicationCatchUp::CaughtUp(progress) => progress,
+        BrokerStreamCatchUp::CaughtUp(progress) => progress,
         other => panic!("stream follower did not catch up: {other:?}"),
     };
     assert_eq!(progress.applied_message_records, 2);
@@ -4101,30 +3936,14 @@ async fn broker_state_checkpoint_export_installs_then_messages_catch_up() {
     );
 
     let records = owner
-        .read_owner_replication_records(
-            "checkpoint",
-            Partition::new(0),
-            None,
-            0,
-            checkpoint.event_start_offset,
-            10,
-            10,
-            usize::MAX,
-            0,
-        )
+        .read_owner_queue_records("checkpoint", Partition::new(0), None, checkpoint.event_start_offset, 10, usize::MAX, 0)
         .await
         .unwrap();
     let apply = follower
-        .apply_follower_replication_records(
-            "checkpoint",
-            Partition::new(0),
-            None,
-            ReplicationResourceKind::Queue,
-            records,
-        )
+        .apply_follower_queue_records("checkpoint", Partition::new(0), None, records)
         .await
         .unwrap();
-    assert!(matches!(apply, BrokerFollowerReplicationApply::Applied(_)));
+    assert!(matches!(apply, BrokerQueueFollowerApply::Applied(_)));
     follower
         .engine()
         .verify_queue_learner_caught_up("checkpoint", 0, None, 0, 0, 2)
@@ -4177,13 +3996,7 @@ async fn broker_state_checkpoint_export_installs_then_messages_catch_up() {
 #[tokio::test]
 async fn follower_apply_returns_checkpoint_required_without_materializing_queue() {
     let (follower, _dir) = open_test_broker().await;
-    let message_checkpoint = BrokerReplicationCheckpointRequired {
-        epoch: 3,
-        requested_offset: 5,
-        head_offset: 8,
-        next_offset: 20,
-    };
-    let event_checkpoint = BrokerReplicationCheckpointRequired {
+    let checkpoint = BrokerReplicationCheckpointRequired {
         epoch: 3,
         requested_offset: 4,
         head_offset: 9,
@@ -4191,43 +4004,28 @@ async fn follower_apply_returns_checkpoint_required_without_materializing_queue(
     };
 
     let apply = follower
-        .apply_follower_replication_records(
+        .apply_follower_queue_records(
             "checkpointed",
             Partition::new(0),
             None,
-            ReplicationResourceKind::Queue,
-            BrokerOwnerReplicationRecords {
-                messages: OwnerReplicationRead::CheckpointRequired {
-                    epoch: message_checkpoint.epoch,
-                    requested_offset: message_checkpoint.requested_offset,
-                    head_offset: message_checkpoint.head_offset,
-                    next_offset: message_checkpoint.next_offset,
-                },
-                events: OwnerReplicationRead::CheckpointRequired {
-                    epoch: event_checkpoint.epoch,
-                    requested_offset: event_checkpoint.requested_offset,
-                    head_offset: event_checkpoint.head_offset,
-                    next_offset: event_checkpoint.next_offset,
-                },
+            OwnerReplicationRead::CheckpointRequired {
+                epoch: checkpoint.epoch,
+                requested_offset: checkpoint.requested_offset,
+                head_offset: checkpoint.head_offset,
+                next_offset: checkpoint.next_offset,
             },
         )
         .await
         .unwrap();
 
-    assert_eq!(
-        apply,
-        BrokerFollowerReplicationApply::CheckpointRequired {
-            messages: Some(message_checkpoint),
-            events: Some(event_checkpoint),
-        }
-    );
+    assert_eq!(apply, BrokerQueueFollowerApply::CheckpointRequired(checkpoint));
     assert!(!follower.is_queue_materialized("checkpointed", None));
 
     follower.shutdown().await;
 }
 
 #[tokio::test]
-async fn follower_apply_returns_event_checkpoint_required_after_empty_message_batch() {
+async fn stream_follower_apply_returns_event_checkpoint_required_after_empty_message_batch() {
     let (follower, _dir) = open_test_broker().await;
     let event_checkpoint = BrokerReplicationCheckpointRequired {
         epoch: 4,
@@ -4237,12 +4035,10 @@ async fn follower_apply_returns_event_checkpoint_required_after_empty_message_ba
     };
 
     let apply = follower
-        .apply_follower_replication_records(
+        .apply_follower_stream_records(
             "event-checkpointed",
             Partition::new(0),
-            None,
-            ReplicationResourceKind::Queue,
-            BrokerOwnerReplicationRecords {
+            BrokerOwnerStreamRecords {
                 messages: OwnerReplicationRead::Batch(OwnerReplicationBatch::<Message> {
                     epoch: 4,
                     requested_offset: 0,
@@ -4262,7 +4058,7 @@ async fn follower_apply_returns_event_checkpoint_required_after_empty_message_ba
 
     assert_eq!(
         apply,
-        BrokerFollowerReplicationApply::CheckpointRequired {
+        fibril_broker::broker::BrokerStreamFollowerApply::CheckpointRequired {
             messages: None,
             events: Some(event_checkpoint),
         }
@@ -4308,30 +4104,13 @@ async fn broker_replication_catch_up_loop_handles_multiple_passes() {
     }
 
     let outcome = follower
-        .catch_up_replication_follower_from_owner(
-            &owner,
-            "multi-pass",
-            Partition::new(0),
-            None,
-            ReplicationResourceKind::Queue,
-            BrokerReplicationCatchUpOptions {
-                max_messages_per_read: 2,
-                max_events_per_read: 2,
-                ..Default::default()
-            },
-        )
+        .catch_up_queue_follower(&owner, "multi-pass", Partition::new(0), None, QueueCatchUpOptions { max_records_per_read: 2, ..Default::default() })
         .await
         .unwrap();
 
     assert_eq!(
         outcome,
-        BrokerReplicationCatchUp::CaughtUp(BrokerReplicationCatchUpProgress {
-            iterations: 4,
-            applied_message_records: 0,
-            applied_event_records: 5,
-            message_next_offset: 0,
-            event_next_offset: 5,
-        })
+        BrokerQueueCatchUp::CaughtUp(QueueCatchUpProgress { iterations: 4, applied_records: 5, next_offset: 5 })
     );
 
     let promotion = follower
@@ -4410,30 +4189,13 @@ async fn checkpoint_aware_catch_up_preserves_normal_catch_up_path() {
     }
 
     let outcome = follower
-        .catch_up_replication_follower_from_owner_with_checkpoint(
-            &owner,
-            "checkpoint-aware-normal",
-            Partition::new(0),
-            None,
-            ReplicationResourceKind::Queue,
-            BrokerReplicationCatchUpOptions {
-                max_messages_per_read: 2,
-                max_events_per_read: 2,
-                ..Default::default()
-            },
-        )
+        .catch_up_queue_follower_with_checkpoint(&owner, "checkpoint-aware-normal", Partition::new(0), None, QueueCatchUpOptions { max_records_per_read: 2, ..Default::default() })
         .await
         .unwrap();
 
     assert_eq!(
         outcome,
-        BrokerReplicationCatchUp::CaughtUp(BrokerReplicationCatchUpProgress {
-            iterations: 3,
-            applied_message_records: 0,
-            applied_event_records: 3,
-            message_next_offset: 0,
-            event_next_offset: 3,
-        })
+        BrokerQueueCatchUp::CaughtUp(QueueCatchUpProgress { iterations: 3, applied_records: 3, next_offset: 3 })
     );
 
     owner.shutdown().await;
@@ -4497,31 +4259,20 @@ async fn checkpoint_aware_catch_up_refuses_unauthorized_reset_of_overlapping_pre
     // history there is no authority for it, so catch-up only reports the
     // requirement and the local records stay untouched.
     let outcome = follower
-        .catch_up_replication_follower_from_owner_with_checkpoint(
-            &owner,
-            topic,
-            partition,
-            None,
-            ReplicationResourceKind::Queue,
-            BrokerReplicationCatchUpOptions {
-                max_messages_per_read: 10,
-                max_events_per_read: 10,
-                ..Default::default()
-            },
-        )
+        .catch_up_queue_follower_with_checkpoint(&owner, topic, partition, None, QueueCatchUpOptions { max_records_per_read: 10, ..Default::default() })
         .await
         .unwrap();
     assert!(
-        matches!(outcome, BrokerReplicationCatchUp::CheckpointRequired { .. }),
+        matches!(outcome, BrokerQueueCatchUp::CheckpointRequired { .. }),
         "{outcome:?}"
     );
     assert_eq!(
         follower
             .engine()
-            .queue_replication_next_offsets(topic, 0, None)
+            .queue_replication_next_offset(topic, 0, None)
             .await
             .unwrap(),
-        (0, 1)
+        1
     );
 
     // Unbound local storage has no verified history baseline, so it cannot
@@ -4556,10 +4307,10 @@ async fn checkpoint_aware_catch_up_refuses_unauthorized_reset_of_overlapping_pre
         }
     );
     let records = owner
-        .read_owner_replication_records(topic, partition, None, 0, 0, 10, 10, usize::MAX, 0)
+        .read_owner_queue_records(topic, partition, None, 0, 10, usize::MAX, 0)
         .await
         .unwrap();
-    let OwnerReplicationRead::Batch(events) = records.events else {
+    let OwnerReplicationRead::Batch(events) = records else {
         panic!("owner history should stay readable");
     };
     assert_eq!(
@@ -4595,12 +4346,23 @@ fn follower_worker_state_builds_catch_up_options_from_current_offsets() {
     let state = FollowerReplicationWorkerState::new(23, 29);
 
     assert_eq!(
-        state.catch_up_options(cfg),
-        BrokerReplicationCatchUpOptions {
+        state.stream_catch_up_options(cfg),
+        StreamCatchUpOptions {
             message_from: 23,
             event_from: 29,
             max_messages_per_read: 11,
             max_events_per_read: 13,
+            max_bytes_per_read: 19,
+            max_iterations: 17,
+            max_wait_ms: 0,
+        }
+    );
+    // A queue reads one log, so it uses the event cursor and record limit.
+    assert_eq!(
+        state.queue_catch_up_options(cfg),
+        QueueCatchUpOptions {
+            from: 29,
+            max_records_per_read: 13,
             max_bytes_per_read: 19,
             max_iterations: 17,
             max_wait_ms: 0,
@@ -4612,13 +4374,13 @@ fn follower_worker_state_builds_catch_up_options_from_current_offsets() {
 fn follower_worker_state_records_caught_up_progress_and_enables_wait_budget() {
     let cfg = FollowerReplicationWorkerConfig::default();
     let mut state = FollowerReplicationWorkerState::new(0, 0);
-    let progress = BrokerReplicationCatchUpProgress {
+    let progress = StreamCatchUpProgress {
         message_next_offset: 5,
         event_next_offset: 7,
         ..Default::default()
     };
 
-    state.record_catch_up(cfg, &BrokerReplicationCatchUp::CaughtUp(progress));
+    state.record_catch_up(cfg, &FollowerCatchUp::Stream(BrokerStreamCatchUp::CaughtUp(progress)));
 
     assert_eq!(state.message_next_offset, 5);
     assert_eq!(state.event_next_offset, 7);
@@ -4626,7 +4388,7 @@ fn follower_worker_state_records_caught_up_progress_and_enables_wait_budget() {
     assert_eq!(state.last_progress, Some(progress));
     assert_eq!(state.next_delay_ms, 0);
     assert_eq!(
-        state.catch_up_options(cfg).max_wait_ms,
+        state.stream_catch_up_options(cfg).max_wait_ms,
         cfg.caught_up_poll_ms
     );
 }
@@ -4639,22 +4401,22 @@ fn follower_worker_state_uses_wait_budget_only_after_caught_up() {
     };
     let mut state = FollowerReplicationWorkerState::new(0, 0);
 
-    assert_eq!(state.catch_up_options(cfg).max_wait_ms, 0);
+    assert_eq!(state.stream_catch_up_options(cfg).max_wait_ms, 0);
 
     state.record_catch_up(
         cfg,
-        &BrokerReplicationCatchUp::IterationLimit {
-            progress: BrokerReplicationCatchUpProgress::default(),
-        },
+        &FollowerCatchUp::Stream(BrokerStreamCatchUp::IterationLimit {
+            progress: StreamCatchUpProgress::default(),
+        }),
     );
-    assert_eq!(state.catch_up_options(cfg).max_wait_ms, 0);
+    assert_eq!(state.stream_catch_up_options(cfg).max_wait_ms, 0);
 
     state.record_catch_up(
         cfg,
-        &BrokerReplicationCatchUp::CaughtUp(BrokerReplicationCatchUpProgress::default()),
+        &FollowerCatchUp::Stream(BrokerStreamCatchUp::CaughtUp(StreamCatchUpProgress::default())),
     );
     assert_eq!(
-        state.catch_up_options(cfg).max_wait_ms,
+        state.stream_catch_up_options(cfg).max_wait_ms,
         cfg.caught_up_poll_ms
     );
 }
@@ -4663,13 +4425,13 @@ fn follower_worker_state_uses_wait_budget_only_after_caught_up() {
 fn follower_worker_state_records_iteration_limit_as_retry() {
     let cfg = FollowerReplicationWorkerConfig::default();
     let mut state = FollowerReplicationWorkerState::new(1, 2);
-    let progress = BrokerReplicationCatchUpProgress {
+    let progress = StreamCatchUpProgress {
         message_next_offset: 3,
         event_next_offset: 4,
         ..Default::default()
     };
 
-    state.record_catch_up(cfg, &BrokerReplicationCatchUp::IterationLimit { progress });
+    state.record_catch_up(cfg, &FollowerCatchUp::Stream(BrokerStreamCatchUp::IterationLimit { progress }));
 
     assert_eq!(state.message_next_offset, 3);
     assert_eq!(state.event_next_offset, 4);
@@ -4688,7 +4450,7 @@ fn follower_worker_state_records_checkpoint_requirement() {
         head_offset: 15,
         next_offset: 40,
     };
-    let progress = BrokerReplicationCatchUpProgress {
+    let progress = StreamCatchUpProgress {
         message_next_offset: 10,
         event_next_offset: 20,
         ..Default::default()
@@ -4696,11 +4458,11 @@ fn follower_worker_state_records_checkpoint_requirement() {
 
     state.record_catch_up(
         cfg,
-        &BrokerReplicationCatchUp::CheckpointRequired {
+        &FollowerCatchUp::Stream(BrokerStreamCatchUp::CheckpointRequired {
             progress,
             messages: Some(checkpoint.clone()),
             events: None,
-        },
+        }),
     );
 
     assert_eq!(
@@ -4726,15 +4488,15 @@ fn follower_worker_checkpoint_install_is_policy_gated() {
 
     state.record_catch_up(
         FollowerReplicationWorkerConfig::default(),
-        &BrokerReplicationCatchUp::CheckpointRequired {
-            progress: BrokerReplicationCatchUpProgress {
+        &FollowerCatchUp::Stream(BrokerStreamCatchUp::CheckpointRequired {
+            progress: StreamCatchUpProgress {
                 message_next_offset: 10,
                 event_next_offset: 20,
                 ..Default::default()
             },
             messages: Some(checkpoint),
             events: None,
-        },
+        }),
     );
 
     assert!(!state.should_install_checkpoint(FollowerReplicationWorkerConfig::default()));
@@ -4758,11 +4520,11 @@ fn follower_worker_checkpoint_install_requires_checkpoint_status() {
 
     state.record_catch_up(
         cfg,
-        &BrokerReplicationCatchUp::CaughtUp(BrokerReplicationCatchUpProgress {
+        &FollowerCatchUp::Stream(BrokerStreamCatchUp::CaughtUp(StreamCatchUpProgress {
             message_next_offset: 1,
             event_next_offset: 1,
             ..Default::default()
-        }),
+        })),
     );
 
     assert!(!state.should_install_checkpoint(cfg));
@@ -4818,15 +4580,9 @@ async fn follower_worker_tick_records_catch_up_progress() {
 
     assert_eq!(
         outcome,
-        BrokerReplicationCatchUp::IterationLimit {
-            progress: BrokerReplicationCatchUpProgress {
-                iterations: 1,
-                applied_message_records: 0,
-                applied_event_records: 1,
-                message_next_offset: 0,
-                event_next_offset: 1,
-            },
-        }
+        FollowerCatchUp::Queue(BrokerQueueCatchUp::IterationLimit {
+            progress: QueueCatchUpProgress { iterations: 1, applied_records: 1, next_offset: 1 },
+        })
     );
     assert_eq!(
         follower
@@ -4836,7 +4592,7 @@ async fn follower_worker_tick_records_catch_up_progress() {
             message_next_offset: 0,
             event_next_offset: 1,
             status: FollowerReplicationWorkerStatus::PendingRetry,
-            last_progress: Some(BrokerReplicationCatchUpProgress {
+            last_progress: Some(StreamCatchUpProgress {
                 iterations: 1,
                 applied_message_records: 0,
                 applied_event_records: 1,
@@ -4871,33 +4627,23 @@ async fn follower_worker_tick_records_catch_up_progress() {
 struct EmptyOwnerPeer;
 
 impl BrokerOwnerReplicationPeer for EmptyOwnerPeer {
-    fn read_owner_replication_records<'a>(
+    fn read_owner_queue_records<'a>(
         &'a self,
         _topic: &'a str,
         _partition: fibril_broker::storage::Partition,
         _group: Option<&'a str>,
-        message_from: Offset,
-        event_from: Offset,
-        _max_messages: usize,
-        _max_events: usize,
+        from: Offset,
+        _max_records: usize,
         _max_bytes: usize,
         _max_wait_ms: u64,
-    ) -> BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
+    ) -> BoxFuture<'a, Result<OwnerReplicationRead<stroma_core::StromaEvent>, BrokerError>> {
         Box::pin(async move {
-            Ok(BrokerOwnerReplicationRecords {
-                messages: OwnerReplicationRead::Batch(OwnerReplicationBatch::<Message> {
-                    epoch: 0,
-                    requested_offset: message_from,
-                    next_offset: message_from,
-                    records: Vec::new(),
-                }),
-                events: OwnerReplicationRead::Batch(OwnerReplicationBatch {
-                    epoch: 0,
-                    requested_offset: event_from,
-                    next_offset: event_from,
-                    records: Vec::new(),
-                }),
-            })
+            Ok(OwnerReplicationRead::Batch(OwnerReplicationBatch {
+                epoch: 0,
+                requested_offset: from,
+                next_offset: from,
+                records: Vec::new(),
+            }))
         })
     }
 
@@ -5023,18 +4769,16 @@ impl BrokerOwnerReplicationPeerResolver for StaticOwnerPeerResolver {
 struct NotOwnerPeer;
 
 impl BrokerOwnerReplicationPeer for NotOwnerPeer {
-    fn read_owner_replication_records<'a>(
+    fn read_owner_queue_records<'a>(
         &'a self,
         topic: &'a str,
         partition: fibril_broker::storage::Partition,
         group: Option<&'a str>,
-        _message_from: Offset,
-        _event_from: Offset,
-        _max_messages: usize,
-        _max_events: usize,
+        _from: Offset,
+        _max_records: usize,
         _max_bytes: usize,
         _max_wait_ms: u64,
-    ) -> BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
+    ) -> BoxFuture<'a, Result<OwnerReplicationRead<stroma_core::StromaEvent>, BrokerError>> {
         Box::pin(async move {
             Err(BrokerError::NotOwner {
                 topic: topic.into(),
@@ -5094,18 +4838,16 @@ impl CountingEmptyOwnerPeer {
 }
 
 impl BrokerOwnerReplicationPeer for CountingEmptyOwnerPeer {
-    fn read_owner_replication_records<'a>(
+    fn read_owner_queue_records<'a>(
         &'a self,
         _topic: &'a str,
         _partition: fibril_broker::storage::Partition,
         _group: Option<&'a str>,
-        message_from: Offset,
-        event_from: Offset,
-        _max_messages: usize,
-        _max_events: usize,
+        from: Offset,
+        _max_records: usize,
         _max_bytes: usize,
         max_wait_ms: u64,
-    ) -> BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
+    ) -> BoxFuture<'a, Result<OwnerReplicationRead<stroma_core::StromaEvent>, BrokerError>> {
         if self.reads.load(Ordering::Acquire) >= self.complete_reads_limit {
             return Box::pin(std::future::pending());
         }
@@ -5113,20 +4855,12 @@ impl BrokerOwnerReplicationPeer for CountingEmptyOwnerPeer {
         self.last_max_wait_ms.store(max_wait_ms, Ordering::Release);
         self.read_notify.notify_waiters();
         Box::pin(async move {
-            Ok(BrokerOwnerReplicationRecords {
-                messages: OwnerReplicationRead::Batch(OwnerReplicationBatch::<Message> {
-                    epoch: 0,
-                    requested_offset: message_from,
-                    next_offset: message_from,
-                    records: Vec::new(),
-                }),
-                events: OwnerReplicationRead::Batch(OwnerReplicationBatch {
-                    epoch: 0,
-                    requested_offset: event_from,
-                    next_offset: event_from,
-                    records: Vec::new(),
-                }),
-            })
+            Ok(OwnerReplicationRead::Batch(OwnerReplicationBatch {
+                epoch: 0,
+                requested_offset: from,
+                next_offset: from,
+                records: Vec::new(),
+            }))
         })
     }
 
@@ -5166,18 +4900,32 @@ impl BlockingOwnerPeer {
 }
 
 impl BrokerOwnerReplicationPeer for BlockingOwnerPeer {
-    fn read_owner_replication_records<'a>(
+    fn read_owner_queue_records<'a>(
         &'a self,
         _topic: &'a str,
         _partition: fibril_broker::storage::Partition,
         _group: Option<&'a str>,
+        _from: Offset,
+        _max_records: usize,
+        _max_bytes: usize,
+        _max_wait_ms: u64,
+    ) -> BoxFuture<'a, Result<OwnerReplicationRead<stroma_core::StromaEvent>, BrokerError>> {
+        self.reads.fetch_add(1, Ordering::AcqRel);
+        self.read_notify.notify_waiters();
+        Box::pin(std::future::pending())
+    }
+
+    fn read_owner_stream_records<'a>(
+        &'a self,
+        _topic: &'a str,
+        _partition: fibril_broker::storage::Partition,
         _message_from: Offset,
         _event_from: Offset,
         _max_messages: usize,
         _max_events: usize,
         _max_bytes: usize,
         _max_wait_ms: u64,
-    ) -> BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
+    ) -> BoxFuture<'a, Result<BrokerOwnerStreamRecords, BrokerError>> {
         self.reads.fetch_add(1, Ordering::AcqRel);
         self.read_notify.notify_waiters();
         Box::pin(std::future::pending())
@@ -5221,13 +4969,11 @@ async fn follower_worker_tick_uses_owner_peer_abstraction() {
 
     assert_eq!(
         outcome,
-        BrokerReplicationCatchUp::CaughtUp(BrokerReplicationCatchUpProgress {
+        FollowerCatchUp::Queue(BrokerQueueCatchUp::CaughtUp(QueueCatchUpProgress {
             iterations: 1,
-            applied_message_records: 0,
-            applied_event_records: 0,
-            message_next_offset: 0,
-            event_next_offset: 0,
-        })
+            applied_records: 0,
+            next_offset: 0,
+        }))
     );
     assert_eq!(
         follower
@@ -5290,17 +5036,7 @@ async fn owner_replication_long_poll_wakes_on_broker_shutdown() {
         let owner = owner.clone();
         tokio::spawn(async move {
             owner
-                .read_owner_replication_records(
-                    "shutdown-long-poll",
-                    Partition::new(0),
-                    None,
-                    0,
-                    0,
-                    8,
-                    8,
-                    usize::MAX,
-                    60_000,
-                )
+                .read_owner_queue_records("shutdown-long-poll", Partition::new(0), None, 0, 8, usize::MAX, 60_000)
                 .await
         })
     };
@@ -6503,7 +6239,7 @@ async fn delayed_publish_with_elapsed_deadline_records_an_ordinary_enqueue() {
         b"ready".to_vec(), 0, 0, None, Default::default(), 1,
     ).await.unwrap().await.unwrap().unwrap();
     let OwnerReplicationRead::Batch(events) = broker.engine()
-        .read_owner_event_records("elapsed", 0, None, 0, 100).await.unwrap() else { panic!("event batch") };
+        .read_owner_queue_records("elapsed", 0, None, 0, 100, usize::MAX).await.unwrap() else { panic!("event batch") };
     // The payload record itself is the enqueue. An elapsed deadline must not
     // leave a not_before on it.
     assert!(events.records.iter().any(|(_, event)| matches!(event,
@@ -8594,7 +8330,7 @@ async fn coordinated_declaration_is_written_only_by_owner_and_reapplied_after_re
     drop(second.unwrap());
     let OwnerReplicationRead::Batch(events) = broker
         .engine()
-        .read_owner_event_records("jobs", 0, None, 0, 100)
+        .read_owner_queue_records("jobs", 0, None, 0, 100, usize::MAX)
         .await
         .unwrap()
     else {
@@ -8626,7 +8362,7 @@ async fn coordinated_declaration_is_written_only_by_owner_and_reapplied_after_re
         .await;
     let OwnerReplicationRead::Batch(events) = broker
         .engine()
-        .read_owner_event_records("jobs", 0, None, 0, 100)
+        .read_owner_queue_records("jobs", 0, None, 0, 100, usize::MAX)
         .await
         .unwrap()
     else {
@@ -8656,7 +8392,7 @@ async fn coordinated_declaration_is_written_only_by_owner_and_reapplied_after_re
     );
     let OwnerReplicationRead::Batch(events) = broker
         .engine()
-        .read_owner_event_records("jobs", 1, None, 0, 100)
+        .read_owner_queue_records("jobs", 1, None, 0, 100, usize::MAX)
         .await
         .unwrap()
     else {
@@ -8699,7 +8435,7 @@ async fn declaration_reconciliation_cannot_override_a_refused_promotion() {
     assert!(matches!(
         broker
             .engine()
-            .read_owner_event_records("jobs", 0, None, 0, 10)
+            .read_owner_queue_records("jobs", 0, None, 0, 10, usize::MAX)
             .await,
         Err(StromaError::WrongQueueRole {
             actual: QueueRole::Follower,
@@ -8868,26 +8604,16 @@ async fn queue_dependency_boundary(prefix: u64) {
             .unwrap();
         rx.await.unwrap().unwrap();
         let seed = owner
-            .read_owner_replication_records(
-                topic,
-                Partition::new(0),
-                None,
-                0,
-                0,
-                2048,
-                2048,
-                8 * 1024 * 1024,
-                0,
-            )
+            .read_owner_queue_records(topic, Partition::new(0), None, 0, 2048, 8 * 1024 * 1024, 0)
             .await
             .unwrap();
-        if let OwnerReplicationRead::Batch(events) = &seed.events {
+        if let OwnerReplicationRead::Batch(events) = &seed {
             event_from = events.next_offset;
         } else {
             panic!("seed checkpoint");
         }
         follower
-            .apply_replicated_stream_batch(topic, Partition::new(0), None, seed)
+            .apply_queue_push_batch(topic, Partition::new(0), None, seed)
             .await
             .unwrap();
     }
@@ -8949,35 +8675,21 @@ async fn queue_dependency_boundary(prefix: u64) {
     );
     // Real owner-read path. Only the first new payload record fits.
     let records = owner
-        .read_owner_replication_records(
-            topic,
-            Partition::new(0),
-            None,
-            0,
-            event_from,
-            2048,
-            1,
-            8 * 1024 * 1024,
-            0,
-        )
+        .read_owner_queue_records(topic, Partition::new(0), None, event_from, 1, 8 * 1024 * 1024, 0)
         .await
         .unwrap();
-    assert_empty_message_lane(&records.messages);
-    let OwnerReplicationRead::Batch(events) = &records.events else {
+    let OwnerReplicationRead::Batch(events) = &records else {
         panic!("fresh logs must not need checkpoints");
     };
     assert_eq!(event_payloads(events), vec![(prefix, vec![0; 64])]);
     let outcome = follower
-        .apply_replicated_stream_batch(topic, Partition::new(0), None, records)
+        .apply_queue_push_batch(topic, Partition::new(0), None, records)
         .await
         .unwrap();
-    let fibril_broker::replication::ReplicatedStreamApply::Applied {
-        message_next,
-        event_next,
-    } = outcome
-    else {
+    let fibril_broker::replication::QueuePushApply::Applied { next: event_next } = outcome else {
         panic!("expected durable apply")
     };
+    let message_next = 0;
     assert_eq!((message_next, event_next), (0, prefix + 1));
     owner.record_follower_replication_progress(
         topic,
@@ -9014,28 +8726,14 @@ async fn queue_dependency_boundary(prefix: u64) {
         "a message-lane report must not confirm a queue publish"
     );
     let suffix = owner
-        .read_owner_replication_records(
-            topic,
-            Partition::new(0),
-            None,
-            0,
-            event_next,
-            2048,
-            2048,
-            8 * 1024 * 1024,
-            0,
-        )
+        .read_owner_queue_records(topic, Partition::new(0), None, event_next, 2048, 8 * 1024 * 1024, 0)
         .await
         .unwrap();
     let outcome = follower
-        .apply_replicated_stream_batch(topic, Partition::new(0), None, suffix)
+        .apply_queue_push_batch(topic, Partition::new(0), None, suffix)
         .await
         .unwrap();
-    let fibril_broker::replication::ReplicatedStreamApply::Applied {
-        message_next,
-        event_next,
-    } = outcome
-    else {
+    let fibril_broker::replication::QueuePushApply::Applied { next: event_next } = outcome else {
         panic!("expected durable suffix")
     };
     assert_eq!(event_next, dependency.event_next);
@@ -9334,17 +9032,7 @@ async fn durable_batch_wakes_replication_while_earlier_confirm_waits() {
     let reader_broker = broker.clone();
     let mut reader = tokio::spawn(async move {
         reader_broker
-            .read_owner_replication_records(
-                topic,
-                part,
-                None,
-                initial.message_next,
-                initial.event_next,
-                10,
-                10,
-                usize::MAX,
-                10_000,
-            )
+            .read_owner_queue_records(topic, part, None, initial.event_next, 10, usize::MAX, 10_000)
             .await
     });
     assert!(
@@ -9368,8 +9056,7 @@ async fn durable_batch_wakes_replication_while_earlier_confirm_waits() {
         .expect("locally durable B must wake the follower while A awaits its replica")
         .unwrap()
         .unwrap();
-    assert_empty_message_lane(&records.messages);
-    let OwnerReplicationRead::Batch(events) = records.events else {
+    let OwnerReplicationRead::Batch(events) = records else {
         panic!("event checkpoint");
     };
     assert_eq!(event_payloads(&events), vec![(1, vec![2])]);

@@ -96,12 +96,7 @@ async fn authenticated_snapshot_chunks_require_authority_and_complete_artifact()
         .await
         .unwrap();
     engine
-        .apply_replicated_queue_batch(
-            "q",
-            0,
-            None,
-            None,
-            Some(stroma_core::ReplicatedEventBatch {
+        .apply_replicated_queue_log_batch("q", 0, None, stroma_core::ReplicatedEventBatch {
                 epoch: 1,
                 first_offset: 0,
                 durability: Some(stroma_core::KDurability::AfterFsync),
@@ -113,8 +108,7 @@ async fn authenticated_snapshot_chunks_require_authority_and_complete_artifact()
                         payload: vec![n; 128],
                     })
                     .collect(),
-            }),
-        )
+            })
         .await
         .unwrap();
     let authority = Arc::new(Authority::default());

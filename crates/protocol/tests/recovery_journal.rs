@@ -86,12 +86,7 @@ async fn inspection_download_resumes_over_tcp_then_revalidates_without_source() 
         .await
         .unwrap();
     engine
-        .apply_replicated_queue_batch(
-            "q",
-            0,
-            None,
-            None,
-            Some(stroma_core::ReplicatedEventBatch {
+        .apply_replicated_queue_log_batch("q", 0, None, stroma_core::ReplicatedEventBatch {
                 epoch: 1,
                 first_offset: 0,
                 durability: Some(stroma_core::KDurability::AfterFsync),
@@ -103,8 +98,7 @@ async fn inspection_download_resumes_over_tcp_then_revalidates_without_source() 
                         payload: vec![n; 128],
                     })
                     .collect(),
-            }),
-        )
+            })
         .await
         .unwrap();
     let authority = Arc::new(Authority {

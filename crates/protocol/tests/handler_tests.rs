@@ -652,18 +652,6 @@ fn wire_queue_publishes(records: &[ReplicationEventRecord]) -> Vec<(u64, Vec<u8>
         .collect()
 }
 
-/// Queues keep no separate message log, so the message lane of a queue
-/// replication read is always an empty batch.
-fn assert_empty_queue_message_lane(messages: &OwnerReplicationRead<stroma_core::Message>) {
-    match messages {
-        OwnerReplicationRead::Batch(batch) => {
-            assert!(batch.records.is_empty(), "queue message lane carried records");
-            assert_eq!(batch.next_offset, 0);
-        }
-        other => panic!("unexpected queue message lane read: {other:?}"),
-    }
-}
-
 #[tokio::test]
 async fn hello_can_resume_with_owner_scoped_identity() {
     let settings = ConnectionSettings::new(Some(60)).with_reconnect_grace_ms(Some(1_000));
@@ -2122,26 +2110,15 @@ async fn protocol_owner_replication_peer_reads_owner_records() {
 
     let peer = ProtocolOwnerReplicationPeer::new(owner_framed);
     let records = peer
-        .read_owner_replication_records(
-            topic,
-            Partition::new(0),
-            group.as_deref(),
-            0,
-            0,
-            8,
-            8,
-            usize::MAX,
-            0,
-        )
+        .read_owner_queue_records(topic, Partition::new(0), group.as_deref(), 0, 8, usize::MAX, 0)
         .await
         .unwrap();
 
-    assert_empty_queue_message_lane(&records.messages);
     assert_eq!(
-        queue_publishes(&records.events),
+        queue_publishes(&records),
         vec![(0, b"peer-replicated-payload".to_vec())]
     );
-    let OwnerReplicationRead::Batch(events) = records.events else {
+    let OwnerReplicationRead::Batch(events) = records else {
         panic!("expected event batch");
     };
     assert_eq!(events.requested_offset, 0);
@@ -2195,17 +2172,7 @@ async fn protocol_owner_replication_peer_maps_not_owner_error() {
 
     let peer = ProtocolOwnerReplicationPeer::new(framed);
     let err = peer
-        .read_owner_replication_records(
-            "unowned",
-            Partition::new(0),
-            None,
-            0,
-            0,
-            8,
-            8,
-            usize::MAX,
-            0,
-        )
+        .read_owner_queue_records("unowned", Partition::new(0), None, 0, 8, usize::MAX, 0)
         .await
         .unwrap_err();
 
@@ -2267,23 +2234,12 @@ async fn static_protocol_owner_peer_resolver_reads_from_owner_node() {
         .unwrap()
         .expect("owner peer");
     let records = peer
-        .read_owner_replication_records(
-            topic,
-            Partition::new(0),
-            group.as_deref(),
-            0,
-            0,
-            8,
-            8,
-            usize::MAX,
-            0,
-        )
+        .read_owner_queue_records(topic, Partition::new(0), group.as_deref(), 0, 8, usize::MAX, 0)
         .await
         .unwrap();
 
-    assert_empty_queue_message_lane(&records.messages);
     assert_eq!(
-        queue_publishes(&records.events),
+        queue_publishes(&records),
         vec![(0, b"resolver-payload".to_vec())]
     );
 
@@ -2570,12 +2526,11 @@ async fn static_protocol_owner_peer_resolver_can_authenticate() {
         .unwrap()
         .expect("owner peer");
     let records = peer
-        .read_owner_replication_records(topic, Partition::new(0), None, 0, 0, 8, 8, usize::MAX, 0)
+        .read_owner_queue_records(topic, Partition::new(0), None, 0, 8, usize::MAX, 0)
         .await
         .unwrap();
 
-    assert_empty_queue_message_lane(&records.messages);
-    assert_eq!(queue_publishes(&records.events), vec![(0, b"auth-payload".to_vec())]);
+    assert_eq!(queue_publishes(&records), vec![(0, b"auth-payload".to_vec())]);
 
     drop(peer);
     drop(resolver);
@@ -2668,12 +2623,11 @@ async fn owner_peer_replication_works_over_tls() {
         .unwrap()
         .expect("owner peer");
     let records = peer
-        .read_owner_replication_records(topic, Partition::new(0), None, 0, 0, 8, 8, usize::MAX, 0)
+        .read_owner_queue_records(topic, Partition::new(0), None, 0, 8, usize::MAX, 0)
         .await
         .unwrap();
 
-    assert_empty_queue_message_lane(&records.messages);
-    assert_eq!(queue_publishes(&records.events), vec![(0, b"tls-payload".to_vec())]);
+    assert_eq!(queue_publishes(&records), vec![(0, b"tls-payload".to_vec())]);
 
     drop(peer);
     drop(resolver);
@@ -3442,21 +3396,10 @@ async fn follower_worker_loop_reports_checkpoint_requirement_without_history() {
         .unwrap();
     assert!(owner_checkpoint.combined_log);
     let owner_records = owner_broker
-        .read_owner_replication_records(
-            topic,
-            Partition::new(0),
-            group.as_deref(),
-            0,
-            0,
-            8,
-            8,
-            usize::MAX,
-            0,
-        )
+        .read_owner_queue_records(topic, Partition::new(0), group.as_deref(), 0, 8, usize::MAX, 0)
         .await
         .unwrap();
-    assert_empty_queue_message_lane(&owner_records.messages);
-    let OwnerReplicationRead::Batch(events) = owner_records.events else {
+    let OwnerReplicationRead::Batch(events) = owner_records else {
         panic!("expected owner event batch");
     };
     let event_records = events
@@ -3556,10 +3499,10 @@ async fn follower_worker_loop_reports_checkpoint_requirement_without_history() {
     assert_eq!(
         follower_broker
             .engine()
-            .queue_replication_next_offsets(topic, 0, group.as_deref())
+            .queue_replication_next_offset(topic, 0, group.as_deref())
             .await
             .unwrap(),
-        (0, 0)
+        0
     );
     let promoted = follower_broker
         .promote_replication_follower_if_caught_up(
@@ -6950,12 +6893,7 @@ async fn recovery_seal_requires_node_auth_and_exact_committed_authority_over_tcp
         .await
         .unwrap();
     engine
-        .apply_replicated_queue_batch(
-            &request.topic,
-            0,
-            None,
-            None,
-            Some(stroma_core::ReplicatedEventBatch {
+        .apply_replicated_queue_log_batch(&request.topic, 0, None, stroma_core::ReplicatedEventBatch {
                 epoch: pending.previous.epoch,
                 first_offset: 0,
                 events: vec![StromaEvent::PayloadEnqueue {
@@ -6965,8 +6903,7 @@ async fn recovery_seal_requires_node_auth_and_exact_committed_authority_over_tcp
                     payload: b"sealed-wire-body".to_vec(),
                 }],
                 durability: None,
-            }),
-        )
+            })
         .await
         .unwrap();
     for identity in [None, Some("ordinary-user"), Some("@node")] {
@@ -7518,37 +7455,16 @@ async fn owner_peer_reauthenticates_after_transport_loss() {
         "test".into(),
     );
     assert!(
-        peer.read_owner_replication_records(
-            "reconnect-auth",
-            Partition::new(0),
-            None,
-            0,
-            0,
-            8,
-            8,
-            1024 * 1024,
-            0
-        )
+        peer.read_owner_queue_records("reconnect-auth", Partition::new(0), None, 0, 8, 1024 * 1024, 0)
         .await
         .is_err()
     );
     let records = peer
-        .read_owner_replication_records(
-            "reconnect-auth",
-            Partition::new(0),
-            None,
-            0,
-            0,
-            8,
-            8,
-            1024 * 1024,
-            0,
-        )
+        .read_owner_queue_records("reconnect-auth", Partition::new(0), None, 0, 8, 1024 * 1024, 0)
         .await
         .unwrap();
-    assert_empty_queue_message_lane(&records.messages);
     assert_eq!(
-        queue_publishes(&records.events),
+        queue_publishes(&records),
         vec![(0, b"after-reconnect".to_vec())]
     );
     peer.close().await;
@@ -7721,18 +7637,12 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
         ];
         let first = if checkpoints { index + 3 } else { 4 };
         engine
-            .apply_replicated_queue_batch(
-                &command.topic,
-                0,
-                None,
-                None,
-                Some(stroma_core::ReplicatedEventBatch {
+            .apply_replicated_queue_log_batch(&command.topic, 0, None, stroma_core::ReplicatedEventBatch {
                     epoch: pending.previous.epoch,
                     first_offset: 0,
                     durability: None,
                     events: shared[..first].to_vec(),
-                }),
-            )
+                })
             .await
             .unwrap();
         if checkpoints {
@@ -7747,18 +7657,12 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
         }
         if !suffix.is_empty() {
             engine
-                .apply_replicated_queue_batch(
-                    &command.topic,
-                    0,
-                    None,
-                    None,
-                    Some(stroma_core::ReplicatedEventBatch {
+                .apply_replicated_queue_log_batch(&command.topic, 0, None, stroma_core::ReplicatedEventBatch {
                         epoch: pending.previous.epoch,
                         first_offset: first as u64,
                         durability: None,
                         events: suffix,
-                    }),
-                )
+                    })
                 .await
                 .unwrap();
         }
@@ -8688,40 +8592,22 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
     // A durable owner write is insufficient for this majority confirmation.
     let records = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let records = peer.read_owner_replication_records_fenced("initial-wire", Partition::new(0), None, 0, 0, 8, 8, 65536, 20, Some(1)).await.unwrap();
-            if !queue_publishes(&records.events).is_empty() { break records; }
+            let records = peer.read_owner_queue_records_fenced("initial-wire", Partition::new(0), None, 0, 8, 65536, 20, Some(1)).await.unwrap();
+            if !queue_publishes(&records).is_empty() { break records; }
         }
     }).await.unwrap();
-    assert_empty_queue_message_lane(&records.messages);
-    assert_eq!(queue_publishes(&records.events), vec![(0, b"activated-history".to_vec())]);
+    assert_eq!(queue_publishes(&records), vec![(0, b"activated-history".to_vec())]);
     assert!(matches!(
         confirmed.try_recv(),
         Err(tokio::sync::oneshot::error::TryRecvError::Empty)
     ));
     brokers[1]
-        .apply_follower_replication_records(
-            "initial-wire",
-            Partition::new(0),
-            None,
-            ReplicationResourceKind::Queue,
-            records,
-        )
+        .apply_follower_queue_records("initial-wire", Partition::new(0), None, records)
         .await
         .unwrap();
     // The empty message lane stays at zero. The event cursor reports the
     // follower's durable copy of the publish.
-    peer.read_owner_replication_records_fenced(
-        "initial-wire",
-        Partition::new(0),
-        None,
-        0,
-        1,
-        8,
-        8,
-        65536,
-        0,
-        Some(1),
-    )
+    peer.read_owner_queue_records_fenced("initial-wire", Partition::new(0), None, 1, 8, 65536, 0, Some(1))
     .await
     .unwrap();
     assert_eq!(
@@ -8737,21 +8623,18 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
         Arc<Broker<StromaEngine>>,
         fibril_broker::history_replication::HistoryReplicationSession,
     );
-    impl fibril_broker::broker::BrokerReplicationStreamApply for ApplyHistory {
-        fn apply_stream_batch<'a>(
+    impl fibril_broker::broker::BrokerQueuePushApply for ApplyHistory {
+        fn apply_queue_push<'a>(
             &'a self,
-            records: fibril_broker::broker::BrokerOwnerReplicationRecords,
+            records: OwnerReplicationRead<StromaEvent>,
         ) -> futures::future::BoxFuture<
             'a,
-            Result<
-                fibril_broker::broker::ReplicatedStreamApply,
-                fibril_broker::broker::BrokerError,
-            >,
+            Result<fibril_broker::broker::QueuePushApply, fibril_broker::broker::BrokerError>,
         > {
             Box::pin(async move {
                 self.0.authorize_history_replication(&self.1, false)?;
                 self.0
-                    .apply_replicated_stream_batch("initial-wire", Partition::new(0), None, records)
+                    .apply_queue_push_batch("initial-wire", Partition::new(0), None, records)
                     .await
             })
         }
@@ -8778,11 +8661,10 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
         let stop = stop.clone();
         async move {
             streaming_peer
-                .stream_replication_fenced(
+                .push_queue_replication_fenced(
                     "initial-wire",
                     Partition::new(0),
                     None,
-                    0,
                     1,
                     65536,
                     Arc::new(|| fibril_broker::replication::StreamApplyTunables {
@@ -8825,7 +8707,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
         .unwrap();
     stream_task.await.unwrap().unwrap();
     if learner != LearnerCase::None {
-        use fibril_broker::broker::{BrokerReplicationCatchUp, BrokerReplicationCatchUpOptions};
+        use fibril_broker::broker::{BrokerQueueCatchUp, QueueCatchUpOptions};
         use fibril_protocol::v1::replication::connect_protocol_owner_peer;
         for (provider, id) in providers.iter().zip(["a", "b", "c"]) {
             let node = NodeInfo {
@@ -8923,17 +8805,10 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
             .await
             .unwrap();
         let caught = brokers[2]
-            .catch_up_replication_follower_from_owner_with_checkpoint(
-                &learner_peer,
-                "initial-wire",
-                Partition::new(0),
-                None,
-                ReplicationResourceKind::Queue,
-                BrokerReplicationCatchUpOptions::default(),
-            )
+            .catch_up_queue_follower_with_checkpoint(&learner_peer, "initial-wire", Partition::new(0), None, QueueCatchUpOptions::default())
             .await
             .unwrap();
-        assert!(matches!(caught, BrokerReplicationCatchUp::CaughtUp(_)));
+        assert!(matches!(caught, BrokerQueueCatchUp::CaughtUp(_)));
         if matches!(
             learner,
             LearnerCase::RecoveryFirst | LearnerCase::Race | LearnerCase::StaleOwner
@@ -9073,18 +8948,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
                 // old eligible follower is now sealed and rejects further apply.
                 assert!(
                     brokers[1]
-                        .catch_up_replication_follower_from_owner_with_checkpoint(
-                            &peer,
-                            "initial-wire",
-                            Partition::new(0),
-                            None,
-                            ReplicationResourceKind::Queue,
-                            BrokerReplicationCatchUpOptions {
-                                message_from: 0,
-                                event_from: 2,
-                                ..Default::default()
-                            }
-                        )
+                        .catch_up_queue_follower_with_checkpoint(&peer, "initial-wire", Partition::new(0), None, QueueCatchUpOptions { from: 2, ..Default::default() })
                         .await
                         .is_err()
                 );
@@ -9123,18 +8987,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
             .unwrap();
         // Even forged optimistic learner progress must never satisfy a confirm.
         let _ = learner_peer
-            .read_owner_replication_records_fenced(
-                "initial-wire",
-                Partition::new(0),
-                None,
-                0,
-                3,
-                8,
-                8,
-                65536,
-                0,
-                Some(1),
-            )
+            .read_owner_queue_records_fenced("initial-wire", Partition::new(0), None, 3, 8, 65536, 0, Some(1))
             .await
             .unwrap();
         assert!(matches!(
@@ -9199,18 +9052,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
         }
         assert!(
             learner_peer
-                .read_owner_replication_records_fenced(
-                    "initial-wire",
-                    Partition::new(0),
-                    None,
-                    0,
-                    3,
-                    8,
-                    8,
-                    65536,
-                    0,
-                    Some(1)
-                )
+                .read_owner_queue_records_fenced("initial-wire", Partition::new(0), None, 3, 8, 65536, 0, Some(1))
                 .await
                 .is_err()
         );
@@ -9247,21 +9089,10 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
             .await
             .unwrap();
         let caught = brokers[2]
-            .catch_up_replication_follower_from_owner_with_checkpoint(
-                &new_peer,
-                "initial-wire",
-                Partition::new(0),
-                None,
-                ReplicationResourceKind::Queue,
-                BrokerReplicationCatchUpOptions {
-                    message_from: from.message_next,
-                    event_from: from.event_next,
-                    ..Default::default()
-                },
-            )
+            .catch_up_queue_follower_with_checkpoint(&new_peer, "initial-wire", Partition::new(0), None, QueueCatchUpOptions { from: from.event_next, ..Default::default() })
             .await
             .unwrap();
-        assert!(matches!(caught, BrokerReplicationCatchUp::CaughtUp(_)));
+        assert!(matches!(caught, BrokerQueueCatchUp::CaughtUp(_)));
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(10), waiting)
                 .await
@@ -9860,44 +9691,34 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
         .unwrap();
     let records=tokio::time::timeout(Duration::from_secs(10),async {
         loop {
-            let records=recovered_peer.read_owner_replication_records_fenced("initial-wire",Partition::new(0),None,plan.message_next(),plan.event_next(),8,8,65536,20,Some(2)).await.unwrap();
-            if !queue_publishes(&records.events).is_empty() {break records}
+            let records=recovered_peer.read_owner_queue_records_fenced("initial-wire", Partition::new(0), None, plan.event_next(), 8, 65536, 20, Some(2)).await.unwrap();
+            if !queue_publishes(&records).is_empty() {break records}
         }
     }).await.unwrap();
-    assert_empty_queue_message_lane(&records.messages);
     // The recovered owner continues the selected history: the next publish
     // takes the first event offset after the recovered prefix.
     assert_eq!(
-        queue_publishes(&records.events),
+        queue_publishes(&records),
         vec![(plan.event_next(), b"after recovered activation".to_vec())]
     );
     assert!(matches!(
         new_confirm.try_recv(),
         Err(tokio::sync::oneshot::error::TryRecvError::Empty)
     ));
-    let message_next = 0;
-    let event_next = match &records.events {
+    let event_next = match &records {
         OwnerReplicationRead::Batch(batch) => batch.records.last().unwrap().0 + 1,
         _ => unreachable!(),
     };
     brokers[2]
-        .apply_follower_replication_records(
-            "initial-wire",
-            Partition::new(0),
-            None,
-            ReplicationResourceKind::Queue,
-            records,
-        )
+        .apply_follower_queue_records("initial-wire", Partition::new(0), None, records)
         .await
         .unwrap();
     recovered_peer
-        .read_owner_replication_records_fenced(
+        .read_owner_queue_records_fenced(
             "initial-wire",
             Partition::new(0),
             None,
-            message_next,
             event_next,
-            8,
             8,
             65536,
             0,
@@ -10028,18 +9849,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
             .is_err()
     );
     assert!(
-        peer.read_owner_replication_records_fenced(
-            "initial-wire",
-            Partition::new(0),
-            None,
-            0,
-            1,
-            8,
-            8,
-            65536,
-            0,
-            Some(1)
-        )
+        peer.read_owner_queue_records_fenced("initial-wire", Partition::new(0), None, 1, 8, 65536, 0, Some(1))
         .await
         .is_err()
     );

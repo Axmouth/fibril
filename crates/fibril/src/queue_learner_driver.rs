@@ -3,11 +3,11 @@ use fibril_broker::coordination::Coordination;
 use fibril_broker::{
     Partition,
     broker::{
-        Broker, BrokerError, BrokerOwnerReplicationPeer, BrokerOwnerReplicationRecords,
-        BrokerReplicationCatchUp, BrokerReplicationCatchUpOptions, ReplicationResourceKind,
+        Broker, BrokerError, BrokerOwnerReplicationPeer, BrokerQueueCatchUp, QueueCatchUpOptions,
     },
     queue_engine::{
         OwnerReplicationBatch, OwnerReplicationRead, OwnerStateCheckpoint, StromaEngine,
+        StromaEvent,
     },
 };
 use fibril_coordination_ganglion::GanglionCoordination;
@@ -16,12 +16,11 @@ use fibril_protocol::v1::replication::{
 };
 use ganglion_core::ResourceIdentity;
 
-// Bound both streams to the captured cut. Otherwise a busy owner can keep
-// supplying newer enqueue events faster than their payload backfill catches up.
+// Bound the queue log read to the captured cut. Otherwise a busy owner can keep
+// supplying newer records faster than the learner reaches the cut.
 struct CutPeer<'a> {
     owner: &'a dyn BrokerOwnerReplicationPeer,
-    messages: u64,
-    events: u64,
+    cut: u64,
 }
 fn cap_read<T>(read: OwnerReplicationRead<T>, cut: u64) -> OwnerReplicationRead<T> {
     match read {
@@ -35,7 +34,7 @@ fn cap_read<T>(read: OwnerReplicationRead<T>, cut: u64) -> OwnerReplicationRead<
             requested_offset,
             ..
         } if requested_offset >= cut => {
-            // This side is already complete locally. Compaction of newer owner
+            // The cut is already complete locally. Compaction of newer owner
             // data must not force it to chase a new checkpoint unnecessarily.
             OwnerReplicationRead::Batch(OwnerReplicationBatch {
                 epoch,
@@ -48,64 +47,53 @@ fn cap_read<T>(read: OwnerReplicationRead<T>, cut: u64) -> OwnerReplicationRead<
     }
 }
 impl BrokerOwnerReplicationPeer for CutPeer<'_> {
-    fn read_owner_replication_records<'a>(
+    fn read_owner_queue_records<'a>(
         &'a self,
         topic: &'a str,
         partition: Partition,
         group: Option<&'a str>,
-        message_from: u64,
-        event_from: u64,
-        max_messages: usize,
-        max_events: usize,
+        from: u64,
+        max_records: usize,
         max_bytes: usize,
         max_wait_ms: u64,
-    ) -> futures::future::BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
-        self.read_owner_replication_records_fenced(
+    ) -> futures::future::BoxFuture<'a, Result<OwnerReplicationRead<StromaEvent>, BrokerError>> {
+        self.read_owner_queue_records_fenced(
             topic,
             partition,
             group,
-            message_from,
-            event_from,
-            max_messages,
-            max_events,
+            from,
+            max_records,
             max_bytes,
             max_wait_ms,
             None,
         )
     }
-    fn read_owner_replication_records_fenced<'a>(
+    fn read_owner_queue_records_fenced<'a>(
         &'a self,
         topic: &'a str,
         partition: Partition,
         group: Option<&'a str>,
-        message_from: u64,
-        event_from: u64,
-        max_messages: usize,
-        max_events: usize,
+        from: u64,
+        max_records: usize,
         max_bytes: usize,
         max_wait_ms: u64,
         epoch: Option<u64>,
-    ) -> futures::future::BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
+    ) -> futures::future::BoxFuture<'a, Result<OwnerReplicationRead<StromaEvent>, BrokerError>> {
         Box::pin(async move {
-            let records = self
+            let read = self
                 .owner
-                .read_owner_replication_records_fenced(
+                .read_owner_queue_records_fenced(
                     topic,
                     partition,
                     group,
-                    message_from,
-                    event_from,
-                    max_messages,
-                    max_events,
+                    from,
+                    max_records,
                     max_bytes,
                     max_wait_ms,
                     epoch,
                 )
                 .await?;
-            Ok(BrokerOwnerReplicationRecords {
-                messages: cap_read(records.messages, self.messages),
-                events: cap_read(records.events, self.events),
-            })
+            Ok(cap_read(read, self.cut))
         })
     }
     fn export_owner_state_checkpoint<'a>(
@@ -283,6 +271,10 @@ pub async fn learn_queue_once(
     {
         return Err("learner checkpoint has another epoch".into());
     }
+    // The learner follows one cursor in the single queue log.
+    if !cut.combined_log || cut.message_next_offset != 0 {
+        return Err("learner checkpoint has a separate message log".into());
+    }
     intent.authorize(provider).await?;
     engine
         .verify_admitted_storage_history(&receipt)
@@ -328,7 +320,7 @@ pub async fn learn_queue_once(
             .map_err(|e| e.to_string())?;
     }
     let mut from = engine
-        .queue_replication_next_offsets(&resource.name, part.id(), resource.group.as_deref())
+        .queue_replication_next_offset(&resource.name, part.id(), resource.group.as_deref())
         .await
         .map_err(|e| e.to_string())?;
     loop {
@@ -336,7 +328,7 @@ pub async fn learn_queue_once(
             return Err("broker is shutting down".into());
         }
         // The cut is fixed at the start; publishing does not need an idle gap.
-        if from.0 >= cut.message_next_offset && from.1 >= cut.event_next_offset {
+        if from >= cut.event_next_offset {
             intent
                 .admit(
                     provider,
@@ -349,30 +341,25 @@ pub async fn learn_queue_once(
                 topic = resource.name,
                 partition = resource.partition,
                 node = intent.node(),
-                message_next = from.0,
-                event_next = from.1,
+                next = from,
                 "background queue learner admitted without fencing the owner"
             );
             return Ok(());
         }
         let cut_peer = CutPeer {
             owner: &peer,
-            messages: cut.message_next_offset,
-            events: cut.event_next_offset,
+            cut: cut.event_next_offset,
         };
         let outcome = broker
-            .catch_up_replication_follower_using_engine(
+            .catch_up_queue_follower_using_engine(
                 &engine,
                 &cut_peer,
                 &resource.name,
                 part,
                 resource.group.as_deref(),
-                ReplicationResourceKind::Queue,
-                BrokerReplicationCatchUpOptions {
-                    message_from: from.0,
-                    event_from: from.1,
-                    max_messages_per_read: 4096,
-                    max_events_per_read: 4096,
+                QueueCatchUpOptions {
+                    from,
+                    max_records_per_read: 4096,
                     max_bytes_per_read: 16 * 1024 * 1024,
                     max_iterations: 16,
                     max_wait_ms: 0,
@@ -381,9 +368,10 @@ pub async fn learn_queue_once(
             .await
             .map_err(|e| e.to_string())?;
         let progress = match outcome {
-            BrokerReplicationCatchUp::CaughtUp(p)
-            | BrokerReplicationCatchUp::IterationLimit { progress: p } => p,
-            BrokerReplicationCatchUp::CheckpointRequired { .. } => {
+            BrokerQueueCatchUp::CaughtUp(p) | BrokerQueueCatchUp::IterationLimit { progress: p } => {
+                p
+            }
+            BrokerQueueCatchUp::CheckpointRequired { .. } => {
                 // Compaction can overtake the read cursor while the owner
                 // continues serving. Only fresh non-voting authority permits reset.
                 intent.authorize(provider).await?;
@@ -395,6 +383,9 @@ pub async fn learn_queue_once(
                     || checkpoint.event_epoch != intent.assignment().epoch
                 {
                     return Err("learner checkpoint epoch changed".into());
+                }
+                if !checkpoint.combined_log || checkpoint.message_next_offset != 0 {
+                    return Err("learner checkpoint has a separate message log".into());
                 }
                 engine
                     .install_queue_learner_checkpoint(
@@ -414,7 +405,7 @@ pub async fn learn_queue_once(
                     .map_err(|e| e.to_string())?;
                 cut = checkpoint;
                 from = engine
-                    .queue_replication_next_offsets(
+                    .queue_replication_next_offset(
                         &resource.name,
                         part.id(),
                         resource.group.as_deref(),
@@ -424,8 +415,7 @@ pub async fn learn_queue_once(
                 continue;
             }
         };
-        from.0 = progress.message_next_offset;
-        from.1 = progress.event_next_offset;
+        from = progress.next_offset;
         // Validate the unchanged intent before admitting any further local work.
         intent.session(&provider.consensus_node().committed_snapshot())?;
         tokio::task::yield_now().await;

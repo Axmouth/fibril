@@ -10,8 +10,8 @@ use fibril_broker::{
     Offset, Partition,
     broker::{
         BrokerError, BrokerOwnerReplicationPeer, BrokerOwnerReplicationPeerResolver,
-        BrokerOwnerReplicationRecords, BrokerReplicationStreamApply, FollowerStreamExit,
-        ReplicatedStreamApply, ReplicationResourceKind,
+        BrokerOwnerStreamRecords, BrokerQueuePushApply, FollowerStreamExit, QueuePushApply,
+        ReplicationResourceKind,
     },
     coordination::{Coordination, NodeInfo, PartitionAssignment},
     queue_engine::{
@@ -321,9 +321,6 @@ impl BrokerOwnerReplicationPeerResolver for StaticProtocolOwnerPeerResolver {
             if let Some(tls) = &self.cfg.tls {
                 built = built.with_peer_tls(tls.clone());
             }
-            if kind == ReplicationResourceKind::Stream {
-                built = built.with_stream_mode();
-            }
             let peer = Arc::new(built);
             peers.insert(cache_key, peer.clone());
             let peer: Arc<dyn BrokerOwnerReplicationPeer> = peer;
@@ -468,9 +465,6 @@ impl BrokerOwnerReplicationPeerResolver for CoordinationProtocolOwnerPeerResolve
             }
             if let Some(tls) = &self.cfg.tls {
                 built = built.with_peer_tls(tls.clone());
-            }
-            if kind == ReplicationResourceKind::Stream {
-                built = built.with_stream_mode();
             }
             let peer = Arc::new(built);
             peers.insert(
@@ -710,10 +704,6 @@ pub struct ProtocolOwnerReplicationPeer {
     close_token: CancellationToken,
     /// Stamped into replication reads for owner-side progress tracking.
     reporter_node_id: Option<String>,
-    /// When set, the peer reads a STREAM partition: it sends
-    /// `StreamReplicationRead` and expects `StreamReplicationReadOk`. The body is
-    /// identical to the queue read; only the op differs.
-    stream_mode: bool,
     /// Added to a read's `max_wait_ms` to bound how long the follower waits for
     /// the owner's response before treating the connection as dead.
     read_timeout_slack_ms: u64,
@@ -746,7 +736,6 @@ impl ProtocolOwnerReplicationPeer {
             reconnect: None,
             close_token: CancellationToken::new(),
             reporter_node_id: None,
-            stream_mode: false,
             read_timeout_slack_ms: DEFAULT_READ_TIMEOUT_SLACK_MS,
         }
     }
@@ -774,12 +763,6 @@ impl ProtocolOwnerReplicationPeer {
         self
     }
 
-    /// Read stream partitions (send `StreamReplicationRead`) instead of queues.
-    pub fn with_stream_mode(mut self) -> Self {
-        self.stream_mode = true;
-        self
-    }
-
     pub fn new_reconnecting(
         addr: String,
         auth: Option<ProtocolOwnerPeerAuth>,
@@ -792,7 +775,6 @@ impl ProtocolOwnerReplicationPeer {
             request_lock: Mutex::new(()),
             next_request_id: AtomicU64::new(20_000),
             reporter_node_id: None,
-            stream_mode: false,
             read_timeout_slack_ms: DEFAULT_READ_TIMEOUT_SLACK_MS,
             reconnect: Some(ProtocolOwnerPeerConnectConfig {
                 addr,
@@ -847,23 +829,162 @@ impl ProtocolOwnerReplicationPeer {
     }
 }
 
+impl ProtocolOwnerReplicationPeer {
+    /// Send one pull read (`ReplicationRead` or `StreamReplicationRead`, which
+    /// share a body) and wait for its reply, bounded by the long-poll window
+    /// plus slack.
+    async fn request_replication_read(
+        &self,
+        op: Op,
+        request: ReplicationRead,
+    ) -> Result<ReplicationReadOk, BrokerError> {
+        let topic = request.topic.clone();
+        let partition = request.partition;
+        let group = request.group.clone();
+        let max_wait_ms = request.max_wait_ms;
+        let stream = matches!(op, Op::StreamReplicationRead);
+        let _request_guard = tokio::select! {
+            biased;
+            _ = self.close_token.cancelled() => {
+                return Err(BrokerError::Unknown("protocol owner peer closed".into()));
+            }
+            guard = self.request_lock.lock() => guard,
+        };
+        let request_id = self.next_request_id();
+        let mut conn = self.take_conn().await?;
+        if let Err(err) = conn
+            .send(self.history_frame(try_encode(op, request_id, &request).map_err(protocol_error)?)?)
+            .await
+        {
+            return Err(BrokerError::Unknown(format!(
+                "replication read send failed: {err}"
+            )));
+        }
+
+        let recv = async {
+            if stream {
+                recv_stream_replication_read_ok_response(&mut conn, request_id).await
+            } else {
+                recv_replication_read_ok_response(&mut conn, request_id).await
+            }
+        };
+        // Bound the wait: the owner long-polls up to `max_wait_ms`, so anything
+        // past that plus slack means the response was lost (for example a
+        // partition that dropped it). Give up and drop the connection so the
+        // worker reconnects instead of hanging on a dead socket.
+        let read_deadline_ms = max_wait_ms as u64 + self.read_timeout_slack_ms;
+        let read: ReplicationReadOk = match tokio::select! {
+            biased;
+            _ = self.close_token.cancelled() => {
+                Err(ProtocolReplicationRequestError::ConnectionClosed)
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(read_deadline_ms)) => {
+                Err(ProtocolReplicationRequestError::ReadTimeout(read_deadline_ms))
+            }
+            response = recv => {
+                response
+            }
+        } {
+            Ok(read) => read,
+            Err(err) => {
+                if !err.invalidates_connection() {
+                    self.restore_conn(conn).await;
+                }
+                return Err(protocol_request_error_to_broker(
+                    err,
+                    &topic,
+                    partition,
+                    group.as_deref(),
+                ));
+            }
+        };
+        self.restore_conn(conn).await;
+        Ok(read)
+    }
+}
+
 impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
-    fn read_owner_replication_records<'a>(
+    fn read_owner_queue_records<'a>(
         &'a self,
         topic: &'a str,
         partition: Partition,
         group: Option<&'a str>,
+        from: Offset,
+        max_records: usize,
+        max_bytes: usize,
+        max_wait_ms: u64,
+    ) -> futures::future::BoxFuture<'a, Result<OwnerReplicationRead<StromaEvent>, BrokerError>> {
+        self.read_owner_queue_records_fenced(
+            topic,
+            partition,
+            group,
+            from,
+            max_records,
+            max_bytes,
+            max_wait_ms,
+            None,
+        )
+    }
+
+    fn read_owner_queue_records_fenced<'a>(
+        &'a self,
+        topic: &'a str,
+        partition: Partition,
+        group: Option<&'a str>,
+        from: Offset,
+        max_records: usize,
+        max_bytes: usize,
+        max_wait_ms: u64,
+        reporter_epoch: Option<u64>,
+    ) -> futures::future::BoxFuture<'a, Result<OwnerReplicationRead<StromaEvent>, BrokerError>> {
+        Box::pin(async move {
+            let max_records = u32::try_from(max_records).map_err(|_| {
+                BrokerError::InvalidArgument("max_records exceeds protocol limit".into())
+            })?;
+            let max_bytes = u64::try_from(max_bytes).map_err(|_| {
+                BrokerError::InvalidArgument("max_bytes exceeds protocol limit".into())
+            })?;
+            let max_wait_ms = u32::try_from(max_wait_ms).map_err(|_| {
+                BrokerError::InvalidArgument("max_wait_ms exceeds protocol limit".into())
+            })?;
+            // The two-lane wire body carries the queue log as its event lane.
+            // The message lane is fixed at cursor zero.
+            let read = self
+                .request_replication_read(
+                    Op::ReplicationRead,
+                    ReplicationRead {
+                        reporter_epoch,
+                        topic: topic.to_string(),
+                        group: group.map(str::to_string),
+                        partition,
+                        message_from: 0,
+                        event_from: from,
+                        max_messages: max_records,
+                        max_events: max_records,
+                        max_bytes,
+                        max_wait_ms,
+                        reporter_node_id: self.reporter_node_id.clone(),
+                    },
+                )
+                .await?;
+            queue_read_from_wire(read)
+        })
+    }
+
+    fn read_owner_stream_records<'a>(
+        &'a self,
+        topic: &'a str,
+        partition: Partition,
         message_from: Offset,
         event_from: Offset,
         max_messages: usize,
         max_events: usize,
         max_bytes: usize,
         max_wait_ms: u64,
-    ) -> futures::future::BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
-        self.read_owner_replication_records_fenced(
+    ) -> futures::future::BoxFuture<'a, Result<BrokerOwnerStreamRecords, BrokerError>> {
+        self.read_owner_stream_records_fenced(
             topic,
             partition,
-            group,
             message_from,
             event_from,
             max_messages,
@@ -874,11 +995,10 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
         )
     }
 
-    fn read_owner_replication_records_fenced<'a>(
+    fn read_owner_stream_records_fenced<'a>(
         &'a self,
         topic: &'a str,
         partition: Partition,
-        group: Option<&'a str>,
         message_from: Offset,
         event_from: Offset,
         max_messages: usize,
@@ -886,7 +1006,7 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
         max_bytes: usize,
         max_wait_ms: u64,
         reporter_epoch: Option<u64>,
-    ) -> futures::future::BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
+    ) -> futures::future::BoxFuture<'a, Result<BrokerOwnerStreamRecords, BrokerError>> {
         Box::pin(async move {
             let max_messages = u32::try_from(max_messages).map_err(|_| {
                 BrokerError::InvalidArgument("max_messages exceeds protocol limit".into())
@@ -900,86 +1020,25 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
             let max_wait_ms = u32::try_from(max_wait_ms).map_err(|_| {
                 BrokerError::InvalidArgument("max_wait_ms exceeds protocol limit".into())
             })?;
-            let _request_guard = tokio::select! {
-                biased;
-                _ = self.close_token.cancelled() => {
-                    return Err(BrokerError::Unknown("protocol owner peer closed".into()));
-                }
-                guard = self.request_lock.lock() => guard,
-            };
-            let request_id = self.next_request_id();
-            let read_op = if self.stream_mode {
-                Op::StreamReplicationRead
-            } else {
-                Op::ReplicationRead
-            };
-            let mut conn = self.take_conn().await?;
-            if let Err(err) = conn
-                .send(
-                    self.history_frame(
-                        try_encode(
-                            read_op,
-                            request_id,
-                            &ReplicationRead {
-                                reporter_epoch: reporter_epoch,
-                                topic: topic.to_string(),
-                                group: group.map(str::to_string),
-                                partition,
-                                message_from,
-                                event_from,
-                                max_messages,
-                                max_events,
-                                max_bytes,
-                                max_wait_ms,
-                                reporter_node_id: self.reporter_node_id.clone(),
-                            },
-                        )
-                        .map_err(protocol_error)?,
-                    )?,
+            let read = self
+                .request_replication_read(
+                    Op::StreamReplicationRead,
+                    ReplicationRead {
+                        reporter_epoch,
+                        topic: topic.to_string(),
+                        group: None,
+                        partition,
+                        message_from,
+                        event_from,
+                        max_messages,
+                        max_events,
+                        max_bytes,
+                        max_wait_ms,
+                        reporter_node_id: self.reporter_node_id.clone(),
+                    },
                 )
-                .await
-            {
-                return Err(BrokerError::Unknown(format!(
-                    "replication read send failed: {err}"
-                )));
-            }
-
-            let recv = async {
-                if self.stream_mode {
-                    recv_stream_replication_read_ok_response(&mut conn, request_id).await
-                } else {
-                    recv_replication_read_ok_response(&mut conn, request_id).await
-                }
-            };
-            // Bound the wait: the owner long-polls up to `max_wait_ms`, so anything
-            // past that plus slack means the response was lost (for example a
-            // partition that dropped it). Give up and drop the connection so the
-            // worker reconnects instead of hanging on a dead socket.
-            let read_deadline_ms = max_wait_ms as u64 + self.read_timeout_slack_ms;
-            let read: ReplicationReadOk = match tokio::select! {
-                biased;
-                _ = self.close_token.cancelled() => {
-                    Err(ProtocolReplicationRequestError::ConnectionClosed)
-                }
-                _ = tokio::time::sleep(std::time::Duration::from_millis(read_deadline_ms)) => {
-                    Err(ProtocolReplicationRequestError::ReadTimeout(read_deadline_ms))
-                }
-                response = recv => {
-                    response
-                }
-            } {
-                Ok(read) => read,
-                Err(err) => {
-                    if !err.invalidates_connection() {
-                        self.restore_conn(conn).await;
-                    }
-                    return Err(protocol_request_error_to_broker(
-                        err, topic, partition, group,
-                    ));
-                }
-            };
-            self.restore_conn(conn).await;
-            to_broker_owner_replication_records(read)
+                .await?;
+            to_broker_stream_records(read)
         })
     }
 
@@ -1059,25 +1118,23 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
         })
     }
 
-    fn stream_replication<'a>(
+    fn push_queue_replication<'a>(
         &'a self,
         topic: &'a str,
         partition: Partition,
         group: Option<&'a str>,
-        message_from: Offset,
-        event_from: Offset,
+        from: Offset,
         credit_bytes: u64,
         tunables: StreamApplyTunablesFn,
         buffer_batches: usize,
-        apply: Arc<dyn BrokerReplicationStreamApply>,
+        apply: Arc<dyn BrokerQueuePushApply>,
         shutdown: CancellationToken,
     ) -> futures::future::BoxFuture<'a, Result<FollowerStreamExit, BrokerError>> {
-        self.stream_replication_fenced(
+        self.push_queue_replication_fenced(
             topic,
             partition,
             group,
-            message_from,
-            event_from,
+            from,
             credit_bytes,
             tunables,
             buffer_batches,
@@ -1087,34 +1144,34 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
         )
     }
 
-    fn stream_replication_fenced<'a>(
+    fn push_queue_replication_fenced<'a>(
         &'a self,
         topic: &'a str,
         partition: Partition,
         group: Option<&'a str>,
-        message_from: Offset,
-        event_from: Offset,
+        from: Offset,
         credit_bytes: u64,
         tunables: StreamApplyTunablesFn,
         buffer_batches: usize,
-        apply: Arc<dyn BrokerReplicationStreamApply>,
+        apply: Arc<dyn BrokerQueuePushApply>,
         shutdown: CancellationToken,
         reporter_epoch: Option<u64>,
     ) -> futures::future::BoxFuture<'a, Result<FollowerStreamExit, BrokerError>> {
         Box::pin(async move {
-            // The stream owns a connection for its lifetime (no concurrent
+            // The push owns a connection for its lifetime (no concurrent
             // request/response on it). take_conn reconnects if needed.
             let conn = self.take_conn().await?;
             let stream_id = self.next_request_id();
-            let sink = Arc::new(StreamApplyAdapterSink { apply });
+            let sink = Arc::new(QueuePushAdapterSink { apply });
+            // The two-lane wire start carries the queue log as its event lane.
             let exit = run_follower_replication_stream_with_history(
                 conn,
                 sink,
                 topic.to_string(),
                 partition,
                 group.map(str::to_string),
-                message_from,
-                event_from,
+                0,
+                from,
                 credit_bytes,
                 tunables,
                 self.reporter_node_id.clone(),
@@ -1477,13 +1534,44 @@ fn protocol_request_error_to_broker(
     }
 }
 
-fn to_broker_owner_replication_records(
-    read: ReplicationReadOk,
-) -> Result<BrokerOwnerReplicationRecords, BrokerError> {
-    Ok(BrokerOwnerReplicationRecords {
+fn to_broker_stream_records(read: ReplicationReadOk) -> Result<BrokerOwnerStreamRecords, BrokerError> {
+    Ok(BrokerOwnerStreamRecords {
         messages: to_broker_message_read(read.messages)?,
         events: to_broker_event_read(read.events)?,
     })
+}
+
+/// Convert a two-lane queue reply into a read of the single queue log. The
+/// queue log travels in the event lane. The message lane must be the fixed
+/// empty batch at cursor zero under the same epoch, otherwise the reply came
+/// from a peer that disagrees about the queue layout and nothing is applied.
+pub(crate) fn queue_read_from_wire(
+    read: ReplicationReadOk,
+) -> Result<OwnerReplicationRead<StromaEvent>, BrokerError> {
+    let lane_epoch = match &read.messages {
+        ReplicationMessageRead::Batch {
+            epoch,
+            requested_offset: 0,
+            next_offset: 0,
+            records,
+        } if records.is_empty() => *epoch,
+        _ => {
+            return Err(BrokerError::InvalidArgument(
+                "queue replication reply carries a message lane".into(),
+            ));
+        }
+    };
+    let events = to_broker_event_read(read.events)?;
+    let log_epoch = match &events {
+        OwnerReplicationRead::Batch(batch) => batch.epoch,
+        OwnerReplicationRead::CheckpointRequired { epoch, .. } => *epoch,
+    };
+    if lane_epoch != log_epoch {
+        return Err(BrokerError::InvalidArgument(format!(
+            "queue replication reply lane epoch {lane_epoch} differs from log epoch {log_epoch}"
+        )));
+    }
+    Ok(events)
 }
 
 fn to_broker_message_read(
@@ -1800,51 +1888,133 @@ async fn run_follower_replication_stream_with_history<S: FollowerStreamSink>(
     exit
 }
 
-/// Adapts a broker-side [`BrokerReplicationStreamApply`] (which speaks broker
-/// records) to the protocol [`FollowerStreamSink`] the transport drives. Decodes
-/// the batch to broker records, computes the credit (bytes) to return, and maps
-/// the broker apply outcome.
-struct StreamApplyAdapterSink {
-    apply: Arc<dyn BrokerReplicationStreamApply>,
+/// Adapts a broker-side [`BrokerQueuePushApply`] (which speaks single-log
+/// queue reads) to the protocol [`FollowerStreamSink`] the transport drives.
+/// Converts each two-lane batch to a queue read, computes the credit (bytes)
+/// to return, and maps the broker outcome back to wire progress, where the
+/// message lane stays at zero.
+struct QueuePushAdapterSink {
+    apply: Arc<dyn BrokerQueuePushApply>,
+}
+
+fn queue_push_outcome(outcome: Result<QueuePushApply, BrokerError>, bytes: u64) -> FollowerApplyOutcome {
+    match outcome {
+        Ok(QueuePushApply::Applied { next }) => FollowerApplyOutcome::Applied {
+            durable_message_next: 0,
+            durable_event_next: next,
+            bytes,
+        },
+        Ok(QueuePushApply::CheckpointRequired) => FollowerApplyOutcome::CheckpointRequired,
+        Err(err) => FollowerApplyOutcome::Error(err.to_string()),
+    }
 }
 
 #[async_trait::async_trait]
-impl FollowerStreamSink for StreamApplyAdapterSink {
+impl FollowerStreamSink for QueuePushAdapterSink {
     async fn apply_open(&self, frames: futures::stream::BoxStream<'_, ReplicationReadOk>) -> FollowerApplyOutcome {
         use futures::StreamExt;
         let mut bytes = 0u64;
         let records = frames.map(|frame| {
             bytes = bytes.saturating_add(stream_batch_bytes(&frame));
-            to_broker_owner_replication_records(frame)
+            queue_read_from_wire(frame)
         }).boxed();
-        match self.apply.apply_open_stream_batch(records).await {
-            Ok(ReplicatedStreamApply::Applied { message_next, event_next }) => FollowerApplyOutcome::Applied {
-                durable_message_next: message_next, durable_event_next: event_next, bytes,
-            },
-            Ok(ReplicatedStreamApply::CheckpointRequired) => FollowerApplyOutcome::CheckpointRequired,
-            Err(err) => FollowerApplyOutcome::Error(err.to_string()),
-        }
+        let outcome = self.apply.apply_open_queue_push(records).await;
+        queue_push_outcome(outcome, bytes)
     }
     async fn apply(&self, batch: ReplicationReadOk) -> FollowerApplyOutcome {
         let bytes = stream_batch_bytes(&batch);
-        let records = match to_broker_owner_replication_records(batch) {
+        let records = match queue_read_from_wire(batch) {
             Ok(records) => records,
             Err(err) => return FollowerApplyOutcome::Error(err.to_string()),
         };
-        match self.apply.apply_stream_batch(records).await {
-            Ok(ReplicatedStreamApply::Applied {
-                message_next,
-                event_next,
-            }) => FollowerApplyOutcome::Applied {
-                durable_message_next: message_next,
-                durable_event_next: event_next,
-                bytes,
+        queue_push_outcome(self.apply.apply_queue_push(records).await, bytes)
+    }
+}
+
+#[cfg(test)]
+mod queue_wire_adapter_tests {
+    use super::*;
+    use crate::v1::{ReplicationEventRecord, ReplicationMessageRecord};
+
+    fn reply(messages: ReplicationMessageRead, epoch: u64) -> ReplicationReadOk {
+        let event = StromaEvent::Ack { off: 4 }.encode().unwrap();
+        ReplicationReadOk {
+            messages,
+            events: ReplicationEventRead::Batch {
+                epoch,
+                requested_offset: 5,
+                next_offset: 6,
+                records: vec![ReplicationEventRecord { offset: 5, payload: event }],
             },
-            Ok(ReplicatedStreamApply::CheckpointRequired) => {
-                FollowerApplyOutcome::CheckpointRequired
-            }
-            Err(err) => FollowerApplyOutcome::Error(err.to_string()),
         }
+    }
+
+    fn lane(epoch: u64, requested_offset: u64, next_offset: u64, records: usize) -> ReplicationMessageRead {
+        ReplicationMessageRead::Batch {
+            epoch,
+            requested_offset,
+            next_offset,
+            records: (0..records)
+                .map(|i| ReplicationMessageRecord {
+                    offset: i as u64,
+                    flags: 0,
+                    headers: Vec::new(),
+                    payload: vec![1],
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn queue_reply_needs_the_fixed_empty_message_lane() {
+        let OwnerReplicationRead::Batch(batch) = queue_read_from_wire(reply(lane(3, 0, 0, 0), 3)).unwrap()
+        else {
+            panic!("queue batch")
+        };
+        assert_eq!((batch.epoch, batch.requested_offset, batch.next_offset), (3, 5, 6));
+        assert_eq!(batch.records, vec![(5, StromaEvent::Ack { off: 4 })]);
+
+        // Message records, a moved lane cursor, a lane checkpoint or a lane
+        // under another epoch mean the peer disagrees about the queue layout.
+        for bad in [
+            reply(lane(3, 0, 1, 1), 3),
+            reply(lane(3, 1, 1, 0), 3),
+            reply(lane(3, 0, 2, 0), 3),
+            reply(lane(2, 0, 0, 0), 3),
+            reply(
+                ReplicationMessageRead::CheckpointRequired(ReplicationCheckpointRequired {
+                    epoch: 3,
+                    requested_offset: 0,
+                    head_offset: 1,
+                    next_offset: 1,
+                }),
+                3,
+            ),
+        ] {
+            assert!(queue_read_from_wire(bad).is_err());
+        }
+    }
+
+    #[test]
+    fn queue_reply_carries_a_log_checkpoint_requirement() {
+        let read = ReplicationReadOk {
+            messages: lane(7, 0, 0, 0),
+            events: ReplicationEventRead::CheckpointRequired(ReplicationCheckpointRequired {
+                epoch: 7,
+                requested_offset: 2,
+                head_offset: 9,
+                next_offset: 12,
+            }),
+        };
+        assert_eq!(
+            queue_read_from_wire(read).unwrap(),
+            OwnerReplicationRead::CheckpointRequired {
+                epoch: 7,
+                requested_offset: 2,
+                head_offset: 9,
+                next_offset: 12,
+            }
+        );
     }
 }
 

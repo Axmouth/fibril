@@ -26,7 +26,7 @@ pub use stroma_core::{
     PreparedStorageHistory, PutOutcome, QuarantineInfo, QueueInspectionState,
     QueuePromotionOutcome, QueueRecoveryStage, QueueRecoveryStageReceipt, QueueRecoveryStageSpec,
     RecoveryMismatchPolicy, RecoveryStageLimits, ReplicatedAppendOutcome, ReplicatedEventBatch,
-    ReplicatedMessageBatch, ReplicatedQueueApplyOutcome, RetentionConfig, SnapshotConfig,
+    ReplicatedMessageBatch, ReplicatedStreamApplyOutcome, RetentionConfig, SnapshotConfig,
     StorageHistoryBinding, Stroma, StromaError, StromaEvent, StromaKeratinConfig,
 };
 use tokio::sync::Notify;
@@ -719,14 +719,14 @@ impl StromaEngine {
             .await
     }
 
-    pub async fn queue_replication_next_offsets(
+    pub async fn queue_replication_next_offset(
         &self,
         topic: &str,
         part: u32,
         group: Option<&str>,
-    ) -> Result<(Offset, Offset), StromaError> {
+    ) -> Result<Offset, StromaError> {
         self.inner
-            .queue_replication_next_offsets(topic, part, group)
+            .queue_replication_next_offset(topic, part, group)
             .await
     }
 
@@ -916,7 +916,16 @@ impl StromaEngine {
     }
 
     #[cfg(feature = "early-replication-experiment")]
-    pub async fn read_owner_message_records_early(
+    pub async fn subscribe_owner_queue_written(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<tokio::sync::watch::Receiver<()>, StromaError> {
+        self.inner.subscribe_owner_queue_written(tp, part, group).await
+    }
+
+    pub async fn read_owner_queue_records(
         &self,
         tp: &str,
         part: u32,
@@ -924,14 +933,14 @@ impl StromaEngine {
         from: Offset,
         max: usize,
         max_bytes: usize,
-    ) -> Result<OwnerReplicationRead<Message>, StromaError> {
+    ) -> Result<OwnerReplicationRead<StromaEvent>, StromaError> {
         self.inner
-            .read_owner_message_records_early_with_byte_budget(tp, part, group, from, max, max_bytes)
+            .read_owner_queue_records(tp, part, group, from, max, max_bytes)
             .await
     }
 
     #[cfg(feature = "early-replication-experiment")]
-    pub async fn read_owner_event_records_early(
+    pub async fn read_owner_queue_records_early(
         &self,
         tp: &str,
         part: u32,
@@ -941,61 +950,61 @@ impl StromaEngine {
         max_bytes: usize,
     ) -> Result<OwnerReplicationRead<StromaEvent>, StromaError> {
         self.inner
-            .read_owner_event_records_early_with_byte_budget(tp, part, group, from, max, max_bytes)
+            .read_owner_queue_records_early(tp, part, group, from, max, max_bytes)
             .await
     }
 
-    pub async fn read_owner_message_records(
+    pub async fn read_owner_stream_records(
         &self,
         tp: &str,
         part: u32,
-        group: Option<&str>,
-        from: Offset,
-        max: usize,
-    ) -> Result<OwnerReplicationRead<Message>, StromaError> {
-        self.inner
-            .read_owner_message_records(tp, part, group, from, max)
-            .await
-    }
-
-    pub async fn read_owner_message_records_with_byte_budget(
-        &self,
-        tp: &str,
-        part: u32,
-        group: Option<&str>,
         from: Offset,
         max: usize,
         max_bytes: usize,
     ) -> Result<OwnerReplicationRead<Message>, StromaError> {
         self.inner
-            .read_owner_message_records_with_byte_budget(tp, part, group, from, max, max_bytes)
+            .read_owner_stream_records(tp, part, from, max, max_bytes)
             .await
     }
 
-    pub async fn read_owner_event_records(
+    #[cfg(feature = "early-replication-experiment")]
+    pub async fn read_owner_stream_records_early(
         &self,
         tp: &str,
         part: u32,
-        group: Option<&str>,
         from: Offset,
         max: usize,
-    ) -> Result<OwnerReplicationRead<StromaEvent>, StromaError> {
+        max_bytes: usize,
+    ) -> Result<OwnerReplicationRead<Message>, StromaError> {
         self.inner
-            .read_owner_event_records(tp, part, group, from, max)
+            .read_owner_stream_records_early(tp, part, from, max, max_bytes)
             .await
     }
 
-    pub async fn read_owner_event_records_with_byte_budget(
+    pub async fn read_owner_stream_cursor_events(
         &self,
         tp: &str,
         part: u32,
-        group: Option<&str>,
         from: Offset,
         max: usize,
         max_bytes: usize,
     ) -> Result<OwnerReplicationRead<StromaEvent>, StromaError> {
         self.inner
-            .read_owner_event_records_with_byte_budget(tp, part, group, from, max, max_bytes)
+            .read_owner_stream_cursor_events(tp, part, from, max, max_bytes)
+            .await
+    }
+
+    #[cfg(feature = "early-replication-experiment")]
+    pub async fn read_owner_stream_cursor_events_early(
+        &self,
+        tp: &str,
+        part: u32,
+        from: Offset,
+        max: usize,
+        max_bytes: usize,
+    ) -> Result<OwnerReplicationRead<StromaEvent>, StromaError> {
+        self.inner
+            .read_owner_stream_cursor_events_early(tp, part, from, max, max_bytes)
             .await
     }
 
@@ -1130,23 +1139,22 @@ impl StromaEngine {
         Ok(())
     }
 
-    pub async fn apply_open_replicated_queue_batch(
+    pub async fn apply_open_replicated_queue_log_batch(
         &self, tp: &str, part: u32, group: Option<&str>,
-        frames: futures::stream::BoxStream<'_, Result<(Option<ReplicatedMessageBatch>, Option<ReplicatedEventBatch>), StromaError>>,
-    ) -> Result<Vec<ReplicatedQueueApplyOutcome>, StromaError> {
-        self.inner.apply_open_replicated_queue_batch(tp, part, group, frames).await
+        frames: futures::stream::BoxStream<'_, Result<ReplicatedEventBatch, StromaError>>,
+    ) -> Result<Vec<ReplicatedAppendOutcome>, StromaError> {
+        self.inner.apply_open_replicated_queue_log_batch(tp, part, group, frames).await
     }
 
-    pub async fn apply_replicated_queue_batch(
+    pub async fn apply_replicated_queue_log_batch(
         &self,
         tp: &str,
         part: u32,
         group: Option<&str>,
-        messages: Option<ReplicatedMessageBatch>,
-        events: Option<ReplicatedEventBatch>,
-    ) -> Result<ReplicatedQueueApplyOutcome, StromaError> {
+        batch: ReplicatedEventBatch,
+    ) -> Result<ReplicatedAppendOutcome, StromaError> {
         self.inner
-            .apply_replicated_queue_batch(tp, part, group, messages, events)
+            .apply_replicated_queue_log_batch(tp, part, group, batch)
             .await
     }
 
@@ -1232,7 +1240,7 @@ impl StromaEngine {
         part: u32,
         messages: Option<ReplicatedMessageBatch>,
         events: Option<ReplicatedEventBatch>,
-    ) -> Result<ReplicatedQueueApplyOutcome, StromaError> {
+    ) -> Result<ReplicatedStreamApplyOutcome, StromaError> {
         self.inner
             .apply_replicated_stream_batch(tp, part, messages, events)
             .await

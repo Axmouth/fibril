@@ -769,7 +769,7 @@ async fn three_node_owner_loss_with_history(
     .unwrap();
     if matches!(learner, LearnerCase::Join | LearnerCase::Restart) {
         use fibril_broker::broker::{
-            BrokerOwnerReplicationPeer, BrokerReplicationCatchUpOptions, ReplicationResourceKind,
+            BrokerOwnerReplicationPeer, QueueCatchUpOptions,
         };
         use fibril_broker::coordination::CoordinationSnapshot;
         use fibril_protocol::v1::replication::connect_protocol_owner_peer;
@@ -822,7 +822,7 @@ async fn three_node_owner_loss_with_history(
             .await
             .unwrap();
         let mut learner_worker = None;
-        let mut frontiers = (0, 0);
+        let mut frontiers = 0;
         for n in 0..40u64 {
             if n == 4 {
                 let (address, listener) = serve_test_broker(brokers[2].clone()).await;
@@ -1015,25 +1015,14 @@ async fn three_node_owner_loss_with_history(
                 .await
                 .unwrap();
             tokio::time::timeout(Duration::from_secs(10), async {
-                while frontiers.0 < message_tail(n + 1) || frontiers.1 <= n {
+                while frontiers <= n {
                     brokers[1]
-                        .catch_up_replication_follower_from_owner_with_checkpoint(
-                            &peer,
-                            "q",
-                            Partition::new(0),
-                            None,
-                            ReplicationResourceKind::Queue,
-                            BrokerReplicationCatchUpOptions {
-                                message_from: frontiers.0,
-                                event_from: frontiers.1,
-                                ..Default::default()
-                            },
-                        )
+                        .catch_up_queue_follower_with_checkpoint(&peer, "q", Partition::new(0), None, QueueCatchUpOptions { from: frontiers, ..Default::default() })
                         .await
                         .unwrap();
                     frontiers = brokers[1]
                         .engine()
-                        .queue_replication_next_offsets("q", 0, None)
+                        .queue_replication_next_offset("q", 0, None)
                         .await
                         .unwrap();
                     tokio::time::sleep(Duration::from_millis(5)).await;
@@ -1171,13 +1160,9 @@ async fn three_node_owner_loss_with_history(
             for i in 1..3 {
                 tokio::time::timeout(Duration::from_secs(10), async {
                     loop {
-                        let from = brokers[i].engine().queue_replication_next_offsets("q", 0, None).await.unwrap();
-                        if from.0 >= message_tail(n + 1) && from.1 >= n + 1 { break; }
-                        brokers[i].catch_up_replication_follower_from_owner(&peers[i-1], "q", Partition::new(0), None,
-                            fibril_broker::broker::ReplicationResourceKind::Queue,
-                            fibril_broker::broker::BrokerReplicationCatchUpOptions { message_from: from.0, event_from: from.1,
-                                max_messages_per_read: 4096, max_events_per_read: 4096, max_bytes_per_read: 16*1024*1024,
-                                max_iterations: 16, max_wait_ms: 0 }).await.unwrap();
+                        let from = brokers[i].engine().queue_replication_next_offset("q", 0, None).await.unwrap();
+                        if from >= n + 1 { break; }
+                        brokers[i].catch_up_queue_follower(&peers[i-1], "q", Partition::new(0), None, fibril_broker::broker::QueueCatchUpOptions { from: from, max_records_per_read: 4096, max_bytes_per_read: 16*1024*1024, max_iterations: 16, max_wait_ms: 0 }).await.unwrap();
                         tokio::time::sleep(Duration::from_millis(5)).await;
                     }
                 }).await.unwrap();
@@ -1224,15 +1209,9 @@ async fn three_node_owner_loss_with_history(
                 }
                 tokio::time::timeout(Duration::from_secs(30), async {
                     loop {
-                        let from = brokers[copied_follower].engine().queue_replication_next_offsets("q", 0, None).await.unwrap();
-                        if from.1 >= batch_end { break; }
-                        brokers[copied_follower].catch_up_replication_follower_from_owner(&peers[copied_follower - 1], "q", Partition::new(0), None,
-                            fibril_broker::broker::ReplicationResourceKind::Queue,
-                            fibril_broker::broker::BrokerReplicationCatchUpOptions {
-                                message_from: from.0, event_from: from.1,
-                                max_messages_per_read: 4096, max_events_per_read: 4096,
-                                max_bytes_per_read: 16 * 1024 * 1024, max_iterations: 16, max_wait_ms: 0,
-                            }).await.unwrap();
+                        let from = brokers[copied_follower].engine().queue_replication_next_offset("q", 0, None).await.unwrap();
+                        if from >= batch_end { break; }
+                        brokers[copied_follower].catch_up_queue_follower(&peers[copied_follower - 1], "q", Partition::new(0), None, fibril_broker::broker::QueueCatchUpOptions { from: from, max_records_per_read: 4096, max_bytes_per_read: 16 * 1024 * 1024, max_iterations: 16, max_wait_ms: 0 }).await.unwrap();
                         tokio::time::sleep(Duration::from_millis(5)).await;
                     }
                 }).await.unwrap();
@@ -1246,10 +1225,10 @@ async fn three_node_owner_loss_with_history(
             assert_eq!(
                 brokers[lagging_follower]
                     .engine()
-                    .queue_replication_next_offsets("q", 0, None)
+                    .queue_replication_next_offset("q", 0, None)
                     .await
                     .unwrap(),
-                (message_tail(16), 16)
+                16
             );
         } else {
             let confirm = publisher
@@ -1268,29 +1247,14 @@ async fn three_node_owner_loss_with_history(
                     loop {
                         let from = brokers[i]
                             .engine()
-                            .queue_replication_next_offsets("q", 0, None)
+                            .queue_replication_next_offset("q", 0, None)
                             .await
                             .unwrap();
-                        if from.0 >= message_tail(17) && from.1 >= 17 {
+                        if from >= 17 {
                             break;
                         }
                         brokers[i]
-                            .catch_up_replication_follower_from_owner(
-                                &peers[i - 1],
-                                "q",
-                                Partition::new(0),
-                                None,
-                                fibril_broker::broker::ReplicationResourceKind::Queue,
-                                fibril_broker::broker::BrokerReplicationCatchUpOptions {
-                                    message_from: from.0,
-                                    event_from: from.1,
-                                    max_messages_per_read: 4096,
-                                    max_events_per_read: 4096,
-                                    max_bytes_per_read: 16 * 1024 * 1024,
-                                    max_iterations: 16,
-                                    max_wait_ms: 0,
-                                },
-                            )
+                            .catch_up_queue_follower(&peers[i - 1], "q", Partition::new(0), None, fibril_broker::broker::QueueCatchUpOptions { from: from, max_records_per_read: 4096, max_bytes_per_read: 16 * 1024 * 1024, max_iterations: 16, max_wait_ms: 0 })
                             .await
                             .unwrap();
                         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -1631,14 +1595,8 @@ async fn three_node_owner_loss_with_history(
                     None, Default::default(), None).await.unwrap();
                 let replicate = async {
                     loop {
-                        let from = brokers[2].engine().queue_replication_next_offsets("q", 0, None).await.unwrap();
-                        brokers[2].catch_up_replication_follower_from_owner(&peer, "q", Partition::new(0), None,
-                            fibril_broker::broker::ReplicationResourceKind::Queue,
-                            fibril_broker::broker::BrokerReplicationCatchUpOptions {
-                                message_from: from.0, event_from: from.1,
-                                max_messages_per_read: 4096, max_events_per_read: 4096,
-                                max_bytes_per_read: 16 * 1024 * 1024, max_iterations: 16, max_wait_ms: 0,
-                            }).await.unwrap();
+                        let from = brokers[2].engine().queue_replication_next_offset("q", 0, None).await.unwrap();
+                        brokers[2].catch_up_queue_follower(&peer, "q", Partition::new(0), None, fibril_broker::broker::QueueCatchUpOptions { from: from, max_records_per_read: 4096, max_bytes_per_read: 16 * 1024 * 1024, max_iterations: 16, max_wait_ms: 0 }).await.unwrap();
                         tokio::time::sleep(Duration::from_millis(2)).await;
                     }
                 };
@@ -1706,8 +1664,7 @@ async fn admitted_replica_reseed(
 ) {
     use fibril_broker::{
         broker::{
-            BrokerOwnerReplicationPeer, BrokerReplicationCatchUp, BrokerReplicationCatchUpOptions,
-            ReplicationResourceKind,
+            BrokerOwnerReplicationPeer, BrokerQueueCatchUp, QueueCatchUpOptions,
         },
         coordination::CoordinationSnapshot,
     };
@@ -1778,27 +1735,12 @@ async fn admitted_replica_reseed(
             loop {
         let from = brokers[i]
             .engine()
-            .queue_replication_next_offsets("q", 0, None)
+            .queue_replication_next_offset("q", 0, None)
             .await
             .unwrap();
-        if from.1 >= target { break; }
+        if from >= target { break; }
         brokers[i]
-            .catch_up_replication_follower_from_owner(
-                &peer,
-                "q",
-                Partition::new(0),
-                None,
-                ReplicationResourceKind::Queue,
-                BrokerReplicationCatchUpOptions {
-                    message_from: from.0,
-                    event_from: from.1,
-                    max_messages_per_read: 4096,
-                    max_events_per_read: 4096,
-                    max_bytes_per_read: 16 * 1024 * 1024,
-                    max_iterations: 16,
-                    max_wait_ms: 0,
-                },
-            )
+            .catch_up_queue_follower(&peer, "q", Partition::new(0), None, QueueCatchUpOptions { from: from, max_records_per_read: 4096, max_bytes_per_read: 16 * 1024 * 1024, max_iterations: 16, max_wait_ms: 0 })
             .await
             .unwrap();
                 tokio::time::sleep(Duration::from_millis(2)).await;
@@ -1836,39 +1778,30 @@ async fn admitted_replica_reseed(
     // coordinated repair and must never invoke legacy destructive installation.
     struct ExpiredHistory;
     impl BrokerOwnerReplicationPeer for ExpiredHistory {
-        fn read_owner_replication_records<'a>(
+        fn read_owner_queue_records<'a>(
             &'a self,
             _: &'a str,
             _: Partition,
             _: Option<&'a str>,
-            message: u64,
-            event: u64,
-            _: usize,
+            from: u64,
             _: usize,
             _: usize,
             _: u64,
         ) -> futures::future::BoxFuture<
             'a,
             Result<
-                fibril_broker::broker::BrokerOwnerReplicationRecords,
+                fibril_broker::queue_engine::OwnerReplicationRead<
+                    fibril_broker::queue_engine::StromaEvent,
+                >,
                 fibril_broker::broker::BrokerError,
             >,
         > {
             Box::pin(async move {
-                Ok(fibril_broker::broker::BrokerOwnerReplicationRecords {
-                    messages:
-                        fibril_broker::queue_engine::OwnerReplicationRead::CheckpointRequired {
-                            epoch: 1,
-                            requested_offset: message,
-                            head_offset: 5,
-                            next_offset: 5,
-                        },
-                    events: fibril_broker::queue_engine::OwnerReplicationRead::CheckpointRequired {
-                        epoch: 1,
-                        requested_offset: event,
-                        head_offset: 5,
-                        next_offset: 5,
-                    },
+                Ok(fibril_broker::queue_engine::OwnerReplicationRead::CheckpointRequired {
+                    epoch: 1,
+                    requested_offset: from,
+                    head_offset: 5,
+                    next_offset: 5,
                 })
             })
         }
@@ -1888,26 +1821,11 @@ async fn admitted_replica_reseed(
         }
     }
     let exhausted = brokers[2]
-        .catch_up_replication_follower_from_owner_with_checkpoint(
-            &ExpiredHistory,
-            "q",
-            Partition::new(0),
-            None,
-            ReplicationResourceKind::Queue,
-            BrokerReplicationCatchUpOptions {
-                message_from: message_tail(4),
-                event_from: 4,
-                max_messages_per_read: 16,
-                max_events_per_read: 16,
-                max_bytes_per_read: 65536,
-                max_iterations: 1,
-                max_wait_ms: 0,
-            },
-        )
+        .catch_up_queue_follower_with_checkpoint(&ExpiredHistory, "q", Partition::new(0), None, QueueCatchUpOptions { from: 4, max_records_per_read: 16, max_bytes_per_read: 65536, max_iterations: 1, max_wait_ms: 0 })
         .await
         .unwrap();
     assert!(
-        matches!(exhausted, BrokerReplicationCatchUp::CheckpointRequired { .. }),
+        matches!(exhausted, BrokerQueueCatchUp::CheckpointRequired { .. }),
         "{exhausted:?}"
     );
     let intent = tokio::time::timeout(Duration::from_secs(10), async {
@@ -1999,7 +1917,7 @@ async fn admitted_replica_reseed(
     assert!(
         brokers[2]
             .engine()
-            .queue_replication_next_offsets("q", 0, None)
+            .queue_replication_next_offset("q", 0, None)
             .await
             .is_err(),
         "original replica stays frozen throughout repair"
@@ -2018,11 +1936,9 @@ async fn admitted_replica_reseed(
     let b = healthy_peer.take().unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-    let from = brokers[1].engine().queue_replication_next_offsets("q",0,None).await.unwrap();
-    if from.1 >= 5 { break; }
-    brokers[1].catch_up_replication_follower_from_owner(&b,"q",Partition::new(0),None,ReplicationResourceKind::Queue,BrokerReplicationCatchUpOptions {
-        message_from:from.0,event_from:from.1,max_messages_per_read:4096,max_events_per_read:4096,max_bytes_per_read:16*1024*1024,max_iterations:16,max_wait_ms:0,
-    }).await.unwrap();
+    let from = brokers[1].engine().queue_replication_next_offset("q",0,None).await.unwrap();
+    if from >= 5 { break; }
+    brokers[1].catch_up_queue_follower(&b, "q", Partition::new(0), None, QueueCatchUpOptions { from: from, max_records_per_read: 4096, max_bytes_per_read: 16*1024*1024, max_iterations: 16, max_wait_ms: 0 }).await.unwrap();
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
     }).await.unwrap();

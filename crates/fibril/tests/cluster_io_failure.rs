@@ -333,11 +333,11 @@ async fn run_case(all: bool, after_sync: bool) {
     // holding this publish's fsync.
     let engine = brokers[0].engine();
     let visible = engine
-        .read_owner_event_records("q", 0, None, PREFIX, 1)
+        .read_owner_queue_records("q", 0, None, PREFIX, 1, usize::MAX)
         .await
         .map(|r| match r {
             fibril_broker::queue_engine::OwnerReplicationRead::Batch(b) => b.records.len(),
-            _ => panic!("expected the queue event lane"),
+            _ => panic!("expected the queue log"),
         })
         .unwrap();
     assert_eq!(visible, 0);
@@ -657,25 +657,21 @@ async fn catch_up(
         loop {
             let from = broker
                 .engine()
-                .queue_replication_next_offsets("q", 0, None)
+                .queue_replication_next_offset("q", 0, None)
                 .await
                 .unwrap();
-            assert_eq!(from.0, 0, "single-log queue has no physical message lane");
-            if from.1 >= target {
+            if from >= target {
                 break;
             }
             broker
-                .catch_up_replication_follower_from_owner(
+                .catch_up_queue_follower(
                     peer,
                     "q",
                     Partition::new(0),
                     None,
-                    fibril_broker::broker::ReplicationResourceKind::Queue,
-                    fibril_broker::broker::BrokerReplicationCatchUpOptions {
-                        message_from: from.0,
-                        event_from: from.1,
-                        max_messages_per_read: 128,
-                        max_events_per_read: 128,
+                    fibril_broker::broker::QueueCatchUpOptions {
+                        from,
+                        max_records_per_read: 128,
                         max_bytes_per_read: 1024 * 1024,
                         max_iterations: 16,
                         max_wait_ms: 0,

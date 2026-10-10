@@ -20,9 +20,9 @@ use arc_swap::ArcSwap;
 use fibril_broker::{Group, Partition, Topic};
 use fibril_broker::{
     broker::{
-        Broker, BrokerError, BrokerFollowerReplicationApply, BrokerOwnerReplicationRecords,
+        Broker, BrokerError, BrokerOwnerStreamRecords, BrokerQueueFollowerApply,
         ConsumerCloseCause, ConsumerConfig, ConsumerHandle, ConsumerLease,
-        ExclusiveAssignmentUpdate, PublisherHandle, ReplicationResourceKind, SettleRequest,
+        ExclusiveAssignmentUpdate, PublisherHandle, SettleRequest,
         SettleType,
     },
     queue_engine::{
@@ -609,13 +609,40 @@ fn to_replication_event_read(
     }
 }
 
-fn to_replication_read_ok(
-    records: BrokerOwnerReplicationRecords,
-) -> std::io::Result<ReplicationReadOk> {
+fn stream_records_to_wire(records: BrokerOwnerStreamRecords) -> std::io::Result<ReplicationReadOk> {
     Ok(ReplicationReadOk {
         messages: to_replication_message_read(records.messages),
         events: to_replication_event_read(records.events)?,
     })
+}
+
+/// Encode a read of the single queue log in the two-lane wire body. The log
+/// travels in the event lane and the message lane is the fixed empty batch at
+/// cursor zero under the same epoch.
+fn queue_read_to_wire(read: OwnerReplicationRead<StromaEvent>) -> std::io::Result<ReplicationReadOk> {
+    let epoch = match &read {
+        OwnerReplicationRead::Batch(batch) => batch.epoch,
+        OwnerReplicationRead::CheckpointRequired { epoch, .. } => *epoch,
+    };
+    Ok(ReplicationReadOk {
+        messages: ReplicationMessageRead::Batch {
+            epoch,
+            requested_offset: 0,
+            next_offset: 0,
+            records: Vec::new(),
+        },
+        events: to_replication_event_read(read)?,
+    })
+}
+
+/// The two-lane queue read body fixes the message lane at cursor zero.
+fn queue_wire_cursor(message_from: u64, event_from: u64) -> Result<u64, BrokerError> {
+    if message_from != 0 {
+        return Err(BrokerError::InvalidArgument(
+            "queue replication message lane cursor must be zero".into(),
+        ));
+    }
+    Ok(event_from)
 }
 
 /// Broker-backed source for an owner replication stream sender. Bridges the
@@ -660,19 +687,11 @@ impl replication_stream::OwnerStreamSource for BrokerOwnerStreamSource {
             true,
         )
         .map_err(|e| e.to_string())?;
+        let _ = max_messages;
+        let from = queue_wire_cursor(message_from, event_from).map_err(|e| e.to_string())?;
         let records = self
             .broker
-            .read_owner_replication_records(
-                topic,
-                partition,
-                group,
-                message_from,
-                event_from,
-                max_messages,
-                max_events,
-                max_bytes,
-                max_wait_ms,
-            )
+            .read_owner_queue_records(topic, partition, group, from, max_events, max_bytes, max_wait_ms)
             .await
             .map_err(|err| broker_error_response(&err).1.to_string())?;
         crate::v1::history_replication::check_resource(
@@ -684,7 +703,7 @@ impl replication_stream::OwnerStreamSource for BrokerOwnerStreamSource {
             true,
         )
         .map_err(|e| e.to_string())?;
-        to_replication_read_ok(records).map_err(|err| err.to_string())
+        queue_read_to_wire(records).map_err(|err| err.to_string())
     }
 
     fn record_progress(
@@ -740,44 +759,6 @@ where
     Ok(())
 }
 
-fn to_owner_message_read(
-    batch: Option<ReplicationMessageApplyBatch>,
-) -> Result<OwnerReplicationRead<Message>, String> {
-    let Some(batch) = batch else {
-        return Ok(OwnerReplicationRead::Batch(OwnerReplicationBatch {
-            epoch: 0,
-            requested_offset: 0,
-            next_offset: 0,
-            records: Vec::new(),
-        }));
-    };
-
-    ensure_contiguous_offsets(batch.records.iter().map(|record| record.offset))?;
-    let requested_offset = batch.records.first().map_or(0, |record| record.offset);
-    let next_offset = batch.records.last().map_or(0, |record| record.offset + 1);
-    let records = batch
-        .records
-        .into_iter()
-        .map(|record| {
-            (
-                record.offset,
-                Message {
-                    flags: record.flags,
-                    headers: record.headers,
-                    payload: record.payload,
-                },
-            )
-        })
-        .collect();
-
-    Ok(OwnerReplicationRead::Batch(OwnerReplicationBatch {
-        epoch: batch.epoch,
-        requested_offset,
-        next_offset,
-        records,
-    }))
-}
-
 fn to_owner_event_read(
     batch: Option<ReplicationEventApplyBatch>,
 ) -> Result<OwnerReplicationRead<StromaEvent>, String> {
@@ -810,13 +791,13 @@ fn to_owner_event_read(
     }))
 }
 
-fn to_owner_replication_records(
-    apply: ReplicationApply,
-) -> Result<BrokerOwnerReplicationRecords, String> {
-    Ok(BrokerOwnerReplicationRecords {
-        messages: to_owner_message_read(apply.messages)?,
-        events: to_owner_event_read(apply.events)?,
-    })
+/// A two-lane apply for a queue carries the queue log in its event lane. A
+/// queue has no separate message log, so message records are refused.
+fn to_owner_queue_read(apply: ReplicationApply) -> Result<OwnerReplicationRead<StromaEvent>, String> {
+    if apply.messages.as_ref().is_some_and(|batch| !batch.records.is_empty()) {
+        return Err("queue replication apply carries message lane records".into());
+    }
+    to_owner_event_read(apply.events)
 }
 
 fn to_replication_apply_ok(messages_applied: bool, events_applied: bool) -> ReplicationApplyOk {
@@ -3287,6 +3268,21 @@ where
             x if x == Op::ReplicationRead as u16 => {
                 let read: ReplicationRead =
                     decode_or_400!(frame, frame_tx_high_prio, metrics, ReplicationRead);
+                let from = match queue_wire_cursor(read.message_from, read.event_from) {
+                    Ok(from) => from,
+                    Err(error) => {
+                        let (code, message) = broker_error_response(&error);
+                        send_error_response_and_count(
+                            &frame_tx_high_prio,
+                            &metrics,
+                            frame.request_id,
+                            code,
+                            message,
+                        )
+                        .await;
+                        continue;
+                    }
+                };
 
                 // A stamped read doubles as the follower's durable-progress
                 // report (followers apply durably; pull offsets = watermarks).
@@ -3340,13 +3336,11 @@ where
                 }
 
                 match broker
-                    .read_owner_replication_records(
+                    .read_owner_queue_records(
                         &read.topic,
                         read.partition,
                         read.group.as_deref(),
-                        read.message_from,
-                        read.event_from,
-                        read.max_messages as usize,
+                        from,
                         read.max_events as usize,
                         usize::try_from(read.max_bytes).unwrap_or(usize::MAX),
                         read.max_wait_ms as u64,
@@ -3364,7 +3358,7 @@ where
                         Ok(records)
                     }) {
                     Ok(records) => {
-                        let response = match to_replication_read_ok(records) {
+                        let response = match queue_read_to_wire(records) {
                             Ok(response) => response,
                             Err(err) => {
                                 tracing::error!(
@@ -3469,10 +3463,9 @@ where
                 // Owner role is the authority, so a non-owner read returns
                 // NotOwner. read.event_from is the cursor-commit-event offset.
                 match broker
-                    .read_owner_replication_records(
+                    .read_owner_stream_records(
                         &read.topic,
                         read.partition,
-                        None,
                         read.message_from,
                         read.event_from,
                         read.max_messages as usize,
@@ -3492,7 +3485,7 @@ where
                         )?;
                         Ok(records)
                     }) {
-                    Ok(records) => match to_replication_read_ok(records) {
+                    Ok(records) => match stream_records_to_wire(records) {
                         Ok(response) => {
                             frame_tx_high_prio
                                 .send(wire::encode_stream_replication_read_ok(
@@ -3891,7 +3884,7 @@ where
                 let topic = apply.topic.clone();
                 let group = apply.group.clone();
                 let partition = apply.partition;
-                let records = match to_owner_replication_records(apply) {
+                let records = match to_owner_queue_read(apply) {
                     Ok(records) => records,
                     Err(message) => {
                         send_error_response_and_count(
@@ -3907,20 +3900,12 @@ where
                 };
 
                 match broker
-                    .apply_follower_replication_records(
-                        &topic,
-                        partition,
-                        group.as_deref(),
-                        ReplicationResourceKind::Queue,
-                        records,
-                    )
+                    .apply_follower_queue_records(&topic, partition, group.as_deref(), records)
                     .await
                 {
-                    Ok(BrokerFollowerReplicationApply::Applied(outcome)) => {
-                        let response = to_replication_apply_ok(
-                            outcome.message_log.is_some(),
-                            outcome.event_log.is_some(),
-                        );
+                    Ok(BrokerQueueFollowerApply::Applied(outcome)) => {
+                        // A queue has no separate message log to apply.
+                        let response = to_replication_apply_ok(false, outcome.is_some());
                         frame_tx_high_prio
                             .send(try_encode(
                                 Op::ReplicationApplyOk,
@@ -3929,7 +3914,7 @@ where
                             )?)
                             .await?;
                     }
-                    Ok(BrokerFollowerReplicationApply::CheckpointRequired { .. }) => {
+                    Ok(BrokerQueueFollowerApply::CheckpointRequired(_)) => {
                         tracing::error!(
                             topic,
                             partition = partition.id(),
