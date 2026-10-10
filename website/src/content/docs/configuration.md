@@ -197,7 +197,7 @@ Changing these generally requires restarting the server.
   node/           setup_complete, config-overlay.toml, cluster.secret,
                   tls/ (generated material), tls-provided/ (setup uploads)
   coordination/   default Ganglion data dir
-  storage/        queue and stream data
+  storage/        Stroma storage root for queue and stream data
   cache/          disposable, safe to delete while the node is stopped
 ```
 
@@ -210,6 +210,15 @@ is no migration between layouts yet, so drain the node and start it on a new
 data dir instead. `coordination.ganglion.data_dir` defaults to
 `<data_dir>/coordination`, and Fibril keeps a marker there tied to the raft
 node id, so a coordination dir from another node is refused too.
+
+`storage/` carries its own `stroma-layout` marker with the Stroma storage layout
+version, which is 3. That version is separate from the node layout version in
+`fibril-node`, which is 2, so a data dir can pass the node check and still have
+its storage refused. Startup refuses a storage root with an older Stroma layout,
+with no migration. Storage layout 3 also changes the coordination records for
+queue learner admissions and reseeds, so upgrading a cluster to it means
+draining the queues, starting every node on a fresh data dir and fresh
+coordination state, and recreating the queues.
 
 To place files such as `cluster.secret` or a shared CA before the first
 start, prepare the data dir with `fibrilctl node init` (it uses the same

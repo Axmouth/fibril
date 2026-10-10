@@ -28,9 +28,11 @@ When coordination is enabled and a partition is assigned followers, each
 partition has one **owner** and one or more **followers**:
 
 - **Followers catch up by pulling.** A follower worker reads the owner's durable
-  payload-bearing enqueue and state-change records over the protocol and applies them durably to its
-  own log. If a follower falls too far behind the owner's retained log, it
-  installs an owner checkpoint and resumes from there.
+  queue log over the protocol and applies it durably to its own copy. A queue
+  has one log holding payload-bearing enqueues and state changes, so the
+  follower tracks one log position. If a follower falls behind the owner's
+  retained log, it is rebuilt through the
+  [follower repair path](#follower-retention-and-repair).
 - **Replicated failover waits for recovery proof.** The controller records a
   proposed replacement and retains the previous assignment and replication
   source. Fresh cluster queues enroll automatically on every platform. A worker
@@ -51,7 +53,7 @@ partition has one **owner** and one or more **followers**:
   durability policy requires more than the owner, a confirmed publish does not
   return until enough followers have reported the required progress, subject to a
   timeout and an in-sync floor. Each counted follower must have the queue payload
-  batch through its exact event frontier. Each enqueue carries its payload in
+  batch through its exact log position. Each enqueue carries its payload in
   that same log. Delivery visibility uses the same dependency proof.
 
 ## Durability levels
@@ -92,8 +94,8 @@ same replication settings start attempts earlier under load. The interval must
 remain enabled. Zero thresholds preserve periodic-only behavior. Starts are
 limited to once per second per queue and periodic work is staggered across queues.
 Byte counts are scheduling hints that reset on reopen, not durability evidence.
-The Cluster page shows checkpoint age, event cut, local suffix and retained message
-counts, agreement/install progress and failures. Retained counts are logical
+The Cluster page shows checkpoint age, the cut, local suffix and retained record
+counts from the queue log, agreement/install progress and failures. Retained counts are logical
 ranges, not physical disk usage.
 The default is `0`. Positive intervals range from 1,000 to 86,400,000 ms.
 
@@ -184,8 +186,8 @@ latency. See the [configuration](/configuration/) replication settings.
 
 ## Follower retention and repair
 
-Owner compaction respects each active follower's reported durable message and event
-positions. An unknown cursor starts at zero. A follower without fresh progress
+Owner compaction respects each active follower's reported durable position: one
+log position for a queue, or record and cursor-event positions for a stream. An unknown cursor starts at zero. A follower without fresh progress
 reports has a 60-second retention grace, so a disconnected follower does not pin
 that prefix indefinitely. Idle followers with fresh reports remain protected. These are catch-up protections and do not change confirmation counts.
 
@@ -196,7 +198,7 @@ copy remains available as recovery evidence throughout copying. The owner gives
 repair a bounded 120-second retention grace while the replacement catches up.
 
 The switch requires durable payloads, completely applied events and coverage of
-both original log tails. It publishes a durable route only after these checks.
+the original log tail. It publishes a durable route only after these checks.
 Re-admission uses a fresh transport identity. A lost admission reply resumes from
 the installed completion receipt without resetting the replacement. A recovery
 seal prevents a concurrent repair switch.
@@ -222,12 +224,14 @@ to enrolled queues with matching broker revisions. Stream recovery remains separ
 - `local_durable` queues behave exactly like single-node queues even in a
   cluster. Replica-durable confirms only mean something when the durability
   policy requires more than the owner.
-- Follower application is durable: message and event writes overlap, and both
-  completions drain before queue state is applied and progress is reported.
+- Follower application is durable. A queue follower appends to its one log and
+  waits for that write before state is applied and progress is reported. A
+  stream follower overlaps record and cursor-event writes, and both completions
+  drain before progress is reported.
   Failed or interrupted application blocks promotion until recovery or resync.
 - Progress reports are tied to an assignment epoch and an ordered transport
   session. Replacement sessions and assignments invalidate earlier reports;
-  resets replace both reported frontiers together.
+  a reset replaces the whole reported position.
 - Run matching broker revisions across a cluster. Older reports without an
   assignment epoch remain readable but do not count toward replicated confirms.
   The client publish, delivery and acknowledgment frames are unchanged.

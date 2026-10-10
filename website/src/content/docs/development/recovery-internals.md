@@ -43,8 +43,8 @@ queue dirty again. Crash acceptance tests run on Linux only.
 
 ## Single-log queue recovery
 
-An enqueue record carries its payload. Its event offset identifies that payload,
-and subsequent state changes refer to earlier payload offsets in the same log.
+An enqueue record carries its payload. Its log offset is the message id, and
+subsequent state changes refer to earlier payload offsets in the same log.
 Recovery decodes retained records and rejects forward references. Corruption
 uses the configured quarantine, refusal or explicit local-repair policy.
 
@@ -53,6 +53,32 @@ histories preserve their bytes for coordinated recovery and cannot independently
 truncate or reuse offsets. Checkpoint installation has a separate journal covering
 the retained payload-bearing event prefix and actor snapshot. The prefix may start
 before the snapshot cut when older messages remain live.
+
+## Evidence and stage formats
+
+Recovery evidence names its logs by resource kind. A queue has one log and a
+stream has a record log and a cursor event log. Seal replies (op 89, `RSO3`),
+retained history ids, recovery inspection, source selection, plans and stages
+all carry that shape, and each refuses evidence of the other kind. Recovery
+inspection accepts queue histories only and refuses a stream command itself,
+since the seal history already carries the kind.
+
+The current formats ship with Stroma storage layout version 3. Seal receipts,
+history ids, inspection journals, phase caches, selections, plans and stage
+intents written before that layout are not reused:
+
+- Retained history ids use the `fibril-retained-history-v2` tag.
+- Source selections use `fibril-queue-recovery-selection-v2` and plans use
+  `fibril-queue-recovery-plan-v2`.
+- A recovery stage keeps its staged log under `log/` with a version 3 intent
+  header (`RSTAGE`).
+- Recovery transfer frames (ops 110 and 111) use the `RXT2` magic.
+- Agreed checkpoint proposal and evidence digests move to `-v2`, and the
+  checkpoint capsule tag is `stroma-queue-checkpoint-capsule-v2`.
+
+Inspection journals and phase caches from an earlier build are rebuilt. Seals,
+plans and stages from an earlier build are refused, so a recovery in flight
+during an upgrade must be restarted after every broker runs the new build.
 
 ## Recovery comparison
 
@@ -84,7 +110,7 @@ Snapshot reads retain complete envelope verification. No payload history cache i
 kept across attempts.
 
 Strict `RecoveryRead` (105), used for diagnostics and target copying, still verifies
-both retained logs per page. A selected artifact can be reused within its attempt
+every retained log per page. A selected artifact can be reused within its attempt
 only after verification against the persisted plan; restart falls back to source
 reconstruction or a completed target snapshot. Inspection connections are reused
 only after a valid reply, and discarded on timeout, cancellation or invalid data.
@@ -97,7 +123,7 @@ with older binaries is not supported by this change.
 
 ## Compatible retained-data reuse
 
-A target with the exact selected message range can initialize its recovery stage
+A target with the exact selected log range can initialize its recovery stage
 from its own sealed log. The target checks its resource incarnation and durable
 seal, then reads the actual records to validate CRCs, the full payload digest and
 the selected snapshot's live-payload dependencies. Unequal bounds or payloads use

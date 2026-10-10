@@ -60,8 +60,11 @@ identical retries retain the original seal. There is no public unseal operation.
 
 `RecoverySealOk` (opcode 89) includes the local replica identity supplied by
 coordination, transition digest, fence, retained bounds and content fingerprints.
-The codecs use `RSL1` and `RSO1` version markers and reject trailing or truncated
-data. These internal messages are experimental and require matching broker
+The reply carries the sealed logs by resource kind: one log for a queue, or a
+record log and a cursor event log for a stream. The seal client and witness
+collection refuse a reply whose logs do not match the requested kind, so a stream
+history never enters the queue tail comparison. The codecs use `RSL1` and `RSO3`
+version markers and reject trailing or truncated data. These internal messages are experimental and require matching broker
 revisions. Ordinary client frames are unchanged.
 
 ## Resource incarnation
@@ -92,7 +95,7 @@ The caller must first obtain an authorized initial-history decision from
 coordination. The initial-preparation worker uses the non-admitting preparation form.
 
 Initialization requires previously nonexistent partition directories and takes
-both log locks before persisting a checksummed receipt. The receipt and directory
+the partition's log locks before persisting a checksummed receipt. The receipt and directory
 entries are synchronized before local admission is published. Identical retries
 within the same storage instance are accepted; conflicting IDs and existing
 storage, including empty legacy logs, are refused. Admitted work survives caller
@@ -311,8 +314,11 @@ queue histories. Unsupported origins remain fenced with a diagnostic.
 ## Retained content identity
 
 After draining accepted work and fencing the physical logs, storage computes a
-versioned BLAKE3 identity over the resource, layout, retained records and snapshot
-bytes. Queues have one payload-bearing event log. Streams retain two logs. Record offsets, flags, headers and payloads participate;
+versioned BLAKE3 identity over the resource, retained logs, records and snapshot
+bytes. A queue has one log. A stream has a record log and a cursor event log. The
+log shape is part of the history id, whose tag is `fibril-retained-history-v2`, so
+seals and receipts from earlier builds do not verify. A queue seal records one
+fencing epoch and a stream seal records two. Record offsets, flags, headers and payloads participate,
 replica-local append timestamps and promise epochs are excluded. Diagnostics
 contain identities and offsets without message payloads.
 
@@ -330,8 +336,11 @@ Future witness selection must prove those relationships separately.
 
 ## Explicit sealed-source reads
 
-`RecoveryRead` (105) and `RecoveryReadOk` (106) expose message records, event
-records and raw snapshot-envelope bytes from an already completed seal. The
+`RecoveryRead` (105) and `RecoveryReadOk` (106) expose retained log records and
+raw snapshot-envelope bytes from an already completed seal. A read names its
+source: stream records (source 0), the log (the queue log, or a stream's cursor
+event log) or the snapshot. A queue seal refuses source 0 instead of returning an
+empty page. The
 `RRD1` and `RRO1` codecs bind pages to the exact transition, fence and retained
 history ID. The receiver requires node authentication and fresh consensus
 authorization of the pending transition; the requester checks replica identity,
@@ -339,14 +348,14 @@ contiguous offsets, retained bounds, progress and page budgets under a whole-cal
 deadline. Ordinary clients cannot access these controls.
 
 Storage reads the files directly without opening ordinary queue actors or writer
-threads. Cold reads acquire both existing log locks; live reads retain the frozen
+threads. Cold reads acquire the existing log locks. Live reads retain the frozen
 log owners. Lifecycle, snapshot and admission guards remain held until disk work
 finishes, including after caller cancellation. Missing receipts, stale requests,
 pending checkpoint installation, corruption and changed content withhold the page
 and leave the source sealed. Reads do not create receipts, repair files or unseal
 replicas.
 
-Every page verifies both complete retained logs and the complete snapshot against
+Every page verifies every complete retained log and the complete snapshot against
 the receipt, capturing its returned bytes during that scan. CRCs and contiguous
 record offsets are checked without cache fallback or record resynchronization.
 Queue, stream, empty-range, nonzero-head, cold-restart, cancellation and real TCP
@@ -357,8 +366,7 @@ authority.
 ## Explicit retained-history inspection
 
 `inspect_recovery_pair` reads two distinct sealed witnesses through authenticated
-recovery control. It compares canonical records at shared message and event
-offsets, tolerates different page boundaries and retained ranges, and verifies
+recovery control. It compares canonical records at shared queue log offsets, tolerates different page boundaries and retained ranges, and verifies
 each complete transferred log against its sealed digest. Results distinguish
 matching overlap, the first divergent offset with content IDs, and no shared
 records. Empty overlap supplies no compatibility evidence. Inspection retains at
@@ -408,8 +416,8 @@ still need a verified baseline before automatic recovery selection.
 `inspect_recovery_pair_with_queue_replay` optionally reconstructs both queues at
 one common, exclusive `event_next` boundary, including the empty boundary zero.
 It applies sealed events in log order to isolated state and verifies both complete
-transferred logs, including records after that boundary. It requires message and
-event histories retained from zero; compacted origins need a proven checkpoint.
+transferred logs, including records after that boundary. It requires the queue log
+retained from zero. Compacted origins need a proven checkpoint.
 Existing snapshot bytes are not treated as an authoritative baseline.
 
 The versioned canonical digest includes ready and settled ranges, inflight
@@ -437,7 +445,7 @@ replays the retained suffix to a common target. Legacy inclusive checkpoints are
 not accepted as exact replay evidence. The configured snapshot cap is at most
 16 MiB per replica, and decoded blob bytes count against the replay work budget.
 
-After reconstruction it streams the retained message records and hashes the
+After reconstruction it streams the retained enqueue records and hashes the
 exact offsets, headers and bodies of live messages. Missing live payloads fail
 inspection. Different retention of settled payloads can therefore produce equal
 live-payload evidence despite different complete-log digests. Snapshot bytes and
@@ -516,6 +524,12 @@ A guarded consensus write keeps the first accepted plan; retries retain its IDs,
 and a conflicting selection cannot replace it. The old assignment and pending
 barrier remain in place.
 
+A recorded source selection carries one queue log position, `next`, which equals
+the source seal tail. Selections use the `fibril-queue-recovery-selection-v2`
+digest tag and plans are version 2 with the `fibril-queue-recovery-plan-v2` tag.
+Plans committed by earlier builds are refused, so a recovery in flight across an
+upgrade must be restarted.
+
 A restarted coordinator can read the saved plan and verify that a reconstructed
 artifact matches its exact source and state. Reading or deserializing a plan
 supplies no fresh installation or serving permission. Each target checks the plan
@@ -525,8 +539,12 @@ not enroll into this lifecycle automatically.
 ## Non-serving recovery staging
 
 A proposed replica can open a stage after a fresh guarded consensus check of the
-exact recovery plan. Payload pages append to a separate native Keratin log under
-the plan's ID, alongside its immutable snapshot and intent. Existing partition
+exact recovery plan. Payload pages append to a separate native Keratin log in the
+stage's `log/` directory under the plan's ID, alongside its immutable snapshot and
+intent. The stage spec carries the source queue log, whose tail is the selected
+applied boundary, and the stage receipt reports one `next` offset. The intent
+header is version 3 (`RSTAGE` magic), so a stage written by an earlier build is
+refused at the header check and the recovery must start again. Existing partition
 files, seals and storage bindings remain untouched. The source remains readable
 while a replacement copy is prepared.
 
@@ -573,7 +591,7 @@ fresh consensus check before admitting its recorded process/storage instance.
 Repeated activation and admission preserve subsequent writes. A replacement process
 must recover through a new transition.
 
-Internal `RecoveryTransfer`/`RecoveryTransferOk` frames (110/111) carry versioned,
+Internal `RecoveryTransfer`/`RecoveryTransferOk` frames (110/111, `RXT2`) carry versioned,
 bounded control operations for staging, completed-stage reads, installation and
 admission. Authentication occurs before decoding the operation. Completed stages
 can supply another target after the original sealed source disappears. Matching

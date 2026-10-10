@@ -189,7 +189,14 @@ verify a queue end to end without a client. Test messages carry a reserved
 When this broker is replicating queues from their owners, the page also shows a
 follower-replication section: which partitions this broker follows, each
 follower's status (caught up, pending retry, or checkpoint required), how far it
-has pulled, and when it last made progress. See
+has pulled, and when it last made progress. A queue follower shows one next
+offset in its log. A stream follower shows its record and cursor-event offsets.
+In `/admin/api/queues_debug`, each `replication_followers` entry has a `state`
+tagged by `kind`:
+`next_offset` for a queue, `message_next_offset` and `event_next_offset` for a
+stream. A checkpoint-required status names the history the owner has compacted away, under
+`state.status.required`, tagged the same way: one `log` position for a queue,
+or `messages` and `events` for a stream. See
 [replication](/reliability/replication/).
 
 The message inspection link starts near the queue's settled offset by default so

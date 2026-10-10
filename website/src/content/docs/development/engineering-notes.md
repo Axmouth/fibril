@@ -21,6 +21,18 @@ for held owners and stuck recoveries. Controller unit and handler tests cover ea
 case, in commits 7fa8d2d through 247908e. See
 [failure modes](/reliability/failure-modes/#choosing-the-new-owner).
 
+## Single-lane queue replication
+
+Queue replication carried a message lane that was always empty at offset zero,
+and the broker guessed each partition's kind when reading progress, so a cold
+stream misread as a queue could let cursor-event progress release record
+confirms. Queues replicate one log with their own wire frames, progress is typed
+by resource kind and checked against the partition's own kind, and recovery
+evidence, checkpoints and stages describe one queue log. This is a breaking
+change: Stroma storage layout 3, fresh coordination state and matching brokers.
+Fibril commits a0be3a5 through b1123fa, with the Keratin side in its changelog.
+See [replication design](/development/replication-design/#queues-replicate-one-log).
+
 ## Resumable queue recovery
 
 Queue recovery persists exact inspection pages and completed phases, transfers

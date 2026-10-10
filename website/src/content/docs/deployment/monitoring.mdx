@@ -62,9 +62,14 @@ Per-channel series, on by default and controlled by
 - `fibril_stream_subscriptions{topic,partition}` and
   `fibril_stream_lag_evictions_total{topic,partition}` - live stream
   subscribers and how often a lagging subscriber went through lag recovery.
+- `fibril_replication_follower_next_offset{topic,group,partition}` - the next
+  queue log offset this node's follower worker will apply, per followed queue
+  partition.
 - `fibril_replication_follower_applied_messages{topic,group,partition}` and
-  `fibril_replication_follower_applied_events{topic,group,partition}` - how
-  far this node's follower workers have applied, per followed partition.
+  `fibril_replication_follower_applied_events{topic,group,partition}` - the
+  next record-log and cursor-event offsets this node's follower worker will
+  apply, per followed stream partition. Queue partitions do not appear in
+  these two families.
 
 Per-channel series come from materialized channels only, so a deployment
 with [many idle queues](/concepts/many-idle-queues/) exports series for the

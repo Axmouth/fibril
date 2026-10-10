@@ -19,19 +19,50 @@ also keeps gaps, overlaps, stale epochs, and future prefix-validation failures
 meaningful, because a follower cannot report itself caught up without actually
 holding the corresponding local durable records.
 
-## Queue payloads and state share a log
+## Queues replicate one log
 
-Each enqueue carries its payload at the containing event offset. ACK, NACK and
-other state changes refer to earlier offsets. A follower validates the frame,
-appends its records, waits for the required local durability and applies events
+A queue partition has a single log. Each enqueue record carries its payload, and
+a message's id is the log offset of that record. ACK, NACK and other state
+changes refer to earlier offsets in the same log. A follower validates the frame,
+appends its records, waits for the required local durability and applies them
 in order before reporting progress. Failed or partially completed application
 fences promotion until recovery restores an admitted history.
 
+Replication tracks one position per queue. A follower's cursor, its progress
+reports, the owner's view of each follower and the heartbeat applied-tail label
+all carry a single queue log offset. Publication dependencies and the
+compaction retention floor are single offsets too.
+
 Streams retain separate record and cursor-event logs. Their follower path drains
 both storage operations and advances the stream tail only after accepted writes.
+Stream progress is a record and cursor-event pair. A progress session fixes its
+resource kind when it opens and checks it against the partition's own kind, so a
+queue never opens a stream session and the reverse. Queue confirms count only
+queue progress and stream confirms count only stream record progress, so cursor
+events never release a record confirm.
+
 Queue checkpoint backfill may include payload-bearing records older than the
 snapshot cut. Those records restore payload coverage without reapplying state
 already represented by the snapshot.
+
+### Internal frames
+
+Replication uses node-only internal operations. Each body starts with a
+four-byte magic, so a peer on a mismatched build fails the decode instead of
+misreading the layout.
+
+| Ops | Name | Body |
+| --- | --- | --- |
+| 80, 81 | `QueueReplicationRead`, `QueueReplicationReadOk` | One start offset (`FQR1`), one queue log batch (`FQO1`) |
+| 84, 85 | `QueueCheckpointExport`, `QueueCheckpointExportOk` | The reply carries one epoch, the backfill start and the applied boundary (`FQC1`). A reply whose start is past its boundary is refused |
+| 93 to 98 | `QueuePush` family: start, batch, progress, reset, stop, end | Credit-based queue push. Start, progress and reset carry one offset (`FQS1`, `FQP1`, `FQX1`). A batch uses the read reply body |
+| 99, 100 | `StreamReplicationRead`, `StreamReplicationReadOk` | Stream record and cursor-event logs, two lanes |
+
+Ops 82 and 83, a follower push apply, and ops 86 and 87, a follower checkpoint
+install, are retired. A follower below the owner's retained history recovers
+through coordinated queue reseeding. Client message frames do not use these
+operations. Upgrade every participating broker together when these bodies
+change.
 
 ## Overlap is a checkpoint repair
 
@@ -53,10 +84,12 @@ committed-replicated watermark, the Kafka high-watermark model: a delivery lease
 is only allowed for offsets below the highest offset durable on the required
 number of replicas.
 
-The watermark derives from the required followers’ durable queue event frontiers
-and the owner’s locally durable, applied dependencies. The same progress reports
-drive the publish-confirm gate. Payload positions are sparse event offsets. It is exposed to the delivery loop as one per-queue
-atomic ceiling, so the hot path stays lock-free.
+The watermark derives from the required followers' durable queue log positions
+and the owner's locally durable, applied dependencies. The same progress reports
+drive the publish-confirm gate. Visibility advances only to completed
+publication boundaries, so a follower holding part of a publish batch neither
+confirms nor exposes it. The watermark is exposed to the delivery loop as one
+per-queue atomic ceiling, so the hot path stays lock-free.
 
 Local-durable queues are never gated: with the owner alone defining durability
 there is no committed watermark to wait on, so single-node delivery is unchanged.
@@ -71,8 +104,8 @@ applying and idle applying while fetching. Once batch sizes made fsync cheap,
 that serialization (an owner-read round trip plus an apply, repeated per tick)
 became the dominant cluster latency.
 
-The streaming model is a continuous stream with credit-based flow control. The
-follower opens a stream and grants the owner a byte budget. The owner pushes
+The streaming model is a continuous stream with credit-based flow control, carried
+by the `QueuePush` operations. The follower opens a push and grants the owner a byte budget. The owner pushes
 offset-ordered batches down one connection and pauses when credit runs low. The
 follower reads into a bounded in-order buffer and applies concurrently, so the
 next batch arrives while the current one is applied. TCP already gives in-order,

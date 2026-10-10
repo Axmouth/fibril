@@ -478,7 +478,7 @@ See also: [monitoring](/deployment/monitoring/).
 | --- | --- | --- |
 | Prometheus `/metrics` endpoint | Implemented | Admin listener, text exposition format, behind admin basic auth and admin HTTPS when enabled |
 | Node-level families | Implemented | Broker message totals, storage operation totals, transport and session-resume counters, open connection/subscription gauges, recovery quarantine gauge and counter, replication worker summary |
-| Per-channel series | Implemented | Queue ready/inflight, stream subscriptions and lag evictions, follower applied offsets - materialized channels only, gated by `admin.metrics_per_channel` (default on) |
+| Per-channel series | Implemented | Queue ready/inflight, stream subscriptions and lag evictions, follower next offsets (one queue log offset, or stream record and cursor-event offsets) - materialized channels only, gated by `admin.metrics_per_channel` (default on) |
 | OpenTelemetry export | Planned | Separate later item, not part of the Prometheus endpoint |
 
 Conditions and limits:
@@ -724,9 +724,10 @@ Conditions and limits:
 
 - Cluster operation is experimental. Ganglion provides the embedded
   coordination and assignment state.
-- Replication uses follower pull or credit-based streaming. Followers overlap
-  message/event persistence and report progress after durable completion and state
-  application. Reports carry the worker’s assignment epoch and belong to one
+- Replication uses follower pull or credit-based streaming. A queue replicates
+  one log and reports one log position. A stream overlaps record and cursor-event
+  persistence and reports both positions. Followers report progress after durable
+  completion and state application. Reports carry the worker's assignment epoch and belong to one
   ordered transport session.
 - Failover checks assignment epochs, completed application and payload dependencies
   in queue state. Checkpoints awaiting payload backfill remain followers after

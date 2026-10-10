@@ -16,7 +16,7 @@ installation, exact quorum activation and bounded recovery are documented in
    process interruption during checkpoint transfer. Controlled stale-owner
    isolation, concurrent recovery/admission and repeated broker/metadata reopening
    with incomplete payload backfill are covered by authenticated tests.
-2. Add composite reconstruction for crossed payload/event tails and authoritative
+2. Add composite reconstruction for crossed queue log tails and authoritative
    stream-state recovery. Keep unsupported or contradictory histories fenced.
 3. Extend transfer support beyond the current 16 MiB record/page and snapshot
    bounds. Measure full-history rescans, checkpoint/hash CPU, peak memory and
@@ -281,6 +281,13 @@ replica pins a separate durable replay base before the owner chooses the common
 cut. Local replay and disk verification reconstruct the same normalized state,
 retained payload range and live-payload identities while later writes continue.
 
+Each pin describes the queue's one log: an epoch, the applied boundary, the
+payload floor and the log tail. The coordinator asks for a cut that covers the
+largest pinned log tail and checks that the cut covers every pin's applied
+boundary, log tail and payload floor. A cut carries `next` and `payload_head`.
+Proposal and evidence digests use `-v2` tags, and the checkpoint status reports
+`next`.
+
 Every admitted replica, including the owner, publishes its own durable capsule
 receipt through the existing consensus metadata channel. One guarded certificate
 binds exact history, membership, process/storage identities and content. A learner
@@ -288,7 +295,7 @@ joining the accepted set invalidates an in-progress agreement even when the base
 activation identifier stays unchanged. Contradictory reports stop that attempt.
 
 Local installation persists a covering restart snapshot and accepted retention
-record before advancing either logical log head. Interruption can leave extra
+record before advancing the logical log head. Interruption can leave extra
 retained data. The next checkpoint waits for installation acknowledgements from
 all participants. Recovery prefers the accepted capsule, verifies all retained
 payloads and the later event suffix, and retains the existing source selection,
@@ -423,7 +430,8 @@ the accepted cut; byte counts rebase on observing a new certificate, epoch chang
 or counter reset. Neither hint authorizes retention or recovery decisions.
 
 The Cluster page and topology API expose accepted checkpoint age, proof and install
-counts, failure reason, local event suffix and retained message ranges. The API
+counts, failure reason, and the cut, local suffix and retained records of the
+queue log. The API
 returns at most 128 records and reports truncation. These logical ranges do not
 measure physical disk allocation. Byte/age scheduling is implemented; retained-disk
 limits, many-queue pressure tests and safe generation reclamation remain follow-ups.

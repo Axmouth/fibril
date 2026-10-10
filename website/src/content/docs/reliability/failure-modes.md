@@ -230,7 +230,9 @@ dropped suffix on its next catch-up. See
 The node checks its data dir before opening anything. It refuses to start when
 the dir uses an older Fibril layout, belongs to a different `coordination.node_id`,
 or holds top-level entries that are not part of the layout. The error names the
-problem. Fix the config if the node id is wrong. For an older layout there is no
+problem. The Stroma storage root under `storage/` has its own layout version
+and is refused the same way when it is older. Fix the config if the node id is
+wrong. For an older layout there is no
 migration yet: drain the node (move its partitions to other nodes or let
 consumers empty its queues), then start it on a new, empty data dir. The `cache/` directory inside the data dir is disposable and can be
 deleted while the node is stopped. See the
