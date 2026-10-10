@@ -156,7 +156,8 @@ a {
   grid-template-columns: minmax(0, 1fr) 470px;
   gap: 56px;
   align-items: center;
-  padding: 76px 0 46px;
+  /* Shrinks on short wide screens so the actions stay above the fold. */
+  padding: clamp(32px, calc(14vh - 50px), 76px) 0 46px;
 }
 
 .eyebrow {
@@ -233,10 +234,18 @@ h3 {
   font-size: 12.5px;
 }
 
+/*
+  Queue lifecycle animation on the landing page.
+  Geometry is drawn on a fixed design grid and scaled with the panel through
+  --u, one design unit in container query units. The wide grid is 470 x 350
+  units. Panels narrower than 400px switch to a 320 x 314 grid with larger
+  nodes so labels stay readable on phones. Packet keyframes use the same
+  units, so packets stay on their lines at any panel width.
+*/
 .queue-visual {
   position: relative;
-  height: 350px;
   overflow: hidden;
+  container-type: inline-size;
   border: 1px solid var(--line);
   border-radius: 13px;
   background: color-mix(in srgb, var(--panel) 78%, transparent);
@@ -250,13 +259,19 @@ h3 {
   content: "";
 }
 
+.qv-stage {
+  --u: calc(100cqw / 470);
+  position: relative;
+  aspect-ratio: 470 / 350;
+}
+
 .visual-grid {
   position: absolute;
   inset: 0;
   background-image:
     linear-gradient(var(--line) 1px, transparent 1px),
     linear-gradient(90deg, var(--line) 1px, transparent 1px);
-  background-size: 34px 34px;
+  background-size: calc(34 * var(--u)) calc(34 * var(--u));
   mask-image: linear-gradient(transparent, rgba(0, 0, 0, 0.58), transparent);
   opacity: 0.36;
 }
@@ -275,34 +290,35 @@ h3 {
 .queue-node,
 .worker-node {
   display: flex;
-  width: 116px;
-  height: 68px;
+  top: calc(90 * var(--u));
+  width: calc(116 * var(--u));
+  height: calc(68 * var(--u));
   flex-direction: column;
   justify-content: center;
-  padding: 0 12px;
+  padding: 0 calc(12 * var(--u));
   border-radius: 10px;
 }
 
-.queue-node { top: 90px; left: 38px; }
-.worker-node { top: 90px; right: 38px; }
+.queue-node { left: calc(38 * var(--u)); }
+.worker-node { right: calc(38 * var(--u)); }
 
 .node-label {
-  margin-bottom: 4px;
+  margin-bottom: calc(4 * var(--u));
   color: var(--dim);
-  font-size: 10px;
+  font-size: clamp(10px, calc(10 * var(--u)), 12px);
 }
 
 .queue-node strong,
 .worker-node strong {
   color: var(--text);
-  font-size: 11px;
+  font-size: clamp(10.5px, calc(11 * var(--u)), 13px);
   font-weight: 500;
 }
 
 .worker-led {
   position: absolute;
-  top: 10px;
-  right: 10px;
+  top: calc(10 * var(--u));
+  right: calc(10 * var(--u));
   width: 5px;
   height: 5px;
   border-radius: 50%;
@@ -317,25 +333,25 @@ h3 {
   align-items: center;
   justify-content: center;
   color: var(--muted);
-  font-size: 11px;
+  font-size: clamp(10.5px, calc(11 * var(--u)), 13px);
 }
 
 .ack-node {
-  top: 197px;
-  right: 54px;
-  width: 86px;
-  height: 36px;
-  gap: 7px;
-  border-radius: 18px;
+  top: calc(197 * var(--u));
+  right: calc(54 * var(--u));
+  width: calc(86 * var(--u));
+  height: calc(36 * var(--u));
+  gap: calc(7 * var(--u));
+  border-radius: 999px;
 }
 
 .ack-mark { color: var(--ok); }
 
 .retry-node {
-  top: 248px;
-  left: 43px;
-  width: 106px;
-  height: 34px;
+  top: calc(248 * var(--u));
+  left: calc(43 * var(--u));
+  width: calc(106 * var(--u));
+  height: calc(34 * var(--u));
   border-radius: 8px;
   color: var(--organic);
 }
@@ -348,38 +364,45 @@ h3 {
   background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 65%, transparent), transparent);
 }
 
-.line-to-worker { top: 124px; left: 154px; width: 162px; }
-.line-to-ack { top: 158px; left: 374px; width: 39px; transform: rotate(90deg); }
-.line-to-retry { top: 158px; left: 350px; width: 228px; transform: rotate(152deg); }
-.line-back { top: 158px; left: 96px; width: 90px; transform: rotate(90deg); }
+.line-to-worker { top: calc(124 * var(--u)); left: calc(154 * var(--u)); width: calc(162 * var(--u)); }
+.line-to-ack { top: calc(158 * var(--u)); left: calc(374 * var(--u)); width: calc(39 * var(--u)); transform: rotate(90deg); }
+.line-to-retry { top: calc(158 * var(--u)); left: calc(350 * var(--u)); width: calc(228 * var(--u)); transform: rotate(152deg); }
+.line-back { top: calc(158 * var(--u)); left: calc(96 * var(--u)); width: calc(90 * var(--u)); transform: rotate(90deg); }
 
 .packet {
   position: absolute;
-  width: 6px;
-  height: 6px;
+  width: max(5px, calc(6 * var(--u)));
+  height: max(5px, calc(6 * var(--u)));
   border-radius: 2px;
   opacity: 0;
 }
 
+/* Packet paths, as design-unit offsets from each packet's start point. */
 .packet-main {
-  top: 121px;
-  left: 156px;
+  --x1: 154;
+  top: calc(121 * var(--u));
+  left: calc(156 * var(--u));
   background: var(--accent);
   box-shadow: 0 0 9px var(--accent);
   animation: move-right 5.6s linear infinite;
 }
 
 .packet-ack {
-  top: 155px;
-  left: 371px;
+  --y1: 39;
+  top: calc(155 * var(--u));
+  left: calc(371 * var(--u));
   background: var(--ok);
   box-shadow: 0 0 9px var(--ok);
   animation: move-ack 5.6s linear infinite;
 }
 
 .packet-retry {
-  top: 155px;
-  left: 347px;
+  --x1: -198;
+  --y1: 106;
+  --x2: -254;
+  --y2: 3;
+  top: calc(155 * var(--u));
+  left: calc(347 * var(--u));
   background: var(--organic);
   box-shadow: 0 0 9px var(--organic);
   animation: move-retry 7.4s linear infinite 2.8s;
@@ -392,8 +415,69 @@ h3 {
   left: 16px;
   display: flex;
   justify-content: space-between;
+  gap: 12px;
   color: var(--dim);
   font: 11px var(--mono);
+}
+
+/* Narrow grid, 320 x 314 units. */
+@container (max-width: 399px) {
+  .qv-stage {
+    --u: calc(100cqw / 320);
+    aspect-ratio: 320 / 314;
+  }
+  .queue-node,
+  .worker-node {
+    top: calc(70 * var(--u));
+    width: calc(110 * var(--u));
+    height: calc(64 * var(--u));
+  }
+  .queue-node { left: calc(20 * var(--u)); }
+  .worker-node { right: calc(20 * var(--u)); }
+  .ack-node { top: calc(172 * var(--u)); right: calc(32 * var(--u)); }
+  .retry-node { top: calc(220 * var(--u)); left: calc(22 * var(--u)); }
+  .line-to-worker { top: calc(102 * var(--u)); left: calc(130 * var(--u)); width: calc(60 * var(--u)); }
+  .line-to-ack { top: calc(134 * var(--u)); left: calc(245 * var(--u)); width: calc(38 * var(--u)); }
+  .line-to-retry { top: calc(134 * var(--u)); left: calc(242 * var(--u)); width: calc(156 * var(--u)); transform: rotate(137deg); }
+  .line-back { top: calc(134 * var(--u)); left: calc(75 * var(--u)); width: calc(86 * var(--u)); }
+  .packet-main { --x1: 52; top: calc(99 * var(--u)); left: calc(132 * var(--u)); }
+  .packet-ack { --y1: 38; top: calc(131 * var(--u)); left: calc(242 * var(--u)); }
+  .packet-retry {
+    --x1: -114;
+    --y1: 103;
+    --x2: -167;
+    --y2: 3;
+    top: calc(131 * var(--u));
+    left: calc(239 * var(--u));
+  }
+}
+
+/* Set by the QueueAnimation script while the panel is offscreen. */
+.queue-visual[data-paused] * {
+  animation-play-state: paused;
+}
+
+@keyframes move-right {
+  0%, 10% { opacity: 0; transform: translateX(0); }
+  15% { opacity: 1; }
+  38% { opacity: 1; transform: translateX(calc(var(--x1) * var(--u))); }
+  41%, 100% { opacity: 0; transform: translateX(calc(var(--x1) * var(--u))); }
+}
+
+@keyframes move-ack {
+  0%, 39% { opacity: 0; transform: translate(0, 0); }
+  43% { opacity: 1; }
+  57% { opacity: 1; transform: translate(0, calc(var(--y1) * var(--u))); }
+  62%, 100% { opacity: 0; transform: translate(0, calc(var(--y1) * var(--u))); }
+}
+
+@keyframes move-retry {
+  0%, 18% { opacity: 0; transform: translate(0, 0); }
+  22% { opacity: 1; }
+  42% { opacity: 1; transform: translate(calc(var(--x1) * var(--u)), calc(var(--y1) * var(--u))); }
+  52% { opacity: 1; transform: translate(calc(var(--x2) * var(--u)), calc(var(--y1) * var(--u))); }
+  72% { opacity: 1; transform: translate(calc(var(--x2) * var(--u)), calc(var(--y2) * var(--u))); }
+  78%, 100% { opacity: 0; transform: translate(calc(var(--x2) * var(--u)), calc(var(--y2) * var(--u))); }
 }
 
 .console {
@@ -621,29 +705,6 @@ h3 {
   50% { opacity: 1; }
 }
 
-@keyframes move-right {
-  0%, 10% { opacity: 0; transform: translateX(0); }
-  15% { opacity: 1; }
-  38% { opacity: 1; transform: translateX(154px); }
-  41%, 100% { opacity: 0; transform: translateX(154px); }
-}
-
-@keyframes move-ack {
-  0%, 39% { opacity: 0; transform: translate(0, 0); }
-  43% { opacity: 1; }
-  57% { opacity: 1; transform: translate(0, 39px); }
-  62%, 100% { opacity: 0; transform: translate(0, 39px); }
-}
-
-@keyframes move-retry {
-  0%, 18% { opacity: 0; transform: translate(0, 0); }
-  22% { opacity: 1; }
-  42% { opacity: 1; transform: translate(-198px, 106px); }
-  52% { opacity: 1; transform: translate(-254px, 106px); }
-  72% { opacity: 1; transform: translate(-254px, 3px); }
-  78%, 100% { opacity: 0; transform: translate(-254px, 3px); }
-}
-
 @media (max-width: 920px) {
   .hero {
     grid-template-columns: 1fr;
@@ -675,65 +736,10 @@ h3 {
     gap: 24px;
     padding: 42px 0 34px;
   }
-  .queue-visual {
-    height: 314px;
-    border-radius: 12px;
-  }
-  .queue-node,
-  .worker-node {
-    width: 110px;
-    height: 64px;
-  }
-  .queue-node { top: 70px; left: 20px; }
-  .worker-node { top: 70px; right: 20px; }
-  .ack-node { top: 172px; right: 33px; }
-  .retry-node { top: auto; bottom: 60px; left: 22px; }
-  .line-to-worker { top: 102px; left: 130px; width: calc(100% - 260px); }
-  .line-to-ack { top: 134px; left: calc(100% - 75px); width: 38px; transform: rotate(90deg); }
-  .line-to-retry { top: 131px; left: calc(100% - 78px); width: calc(100% - 154px); transform: rotate(130deg); }
-  .line-back { top: 134px; left: 75px; width: 88px; transform: rotate(90deg); }
-  .packet-main {
-    top: 99px;
-    left: 132px;
-    animation: mobile-move-right 5.6s linear infinite;
-  }
-  .packet-ack {
-    top: 131px;
-    left: calc(100% - 78px);
-    animation: mobile-move-ack 5.6s linear infinite;
-  }
-  .packet-retry {
-    top: 131px;
-    left: calc(100% - 82px);
-    animation: mobile-move-retry 7.4s linear infinite 2.8s;
-  }
   .feature-grid { grid-template-columns: 1fr; }
   .desktop-matrix { display: none; }
   .mobile-matrix { display: block; }
   .footer-inner { align-items: start; flex-direction: column; justify-content: center; gap: 6px; }
-}
-
-@keyframes mobile-move-right {
-  0%, 10% { opacity: 0; transform: translateX(0); }
-  15% { opacity: 1; }
-  38% { opacity: 1; transform: translateX(calc(100vw - 294px)); }
-  41%, 100% { opacity: 0; transform: translateX(calc(100vw - 294px)); }
-}
-
-@keyframes mobile-move-ack {
-  0%, 39% { opacity: 0; transform: translate(0, 0); }
-  43% { opacity: 1; }
-  57% { opacity: 1; transform: translate(0, 38px); }
-  62%, 100% { opacity: 0; transform: translate(0, 38px); }
-}
-
-@keyframes mobile-move-retry {
-  0%, 18% { opacity: 0; transform: translate(0, 0); }
-  22% { opacity: 1; }
-  42% { opacity: 1; transform: translate(calc(226px - 100vw), 110px); }
-  52% { opacity: 1; transform: translate(calc(180px - 100vw), 110px); }
-  72% { opacity: 1; transform: translate(calc(180px - 100vw), 3px); }
-  78%, 100% { opacity: 0; transform: translate(calc(180px - 100vw), 3px); }
 }
 
 @media (prefers-reduced-motion: reduce) {
