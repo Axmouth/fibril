@@ -5,7 +5,10 @@ description: Proposed resumable recovery phases, storage-health policy and coope
 
 This design note records proposed work. Resumable inspection, storage-health-driven
 relinquishment and cooperative owner handoff are not implemented capabilities.
-Early replication and speculative delivery remain separate unmerged experiments.
+Early replication is an opt-in experiment on main, off unless built with the
+`early-replication-experiment` feature and started with
+`FIBRIL_EXPERIMENT_EARLY_REPLICATION=1`. Speculative queue delivery remains an
+unmerged prototype.
 Current behavior is documented in [failover and recovery](/reliability/recovery-sealing/).
 The [failover plan](/development/failover-plan/) tracks the wider acceptance work.
 

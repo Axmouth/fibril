@@ -105,6 +105,17 @@ durability:
 All three are log-backed, so durable cursors, replay, and retention work on any
 tier.
 
+Speculative saves only the fsync wait between publish and delivery. That wait
+grows with write load, from a few milliseconds on a quiet disk to tens of
+milliseconds under heavy writes (see [benchmarks](/benchmarks/#durability-tiers)).
+The producer confirm still waits for the fsync, so producer
+latency and throughput match the durable tier. The gain matters when consumer
+work is short compared to that wait, or when a consumer can start work early
+and hold back anything it cannot undo until the record is durable. When each
+record takes much longer to process than an fsync, the difference mostly
+disappears. Benchmarks with instant consumers show the largest gap, so treat
+them as the upper bound.
+
 On the speculative and ephemeral tiers, live subscribers get a record when it is
 staged, before the log can serve it. Log reads return only durable records. A
 subscriber that starts behind the live feed, or catches up after falling behind,

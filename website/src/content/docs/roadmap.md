@@ -32,7 +32,8 @@ separate rounds when their dependencies permit.
    crash/error, slow-consumer, memory-budget and expiry/fallback gaps, then repeat
    representative physical-storage measurements. Production configuration and
    confirmation/identity contracts are required before adoption. Replicated
-   speculation and replication before owner fsync remain separate increments.
+   speculation remains a separate increment. Replication before owner fsync
+   exists as the opt-in early replication experiment.
 4. **Python and TypeScript performance.** Profile scheduling, decoding, delivery
    and flushing against shared broker workloads. Apply useful transport changes
    across SDKs where the same mechanism applies, retaining consistent semantics.
