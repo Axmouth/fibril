@@ -2158,8 +2158,22 @@ async fn apply_restart_transitions(nodes: &[RestartNode]) {
     }
 }
 
+/// Wait until every provider's view has reached `generation`. Followers apply
+/// a commit a little after the leader, so a read right after a write can still
+/// see the older state on a busy machine.
+async fn wait_for_views(providers: &[&GanglionCoordination], generation: u64) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while providers.iter().any(|p| p.snapshot().generation < generation) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
 /// Run the controller with placement held, as during the startup grace, so
-/// only process changes can request recovery.
+/// only process changes can request recovery. Returns once every node sees
+/// the result, so callers may read any node's view.
 async fn restart_controller_pass(nodes: &[RestartNode], config: &ProtocolOwnerPeerResolverConfig) {
     use fibril_broker::coordination::{
         DeterministicPartitionPlacement, DeterministicStreamPlacement, NodeInfo,
@@ -2174,13 +2188,13 @@ async fn restart_controller_pass(nodes: &[RestartNode], config: &ProtocolOwnerPe
             )
         })
         .collect();
-    tokio::time::timeout(Duration::from_secs(10), async {
+    let generation = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             for node in nodes {
                 if !node.provider.consensus_node().is_leader().await {
                     continue;
                 }
-                if let Ok(Some(_)) = node
+                if let Ok(Some(snapshot)) = node
                     .provider
                     .control_iteration_in_startup_grace(
                         &DeterministicPartitionPlacement,
@@ -2195,7 +2209,7 @@ async fn restart_controller_pass(nodes: &[RestartNode], config: &ProtocolOwnerPe
                     )
                     .await
                 {
-                    return;
+                    return snapshot.generation;
                 }
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -2203,6 +2217,11 @@ async fn restart_controller_pass(nodes: &[RestartNode], config: &ProtocolOwnerPe
     })
     .await
     .unwrap();
+    wait_restart_views(nodes, generation).await;
+}
+
+async fn wait_restart_views(nodes: &[RestartNode], generation: u64) {
+    wait_for_views(&nodes.iter().map(|n| &*n.provider).collect::<Vec<_>>(), generation).await;
 }
 
 /// Catch follower `index` up to `target` through an ordinary reporting
@@ -2504,6 +2523,9 @@ async fn follower_restart(case: FollowerRestart) {
     })
     .await
     .unwrap();
+    // Node a saw the last admission. The others must too before their
+    // brokers apply it below.
+    wait_restart_views(&nodes, nodes[0].provider.snapshot().generation).await;
     let rejoined = nodes[0]
         .provider
         .snapshot()
