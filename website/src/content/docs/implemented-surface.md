@@ -122,6 +122,7 @@ See also: [client usage](/clients/) and
 | Delayed publish | Implemented | TCP protocol, broker, Rust client, TypeScript client, Python client, Go client, C# client |
 | Content type metadata | Implemented | Protocol metadata, Rust client, TypeScript client, Python client, Go client, C# client, delivery path |
 | Reserved metadata headers | Implemented | Broker protocol handler rejects `fibril.*` and `stroma.*` user headers |
+| Message size limit | Implemented | `connection.max_message_bytes` runtime setting (default 8 MiB, 1 KiB to 15 MiB), broker connection decoder and publish handlers answer `413`; `connection.warn_message_bytes` logs large payloads (default 1 MiB) |
 | Partition key routing | Implemented | Rust client `NewMessage::partition_key`, protocol publish metadata, server per-partition publish routing |
 | Partitioning-version fence | Implemented | Client stamps routed version, and server redirects stale publishes before appending |
 | Message TTL (drop by age) | Implemented | `Publish.ttl_ms` + per-queue `default_message_ttl_ms` on declare, owner resolves an absolute deadline, expiry worker drops via the DLQ/discard pipeline. Rust `Publisher::expiring` + `QueueConfig::default_message_ttl`, TypeScript `Publisher.expiring` + `QueueConfig.defaultMessageTtl`, Python `Publisher.expiring` + `QueueConfig.default_message_ttl` (seconds-native) |

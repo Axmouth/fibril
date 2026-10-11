@@ -103,7 +103,11 @@ test('all newly exposed controls save edits using their actual form types', () =
   f.controls.get('stream.idle_evict_enabled').checked = false;
   f.controls.get('stream.cursor_commit_window_us').value = '0';
   f.controls.get('stream.cursor_commit_max_batch').value = '11';
+  f.controls.get('connection.max_message_bytes').value = '2097152';
+  f.controls.get('connection.warn_message_bytes').value = '0';
   const saved = f.collect();
+  assert.equal(saved.connection.max_message_bytes, 2097152);
+  assert.equal(saved.connection.warn_message_bytes, 0);
   assert.deepEqual(saved.stream, { cursor_commit_window_us: 0, cursor_commit_max_batch: 11,
     idle_evict_enabled: false, idle_evict_after_ms: 2000, idle_sweep_interval_ms: 2000 });
   assert.equal(saved.connection.drain_handoff_timeout_ms, 2000);

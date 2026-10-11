@@ -464,6 +464,10 @@ mod tests {
             code: ERR_INVALID,
             msg: "bad arg".into(),
         });
+        no(FibrilError::Failure {
+            code: fibril_wire::ERR_TOO_LARGE,
+            msg: "message too large".into(),
+        });
         no(FibrilError::SerializationFailure {
             msg: "bad payload".into(),
         });

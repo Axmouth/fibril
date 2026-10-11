@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use fibril_common::message_size;
 use serde::{Deserialize, Serialize};
 use stroma_core::{GlobalKey, GlobalStore, GlobalValue, PutOutcome, StromaError};
 use tokio::sync::watch;
@@ -158,6 +159,11 @@ impl RuntimeSettings {
                 "partitioning.default_partition_count must be at least 1".into(),
             ));
         }
+        message_size::validate_max_message_bytes(
+            "connection.max_message_bytes",
+            self.connection.max_message_bytes,
+        )
+        .map_err(RuntimeSettingsError::Invalid)?;
         Ok(())
     }
 
@@ -340,7 +346,7 @@ impl IdleQueueCleanupRuntimeSettings {
 }
 
 /// Runtime connection lifecycle settings.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct ConnectionRuntimeSettings {
     pub reconnect_grace_ms: Option<u64>,
@@ -353,6 +359,24 @@ pub struct ConnectionRuntimeSettings {
     /// reconciles, past it (or `0`) it reports not-found. Live-process
     /// dormancy stays governed by `reconnect_grace_ms`.
     pub resume_session_restart_ttl_ms: Option<u64>,
+    /// Largest accepted message payload in bytes. Bounded so one message
+    /// always fits a recovery page, see `fibril_common::message_size`.
+    pub max_message_bytes: usize,
+    /// Payloads above this many bytes are accepted but logged as a warning,
+    /// at most once per topic per minute. `0` disables the warning.
+    pub warn_message_bytes: usize,
+}
+
+impl Default for ConnectionRuntimeSettings {
+    fn default() -> Self {
+        Self {
+            reconnect_grace_ms: None,
+            drain_handoff_timeout_ms: None,
+            resume_session_restart_ttl_ms: None,
+            max_message_bytes: message_size::DEFAULT_MAX_MESSAGE_BYTES,
+            warn_message_bytes: message_size::DEFAULT_WARN_MESSAGE_BYTES,
+        }
+    }
 }
 
 /// Default drain handoff wait when the runtime setting is unset.
@@ -839,6 +863,7 @@ mod tests {
                 reconnect_grace_ms: Some(8),
                 drain_handoff_timeout_ms: None,
                 resume_session_restart_ttl_ms: None,
+                ..ConnectionRuntimeSettings::default()
             },
             replication: ReplicationRuntimeSettings::default(),
             partitioning: PartitioningRuntimeSettings::default(),
@@ -880,6 +905,7 @@ mod tests {
                 reconnect_grace_ms: Some(17),
                 drain_handoff_timeout_ms: None,
                 resume_session_restart_ttl_ms: None,
+                ..ConnectionRuntimeSettings::default()
             },
             replication: ReplicationRuntimeSettings::default(),
             partitioning: PartitioningRuntimeSettings::default(),
@@ -951,6 +977,55 @@ mod tests {
             Err(RuntimeSettingsError::Invalid(message))
                 if message.contains("default_partition_count")
         ));
+    }
+
+    #[test]
+    fn runtime_settings_validate_message_size_bounds() {
+        let defaults = ConnectionRuntimeSettings::default();
+        assert_eq!(defaults.max_message_bytes, 8 * 1024 * 1024);
+        assert_eq!(defaults.warn_message_bytes, 1024 * 1024);
+
+        for (max, ok) in [
+            (0, false),
+            (1023, false),
+            (1024, true),
+            (15 * 1024 * 1024, true),
+            (15 * 1024 * 1024 + 1, false),
+        ] {
+            let mut settings = RuntimeSettings::default();
+            settings.connection.max_message_bytes = max;
+            match settings.validate() {
+                Ok(()) => assert!(ok, "{max} should be rejected"),
+                Err(RuntimeSettingsError::Invalid(message)) => {
+                    assert!(!ok, "{max} should be accepted: {message}");
+                    assert!(
+                        message.contains("connection.max_message_bytes"),
+                        "{message}"
+                    );
+                }
+                Err(other) => panic!("unexpected error {other:?}"),
+            }
+        }
+
+        // Any warning threshold is valid, 0 disables it.
+        let mut settings = RuntimeSettings::default();
+        settings.connection.warn_message_bytes = 0;
+        settings.validate().unwrap();
+    }
+
+    #[test]
+    fn connection_settings_without_message_size_fields_use_defaults() {
+        let decoded: ConnectionRuntimeSettings =
+            serde_json::from_str(r#"{"reconnect_grace_ms": 5}"#).unwrap();
+        assert_eq!(decoded.reconnect_grace_ms, Some(5));
+        assert_eq!(
+            decoded.max_message_bytes,
+            message_size::DEFAULT_MAX_MESSAGE_BYTES
+        );
+        assert_eq!(
+            decoded.warn_message_bytes,
+            message_size::DEFAULT_WARN_MESSAGE_BYTES
+        );
     }
 
     #[tokio::test]

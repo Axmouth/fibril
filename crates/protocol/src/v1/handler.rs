@@ -10,8 +10,9 @@ use std::{
 
 use crate::v1::{
     AdvertisedAddress,
-    frame::{Frame, ProtoCodec},
+    frame::{Frame, FrameLimit, OversizedFrame, ProtoCodec, ServerCodec, ServerFrame},
     helper::{ProtocolError, error_frame, try_decode, try_encode},
+    message_size_limits::{LargeMessageWarnings, frame_too_large_reply, payload_too_large_message},
     session_store::SessionSkeletonStore,
     wire::{self, WireError},
     *,
@@ -371,6 +372,40 @@ async fn send_error_response_and_count(
         tracing::error!("failed to send error response: {err}");
     }
     metrics.error();
+}
+
+/// Push the live `max_message_bytes` to the connection decoder. Takes effect
+/// from the next decoded frame.
+fn sync_frame_limit(frame_limit: &FrameLimit, settings: &ConnectionRuntimeSettings) {
+    frame_limit.set_max_frame_bytes(message_size::frame_limit(settings.max_message_bytes));
+}
+
+/// Enforce `max_message_bytes` on a decoded publish and log the large message
+/// warning. Returns false after answering 413 when the payload is too large.
+async fn check_message_size(
+    connection_settings: &ConnectionSettings,
+    settings: &ConnectionRuntimeSettings,
+    tx: &mpsc::Sender<Frame>,
+    metrics: &TcpStats,
+    request_id: u64,
+    topic: &str,
+    payload_len: usize,
+) -> bool {
+    if payload_len > settings.max_message_bytes {
+        send_error_response_and_count(
+            tx,
+            metrics,
+            request_id,
+            ERR_TOO_LARGE,
+            payload_too_large_message(payload_len, settings.max_message_bytes),
+        )
+        .await;
+        return false;
+    }
+    connection_settings
+        .large_message_warnings
+        .check(topic, payload_len, settings.warn_message_bytes);
+    true
 }
 
 /// Map a broker operation error to a client response code and a message that
@@ -2154,17 +2189,37 @@ struct ResumeResolution {
     logical: Arc<LogicalConnection>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct ConnectionRuntimeSettings {
     pub publisher_cache_idle_timeout_ms: Option<u64>,
     pub reconnect_grace_ms: Option<u64>,
     pub resume_session_restart_ttl_ms: Option<u64>,
+    /// Largest accepted message payload. Read on every frame, so a change
+    /// also applies to open connections.
+    pub max_message_bytes: usize,
+    /// Payloads above this are accepted but logged. `0` disables the warning.
+    pub warn_message_bytes: usize,
+}
+
+impl Default for ConnectionRuntimeSettings {
+    fn default() -> Self {
+        Self {
+            publisher_cache_idle_timeout_ms: None,
+            reconnect_grace_ms: None,
+            resume_session_restart_ttl_ms: None,
+            max_message_bytes: message_size::DEFAULT_MAX_MESSAGE_BYTES,
+            warn_message_bytes: message_size::DEFAULT_WARN_MESSAGE_BYTES,
+        }
+    }
 }
 
 #[derive(Clone)]
 pub struct ConnectionSettings {
     pub heartbeat_interval: Option<u64>,
     runtime: Arc<ArcSwap<ConnectionRuntimeSettings>>,
+    /// Shared by every connection of this broker so the large message
+    /// warning is limited per broker, not per connection.
+    large_message_warnings: Arc<LargeMessageWarnings>,
     resume_sessions: Arc<ResumeSessionRegistry>,
     /// Durable session skeletons, when configured. Absent for in-memory / test
     /// paths, where no store means a resume is honored only while the process
@@ -2177,6 +2232,7 @@ impl ConnectionSettings {
         Self {
             heartbeat_interval,
             runtime: Arc::new(ArcSwap::from_pointee(ConnectionRuntimeSettings::default())),
+            large_message_warnings: Arc::new(LargeMessageWarnings::default()),
             resume_sessions: Arc::new(ResumeSessionRegistry::new()),
             session_store: None,
         }
@@ -2209,6 +2265,18 @@ impl ConnectionSettings {
     pub fn with_publisher_cache_idle_timeout_ms(self, timeout_ms: Option<u64>) -> Self {
         let mut runtime = *self.runtime_snapshot();
         runtime.publisher_cache_idle_timeout_ms = timeout_ms;
+        self.update_runtime(runtime);
+        self
+    }
+
+    pub fn with_message_size_limits(
+        self,
+        max_message_bytes: usize,
+        warn_message_bytes: usize,
+    ) -> Self {
+        let mut runtime = *self.runtime_snapshot();
+        runtime.max_message_bytes = max_message_bytes;
+        runtime.warn_message_bytes = warn_message_bytes;
         self.update_runtime(runtime);
         self
     }
@@ -2575,6 +2643,8 @@ where
 pub enum LoopEvent {
     Heartbeat,
     Frame(Frame),
+    /// A frame over the size cap. Its payload was discarded by the decoder.
+    TooLarge(OversizedFrame),
     Disconnect,
     Timeout,
     /// Time to check whether the coordination generation changed and, if so, push
@@ -2628,7 +2698,13 @@ where
     let mut last_pushed_topology = topology_source.as_ref().map(|s| s.topology());
     heartbeat.tick().await; // consume first tick
     // ---- Framed socket -----------------------------------------------------
-    let framed = Framed::with_capacity(socket, ProtoCodec, 128 * 1024);
+    // Without an auth handler the connection starts with the authenticated
+    // frame cap. With one, frames stay small until authentication succeeds.
+    let frame_limit = FrameLimit::new(
+        auth_handler.is_none(),
+        message_size::frame_limit(connection_settings.runtime_snapshot().max_message_bytes),
+    );
+    let framed = Framed::with_capacity(socket, ServerCodec::new(frame_limit.clone()), 128 * 1024);
     let (mut writer, mut reader) = framed.split();
 
     // ---- Write fan-in channel ---------------------------------------------
@@ -2642,10 +2718,22 @@ where
     let client_id: Uuid;
 
     // ---- HELLO handshake ---------------------------------------------------
-    let frame = reader
+    let frame = match reader
         .next()
         .await
-        .ok_or(ProtocolConnectionError::ClosedBeforeHello)??;
+        .ok_or(ProtocolConnectionError::ClosedBeforeHello)??
+    {
+        ServerFrame::Frame(frame) => frame,
+        ServerFrame::TooLarge(oversized) => {
+            let max_message_bytes = connection_settings.runtime_snapshot().max_message_bytes;
+            writer
+                .send(frame_too_large_reply(&oversized, max_message_bytes)?)
+                .await
+                .ok();
+            tcp_stats.error();
+            return Ok(());
+        }
+    };
 
     if frame.opcode != Op::Hello as u16 {
         writer
@@ -2711,6 +2799,11 @@ where
     let mut authenticated_principal: Option<String> = None;
     let transport_generation = logical.attach_transport(frame_tx_high_prio.clone());
     client_id = resume.client_id;
+    // A resumed session that already authenticated skips AUTH, so its
+    // frames get the authenticated cap right away.
+    if logical.state.lock().await.authenticated {
+        frame_limit.authenticate();
+    }
     // A TLS-verified certificate identity that the auth handler maps to a
     // user authenticates the connection with no AUTH frame. A denial is not
     // an error: the connection stays unauthenticated and may still
@@ -2726,6 +2819,7 @@ where
             state.authenticated = true;
             authenticated_principal = Some(identity.clone());
         }
+        frame_limit.authenticate();
         connection_stats.set_connection_auth(&conn_id, true);
         tracing::info!("conn {conn_id} authenticated as `{identity}` by client certificate");
     }
@@ -2929,10 +3023,15 @@ where
             // ---- Incoming frame ----
             frame = reader.next() => {
                 match frame {
-                    Some(Ok(f)) => {
+                    Some(Ok(ServerFrame::Frame(f))) => {
                         last_seen = Instant::now();
 
                         LoopEvent::Frame(f)
+                    },
+                    Some(Ok(ServerFrame::TooLarge(oversized))) => {
+                        last_seen = Instant::now();
+
+                        LoopEvent::TooLarge(oversized)
                     },
                     Some(Err(err)) => {
                         tracing::warn!("[reader] Error reading from tcp socket: {err}");
@@ -2948,11 +3047,38 @@ where
 
         let mut frame = match loop_event {
             LoopEvent::Frame(f) => f,
+            LoopEvent::TooLarge(oversized) => {
+                // The decoder yields this only on a connection that may send
+                // ordinary frames, so no auth check here. The connection stays
+                // open for the next request.
+                let settings = connection_settings.runtime_snapshot();
+                sync_frame_limit(&frame_limit, &settings);
+                tcp_stats.bytes_in(oversized.payload_len as u64);
+                let publish = oversized.opcode == Op::Publish as u16
+                    || oversized.opcode == Op::PublishDelayed as u16;
+                let tx = if publish {
+                    &frame_tx_low_prio
+                } else {
+                    &frame_tx_high_prio
+                };
+                tracing::debug!(
+                    opcode = oversized.opcode,
+                    request_id = oversized.request_id,
+                    payload_len = oversized.payload_len,
+                    limit = oversized.limit,
+                    "rejected an oversized frame"
+                );
+                let reply = frame_too_large_reply(&oversized, settings.max_message_bytes)?;
+                tx.send(reply).await?;
+                tcp_stats.error();
+                continue;
+            }
             LoopEvent::Timeout => break,
             LoopEvent::Disconnect => break,
             LoopEvent::Heartbeat => {
                 let settings = connection_settings.runtime_snapshot();
                 expire_idle_publishers(&mut publishers, settings.publisher_cache_idle_timeout_ms);
+                sync_frame_limit(&frame_limit, &settings);
                 continue;
             }
             LoopEvent::TopologyTick => {
@@ -2995,6 +3121,8 @@ where
 
         let settings = connection_settings.runtime_snapshot();
         expire_idle_publishers(&mut publishers, settings.publisher_cache_idle_timeout_ms);
+        // Live setting changes reach the decoder from the next frame on.
+        sync_frame_limit(&frame_limit, &settings);
 
         let metrics = tcp_stats.clone();
         let size = size_of_val(&frame) + frame.payload.len();
@@ -3157,6 +3285,7 @@ where
                                     state.authenticated = true;
                                     authenticated_principal = Some(auth_frame.username.clone());
                                 }
+                                frame_limit.authenticate();
                                 frame_tx_high_prio
                                     .send(try_encode(Op::AuthOk, frame.request_id, &())?)
                                     .await?;
@@ -4371,6 +4500,21 @@ where
                 if let Some(counter) = &conn_published {
                     counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
+                // Covers queue and stream publishes. A frame under the decoder
+                // cap can still carry a payload slightly over the limit.
+                if !check_message_size(
+                    &connection_settings,
+                    &settings,
+                    &frame_tx_low_prio,
+                    &metrics,
+                    frame.request_id,
+                    &pubreq.topic,
+                    pubreq.payload.len(),
+                )
+                .await
+                {
+                    continue;
+                }
                 if fence_stale_partitioning(
                     &frame_tx_low_prio,
                     frame.request_id,
@@ -4575,6 +4719,19 @@ where
                 );
                 if let Some(counter) = &conn_published {
                     counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                if !check_message_size(
+                    &connection_settings,
+                    &settings,
+                    &frame_tx_low_prio,
+                    &metrics,
+                    frame.request_id,
+                    &pubreq.topic,
+                    pubreq.payload.len(),
+                )
+                .await
+                {
+                    continue;
                 }
                 if fence_stale_partitioning(
                     &frame_tx_low_prio,

@@ -7,6 +7,7 @@ pub use fibril_wire::*;
 pub mod client;
 mod connection_writer;
 pub mod handler;
+pub mod message_size_limits;
 pub mod replication;
 pub mod recovery_inspection;
 pub mod recovery_transfer;

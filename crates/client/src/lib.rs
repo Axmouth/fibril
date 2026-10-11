@@ -7237,6 +7237,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publish_confirmed_fails_fast_on_too_large() {
+        let (client, mut rx) = client_with_command_rx();
+        let publisher = client.publisher("jobs").unwrap();
+        let task = tokio::spawn(async move { publisher.publish_confirmed("big").await });
+
+        match rx.recv().await.unwrap() {
+            Command::PublishConfirmed { reply, .. } => {
+                reply
+                    .send(Err(FibrilError::Failure {
+                        code: fibril_wire::ERR_TOO_LARGE,
+                        msg: "message payload of 9 bytes exceeds the broker limit".into(),
+                    }))
+                    .unwrap();
+            }
+            other => panic!("expected confirmed publish, got {other:?}"),
+        }
+
+        let err = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("a 413 must not be retried")
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            matches!(&err, FibrilError::Failure { code, msg }
+                if *code == fibril_wire::ERR_TOO_LARGE && msg.contains("exceeds")),
+            "{err:?}"
+        );
+        assert_eq!(err.retry_advice(), RetryAdvice::DoNotRetry);
+        assert!(rx.try_recv().is_err(), "no second attempt");
+    }
+
+    #[tokio::test]
     async fn publish_with_confirmation_returns_handle_before_offset() {
         let (client, mut rx) = client_with_command_rx();
         let publisher = client.publisher("jobs").unwrap();

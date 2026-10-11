@@ -33,7 +33,7 @@ use fibril_broker::{
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_protocol::v1::{
     Ack, AdvertisedAddress, ContentType, DeclarePlexus, DeclarePlexusOk, DeclareQueue,
-    DeclareQueueOk, Deliver, ERR_CONFLICT, ERR_INVALID, ErrorMsg, HEADER_SPECULATIVE, Hello,
+    DeclareQueueOk, Deliver, ERR_CONFLICT, ERR_INVALID, ERR_TOO_LARGE, ErrorMsg, HEADER_SPECULATIVE, Hello,
     HelloOk, Nack, Op, PROTOCOL_V1, Publish, PublishDelayed, QueueDlqPolicy, QueueTopologyEntry,
     ReasonCode, ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult,
     QueueCheckpointExport, QueueCheckpointExportOk, QueueReplicationRead, ReconcileSubscription,
@@ -1727,6 +1727,214 @@ async fn malformed_publish_returns_error_and_keeps_connection_open() {
 
     assert_error_frame(&mut framed, 2, 400).await;
     assert_connection_still_responds(&mut framed).await;
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+}
+
+const SMALL_MAX_MESSAGE_BYTES: usize = 1024;
+
+fn small_message_limit_settings() -> ConnectionSettings {
+    ConnectionSettings::new(Some(60)).with_message_size_limits(SMALL_MAX_MESSAGE_BYTES, 512)
+}
+
+fn publish_frame(request_id: u64, topic: &str, payload: Vec<u8>) -> Frame {
+    try_encode(
+        Op::Publish,
+        request_id,
+        &Publish {
+            topic: topic.into(),
+            partition: Partition::new(0),
+            group: None,
+            require_confirm: true,
+            content_type: None,
+            headers: HashMap::new(),
+            payload,
+            published: unix_millis(),
+            partition_key: None,
+            partitioning_version: 0,
+            ttl_ms: None,
+        },
+    )
+    .unwrap()
+}
+
+async fn assert_too_large(framed: &mut Conn, request_id: u64, expected_op: Op) -> String {
+    let frame = recv_frame(framed).await;
+    assert_eq!(frame.opcode, expected_op as u16);
+    assert_eq!(frame.request_id, request_id);
+    let err: ErrorMsg = try_decode(&frame).unwrap();
+    assert_eq!(err.code, ERR_TOO_LARGE);
+    assert!(err.message.contains("reference"), "{}", err.message);
+    err.message
+}
+
+#[tokio::test]
+async fn oversized_publish_frame_gets_413_and_connection_keeps_working() {
+    let (mut framed, server_task, _dir, _broker) =
+        open_protocol_connection_with_settings(small_message_limit_settings()).await;
+    handshake(&mut framed).await;
+
+    // Well past the frame cap: the decoder skips the payload unread.
+    let payload_len = SMALL_MAX_MESSAGE_BYTES + 200 * 1024;
+    framed
+        .send(publish_frame(2, "size.frame", vec![7; payload_len]))
+        .await
+        .unwrap();
+    let message = assert_too_large(&mut framed, 2, Op::Error).await;
+    assert!(message.contains("exceeds the broker limit"), "{message}");
+
+    framed_publish(&mut framed, 3, "size.frame", None, b"small").await;
+    assert_connection_still_responds(&mut framed).await;
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn publish_payload_just_over_the_limit_gets_413() {
+    let (mut framed, server_task, _dir, _broker) =
+        open_protocol_connection_with_settings(small_message_limit_settings()).await;
+    handshake(&mut framed).await;
+
+    // The frame fits under the decoder cap, the payload does not fit the limit.
+    framed
+        .send(publish_frame(
+            2,
+            "size.payload",
+            vec![1; SMALL_MAX_MESSAGE_BYTES + 1],
+        ))
+        .await
+        .unwrap();
+    let message = assert_too_large(&mut framed, 2, Op::Error).await;
+    assert!(
+        message.contains(&format!("{} bytes", SMALL_MAX_MESSAGE_BYTES + 1)),
+        "{message}"
+    );
+
+    framed
+        .send(
+            try_encode(
+                Op::PublishDelayed,
+                3,
+                &PublishDelayed {
+                    topic: "size.payload".into(),
+                    partition: Partition::new(0),
+                    group: None,
+                    require_confirm: true,
+                    content_type: None,
+                    not_before: unix_millis() + 1_000,
+                    headers: HashMap::new(),
+                    payload: vec![1; SMALL_MAX_MESSAGE_BYTES + 1],
+                    published: unix_millis(),
+                    partition_key: None,
+                    partitioning_version: 0,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_too_large(&mut framed, 3, Op::Error).await;
+
+    // Exactly at the limit is accepted.
+    let at_limit = [2; SMALL_MAX_MESSAGE_BYTES];
+    framed_publish(&mut framed, 4, "size.payload", None, &at_limit).await;
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn oversized_subscribe_frame_gets_subscribe_error() {
+    let (mut framed, server_task, _dir, _broker) =
+        open_protocol_connection_with_settings(small_message_limit_settings()).await;
+    handshake(&mut framed).await;
+
+    framed
+        .send(Frame {
+            version: PROTOCOL_V1,
+            opcode: Op::Subscribe as u16,
+            flags: 0,
+            request_id: 5,
+            payload: Bytes::from(vec![0u8; SMALL_MAX_MESSAGE_BYTES + 100 * 1024]),
+        })
+        .await
+        .unwrap();
+    assert_too_large(&mut framed, 5, Op::SubscribeErr).await;
+    assert_connection_still_responds(&mut framed).await;
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn oversized_frame_before_auth_closes_the_connection() {
+    let (broker, dir) = open_test_broker().await;
+    let (mut framed, server_task, _dir, _) =
+        open_node_connection_for_broker(small_message_limit_settings(), broker, dir).await;
+    handshake(&mut framed).await;
+
+    // The server may close before the whole frame is written.
+    let _ = framed
+        .send(publish_frame(2, "size.preauth", vec![0; 100 * 1024]))
+        .await;
+    let next = tokio::time::timeout(Duration::from_secs(15), framed.next())
+        .await
+        .expect("connection should close promptly");
+    assert!(
+        !matches!(next, Some(Ok(_))),
+        "no reply is sent before closing, got {next:?}"
+    );
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn authenticated_connection_gets_the_message_cap() {
+    let (broker, dir) = open_test_broker().await;
+    let (mut framed, server_task, _dir, _) =
+        open_node_connection_for_broker(small_message_limit_settings(), broker, dir).await;
+    node_handshake(&mut framed).await;
+
+    // Over the unauthenticated cap but within max_message_bytes plus overhead.
+    let payload_len = 64 * 1024 + 100;
+    framed
+        .send(Frame {
+            version: PROTOCOL_V1,
+            opcode: Op::Ping as u16,
+            flags: 0,
+            request_id: 6,
+            payload: Bytes::from(vec![0u8; payload_len]),
+        })
+        .await
+        .unwrap();
+    let frame = recv_frame_expect(&mut framed, Op::Pong).await;
+    assert_eq!(frame.request_id, 6);
+
+    framed
+        .send(publish_frame(7, "size.authed", vec![0; 200 * 1024]))
+        .await
+        .unwrap();
+    assert_too_large(&mut framed, 7, Op::Error).await;
+    assert_connection_still_responds(&mut framed).await;
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn max_message_bytes_update_applies_to_open_connections() {
+    let settings = small_message_limit_settings();
+    let (mut framed, server_task, _dir, _broker) =
+        open_protocol_connection_with_settings(settings.clone()).await;
+    handshake(&mut framed).await;
+
+    let mut runtime = *settings.runtime_snapshot();
+    runtime.max_message_bytes = 4 * SMALL_MAX_MESSAGE_BYTES;
+    settings.update_runtime(runtime);
+
+    let payload = [3; 2 * SMALL_MAX_MESSAGE_BYTES];
+    framed_publish(&mut framed, 2, "size.live", None, &payload).await;
 
     drop(framed);
     server_task.await.unwrap().unwrap();

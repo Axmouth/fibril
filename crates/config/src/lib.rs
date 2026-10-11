@@ -5,6 +5,7 @@ use std::{
 };
 
 use clap::Parser;
+use fibril_common::message_size;
 use serde::{Deserialize, Serialize};
 
 pub mod node_layout;
@@ -921,6 +922,11 @@ impl ServerConfig {
                 "runtime_seed.partitioning.default_partition_count must be at least 1",
             ));
         }
+        message_size::validate_max_message_bytes(
+            "runtime_seed.connection.max_message_bytes",
+            self.runtime_seed.connection.max_message_bytes,
+        )
+        .map_err(ConfigError::validation)?;
         if self.coordination.mode == CoordinationMode::Ganglion
             && self.runtime_locks.idle_queue_cleanup
         {
@@ -1916,6 +1922,10 @@ pub const DEFAULT_RESUME_SESSION_RESTART_TTL_MS: u64 = 60_000;
 pub struct ConnectionSettings {
     pub reconnect_grace_ms: Option<u64>,
     pub resume_session_restart_ttl_ms: Option<u64>,
+    /// Largest accepted message payload in bytes, 1 KiB to 15 MiB.
+    pub max_message_bytes: usize,
+    /// Log a warning for payloads above this many bytes. `0` disables it.
+    pub warn_message_bytes: usize,
 }
 
 impl Default for ConnectionSettings {
@@ -1923,6 +1933,8 @@ impl Default for ConnectionSettings {
         Self {
             reconnect_grace_ms: Some(DEFAULT_RECONNECT_GRACE_MS),
             resume_session_restart_ttl_ms: Some(DEFAULT_RESUME_SESSION_RESTART_TTL_MS),
+            max_message_bytes: message_size::DEFAULT_MAX_MESSAGE_BYTES,
+            warn_message_bytes: message_size::DEFAULT_WARN_MESSAGE_BYTES,
         }
     }
 }
@@ -1956,6 +1968,36 @@ mod tests {
         }
         for interval in [1, 999, 86_400_001] {
             assert!(ServerConfig::from_toml_str(&format!("[runtime_seed.replication]\nagreed_checkpoint_interval_ms = {interval}")).is_err());
+        }
+    }
+
+    #[test]
+    fn message_size_seed_defaults_and_bounds() {
+        let default = ServerConfig::from_toml_str("").unwrap();
+        assert_eq!(
+            default.runtime_seed.connection.max_message_bytes,
+            8 * 1024 * 1024
+        );
+        assert_eq!(default.runtime_seed.connection.warn_message_bytes, 1024 * 1024);
+
+        for max in [1024, 8 * 1024 * 1024, 15 * 1024 * 1024] {
+            let config = ServerConfig::from_toml_str(&format!(
+                "[runtime_seed.connection]\nmax_message_bytes = {max}\nwarn_message_bytes = 0"
+            ))
+            .unwrap();
+            assert_eq!(config.runtime_seed.connection.max_message_bytes, max);
+            assert_eq!(config.runtime_seed.connection.warn_message_bytes, 0);
+        }
+        for max in [0, 1023, 15 * 1024 * 1024 + 1] {
+            let err = ServerConfig::from_toml_str(&format!(
+                "[runtime_seed.connection]\nmax_message_bytes = {max}"
+            ))
+            .unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("runtime_seed.connection.max_message_bytes"),
+                "{err}"
+            );
         }
     }
 

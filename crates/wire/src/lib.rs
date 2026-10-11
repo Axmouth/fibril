@@ -12,6 +12,7 @@ pub const DEFAULT_HEARTBEAT_INTERVAL: u64 = 5;
 use std::collections::HashMap;
 
 pub use fibril_common::DeliveryTag;
+pub use fibril_common::message_size;
 use serde::{Deserialize, Serialize};
 pub use stroma_common::Partition;
 use uuid::Uuid;
@@ -1069,6 +1070,10 @@ pub const ERR_NOT_FOUND: u16 = 404;
 /// of an unexplained disconnect. Distinct from certificate trust failures,
 /// which surface through the TLS handshake itself.
 pub const ERR_TLS_REQUIRED: u16 = 426;
+/// The request or its message payload is larger than the broker accepts
+/// (`max_message_bytes`). The connection stays open. Retrying the same
+/// request cannot succeed, so clients fail it without retrying.
+pub const ERR_TOO_LARGE: u16 = 413;
 /// The partition belongs to this broker but cannot serve yet, for example while
 /// its history recovery runs after a restart. Retry the same broker shortly.
 pub const ERR_UNAVAILABLE: u16 = 503;

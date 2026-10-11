@@ -545,6 +545,30 @@ this recovery API's output and disk-read allocations. The shared frame decoder
 rejects oversized recovery-read requests and replies from their frame headers,
 before accumulating their bodies.
 
+### Message size limits
+
+A message payload can be at most `max_message_bytes`, 8 MiB by default. The
+setting accepts 1 KiB to 15 MiB. Because a record that cannot fit a page is
+refused rather than split, a confirmed message larger than a 16 MiB recovery
+page could never be inspected or transferred after a failover, and its queue
+would stay fenced. The 15 MiB ceiling keeps one maximum message plus its record
+and wire overhead inside a single page.
+
+The broker checks the size twice. Its connection decoder reads the declared
+length from each frame header. Before a connection authenticates, any frame
+over 64 KiB closes it. After authentication, an ordinary frame over
+`max_message_bytes` plus 64 KiB of room for the topic and headers is discarded
+as it arrives, without being buffered, and the request gets error `413` while
+the connection stays open. Recovery and history replication frames keep their
+own explicit limits. Publish handlers then check the decoded payload against
+`max_message_bytes` itself. Clients treat `413` as not retryable.
+
+Payloads above `warn_message_bytes`, 1 MiB by default, are accepted but logged
+as a warning at most once per topic per minute on each broker. Large payloads
+slow replication and recovery, so big blobs are better kept in external storage
+with a reference in the message. Both settings are runtime settings, see
+[configuration](/configuration/#connections).
+
 Linux storage, fault, cancellation and real TCP authorization tests cover this
 increment. Other platforms run the same sealing path without that test coverage.
 Process tests do not establish hardware power-loss behavior.

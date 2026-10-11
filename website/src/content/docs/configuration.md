@@ -89,6 +89,10 @@ sweep_interval_ms = 60000
 # fast restart lets clients resume and reconcile (60000 ms). Set to 0 to
 # disable restart resume.
 # resume_session_restart_ttl_ms = 60000
+# Largest accepted message payload, 1 KiB to 15 MiB (8 MiB by default).
+# max_message_bytes = 8388608
+# Log a warning for payloads above this size. Set to 0 to disable it.
+# warn_message_bytes = 1048576
 
 [runtime_seed.replication]
 confirm_timeout_ms = 5000
@@ -479,6 +483,8 @@ See [many idle queues](/concepts/many-idle-queues/) for the user-facing behavior
 | --- | --- | --- | --- |
 | `runtime_seed.connection.reconnect_grace_ms` | `FIBRIL_RECONNECT_GRACE_MS`, `--reconnect-grace-ms` | `5000` | Keeps a disconnected resumable client alive for this long before cleaning up subscriptions and requeueing unsettled messages. On by default so a transient blip resumes transparently; set `0` to disable. |
 | `runtime_seed.connection.resume_session_restart_ttl_ms` | `FIBRIL_RESUME_SESSION_RESTART_TTL_MS`, `--resume-session-restart-ttl-ms` | `60000` | How stale a persisted session skeleton a restarted broker will honor. Within this window a resume after a broker restart succeeds and reconciles instead of being rejected; past it (or `0`) it reports not-found. Independent of `reconnect_grace_ms`, which governs live-process dormancy. |
+| `runtime_seed.connection.max_message_bytes` | none | `8388608` | Largest message payload the broker accepts, between `1024` (1 KiB) and `15728640` (15 MiB). A larger publish is rejected with error `413` and the connection stays open. The upper bound keeps one message plus its overhead inside a 16 MiB recovery page, see [message size limits](/reliability/recovery-sealing/#message-size-limits). Adjustable live from the settings page. |
+| `runtime_seed.connection.warn_message_bytes` | none | `1048576` | Publishes with a payload above this size are accepted but logged as a warning, at most once per topic per minute on each broker. `0` disables the warning. Adjustable live from the settings page. |
 | `connection.drain_handoff_timeout_ms` (runtime settings) | none | `30000` | Upper bound on how long a drain call waits for partition ownership to hand off to caught-up followers in coordinated mode. Only caps the wait: reactive failover stays the backstop either way. Adjustable live from the settings page. |
 
 Reconnect grace is disabled when unset. It only helps clients that use the resume identity handshake.

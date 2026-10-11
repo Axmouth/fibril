@@ -99,6 +99,8 @@ pub fn runtime_seed_from_config(config: &ServerConfig) -> RuntimeSettings {
                 .runtime_seed
                 .connection
                 .resume_session_restart_ttl_ms,
+            max_message_bytes: config.runtime_seed.connection.max_message_bytes,
+            warn_message_bytes: config.runtime_seed.connection.warn_message_bytes,
         },
         replication: ReplicationRuntimeSettings {
             eager_failover: config.runtime_seed.replication.eager_failover,
@@ -2066,7 +2068,11 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     let mut connection_settings = ConnectionSettings::new(None)
         .with_publisher_cache_idle_timeout_ms(runtime.idle_queue_cleanup.publisher_idle_timeout_ms)
         .with_reconnect_grace_ms(runtime.connection.reconnect_grace_ms)
-        .with_resume_session_restart_ttl_ms(runtime.connection.resume_session_restart_ttl_ms);
+        .with_resume_session_restart_ttl_ms(runtime.connection.resume_session_restart_ttl_ms)
+        .with_message_size_limits(
+            runtime.connection.max_message_bytes,
+            runtime.connection.warn_message_bytes,
+        );
     if let Some(store) = session_store {
         connection_settings = connection_settings.with_session_store(store);
     }
@@ -2092,6 +2098,8 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
                         .settings
                         .connection
                         .resume_session_restart_ttl_ms,
+                    max_message_bytes: snapshot.settings.connection.max_message_bytes,
+                    warn_message_bytes: snapshot.settings.connection.warn_message_bytes,
                 });
                 if let Some(manager) = runtime_settings.upgrade() {
                     manager.record_runtime_application(snapshot);

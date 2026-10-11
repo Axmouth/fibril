@@ -129,6 +129,15 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- A broker message size limit. `connection.max_message_bytes` (default
+  8388608, 1 KiB to 15 MiB) caps the message payload, and a larger publish
+  gets error `413` while the connection stays open. The ceiling keeps one
+  message inside a 16 MiB recovery page. `connection.warn_message_bytes`
+  (default 1048576, 0 disables) logs a warning for larger payloads at most
+  once per topic per minute. Both are runtime settings with
+  `runtime_seed.connection` seeds, shared by the cluster, adjustable live from
+  the settings page. Clients treat `413` as not retryable.
+
 - `replication.stream_initial_credit_bytes`, an experimental runtime setting
   (0 to 134217728, default 0) that sets the follower queue push credit apart
   from the per-read byte budget. Zero keeps the credit at one read budget.
@@ -808,6 +817,14 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   unchanged, matching their own language norms.
 
 ### Fixed
+
+- Security: the broker buffered any frame a connection declared, up to about
+  4 GiB, even before authentication, so one connection could exhaust broker
+  memory. Before authentication frames are now capped at 64 KiB and an
+  oversized one closes the connection. After authentication an ordinary frame
+  over `max_message_bytes` plus 64 KiB is discarded as it arrives and answered
+  with `413`. A message over 16 MiB could also be confirmed and then leave its
+  queue fenced after a failover, because it never fit a recovery page.
 
 - After a whole-cluster restart, a replica-durable queue could stop
   delivering for good. A restarted broker's new process identity is a node
