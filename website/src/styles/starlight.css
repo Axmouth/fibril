@@ -36,3 +36,36 @@ header.header {
 .site-title {
   letter-spacing: -0.03em;
 }
+
+/* Tables lay out at the column width and wrap their text. The wrapper added by
+   rehype-wrap-tables scrolls sideways only when even wrapped they cannot fit. */
+.sl-markdown-content .table-wrap {
+  overflow-x: auto;
+}
+
+.sl-markdown-content .table-wrap > table {
+  display: table;
+  width: 100%;
+  margin: 0;
+}
+
+/* Long tokens such as paths and commit lists split only when they cannot fit
+   on a line of their own. overflow-wrap alone does not shrink a table cell's
+   minimum width in Chromium. */
+.sl-markdown-content .table-wrap :is(th, td) {
+  min-width: 4rem;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+/* A floor keeps dates and short words whole. On a phone a many-column table
+   scrolls sideways at a readable width instead of splitting every word. */
+.sl-markdown-content .table-wrap-wide :is(th, td) {
+  min-width: 6.5rem;
+}
+
+/* Pages with many-column tables use a wider content column where the screen
+   has room, as the pages with story players do. */
+html:has(.sl-markdown-content .table-wrap-wide) {
+  --sl-content-width: 64rem;
+}

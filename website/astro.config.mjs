@@ -3,6 +3,7 @@ import starlight from "@astrojs/starlight";
 import starlightVersions from "starlight-versions";
 import tailwindcss from "@tailwindcss/vite";
 import { sidebar } from "./src/navigation.mjs";
+import rehypeWrapTables from "./src/plugins/rehype-wrap-tables.mjs";
 
 export default defineConfig({
   site: "https://fibril.sh",
@@ -37,6 +38,9 @@ export default defineConfig({
       sidebar,
     }),
   ],
+  markdown: {
+    rehypePlugins: [rehypeWrapTables],
+  },
   vite: {
     plugins: [tailwindcss()],
   },
