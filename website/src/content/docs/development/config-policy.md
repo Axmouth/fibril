@@ -1,6 +1,6 @@
 ---
 title: Configuration policy
-description: Proposed direction for Fibril startup config, runtime settings, and persisted global state.
+description: How Fibril decides where a setting belongs between startup config, runtime settings and queue state.
 ---
 
 This is a development note. It describes how Fibril should decide where a setting belongs before adding more one-off environment variables.
@@ -74,7 +74,7 @@ Use one owner per setting.
 
 Bootstrap settings are owned by startup config.
 
-Runtime defaults are owned by persisted global state once that state exists. Startup config may provide initial values for first boot, but should not keep overriding persisted runtime values on every restart by default.
+Runtime defaults are owned by persisted global state. Startup config may provide initial values for first boot, but should not keep overriding persisted runtime values on every restart by default.
 
 Queue settings are owned by queue state.
 
@@ -98,21 +98,22 @@ If an operator wants a startup setting to be locked, make that explicit rather t
 
 Some deployments may want configuration management to own a runtime default and prevent admin edits.
 
-If Fibril supports this, it should be explicit:
+Fibril makes this explicit with the typed `[runtime_locks]` startup section:
 
-```txt
-runtime_settings_locked = ["idle_queue_cleanup", "default_dead_letter_policy"]
+```toml
+[runtime_locks]
+idle_queue_cleanup = true
 ```
 
-or equivalent typed config.
-
-A locked setting should be visible as locked in the admin UI and rejected by the runtime API with a clear error.
+A locked section keeps its boot seed on every start, and the admin API rejects
+edits to it with HTTP 423 `setting_locked`. `idle_queue_cleanup` is the only
+lockable section so far.
 
 Do not make every environment variable an invisible override for persisted state. That creates hard-to-debug behavior.
 
 ## Global State Shape
 
-Persisted global state should have its own event log and snapshot, separate from queue event logs.
+Persisted global state lives in the Stroma global store, a versioned key-value store on its own log, separate from queue logs. Runtime settings are one versioned document in it, updated with an expected-version check. In cluster mode the coordination cluster settings document is the authority and each node keeps a local copy.
 
 Useful properties:
 

@@ -12,7 +12,7 @@ Fibril reserves these message header prefixes:
 - `fibril.*` for broker and protocol metadata
 - `stroma.*` for storage and queue-state metadata
 
-Clients may receive and display these headers, but user code should not set them. The broker rejects published messages that include reserved headers so system metadata cannot be spoofed by application payloads.
+Clients may receive and display these headers, but user code should not set them. The broker rejects published messages that set reserved headers, so system metadata cannot be spoofed by application payloads. Keys under `fibril.client.*` are the exception: client libraries set them for library-owned metadata such as `fibril.client.producer_id` and `fibril.client.producer_seq`, and the libraries refuse any reserved key from user code.
 
 ## What Belongs In Headers
 

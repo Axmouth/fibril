@@ -16,7 +16,7 @@ a live repartition is finalized safely, plus the assumptions each step relies on
 2. **Correctness backstop (always on).** Every publish carries the
    `partitioning_version` it routed under. An owner that receives traffic routed
    under a stale version rejects/redirects it (`Op::Redirect` names the current
-   owner). This is what makes routing *correct* during any change; everything
+   owner). This is what makes routing *correct* during any change. Everything
    below only makes it *cleaner and quieter*.
 
 3. **Live topology push.** When the routing *content* changes (owners, partition
@@ -24,7 +24,7 @@ a live repartition is finalized safely, plus the assumptions each step relies on
    same body as `TopologyOk`) to each connection. The client applies it to its
    routing cache (replace + pool prune, generation-guarded against stale/out-of-order
    pushes) and acks the generation it now reflects (`TopologyUpdateAck`, op 102).
-   The initial snapshot still comes from the client's `TopologyRequest`; the push
+   The initial snapshot still comes from the client's `TopologyRequest`. The push
    carries the deltas. The trigger is the routing content, not the raw coordination
    generation. The generation bumps on any committed metadata change cluster-wide
    (any topic's declare, a transition marker, runtime settings, an unrelated
@@ -94,7 +94,7 @@ drain-complete, bounded by `coordination.ganglion.repartition_adoption_timeout_m
   the wait with a timeout.
 - **Only push-capable connections count.** A connection appears in the adoption
   tracker only after it acks at least once. A silent or pre-push client never
-  drags the cluster minimum down; it is covered by the version-fence and the
+  drags the cluster minimum down. It is covered by the version-fence and the
   timeout. A connection's entry is dropped when it closes.
 - **Only live nodes count.** `global_topology_adoption` reads adoption labels from
   nodes whose heartbeat is within the liveness TTL. A dead node's adoption label is

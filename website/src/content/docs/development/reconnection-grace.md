@@ -24,7 +24,7 @@ different broker requires further design.
 ## Live-process grace
 
 On an eligible disconnect, the broker holds the logical connection dormant for
-`connection.reconnect_grace_ms`. The server seed defaults to 5000 ms; 0 disables
+`connection.reconnect_grace_ms`. The server seed defaults to 5000 ms. Zero disables
 the window. Runtime settings control subsequent changes.
 
 The dormant connection retains queue subscriptions and their inflight delivery
@@ -51,7 +51,7 @@ id when necessary.
 Rust, TypeScript, Python, Go and C# expose typed terminal reasons through their
 receive APIs. Subscription supervisors retry supported ownership changes and
 broker-advised recreation. Automatic recreation is enabled by default for
-supported safe cases and can be disabled; terminal errors surface to the
+supported safe cases and can be disabled. Terminal errors surface to the
 application. Automatic recreation of auto-ACK subscriptions remains outside this
 continuity contract.
 
@@ -64,16 +64,16 @@ a publish may have reached the broker before its confirmation was lost.
 The broker stores session skeletons in its local global store: owner identity,
 client identity, resume token, queue-subscription metadata and freshness data.
 Session changes update this document outside the per-delivery hot path. Writes
-are best-effort; a failed persistence operation is logged and can prevent a later
+are best-effort. A failed persistence operation is logged and can prevent a later
 resume.
 
 `connection.resume_session_restart_ttl_ms` bounds the accepted age of persisted
-sessions. The default is 60000 ms; 0 disables restart resume. This setting is
+sessions. The default is 60000 ms. Zero disables restart resume. This setting is
 independent of live-process grace.
 
 A valid persisted session produces `resumed_after_restart` and supports
 subscription reconciliation. Authentication is established on the new
-connection. Queue messages remain subject to recovery and redelivery; old
+connection. Queue messages remain subject to recovery and redelivery. Old
 inflight ownership and delivery tags are not restored.
 
 ## Held-delivery settlement
@@ -105,5 +105,5 @@ settlement semantics and reliable settlement across this reconnect interval.
 
 TCP logs and admin counters expose resume, grace and reconciliation outcomes.
 Reconciliation logs include client id, connection id, policy and action counts.
-Planned broker drain sends `GoingAway`; ownership handoff and client reconnection
+Planned broker drain sends `GoingAway`. Ownership handoff and client reconnection
 follow the [admin workflow](/admin-dashboard/).

@@ -24,11 +24,14 @@ faults - which is what a deterministic simulator provides.
 
 ## The seam question
 
-The deciding constraint is how the code reaches the network. Today Fibril calls
-`tokio::net::{TcpStream, TcpListener}` directly in roughly seven places (the
-broker connection handler, the client, follower replication, the admin server,
-the server bootstrap) plus the ganglion raft TCP transport. There is no network
-abstraction a simulator can substitute behind. That shapes the tool choice.
+The deciding constraint is how the code reaches the network. Fibril reaches it
+through `fibril_util::net`, which re-exports tokio's TCP types normally and
+turmoil's under the `simulation` feature, and through Ganglion's `RaftDialer`
+seam for raft traffic. Neither seam existed when the tools were compared. Direct
+`tokio::net` calls sat in roughly seven places (the broker connection handler,
+the client, follower replication, the admin server, the server bootstrap) plus
+the ganglion raft TCP transport, and the cost of adding a seam there shaped the
+tool choice.
 
 ## turmoil vs madsim
 
@@ -81,14 +84,16 @@ determinism catches - and only after weighing it against the openraft dep graph.
    modes: the protocol crate (broker connection handler, follower replication,
    the `Conn` alias) and the client crate, each with a `simulation` feature
    forwarding to `fibril-util/simulation`. The broker crate has no direct
-   `tokio::net` (its net lives in the protocol crate). The fibril bootstrap has no
-   production `tokio::net` of its own (it uses the converted `run_server`). The
+   `tokio::net` (its net lives in the protocol crate). The fibril bootstrap uses
+   `tokio::net` only in its raft TLS dialer and acceptor, which are injected
+   through the same `RaftDialer` seam as the simulated transport. The
    ganglion raft transport is handled differently (see stage 4a below): instead of
    a cfg seam, its network factory and peer connection were made generic over a
    `RaftDialer`, so a simulated transport is injected the way production injects
    the tokio one - ganglion takes no turmoil dependency. Left on tokio
-   deliberately: only the admin server (axum's `serve` needs a real tokio listener
-   and admin is off the replication/coordination path). Known gap for sim use: the
+   deliberately: the admin and setup servers (axum's `serve` needs a real tokio
+   listener and admin is off the replication/coordination path) and the raft TLS
+   transport. Known gap for sim use: the
    high-level client `connect()` resolves addresses via std DNS, which a sim's
    logical hostnames do not support - in-sim producers either use a
    hostname-direct connect path or the protocol layer directly.
@@ -156,7 +161,15 @@ determinism catches - and only after weighing it against the openraft dep graph.
    acks over the simulated network, the link is held so the topology exchange is
    delayed, the cutover fence holds (the adoption minimum stays below the new
    generation), and on release the exchange completes and the cutover finalizes.
-   The full initial scenario set is in place.
+   A drain scenario checks that a draining owner hands its queue off before it
+   stops. The full initial scenario set is in place.
+6. **Run it on a schedule.** The suite runs weekly in the scheduled server
+   workflow as `cargo test -p fibril-protocol --features simulation --test
+   simulation_tests`. Each scenario sets its own simulated duration above its
+   longest phase timeout, because turmoil's default of 10 s is shorter than some
+   30 s phase timeouts. Replication listeners and owner resolvers use a shared
+   cluster secret, since replication operations require a connection
+   authenticated as the node principal.
 
 ## Relationship to other testing
 
@@ -174,7 +187,7 @@ The third leg is a real multi-node run on separate OS processes (task #116):
 Ganglion raft cluster over real TCP. Its `--failover-verify` mode runs an
 identity-tagged producer/consumer through public client routing, kills the
 partition owner mid-run, and asserts every confirmed id is still delivered after
-failover (zero loss, no phantoms); `--chaos` repeats mixed faults (pause/resume,
+failover (zero loss, no phantoms). `--chaos` repeats mixed faults (pause/resume,
 kill/rejoin) under sustained load and asserts zero loss plus reconvergence. Both
 pass. Together - deterministic simulation, the soak suite, and this real
 multi-node run - they form the cluster-confidence gate for 1.0.
