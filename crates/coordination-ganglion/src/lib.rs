@@ -78,6 +78,10 @@ pub const DRAINING_LABEL: &str = "fibril/draining";
 pub const RAFT_ID_LABEL: &str = "fibril/raft-id";
 /// Process replacement hint. This may request recovery but never grants admission.
 pub const HISTORY_PROCESS_LABEL: &str = "fibril/history-process";
+/// Attribute key prefix, followed by a node id, holding the process that node
+/// last published. Written once per process start so the change bumps the
+/// generation (see `register_self_with_labels`).
+pub const NODE_PROCESS_ATTRIBUTE_PREFIX: &str = "fibril/node-process/";
 /// Advisory labels carrying a broker's coarse throughput - messages per
 /// second since its previous heartbeat - for the admin topology view.
 pub const RATE_PUB_LABEL: &str = "fibril/rate-pub";
@@ -1122,6 +1126,9 @@ pub struct GanglionCoordination {
     node_id: String,
     // Private instance identity: a replacement provider cannot inherit an old writer grant.
     history_process: [u8; 16],
+    // Set once this process's identity has been published with a generation
+    // bump, see register_self_with_labels.
+    process_published: std::sync::atomic::AtomicBool,
     checkpoint_operation: tokio::sync::Mutex<()>,
     recovery_diagnostics: recovery_diagnostics::RecoveryDiagnostics,
     node: RaftMetadataNode,
@@ -1195,6 +1202,7 @@ impl GanglionCoordination {
         Self {
             node_id,
             history_process,
+            process_published: std::sync::atomic::AtomicBool::new(false),
             checkpoint_operation: tokio::sync::Mutex::new(()),
             recovery_diagnostics: Default::default(),
             node,
@@ -1239,7 +1247,25 @@ impl GanglionCoordination {
             .insert(HEARTBEAT_LABEL.to_string(), unix_millis_now().to_string());
 
         self.forward_merge(MetadataRaftCommand::RegisterNode { node })
-            .await
+            .await?;
+        if info.node_id == self.node_id
+            && !self.process_published.load(std::sync::atomic::Ordering::Acquire)
+        {
+            // Label-only node updates do not bump the generation or wake
+            // watchers, so a restarted process's new identity could stay
+            // invisible to every watched snapshot until some unrelated write.
+            // Histories built from such a stale view suspend this replica and
+            // nothing re-admits it. One attribute write per process forces a
+            // published snapshot that carries the new label.
+            self.forward_merge(MetadataRaftCommand::SetAttribute {
+                key: format!("{NODE_PROCESS_ATTRIBUTE_PREFIX}{}", self.node_id),
+                value: uuid::Uuid::from_bytes(self.history_process).to_string(),
+            })
+            .await?;
+            self.process_published
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        Ok(())
     }
 
     /// Whether the watch-forwarder task is still running. A dead forwarder
@@ -5753,6 +5779,47 @@ mod tests {
     /// The node the planner picked before the label override chose a
     /// follower does not join the proposed replica set: it holds no copy and
     /// would have to be built before the new owner serves.
+    /// A restarted process changes only its node labels, which do not bump
+    /// the generation. Its first registration must still reach watched
+    /// snapshots, or histories built from them keep the dead process.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restarted_process_identity_reaches_watched_snapshots() {
+        let router = InProcessRouter::new();
+        let raft_node = RaftMetadataNode::start(1, default_raft_config().unwrap(), &router)
+            .await
+            .unwrap();
+        raft_node
+            .initialize(BTreeMap::from([(1u64, ganglion_openraft::openraft::BasicNode::new("n1"))]))
+            .await
+            .unwrap();
+        raft_node.wait_for_leader(1, Duration::from_secs(10)).await.unwrap();
+        let provider = GanglionCoordination::new("b", raft_node);
+        let info = NodeInfo {
+            node_id: "b".into(),
+            broker_addr: "127.0.0.1:9000".into(),
+            admin_addr: None,
+        };
+        // The record the previous process left behind.
+        let dead = uuid::Uuid::from_bytes([7; 16]).to_string();
+        let mut old = ganglion_core::NodeInfo::new("b", info.broker_addr.clone(), None);
+        old.labels.insert(HISTORY_PROCESS_LABEL.into(), dead.clone());
+        provider.node.register_node(old).await.unwrap();
+        let watched = provider.node.watch_committed();
+        assert_eq!(watched.borrow().nodes["b"].labels[HISTORY_PROCESS_LABEL], dead);
+
+        provider.register_self(&info).await.unwrap();
+        let current = uuid::Uuid::from_bytes(provider.history_process).to_string();
+        assert_eq!(
+            watched.borrow().nodes["b"].labels[HISTORY_PROCESS_LABEL],
+            current,
+            "the watched snapshot must carry the new process"
+        );
+        // Later heartbeats stay label-only and do not bump the generation.
+        let generation = watched.borrow().generation;
+        provider.register_self(&info).await.unwrap();
+        assert_eq!(provider.node.committed_snapshot().generation, generation);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn displaced_planner_pick_stays_out_of_the_recovery_set() {
         let router = InProcessRouter::new();

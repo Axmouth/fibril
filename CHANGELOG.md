@@ -809,6 +809,14 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- After a whole-cluster restart, a replica-durable queue could stop
+  delivering for good. A restarted broker's new process identity is a node
+  label, and label-only updates neither bump the coordination generation nor
+  reach watched snapshots, so the recovery's new history could see the
+  follower's old process, suspend it, and never re-admit it. Each broker
+  process now publishes its identity once with a generation bump
+  (`fibril/node-process/<node>` attribute) right after it first registers.
+
 - The Rust client ignored `SubscribeErr` replies, so a subscribe the broker
   refused left `sub()` waiting forever. It now fails with the broker's error,
   as the other SDKs already did.
