@@ -486,6 +486,69 @@
       </div>
     </section>
 
+    <section class="settings-section">
+      <div class="settings-section-heading">
+        <h5>Routing</h5>
+        <p>Limits for public brokers that forward client operations to private partition owners. Only clusters with private brokers use them. New limits apply to new forwarded work, open sessions keep running.</p>
+      </div>
+      <div class="settings-grid settings-grid-two">
+      <label class="settings-field">
+        <span class="settings-label">Max upstream sessions</span>
+        <span class="settings-help">Upstream sessions this broker keeps open to partition owners, one per client session and owner. At the cap new forwarded operations get a 503 error. Default 4096.</span>
+        <input id="routing.max_upstream_sessions" data-runtime-setting type="number" min="1" step="1">
+      <span id="seed.routing.max_upstream_sessions" class="settings-help"></span>
+      </label>
+      <label class="settings-field">
+        <span class="settings-label">Max upstream sessions per owner</span>
+        <span class="settings-help">Upstream sessions to any one owner. At the cap that owner's partitions get a 503 error. Default 1024.</span>
+        <input id="routing.max_upstream_sessions_per_owner" data-runtime-setting type="number" min="1" step="1">
+      <span id="seed.routing.max_upstream_sessions_per_owner" class="settings-help"></span>
+      </label>
+      <label class="settings-field">
+        <span class="settings-label">Max in-flight forward bytes</span>
+        <span class="settings-help">Publish payload bytes sent to owners and not answered yet. A publish waits a few seconds for room, then gets a 503 error. Default 268435456 (256 MiB).</span>
+        <input id="routing.max_inflight_forward_bytes" data-runtime-setting type="number" min="1" step="1">
+      <span id="seed.routing.max_inflight_forward_bytes" class="settings-help"></span>
+      </label>
+      <label class="settings-field">
+        <span class="settings-label">Forward timeout</span>
+        <span class="settings-help">How long a forwarded request waits for the owner. Past it the client gets a 504 error: the outcome is unknown and the client does not replay it. Default 30 seconds.</span>
+        <span class="settings-duration">
+          <input id="routing.forward_timeout_ms" data-runtime-setting type="number" min="1" step="any">
+          <select class="duration-unit" id="routing.forward_timeout_ms.unit" data-for="routing.forward_timeout_ms">
+            <option value="s">seconds</option>
+            <option value="ms">milliseconds</option>
+          </select>
+        </span>
+      <span id="seed.routing.forward_timeout_ms" class="settings-help"></span>
+      </label>
+      <label class="settings-field">
+        <span class="settings-label">Upstream connect timeout</span>
+        <span class="settings-help">Upper bound on opening a session to an owner. Blank uses the replication owner connect timeout. On expiry the client gets a 503 error, nothing was sent.</span>
+        <span class="settings-duration">
+          <input id="routing.upstream_connect_timeout_ms" data-runtime-setting data-runtime-optional type="number" min="1" step="any" placeholder="default">
+          <select class="duration-unit" id="routing.upstream_connect_timeout_ms.unit" data-for="routing.upstream_connect_timeout_ms">
+            <option value="s">seconds</option>
+            <option value="ms">milliseconds</option>
+          </select>
+        </span>
+      <span id="seed.routing.upstream_connect_timeout_ms" class="settings-help"></span>
+      </label>
+      <label class="settings-field">
+        <span class="settings-label">Upstream idle close</span>
+        <span class="settings-help">An upstream session with no subscription and no pending request closes after this long. Default 30 seconds.</span>
+        <span class="settings-duration">
+          <input id="routing.upstream_idle_close_ms" data-runtime-setting type="number" min="1" step="any">
+          <select class="duration-unit" id="routing.upstream_idle_close_ms.unit" data-for="routing.upstream_idle_close_ms">
+            <option value="s">seconds</option>
+            <option value="ms">milliseconds</option>
+          </select>
+        </span>
+      <span id="seed.routing.upstream_idle_close_ms" class="settings-help"></span>
+      </label>
+      </div>
+    </section>
+
     <div class="settings-actions">
       <button class="btn btn-primary" type="submit">Save runtime settings</button>
       <button class="btn" type="button" id="reload-settings">Reload</button>

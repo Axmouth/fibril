@@ -116,6 +116,23 @@ test('all newly exposed controls save edits using their actual form types', () =
   assert.equal(saved.replication.owner_connect_timeout_ms, 2000);
 });
 
+test('routing limits save with their units and keep an unset connect timeout unset', () => {
+  const f = form();
+  f.context.renderSettings(f.data);
+  assert.equal(f.collect().routing.upstream_connect_timeout_ms, null);
+  f.controls.get('routing.max_upstream_sessions').value = '64';
+  f.controls.get('routing.max_upstream_sessions_per_owner').value = '8';
+  f.controls.get('routing.max_inflight_forward_bytes').value = '1048576';
+  f.controls.get('routing.forward_timeout_ms').value = '5';
+  f.controls.get('routing.forward_timeout_ms.unit').value = 's';
+  f.controls.get('routing.upstream_idle_close_ms').value = '750';
+  f.controls.get('routing.upstream_idle_close_ms.unit').value = 'ms';
+  const saved = f.collect();
+  assert.deepEqual(saved.routing, { max_upstream_sessions: 64, max_upstream_sessions_per_owner: 8,
+    max_inflight_forward_bytes: 1048576, forward_timeout_ms: 5000,
+    upstream_connect_timeout_ms: null, upstream_idle_close_ms: 750 });
+});
+
 test('saving before a successful load is rejected', () => {
   assert.throws(() => form().collect(), /Load settings before saving/);
 });

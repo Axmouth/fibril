@@ -87,6 +87,13 @@ async fn metrics_scrape_reflects_broker_traffic_and_channels() {
     assert!(sample_value(&body, "fibril_broker_acked_total") >= 5.0);
     assert!(sample_value(&body, "fibril_tcp_connections_open") >= 1.0);
     assert!(sample_value(&body, "fibril_subscriptions_open") >= 1.0);
+    // A standalone broker never forwards, but the families are always there.
+    assert_eq!(sample_value(&body, "fibril_forward_upstream_sessions"), 0.0);
+    assert_eq!(sample_value(&body, "fibril_forwarded_sessions"), 0.0);
+    assert!(
+        body.contains(r#"fibril_forward_requests_total{op="publish",outcome="504"} 0"#),
+        "{body}"
+    );
 
     // Per-channel series are on by default and label the materialized
     // channels only.

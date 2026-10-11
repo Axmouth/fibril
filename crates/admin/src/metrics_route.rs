@@ -8,6 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use fibril_broker::PartitionKind;
+use fibril_metrics::{ForwardLimit, ForwardOp, ForwardOutcome};
 use std::sync::Arc;
 
 use crate::prometheus::{MetricFamily, MetricKind, Sample, render};
@@ -21,6 +22,10 @@ pub async fn metrics(
     check_auth(&server, &headers).await?;
 
     let mut families = node_families(&server);
+    families.extend(forward_families(
+        &server,
+        server.config.metrics_per_channel,
+    ));
     families.extend(replication_families(
         &server,
         server.config.metrics_per_channel,
@@ -178,6 +183,110 @@ fn node_families(server: &AdminServer) -> Vec<MetricFamily> {
             recovery.quarantines_total,
         ),
     ]
+}
+
+/// Forwarding families. The gateway side counts upstream sessions, requests,
+/// bytes and limit rejections. The owner side counts forwarded sessions it
+/// serves. All stay zero on a cluster without private brokers.
+fn forward_families(server: &AdminServer, per_channel: bool) -> Vec<MetricFamily> {
+    let forward = server.metrics.forward();
+    let counter = |name, help, value: u64| {
+        MetricFamily::scalar(name, help, MetricKind::Counter, value as f64)
+    };
+    let gauge = |name, help, value: u64| {
+        MetricFamily::scalar(name, help, MetricKind::Gauge, value as f64)
+    };
+    let mut requests = Vec::new();
+    for op in ForwardOp::ALL {
+        for outcome in ForwardOutcome::ALL {
+            requests.push(Sample::labeled(
+                vec![
+                    ("op", op.as_str().to_string()),
+                    ("outcome", outcome.as_str().to_string()),
+                ],
+                forward.requests(op, outcome) as f64,
+            ));
+        }
+    }
+    let rejected = ForwardLimit::ALL
+        .iter()
+        .map(|limit| {
+            Sample::labeled(
+                vec![("limit", limit.as_str().to_string())],
+                forward.rejected_total(*limit) as f64,
+            )
+        })
+        .collect();
+    let mut families = vec![
+        gauge(
+            "fibril_forward_upstream_sessions",
+            "Upstream sessions this broker holds to partition owners for its clients.",
+            forward.upstream_sessions(),
+        ),
+        MetricFamily {
+            name: "fibril_forward_requests_total",
+            help: "Requests forwarded to partition owners, by op and outcome.",
+            kind: MetricKind::Counter,
+            samples: requests,
+        },
+        counter(
+            "fibril_forward_bytes_in_total",
+            "Bytes received from partition owners on upstream sessions.",
+            forward.bytes_in_total(),
+        ),
+        counter(
+            "fibril_forward_bytes_out_total",
+            "Bytes sent to partition owners on upstream sessions.",
+            forward.bytes_out_total(),
+        ),
+        gauge(
+            "fibril_forward_inflight_bytes",
+            "Publish payload bytes sent to owners and not answered yet.",
+            forward.inflight_bytes(),
+        ),
+        MetricFamily {
+            name: "fibril_forward_rejected_total",
+            help: "Forwarded operations refused with 503 by a routing limit.",
+            kind: MetricKind::Counter,
+            samples: rejected,
+        },
+        counter(
+            "fibril_forward_dropped_total",
+            "Fire-and-forget publishes dropped because no upstream session was available.",
+            forward.dropped_total(),
+        ),
+        counter(
+            "fibril_forward_confirms_total",
+            "Forwarded publishes confirmed by their owner.",
+            forward.confirm_latency.count.load(std::sync::atomic::Ordering::Relaxed),
+        ),
+        counter(
+            "fibril_forward_confirm_latency_microseconds_total",
+            "Total time from forwarding a publish to the owner's confirm. Divide by fibril_forward_confirms_total for the mean.",
+            forward
+                .confirm_latency
+                .total_micros
+                .load(std::sync::atomic::Ordering::Relaxed),
+        ),
+        gauge(
+            "fibril_forwarded_sessions",
+            "Sessions this broker serves for public brokers forwarding their clients.",
+            forward.forwarded_sessions(),
+        ),
+    ];
+    if per_channel {
+        families.push(MetricFamily {
+            name: "fibril_forward_upstream_sessions_by_owner",
+            help: "Upstream sessions this broker holds, per owner node.",
+            kind: MetricKind::Gauge,
+            samples: forward
+                .upstream_sessions_by_owner()
+                .into_iter()
+                .map(|(owner, count)| Sample::labeled(vec![("owner", owner)], count as f64))
+                .collect(),
+        });
+    }
+    families
 }
 
 fn reconcile_outcome(outcome: &'static str, value: u64) -> Sample {
