@@ -526,27 +526,32 @@ few public brokers, with every SDK unchanged.
   upstream resume. Long runs go in the weekly cluster workflow
   (`.github/workflows/rust-scheduled.yaml`).
 
-## 10. Open questions
+## 10. Decisions and open questions
 
-1. Gateway choice: rendezvous over public nodes (recommended) or the answering
-   broker, which avoids extra client connections at the cost of per-broker
-   topology.
-2. Unknown outcome: add `504`, or close the client connection so the existing
-   transport failure path applies with no new code in the SDKs.
-3. Config shape: `broker.visibility` enum or a `broker.private` boolean, and
-   whether `broker.peer_advertise` ships with phase 1 or as a separate fix.
-4. Should private nodes refuse ordinary client AUTH entirely, so a
-   misconfigured client fails loudly instead of being served directly?
-5. Should the cluster ever expose private addresses, tagged, to internal
+Decided for phase 1:
+
+1. Gateway choice: rendezvous hashing over live, non-draining public nodes,
+   so every broker gives the same answer.
+2. Unknown outcome: a new `504` code. The upstream was lost after the request
+   was sent, the outcome is unknown, and clients must not replay blindly.
+3. Config shape: the `broker.visibility` enum, with `broker.peer_advertise`
+   shipping in phase 1, since a load balancer advertise address breaks
+   broker to broker replication without it.
+4. Private nodes accept ordinary client AUTH. Private means not advertised,
+   so internal clients that can reach a private node directly keep working.
+
+Still open:
+
+1. Should the cluster ever expose private addresses, tagged, to internal
    clients, or must they always go through a gateway?
-6. Clean session close: a new node-control op, or a `ForwardedSession` option
+2. Clean session close: a new node-control op, or a `ForwardedSession` option
    that makes the owner skip grace on a clean socket close from the gateway.
-7. Is per-client upstream connection count acceptable for the expected client
+3. Is per-client upstream connection count acceptable for the expected client
    counts, or should the multiplexed link come before 1.0?
-8. Should placement prefer public nodes as owners for hot partitions, so less
+4. Should placement prefer public nodes as owners for hot partitions, so less
    traffic is forwarded, or stay visibility-blind?
-9. Is losing session continuity on a public broker failure acceptable long
+5. Is losing session continuity on a public broker failure acceptable long
    term, or is the client tunnel worth its cost in all five SDKs?
-10. Should a deployment be able to force gateway mode for every partition, even
-    for public owners with their own addresses, for operators who want all
-    client traffic to enter through one place?
+6. Should a deployment be able to force gateway mode for every partition, even
+   for public owners with their own addresses, for operators who want all
+   client traffic to enter through one place?
