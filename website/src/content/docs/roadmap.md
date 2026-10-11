@@ -83,6 +83,8 @@ while retaining direct owner routing where reachable. Define advertisement scope
 authentication, failure/retry outcomes, loop prevention and bounded forwarding.
 Overlapping topology groups and arbitrary multi-hop routing remain later options
 that require a concrete deployment use case.
+The proposed design is in
+[private nodes and internal routing](/development/private-nodes-design/).
 
 ### MCP server and agent integration
 

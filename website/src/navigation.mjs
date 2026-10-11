@@ -215,6 +215,10 @@ export const sidebar = [
             label: "Live rebalancing",
             slug: "development/rebalancing-design",
           },
+          {
+            label: "Private nodes and internal routing",
+            slug: "development/private-nodes-design",
+          },
         ],
       },
       {
