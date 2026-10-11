@@ -1,0 +1,230 @@
+---
+import { terminalTabs } from "./crash-terminal/transcripts.mjs";
+
+const rows = (t: (typeof terminalTabs)[number]) =>
+  Math.max(...t.panes.map((p) => t.lines.filter((l) => l.pane === p.id).length));
+const anyProposed = terminalTabs.some((t) => t.lines.some((l) => "proposed" in l && l.proposed));
+---
+<section class="crash" aria-labelledby="crash-title" data-crash-terminal>
+  <div class="section-intro-wide">
+    <p class="eyebrow">crash test</p>
+    <h2 id="crash-title">Kill it mid-flight. The message is still there.</h2>
+    <p>fibrilctl prints the offset only after the broker has the message on disk. Kill the broker with SIGKILL, start it again, and the message is waiting. In a cluster the confirm also waits for the required replicas, so a surviving node can take over.</p>
+  </div>
+  <div class="page-tabs" role="tablist" aria-label="Crash test" data-tablist>
+    {terminalTabs.map((t, i) => (
+      <button type="button" role="tab" id={`tt-${t.id}`} aria-controls={`tp-${t.id}`} aria-selected={i === 0 ? "true" : "false"} tabindex={i === 0 ? 0 : -1}>{t.label}</button>
+    ))}
+  </div>
+  <div class="term-panels">
+    {terminalTabs.map((t, i) => (
+      <div class="term-panel" role="tabpanel" id={`tp-${t.id}`} aria-labelledby={`tt-${t.id}`} data-term={t.id} style={`--rows: ${rows(t)}`} hidden={i > 0}>
+        <div class="term-bar">
+          <span class="term-step" data-step aria-live="polite"></span>
+          <span class="term-ctrl"><button type="button" data-tplay>Pause</button><button type="button" data-treplay>Replay</button></span>
+        </div>
+        <div class={`term-grid term-grid-${t.panes.length}`}>
+          {t.panes.map((p) => (
+            <div class={`pane pane-${p.id}`} data-pane={p.id}>
+              <div class="console-head"><span>{p.title}</span><span class="pane-state" data-state></span></div>
+              <pre data-screen></pre>
+            </div>
+          ))}
+        </div>
+        <p class="term-foot">{t.foot}{anyProposed && <> <span class="tag-proposed">proposed</span> marks a log line Fibril does not print today.</>}</p>
+      </div>
+    ))}
+  </div>
+  <script is:inline type="application/json" data-transcripts set:html={JSON.stringify(terminalTabs).replace(/</g, "\\u003c")} />
+</section>
+
+<script>
+  import { tablist, showPanel, whenVisible, reduceMotion } from "../scripts/page-ui";
+
+  type Line = { step: number; pane: string; kind: string; text: string; t?: string; proposed?: boolean };
+  type Tab = { id: string; panes: { id: string; states?: [string, string?][] }[]; steps: string[]; final: string; lines: Line[] };
+
+  const escH = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const levelClass: Record<string, string> = { INFO: "t-info", WARN: "t-warn", ERROR: "t-err" };
+
+  function lineHtml(l: Line) {
+    const time = l.t ? `<span class="t-time">${l.t}</span> ` : "";
+    const tag = l.proposed ? '<span class="tag-proposed">proposed</span>' : "";
+    const ln = (inner: string) => `<span class="ln">${inner}</span>`;
+    if (l.kind === "cmd") return ln(`<span class="t-p">$ </span>${escH(l.text)}`);
+    if (l.kind === "comment") return ln(`<span class="t-c">${escH(l.text)}</span>`);
+    if (l.kind === "kill") return ln(`<span class="t-kill">${escH(l.text)}</span>`);
+    if (l.kind === "log") {
+      // "LEVEL module::path: message key=value", with the module cut to its last segment.
+      const m = l.text.match(/^(INFO|WARN|ERROR) ([\w:]+:) ([\s\S]*)$/);
+      if (m) {
+        const module = m[2].replace(/^(\w+::)+/, "");
+        const body = escH(m[3]).replace(/(\b[a-z_]+)=/g, '<span class="t-k">$1=</span>');
+        return ln(`${tag}${time}<span class="${levelClass[m[1]]}">${m[1]}</span> <span class="t-k">${escH(module)}</span> ${body}`);
+      }
+    }
+    return ln(`${tag}${time}<span class="t-o">${escH(l.text)}</span>`);
+  }
+
+  function mount(panel: HTMLElement, data: Tab) {
+    const panes = Object.fromEntries(
+      [...panel.querySelectorAll<HTMLElement>("[data-pane]")].map((el) => [
+        el.dataset.pane!,
+        { el, pre: el.querySelector("pre")!, state: el.querySelector<HTMLElement>("[data-state]"), html: "" },
+      ]),
+    );
+    const stepEl = panel.querySelector<HTMLElement>("[data-step]")!;
+    const playBtn = panel.querySelector<HTMLButtonElement>("[data-tplay]")!;
+    let li = 0;
+    let ci = 0;
+    let timer = 0;
+    let playing = true;
+    let visible = false;
+
+    const setStep = (s: number) => {
+      stepEl.innerHTML = `<b>${s + 1} / ${data.steps.length}</b>  ${escH(data.steps[s])}`;
+      for (const p of data.panes) {
+        const st = p.states?.[s];
+        const pane = panes[p.id];
+        if (!st || !pane.state) continue;
+        pane.state.textContent = st[0];
+        pane.state.className = `pane-state ${st[1] ?? ""}`;
+        pane.el.classList.toggle("down", st[1] === "down");
+      }
+    };
+    const reset = () => {
+      li = 0;
+      ci = 0;
+      for (const p of Object.values(panes)) {
+        p.html = "";
+        p.pre.innerHTML = "";
+      }
+      setStep(0);
+    };
+    const paint = (p: (typeof panes)[string], extra = "") => {
+      p.pre.innerHTML = p.html + extra;
+    };
+    const frame = () => {
+      timer = 0;
+      if (!playing || !visible) return;
+      if (li >= data.lines.length) {
+        timer = window.setTimeout(() => { reset(); frame(); }, 4500);
+        return;
+      }
+      const l = data.lines[li];
+      const p = panes[l.pane];
+      if (li === 0 || data.lines[li - 1].step !== l.step) setStep(l.step);
+      if (l.kind === "cmd" && ci < l.text.length) {
+        ci = Math.min(l.text.length, ci + 4);
+        paint(p, `<span class="ln"><span class="t-p">$ </span>${escH(l.text.slice(0, ci))}<span class="caret"></span></span>`);
+        timer = window.setTimeout(frame, 18);
+        return;
+      }
+      p.html += lineHtml(l);
+      paint(p);
+      li++;
+      ci = 0;
+      const next = data.lines[li];
+      timer = window.setTimeout(frame, !next ? 0 : next.step !== l.step ? 1000 : l.kind === "cmd" ? 300 : 420);
+    };
+    const showAll = () => {
+      for (const l of data.lines) panes[l.pane].html += lineHtml(l);
+      for (const p of Object.values(panes)) paint(p);
+      setStep(data.steps.length - 1);
+      stepEl.textContent = data.final;
+    };
+    const run = () => {
+      clearTimeout(timer);
+      timer = 0;
+      if (playing && visible) frame();
+    };
+    playBtn.addEventListener("click", () => {
+      playing = !playing;
+      playBtn.textContent = playing ? "Pause" : "Play";
+      run();
+    });
+    panel.querySelector("[data-treplay]")!.addEventListener("click", () => {
+      reset();
+      playing = true;
+      playBtn.textContent = "Pause";
+      run();
+    });
+    if (reduceMotion) showAll();
+    else reset();
+    return {
+      setVisible(v: boolean) {
+        if (reduceMotion) return;
+        visible = v;
+        run();
+      },
+    };
+  }
+
+  for (const root of document.querySelectorAll<HTMLElement>("[data-crash-terminal]")) {
+    const tabs: Tab[] = JSON.parse(root.querySelector("[data-transcripts]")!.textContent!);
+    const terms = tabs.map((d) => ({ id: d.id, ctl: mount(root.querySelector<HTMLElement>(`#tp-${d.id}`)!, d) }));
+    let current = tabs[0].id;
+    let inView = false;
+    const apply = () => terms.forEach((t) => t.ctl.setVisible(inView && t.id === current));
+    tablist(root.querySelector<HTMLElement>("[data-tablist]")!, (tab) => {
+      showPanel(tab);
+      current = tab.id.slice(3);
+      apply();
+    });
+    whenVisible(root, (v) => { inView = v; apply(); });
+  }
+</script>
+
+<style is:global>
+  .crash { margin-top: 64px; }
+  /* Both tab panels share one grid cell, so the section keeps the taller height on every tab. */
+  .term-panels { display: grid; }
+  .term-panel { grid-area: 1 / 1; display: flex; flex-direction: column; min-width: 0; padding: 12px; border: 1px solid var(--line-2); border-radius: 0 12px 12px 12px; background: color-mix(in srgb, var(--panel) 92%, transparent); box-shadow: 0 24px 60px var(--shadow); }
+  .term-panel[hidden] { display: flex; visibility: hidden; }
+  .term-bar { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; min-height: 30px; margin-bottom: 10px; }
+  .term-step { height: 3.2em; overflow: hidden; color: var(--text); font: 12.5px/1.6 var(--mono); white-space: pre-wrap; }
+  .term-step b { color: var(--organic); font-weight: 500; }
+  .term-ctrl { display: flex; flex: none; gap: 6px; }
+  .term-ctrl button { min-width: 62px; padding: 4px 10px; border: 1px solid var(--line-2); border-radius: 6px; background: var(--panel-2); color: var(--muted); font: 11.5px var(--sans); cursor: pointer; }
+  .term-ctrl button:hover { color: var(--text); }
+  .term-ctrl button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .term-grid { display: grid; gap: 10px; }
+  .term-grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .term-grid-1 { flex: 1; }
+  .term-grid-1 .pane { display: flex; flex-direction: column; height: 100%; }
+  .term-grid-1 pre { flex: 1 0 auto; font-size: 12.5px; }
+  .pane { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--bg-soft); }
+  .pane.down { border-color: color-mix(in srgb, var(--bad) 55%, var(--line)); }
+  .pane-state { color: var(--ok); }
+  .pane-state.down { color: var(--bad); }
+  .pane-state.wait { color: var(--warn); }
+  /* Fixed height from the final line count, so panes never grow during playback. */
+  .pane pre { box-sizing: content-box; height: calc(var(--rows) * 1.6em); margin: 0; overflow: hidden; padding: 10px 12px; color: var(--text); font: 11.5px/1.6 var(--mono); white-space: pre; }
+  /* Long lines keep their start and end in an ellipsis on wide screens. */
+  .pane .ln { display: block; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
+  .t-p { color: var(--organic); }
+  .t-o { color: var(--text); }
+  .t-c, .t-k { color: var(--dim); }
+  .t-info { color: var(--ok); }
+  .t-warn { color: var(--warn); }
+  .t-err, .t-kill { color: var(--bad); }
+  .t-time { color: var(--accent); }
+  .tag-proposed { display: inline-block; margin-right: 6px; padding: 0 5px; border: 1px dashed var(--warn); border-radius: 4px; color: var(--warn); font: 10px/1.5 var(--mono); vertical-align: 1px; }
+  .term-foot .tag-proposed { margin: 0 2px; }
+  .term-foot { margin: 10px 2px 0; color: var(--dim); font-size: 12px; line-height: 1.55; }
+  .caret { display: inline-block; width: .55em; height: 1.05em; vertical-align: -.2em; background: var(--accent); animation: caret-blink 1s steps(1) infinite; }
+  @keyframes caret-blink { 50% { opacity: 0; } }
+  @media (max-width: 640px) {
+    .crash { margin-top: 48px; }
+    .term-grid-4 { grid-template-columns: 1fr; }
+    /* Phones scroll long lines sideways inside the pane instead of wrapping. */
+    .pane pre { overflow-x: auto; padding: 8px 10px 14px; font-size: 10.5px; }
+    .term-grid-1 pre { font-size: 11px; }
+    .pane .ln { overflow: visible; text-overflow: clip; }
+    /* Narration gets its own fixed three line row above the controls. */
+    .term-bar { flex-direction: column; gap: 6px; }
+    .term-step { width: 100%; height: 4.8em; font-size: 12px; }
+    .term-panel { padding: 8px; }
+  }
+  @media (prefers-reduced-motion: reduce) { .term-ctrl { display: none; } }
+</style>

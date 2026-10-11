@@ -1,0 +1,188 @@
+---
+import QueueAnimation from "./QueueAnimation.astro";
+
+// The durable path: publish, fsync, confirm, then lease and ack or retry.
+// Two layouts share the hop ids, the wide one for desktop panels and a
+// vertical one for narrow panels (swapped by a container query).
+const GEO = {
+  wide: {
+    vb: [560, 288],
+    N: { pub: [75, 140, 124, 58], q: [280, 140, 124, 58], disk: [280, 38, 96, 46], w: [485, 140, 124, 58], ack: [485, 252, 96, 46], retry: [280, 252, 104, 46] },
+    paths: {
+      publish: "M137 131 L218 131", fsync: "M280 111 L280 61", confirm: "M218 149 L137 149", lease: "M342 140 L423 140",
+      ack: "M485 169 L485 229", retry: "M445 169 C445 222 382 252 332 252", back: "M280 229 L280 169",
+    },
+  },
+  narrow: {
+    vb: [320, 472],
+    N: { pub: [120, 44, 124, 58], q: [120, 178, 120, 58], disk: [262, 178, 80, 48], w: [120, 306, 120, 58], ack: [240, 436, 96, 48], retry: [70, 436, 96, 48] },
+    paths: {
+      publish: "M112 73 L112 149", fsync: "M180 178 L222 178", confirm: "M128 149 L128 73", lease: "M120 207 L120 277",
+      ack: "M140 335 C140 376 240 372 240 412", retry: "M100 335 C100 376 70 372 70 412", back: "M36 412 C14 330 14 250 60 196",
+    },
+  },
+} as const;
+
+// Each hop moves during its window of the loop, as fractions of LOOP seconds.
+// The script reads the same values from data attributes to light the steps.
+const LOOP = 15;
+const WINDOWS: Record<string, [number, number]> = {
+  publish: [0.02, 0.11], fsync: [0.13, 0.21], confirm: [0.23, 0.32], lease: [0.36, 0.45],
+  ack: [0.47, 0.55], retry: [0.63, 0.72], back: [0.74, 0.84],
+};
+const STEPS = [
+  ["publish", "Publish"],
+  ["fsync", "Message and enqueue state reach disk"],
+  ["confirm", "Only then is it confirmed"],
+  ["lease", "A worker leases it, then acks or retries"],
+];
+
+const f3 = (n: number) => n.toFixed(3);
+const dot = (hop: string, id: string) => {
+  const [a, b] = WINDOWS[hop];
+  return `<circle r="4.5" class="dot d-${hop}" opacity="0"><animateMotion dur="${LOOP}s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;${a};${b};1" calcMode="linear"><mpath href="#${id}"/></animateMotion><animate attributeName="opacity" dur="${LOOP}s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;${f3(a - 0.004)};${a};${b};${f3(b + 0.004)};1"/></circle>`;
+};
+const svg = (kind: keyof typeof GEO) => {
+  const g = GEO[kind];
+  const s = kind[0];
+  const box = (k: keyof typeof g.N, label: string, sub: string, cls = "") => {
+    const [x, y, w, h] = g.N[k];
+    return `<g class="n ${cls}" data-n="${k}"><rect x="${x - w / 2}" y="${y - h / 2}" width="${w}" height="${h}" rx="10"/><text x="${x - w / 2 + 12}" y="${y - 5}" class="lbl">${label}</text><text x="${x - w / 2 + 12}" y="${y + 13}" class="val">${sub}</text></g>`;
+  };
+  return `<svg class="${kind}" viewBox="0 0 ${g.vb[0]} ${g.vb[1]}" aria-hidden="true" data-path-svg>`
+    + Object.entries(g.paths).map(([k, d]) => `<path id="hop-${k}-${s}" class="edge e-${k}" data-hop="${k}" d="${d}"/>`).join("")
+    + box("pub", "publisher", "send(msg)") + box("q", "queue", "email.send") + box("disk", "log", "fsync", "disk")
+    + box("w", "worker", "leased") + box("ack", "&#10003; ack", "done", "ok") + box("retry", "delay", "30s", "warn")
+    + Object.keys(g.paths).map((k) => dot(k, `hop-${k}-${s}`)).join("")
+    + `</svg>`;
+};
+const tabs = [["durable", "Durable path"], ["lifecycle", "Queue lifecycle"]];
+---
+<div class="hero-visual" data-hero-scenes data-loop={LOOP} data-windows={JSON.stringify(WINDOWS)}>
+  <div class="scene-stage">
+    <figure class="scene path-visual" id="scene-durable" role="tabpanel" aria-labelledby="tab-durable">
+      <div class="visual-grid"></div>
+      <Fragment set:html={svg("wide") + svg("narrow")} />
+      <figcaption>
+        <ol class="steps">{STEPS.map(([k, t]) => <li data-step={k}>{t}</li>)}</ol>
+        <p class="path-note">With replication, the confirm also waits until the required replicas persist it.</p>
+      </figcaption>
+    </figure>
+    <div class="scene" id="scene-lifecycle" role="tabpanel" aria-labelledby="tab-lifecycle" hidden>
+      <QueueAnimation managed />
+    </div>
+  </div>
+  <div class="scene-switch">
+    <span class="ss-label" id="ss-label">view</span>
+    <div class="ss-row" role="tablist" aria-labelledby="ss-label" data-tablist>
+      {tabs.map(([id, label], i) => (
+        <button type="button" role="tab" id={`tab-${id}`} aria-controls={`scene-${id}`} aria-selected={i === 0 ? "true" : "false"} tabindex={i === 0 ? 0 : -1}>{label}</button>
+      ))}
+    </div>
+  </div>
+</div>
+
+<script>
+  import { tablist, whenVisible, reduceMotion } from "../scripts/page-ui";
+
+  for (const root of document.querySelectorAll<HTMLElement>("[data-hero-scenes]")) {
+    const LOOP = Number(root.dataset.loop);
+    const WINDOWS: Record<string, [number, number]> = JSON.parse(root.dataset.windows!);
+    const fig = root.querySelector<HTMLElement>("#scene-durable")!;
+    const svgs = [...fig.querySelectorAll<SVGSVGElement>("[data-path-svg]")];
+    const stepEls = [...fig.querySelectorAll<HTMLElement>(".steps li")];
+    const order = stepEls.map((li) => li.dataset.step!);
+    // Node reached by each hop, lit while the hop is current.
+    const HOP_NODE: Record<string, string> = { publish: "q", fsync: "disk", confirm: "pub", lease: "w", ack: "ack", retry: "retry", back: "q" };
+    const hops = Object.keys(WINDOWS);
+    let timer = 0;
+
+    const tick = () => {
+      const svg = svgs.find((s) => s.getBoundingClientRect().width > 0) || svgs[0];
+      const f = (svg.getCurrentTime() % LOOP) / LOOP;
+      let cur = -1;
+      let hop: string | null = null;
+      order.forEach((k, i) => { if (f >= WINDOWS[k][0]) cur = i; });
+      hops.forEach((k) => { if (f >= WINDOWS[k][0] - 0.01 && f <= WINDOWS[k][1] + 0.04) hop = k; });
+      if (f > 0.9) cur = -1;
+      stepEls.forEach((li, i) => li.classList.toggle("on", i === cur));
+      svg.querySelectorAll<SVGElement>("[data-hop]").forEach((e) => e.classList.toggle("lit", e.dataset.hop === hop));
+      svg.querySelectorAll<SVGElement>(".n").forEach((n) => n.classList.toggle("lit", hop !== null && n.dataset.n === HOP_NODE[hop]));
+    };
+    const runPath = (on: boolean) => {
+      clearInterval(timer);
+      svgs.forEach((s) => (on ? s.unpauseAnimations() : s.pauseAnimations()));
+      if (on) timer = window.setInterval(tick, 120);
+    };
+    if (reduceMotion) svgs.forEach((s) => s.pauseAnimations());
+
+    const stage = root.querySelector<HTMLElement>(".scene-stage")!;
+    const lifecycle = root.querySelector<HTMLElement>("[data-queue-visual]")!;
+    let current = "scene-durable";
+    let visible = true;
+    const apply = () => {
+      runPath(visible && current === "scene-durable" && !reduceMotion);
+      lifecycle.toggleAttribute("data-paused", !(visible && current === "scene-lifecycle"));
+    };
+    tablist(root.querySelector<HTMLElement>("[data-tablist]")!, (tab) => {
+      current = tab.getAttribute("aria-controls")!;
+      stage.querySelectorAll<HTMLElement>(".scene").forEach((p) => (p.hidden = p.id !== current));
+      if (current === "scene-durable") svgs.forEach((s) => s.setCurrentTime(0));
+      apply();
+      // Never scroll down on a switch. Scroll up only when the scene top sits under the sticky header.
+      const header = document.querySelector(".site-header")?.getBoundingClientRect().bottom ?? 0;
+      const top = stage.getBoundingClientRect().top;
+      if (top < header) window.scrollBy({ top: top - header - 12, behavior: reduceMotion ? "auto" : "smooth" });
+    });
+    whenVisible(stage, (v) => { visible = v; apply(); });
+    apply();
+  }
+</script>
+
+<style is:global>
+  .hero-visual { min-width: 0; }
+  /* Both hero views share one grid cell, so switching never changes the page height. */
+  .scene-stage { display: grid; }
+  .scene-stage > .scene { grid-area: 1 / 1; align-self: center; min-width: 0; }
+  .scene-stage > .scene[hidden] { display: block; visibility: hidden; }
+  /* Same frame, grid and glow as the queue animation panel. */
+  .path-visual { position: relative; overflow: hidden; margin: 0; padding: 18px 18px 14px; container-type: inline-size; border: 1px solid var(--line); border-radius: 13px; background: color-mix(in srgb, var(--panel) 78%, transparent); box-shadow: 0 24px 60px var(--shadow); }
+  .path-visual::before { position: absolute; inset: -100px; background: radial-gradient(circle, var(--accent-soft), transparent 38%); content: ""; pointer-events: none; }
+  .path-visual .visual-grid { background-size: 34px 34px; }
+  .path-visual > svg, .path-visual figcaption { position: relative; }
+  .path-visual svg { display: block; width: 100%; height: auto; }
+  .path-visual svg.narrow { display: none; max-width: 300px; margin: 0 auto; }
+  @container (max-width: 420px) { .path-visual svg.wide { display: none; } .path-visual svg.narrow { display: block; } }
+  .path-visual .edge { fill: none; stroke: color-mix(in srgb, var(--accent) 50%, transparent); stroke-width: 1.2; transition: stroke .2s, stroke-width .2s; }
+  .path-visual .e-confirm { stroke: var(--ok); stroke-dasharray: 3 4; opacity: .75; }
+  .path-visual .e-retry, .path-visual .e-back { stroke: color-mix(in srgb, var(--organic) 60%, transparent); }
+  .path-visual .e-fsync { stroke-dasharray: 2 3; }
+  .path-visual .n rect { fill: var(--panel-2); stroke: var(--line-2); transition: stroke .2s, stroke-width .2s; }
+  .path-visual .n .lbl { fill: var(--dim); font: 11px var(--mono); }
+  .path-visual .n .val { fill: var(--text); font: 14px var(--mono); }
+  .path-visual .n.disk rect { stroke: color-mix(in srgb, var(--accent) 55%, var(--line-2)); stroke-dasharray: 2 3; }
+  .path-visual .n.ok .lbl { fill: var(--ok); }
+  .path-visual .n.warn .lbl { fill: var(--organic); }
+  .path-visual .dot { fill: var(--accent); }
+  .path-visual .d-confirm, .path-visual .d-ack { fill: var(--ok); }
+  .path-visual .d-retry, .path-visual .d-back { fill: var(--organic); }
+  .path-visual [data-hop].lit { stroke-width: 2.4; }
+  .path-visual .n.lit rect { stroke: var(--accent); stroke-width: 1.6; }
+  .path-visual .steps { display: grid; gap: 3px; margin: 10px 0 0; padding: 0; list-style: none; color: var(--dim); font: 11.5px/1.45 var(--mono); counter-reset: s; }
+  .path-visual .steps li { counter-increment: s; transition: color .25s; }
+  .path-visual .steps li::before { content: counter(s) "  "; color: var(--organic); }
+  .path-visual .steps li.on { color: var(--text); }
+  /* Narrow panels drop the step list, the lit hop and node carry the story. */
+  @media (prefers-reduced-motion: no-preference) { @container (max-width: 420px) { .path-visual .steps { display: none; } } }
+  .path-note { margin: 8px 0 0; color: var(--dim); font-size: 11.5px; }
+  .scene-switch { display: flex; align-items: flex-start; gap: 6px; margin-top: 10px; min-width: 0; }
+  .ss-label { flex: none; padding-top: 5px; color: var(--dim); font: 10.5px var(--mono); letter-spacing: .06em; }
+  .ss-row { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; min-width: 0; }
+  .ss-row button { flex: none; padding: 4px 8px; border: 1px solid transparent; border-radius: 6px; background: none; color: var(--dim); font: 11.5px var(--mono); white-space: nowrap; cursor: pointer; }
+  .ss-row button:hover { color: var(--muted); }
+  .ss-row button[aria-selected="true"] { border-color: var(--line-2); background: color-mix(in srgb, var(--panel) 80%, transparent); color: var(--text); }
+  .ss-row button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .hero-visual .queue-visual { max-width: none; }
+  @media (max-width: 920px) { .hero-visual { max-width: 560px; } }
+  @media (prefers-reduced-motion: reduce) { .path-visual .dot { display: none; } .path-visual .steps li { color: var(--muted); } }
+</style>

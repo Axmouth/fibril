@@ -19,29 +19,39 @@
   --warn: #d8b46f;
   --bad: #e07b86;
   --shadow: rgba(0, 0, 0, 0.34);
+  --heading: var(--text);
+  --heading-weight: 720;
+  --heading-tracking: -0.075em;
   --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
   --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
+/* Each surface step (bg, bg-soft, panel, panel-2) stays distinct, and every
+   text color passes WCAG AA on all of them. */
 html[data-theme="light"] {
   color-scheme: light;
-  --bg: #f4eee5;
-  --bg-soft: #eee4d8;
-  --panel: #fbf7f0;
-  --panel-2: #eee4d8;
-  --text: #28231f;
-  --muted: #70665d;
-  --dim: #968679;
-  --line: rgba(62, 45, 31, 0.12);
-  --line-2: rgba(62, 45, 31, 0.21);
-  --accent: #5964ba;
-  --accent-soft: rgba(81, 93, 184, 0.1);
-  --organic: #9b6242;
-  --organic-soft: rgba(155, 98, 66, 0.12);
-  --ok: #317a55;
-  --warn: #8b651f;
-  --bad: #a7484f;
-  --shadow: rgba(83, 54, 26, 0.12);
+  --bg: #f2eadf;
+  --bg-soft: #e9dfd0;
+  --panel: #fdfaf4;
+  --panel-2: #f5eee3;
+  --text: #231e1a;
+  --muted: #62584f;
+  --dim: #7d6e62;
+  --line: rgba(62, 45, 31, 0.15);
+  --line-2: rgba(62, 45, 31, 0.27);
+  --accent: #4b56ad;
+  --accent-soft: rgba(75, 86, 173, 0.12);
+  --organic: #8f5537;
+  --organic-soft: rgba(143, 85, 55, 0.13);
+  --ok: #27704c;
+  --warn: #7e5b17;
+  --bad: #a03f48;
+  --shadow: rgba(83, 54, 26, 0.16);
+  /* Dark type on a light ground reads heavier, so headings get a softer ink
+     and a lighter weight than in the dark theme. */
+  --heading: #3a3350;
+  --heading-weight: 600;
+  --heading-tracking: -0.06em;
 }
 
 * {
@@ -145,6 +155,10 @@ a {
   transition: background 150ms ease, border-color 150ms ease;
 }
 
+.theme-toggle svg {
+  display: block;
+}
+
 .theme-toggle:hover,
 .button:hover {
   border-color: color-mix(in srgb, var(--accent) 40%, var(--line-2));
@@ -155,9 +169,59 @@ a {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 470px;
   gap: 56px;
-  align-items: center;
+  align-items: start;
   /* Shrinks on short wide screens so the actions stay above the fold. */
   padding: clamp(32px, calc(14vh - 50px), 76px) 0 46px;
+}
+
+.hero-copy {
+  padding-top: clamp(0px, 3vh, 28px);
+}
+
+/* Intro block for the full-width sections below the hero. */
+.section-intro-wide {
+  max-width: 760px;
+}
+
+.section-intro-wide h2 {
+  font-size: clamp(25px, 3.2vw, 32px);
+}
+
+.section-intro-wide p:last-child {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+/* Folder tabs that sit on top of a panel. */
+.page-tabs {
+  display: flex;
+  gap: 4px;
+  margin: 20px 0 0;
+  overflow-x: auto;
+}
+
+.page-tabs button {
+  flex: none;
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  border-bottom: 0;
+  border-radius: 8px 8px 0 0;
+  background: var(--bg-soft);
+  color: var(--muted);
+  font: 12px var(--mono);
+  cursor: pointer;
+}
+
+.page-tabs button[aria-selected="true"] {
+  border-color: var(--line-2);
+  background: var(--panel);
+  color: var(--text);
+}
+
+.page-tabs button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .eyebrow {
@@ -176,14 +240,16 @@ p {
 h1 {
   max-width: 670px;
   margin-bottom: 0;
+  color: var(--heading);
   font-size: clamp(42px, 6vw, 66px);
-  font-weight: 720;
-  letter-spacing: -0.075em;
+  font-weight: var(--heading-weight);
+  letter-spacing: var(--heading-tracking);
   line-height: 0.97;
 }
 
 h2 {
   margin-bottom: 12px;
+  color: var(--heading);
   font-size: 25px;
   letter-spacing: -0.05em;
   line-height: 1.1;

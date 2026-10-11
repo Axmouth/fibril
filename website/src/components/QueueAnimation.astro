@@ -1,4 +1,11 @@
-<div class="queue-visual" role="img" aria-label="Message queue lifecycle: a message is leased by a worker, then acknowledged or delayed before retrying" data-queue-visual>
+---
+interface Props {
+  /** Set when a parent decides when the animation runs. */
+  managed?: boolean;
+}
+const { managed = false } = Astro.props;
+---
+<div class="queue-visual" role="img" aria-label="Message queue lifecycle: a message is leased by a worker, then acknowledged or delayed before retrying" data-queue-visual data-managed={managed ? "" : undefined}>
   <div class="qv-stage">
     <div class="visual-grid"></div>
     <div class="queue-node">
@@ -25,7 +32,7 @@
 <script>
   // Pause the CSS animation while the panel is scrolled out of view.
   // Hidden tabs already stop rendering, so only visibility in the page matters.
-  for (const visual of document.querySelectorAll<HTMLElement>("[data-queue-visual]")) {
+  for (const visual of document.querySelectorAll<HTMLElement>("[data-queue-visual]:not([data-managed])")) {
     if (!("IntersectionObserver" in window)) break;
     new IntersectionObserver(([entry]) => {
       visual.toggleAttribute("data-paused", !entry?.isIntersecting);

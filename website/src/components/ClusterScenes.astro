@@ -1,0 +1,110 @@
+---
+import BrokerStory from "./BrokerStory.astro";
+
+// Durable replication and early replication only. Unmerged variants stay in
+// the docs scenes, hidden by default.
+const scenes = [
+  { id: "delivery", label: "Replication", variants: ["durable", "early"] },
+  { id: "failover", label: "Failover", variants: undefined },
+] as const;
+---
+<section class="cluster" aria-labelledby="cluster-title" data-cluster-scenes>
+  <div class="section-intro-wide">
+    <p class="eyebrow">inside a cluster</p>
+    <h2 id="cluster-title">Copied before it is confirmed. Recovered after a crash.</h2>
+    <p>Clustering is experimental. These scenes walk through the real protocol one step at a time. Timing is illustrative, not measured.</p>
+  </div>
+  <div class="page-tabs" role="tablist" aria-label="Cluster scenes" data-tablist>
+    {scenes.map((s, i) => (
+      <button type="button" role="tab" id={`ct-${s.id}`} aria-controls={`cp-${s.id}`} aria-selected={i === 0 ? "true" : "false"} tabindex={i === 0 ? 0 : -1}>{s.label}</button>
+    ))}
+  </div>
+  <div class="cluster-panels">
+    {scenes.map((s, i) => (
+      <div class="cluster-panel" role="tabpanel" id={`cp-${s.id}`} aria-labelledby={`ct-${s.id}`} hidden={i > 0}>
+        <BrokerStory scene={s.id} variants={s.variants ? [...s.variants] : undefined} />
+      </div>
+    ))}
+  </div>
+  <a class="cluster-more" href="/reliability/replication/">More scenes in the docs: placement, checkpoints, rebalancing <span>→</span></a>
+</section>
+
+<script>
+  import { tablist, showPanel } from "../scripts/page-ui";
+
+  for (const root of document.querySelectorAll<HTMLElement>("[data-cluster-scenes]")) {
+    const holder = root.querySelector<HTMLElement>(".cluster-panels")!;
+    const panels = [...root.querySelectorAll<HTMLElement>(".cluster-panel")];
+
+    // Every panel keeps the tallest panel's height, so switching tabs never
+    // moves the page. Hidden panels are measured offscreen and stay paused.
+    const reserveHeight = () => {
+      let max = 0;
+      for (const p of panels) {
+        const was = p.hidden;
+        if (was) {
+          p.hidden = false;
+          p.style.cssText = `position:absolute;visibility:hidden;width:${holder.clientWidth}px`;
+        }
+        max = Math.max(max, p.getBoundingClientRect().height);
+        if (was) {
+          p.hidden = true;
+          p.style.cssText = "";
+        }
+      }
+      holder.style.minHeight = `${Math.ceil(max)}px`;
+    };
+
+    // Phones: size each caption for its longest step so the stage never jumps.
+    const reserveCaptions = () => {
+      for (const story of root.querySelectorAll<HTMLElement>("broker-story")) {
+        const cap = story.querySelector<HTMLElement>(".story-caption");
+        const h4 = cap?.querySelector<HTMLElement>("[data-headline]");
+        const p = cap?.querySelector<HTMLElement>("[data-narrative]");
+        if (!cap || !h4 || !p) continue;
+        const steps = [...story.querySelectorAll(".story-transcript li")].map((li) => [
+          li.querySelector("strong")?.textContent ?? "",
+          li.querySelector("p")?.textContent ?? "",
+        ]);
+        const keep = [h4.textContent, p.textContent];
+        cap.style.removeProperty("--caption-min");
+        let max = 0;
+        for (const [a, b] of steps) {
+          h4.textContent = a;
+          p.textContent = b;
+          max = Math.max(max, cap.getBoundingClientRect().height);
+        }
+        [h4.textContent, p.textContent] = keep;
+        cap.style.setProperty("--caption-min", `${Math.ceil(max)}px`);
+      }
+    };
+
+    const reserve = () => {
+      reserveCaptions();
+      reserveHeight();
+    };
+    tablist(root.querySelector<HTMLElement>("[data-tablist]")!, showPanel);
+    for (const d of root.querySelectorAll("details")) d.addEventListener("toggle", reserveHeight);
+    let resizeTimer = 0;
+    addEventListener("resize", () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(reserve, 150);
+    });
+    // The players render their first frame after this script runs.
+    requestAnimationFrame(() => requestAnimationFrame(reserve));
+  }
+</script>
+
+<style is:global>
+  .cluster { margin-top: 64px; }
+  /* Starlight tokens the story player expects, mapped onto the site palette. */
+  .cluster { --sl-color-black: var(--panel); --sl-color-gray-6: var(--panel-2); --sl-color-gray-5: var(--line-2); --sl-color-white: var(--text); --sl-color-gray-2: var(--muted); --sl-font: var(--sans); --sl-font-mono: var(--mono); }
+  .cluster-panels { min-width: 0; }
+  .cluster .broker-story { margin: 0; border-top-left-radius: 0; }
+  .cluster-more { display: inline-block; margin-top: 12px; color: var(--dim); font: 12px var(--mono); }
+  .cluster-more:hover { color: var(--accent); }
+  @media (max-width: 600px) {
+    .cluster { margin-top: 48px; }
+    .cluster .broker-story .story-caption { min-height: var(--caption-min, 138px); }
+  }
+</style>

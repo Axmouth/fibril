@@ -5,7 +5,9 @@ import Button from "../components/Button.astro";
 import CodePanel from "../components/CodePanel.astro";
 import FeatureCard from "../components/FeatureCard.astro";
 import FeatureMatrix from "../components/FeatureMatrix.astro";
-import QueueAnimation from "../components/QueueAnimation.astro";
+import HeroScenes from "../components/HeroScenes.astro";
+import ClusterScenes from "../components/ClusterScenes.astro";
+import CrashTerminal from "../components/CrashTerminal.astro";
 
 const github = "https://github.com/Axmouth/fibril";
 
@@ -55,26 +57,25 @@ const version = versionMatch ? `v${versionMatch[1]}` : "0.x";
         <p class="eyebrow">broker / queue / durable delivery</p>
         <h1>Useful messaging without broker ceremony.</h1>
         <p class="lead">
-          Fibril is a lightweight message broker focused on durable queues,
-          explicit delivery semantics, leasing, retries, and predictable operational behavior,
-          with fan-out streams alongside the work queues when you need broadcast.
-          Most applications need durable queues, predictable delivery semantics,
-          reconnect behavior that doesn't surprise them, and operational controls
-          that are easy to understand during incidents. Fibril optimizes for that path.
-          It is implemented in Rust, but the identity is simple, inspectable broker behavior.
-          It is still early, and the missing pieces are named rather than hidden.
+          Fibril is a lightweight message broker for durable work queues and fan-out streams.
+          A publish is confirmed once it is on disk. Workers lease messages, then complete,
+          retry or delay them. Broker state stays plain and inspectable during incidents.
         </p>
         <div class="actions">
           <Button href="/quickstart/" variant="primary">Start running</Button>
           <Button href="/quickstart/">Read docs</Button>
           <Button href={github}>GitHub</Button>
         </div>
-        <p class="note">Durability is core and tested. Production readiness is still earned, not claimed.</p>
+        <p class="note">Early-stage. Durability is core and tested. Production readiness is still earned.</p>
       </div>
-      <QueueAnimation />
+      <HeroScenes />
     </section>
 
     <CodePanel />
+
+    <ClusterScenes />
+
+    <CrashTerminal />
 
     <section class="feature-grid" aria-label="Core capabilities">
       <FeatureCard number="01" title="Durable by default">Queue publish confirmations wait for the message and the state needed to recover it to cross the persistence boundary.</FeatureCard>
