@@ -1037,6 +1037,35 @@ impl Default for HeartbeatRateTracker {
     }
 }
 
+/// Say how this broker is reached, and warn about client advertise entries a
+/// private broker never hands out.
+fn log_visibility_at_startup(config: &ServerConfig) {
+    if config.coordination.mode != CoordinationMode::Ganglion {
+        return;
+    }
+    let peer = config.broker_peer_address();
+    if config.broker.visibility.is_private() {
+        tracing::info!(
+            peer_address = %peer,
+            "broker is private: clients are sent to public brokers, which forward \
+             operations for the partitions this broker owns"
+        );
+        if !config.broker.listener.advertise.is_empty() {
+            tracing::warn!(
+                advertise = ?config.broker.listener.advertise,
+                "broker.listener.advertise is set on a private broker. These addresses are \
+                 never given to clients. Peers dial broker.peer_advertise ({peer})"
+            );
+        }
+    } else {
+        tracing::info!(
+            peer_address = %peer,
+            client_addresses = ?config.broker_client_addresses(),
+            "broker is public"
+        );
+    }
+}
+
 /// Static-per-process runtime facts the heartbeat advertises, plus a
 /// rotation-aware reader for the serving leaf's expiry.
 #[derive(Clone)]
@@ -1056,6 +1085,7 @@ pub fn broker_heartbeat_labels(
     broker: &Broker<StromaEngine>,
     topology_adoption: Option<&TopologyAdoptionTracker>,
     advertise: &[String],
+    private: bool,
     draining: bool,
     raft_node_id: u64,
     rates: (u64, u64),
@@ -1099,9 +1129,18 @@ pub fn broker_heartbeat_labels(
         );
     }
 
+    // A private broker carries the visibility label and no client list, so no
+    // topology answer or redirect ever names it.
+    if private {
+        labels.insert(
+            fibril_coordination_ganglion::VISIBILITY_LABEL.to_string(),
+            fibril_coordination_ganglion::PRIVATE_VISIBILITY.to_string(),
+        );
+    }
+
     // The broker's full advertise list, so clients learn every reachable endpoint
-    // of an owner (not just the single endpoint registered in the node table).
-    if !advertise.is_empty() {
+    // of an owner. The node table carries the peer address instead.
+    if !private && !advertise.is_empty() {
         labels.insert(
             fibril_coordination_ganglion::ADVERTISE_LABEL.to_string(),
             fibril_coordination_ganglion::encode_advertise(advertise),
@@ -1215,17 +1254,13 @@ pub fn spawn_ganglion_broker_tasks(
 
     let tails_broker = broker.clone();
     let labels_adoption = topology_adoption.clone();
-    // Advertise the configured/derived addresses (routable host:port, possibly
-    // service names) so peers and clients can dial back even when bind is 0.0.0.0.
-    // The node table holds the primary (first) endpoint; the full priority list
-    // rides a heartbeat label so clients can try them in order. Fall back to the
-    // bind address when nothing else is known.
-    let advertise_list = config.broker_advertise_addresses();
-    let advertise_primary = advertise_list
-        .first()
-        .cloned()
-        .unwrap_or_else(|| config.broker.listener.bind.to_string());
-    let heartbeat_advertise = advertise_list.clone();
+    // The node table holds the address peers dial for replication and
+    // forwarding. The client list (routable host:port entries, possibly service
+    // names) rides a heartbeat label so clients can try them in order. A private
+    // broker publishes no client list.
+    let peer_address = config.broker_peer_address();
+    let heartbeat_advertise = config.broker_client_addresses();
+    let heartbeat_private = config.broker.visibility.is_private();
     let heartbeat_raft_id = config.coordination.ganglion.raft_node_id;
     // Cold path (one lock per heartbeat), so a Mutex around the rate
     // baseline is fine under the Fn bound.
@@ -1233,7 +1268,7 @@ pub fn spawn_ganglion_broker_tasks(
     let heartbeat = parts.coordination.spawn_heartbeat_with_labels(
         NodeInfo {
             node_id: config.coordination.node_id.clone(),
-            broker_addr: advertise_primary,
+            broker_addr: peer_address,
             admin_addr: Some(config.admin_advertise_address()),
         },
         Duration::from_millis(config.coordination.ganglion.heartbeat_interval_ms),
@@ -1255,6 +1290,7 @@ pub fn spawn_ganglion_broker_tasks(
                 &tails_broker,
                 labels_adoption.as_deref(),
                 &heartbeat_advertise,
+                heartbeat_private,
                 draining.load(std::sync::atomic::Ordering::Relaxed),
                 heartbeat_raft_id,
                 rates,
@@ -1860,6 +1896,8 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         RecoveryMismatchMode::Ignore => RecoveryMismatchPolicy::Ignore,
     });
 
+    log_visibility_at_startup(&config);
+
     let runtime_seed = runtime_seed_from_config(&config);
     // Node-to-node trust: the cluster secret is operator-provisioned and
     // required in cluster mode, where replication must authenticate across
@@ -1903,6 +1941,13 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     // this node at its coordination peer address, so that host joins the
     // generated certificate's names alongside the broker advertise hosts.
     let mut tls_sans = tls::san_hosts_from_advertise(&config.broker_advertise_addresses());
+    // Peers verify this node against its peer address, which can differ from
+    // every client address.
+    for host in tls::san_hosts_from_advertise(&[config.broker_peer_address()]) {
+        if !tls_sans.contains(&host) {
+            tls_sans.push(host);
+        }
+    }
     if config.coordination.mode == CoordinationMode::Ganglion {
         let section = &config.coordination.ganglion;
         if let Some(own_addr) = section.peers.get(&section.raft_node_id.to_string()) {

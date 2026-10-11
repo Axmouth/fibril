@@ -444,6 +444,13 @@ impl ServerConfig {
                 .map(str::to_string)
                 .collect();
         }
+        if let Some(value) = env_value(&mut get, "FIBRIL_BROKER_VISIBILITY")? {
+            self.broker.visibility = parse_env("FIBRIL_BROKER_VISIBILITY", &value)?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_BROKER_PEER_ADVERTISE")? {
+            let value = value.trim();
+            self.broker.peer_advertise = (!value.is_empty()).then(|| value.to_string());
+        }
         if let Some(value) = env_value(&mut get, "FIBRIL_ADMIN_BIND")? {
             self.admin.listener.bind = parse_env("FIBRIL_ADMIN_BIND", &value)?;
         }
@@ -927,6 +934,22 @@ impl ServerConfig {
             self.runtime_seed.connection.max_message_bytes,
         )
         .map_err(ConfigError::validation)?;
+        if self.broker.visibility.is_private()
+            && self.coordination.mode != CoordinationMode::Ganglion
+        {
+            return Err(ConfigError::validation(
+                "broker.visibility = \"private\" needs cluster mode \
+                 (coordination.mode = \"ganglion\"). A standalone broker has no public \
+                 broker to forward its clients",
+            ));
+        }
+        if let Some(peer) = &self.broker.peer_advertise
+            && !valid_host_port(peer)
+        {
+            return Err(ConfigError::validation(format!(
+                "broker.peer_advertise must be a host:port address, got `{peer}`"
+            )));
+        }
         if self.coordination.mode == CoordinationMode::Ganglion
             && self.runtime_locks.idle_queue_cleanup
         {
@@ -1055,6 +1078,15 @@ impl Default for ServerSection {
 #[serde(default)]
 pub struct BrokerSection {
     pub listener: ListenerSection,
+    /// Whether clients are ever sent to this broker. A private broker is never
+    /// named in topology answers or redirects, and public brokers forward
+    /// operations for the partitions it owns. Cluster mode only.
+    pub visibility: BrokerVisibility,
+    /// The `host:port` other brokers dial for replication and forwarding.
+    /// Unset means the first client advertise address, then the bind address.
+    /// Set it when the client address is a shared load balancer address or is
+    /// not reachable from the other brokers.
+    pub peer_advertise: Option<String>,
 }
 
 impl Default for BrokerSection {
@@ -1064,6 +1096,37 @@ impl Default for BrokerSection {
                 bind: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 9876)),
                 advertise: Vec::new(),
             },
+            visibility: BrokerVisibility::Public,
+            peer_advertise: None,
+        }
+    }
+}
+
+/// Client visibility of a broker, see [`BrokerSection::visibility`].
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrokerVisibility {
+    #[default]
+    Public,
+    Private,
+}
+
+impl BrokerVisibility {
+    pub fn is_private(self) -> bool {
+        self == Self::Private
+    }
+}
+
+impl std::str::FromStr for BrokerVisibility {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.trim() {
+            "public" => Ok(Self::Public),
+            "private" => Ok(Self::Private),
+            other => Err(format!(
+                "unknown broker visibility `{other}`, expected `public` or `private`"
+            )),
         }
     }
 }
@@ -1617,6 +1680,15 @@ impl Default for ListenerSection {
     }
 }
 
+/// Whether `value` looks like a dialable `host:port`: a non-empty host and a
+/// numeric port.
+fn valid_host_port(value: &str) -> bool {
+    match value.trim().rsplit_once(':') {
+        Some((host, port)) => !host.is_empty() && port.parse::<u16>().is_ok(),
+        None => false,
+    }
+}
+
 /// Derive an advertise `host:port` from this node's own coordination peer entry
 /// (its host) combined with the broker port. Returns `None` when this node has no
 /// peer entry or the host is empty. The peer entry is `host:coord_port`; the host
@@ -1664,6 +1736,41 @@ impl ServerConfig {
             out.push(derived);
         }
         out
+    }
+
+    /// The broker address other nodes dial for replication and forwarding,
+    /// registered in the cluster node table. `broker.peer_advertise` when set,
+    /// else the first client advertise address, else the bind address.
+    pub fn broker_peer_address(&self) -> String {
+        if let Some(peer) = self
+            .broker
+            .peer_advertise
+            .as_deref()
+            .map(str::trim)
+            .filter(|peer| !peer.is_empty())
+        {
+            return peer.to_string();
+        }
+        self.broker_advertise_addresses()
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| self.broker.listener.bind.to_string())
+    }
+
+    /// The addresses this broker gives clients for itself. Empty for a private
+    /// broker. A public broker falls back to its bind address when nothing
+    /// else is known, the same address its node record carried before
+    /// `peer_advertise` existed.
+    pub fn broker_client_addresses(&self) -> Vec<String> {
+        if self.broker.visibility.is_private() {
+            return Vec::new();
+        }
+        let list = self.broker_advertise_addresses();
+        if list.is_empty() {
+            vec![self.broker.listener.bind.to_string()]
+        } else {
+            list
+        }
     }
 
     /// The admin address this node registers with the cluster, feeding the
@@ -2133,6 +2240,76 @@ mod tests {
             vec!["127.0.0.1:8082".to_string()]
         );
         assert_eq!(config.admin_advertise_address(), "127.0.0.1:8082");
+    }
+
+    #[test]
+    fn broker_visibility_and_peer_address_parse_from_file_and_env() {
+        let default = ServerConfig::from_toml_str("").unwrap();
+        assert_eq!(default.broker.visibility, BrokerVisibility::Public);
+        assert_eq!(default.broker.peer_advertise, None);
+
+        let config = ServerConfig::from_toml_str(
+            "[coordination]\nmode = \"ganglion\"\n[broker]\nvisibility = \"private\"\n\
+             peer_advertise = \"10.1.0.7:9876\"\n",
+        )
+        .unwrap();
+        assert!(config.broker.visibility.is_private());
+        assert_eq!(config.broker_peer_address(), "10.1.0.7:9876");
+        assert!(config.broker_client_addresses().is_empty());
+
+        let mut config = ServerConfig::default();
+        config
+            .apply_env_from(|name| match name {
+                "FIBRIL_COORDINATION_MODE" => Some(Ok("ganglion".into())),
+                "FIBRIL_BROKER_VISIBILITY" => Some(Ok("private".into())),
+                "FIBRIL_BROKER_PEER_ADVERTISE" => Some(Ok(" broker-3.internal:9876 ".into())),
+                _ => None,
+            })
+            .unwrap();
+        config.validate().unwrap();
+        assert!(config.broker.visibility.is_private());
+        assert_eq!(config.broker_peer_address(), "broker-3.internal:9876");
+
+        let mut config = ServerConfig::default();
+        assert!(
+            config
+                .apply_env_from(|name| match name {
+                    "FIBRIL_BROKER_VISIBILITY" => Some(Ok("hidden".into())),
+                    _ => None,
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn private_broker_in_standalone_mode_fails_validation() {
+        let err = ServerConfig::from_toml_str("[broker]\nvisibility = \"private\"\n").unwrap_err();
+        assert!(err.to_string().contains("broker.visibility"), "{err}");
+        let err = ServerConfig::from_toml_str("[broker]\npeer_advertise = \"no-port\"\n")
+            .unwrap_err();
+        assert!(err.to_string().contains("broker.peer_advertise"), "{err}");
+    }
+
+    #[test]
+    fn peer_address_defaults_to_the_first_client_address_then_bind() {
+        let mut config = ServerConfig::default();
+        config.broker.listener.bind = "127.0.0.1:9876".parse().unwrap();
+        assert_eq!(config.broker_peer_address(), "127.0.0.1:9876");
+        assert_eq!(config.broker_client_addresses(), vec!["127.0.0.1:9876"]);
+
+        config.broker.listener.advertise = vec!["lb.example:9876".into(), "b2:9876".into()];
+        assert_eq!(config.broker_peer_address(), "lb.example:9876");
+        assert_eq!(
+            config.broker_client_addresses(),
+            vec!["lb.example:9876", "b2:9876"]
+        );
+
+        config.broker.peer_advertise = Some("10.0.0.2:9876".into());
+        assert_eq!(config.broker_peer_address(), "10.0.0.2:9876");
+        assert_eq!(
+            config.broker_client_addresses(),
+            vec!["lb.example:9876", "b2:9876"]
+        );
     }
 
     #[test]

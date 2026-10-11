@@ -73,6 +73,13 @@ pub const ADVERTISE_LABEL: &str = "fibril/advertise";
 /// new on it. A label rather than a raft attribute so the state expires with
 /// the node's heartbeats and a crashed drain leaves nothing behind.
 pub const DRAINING_LABEL: &str = "fibril/draining";
+/// Heartbeat label a private broker sets to [`PRIVATE_VISIBILITY`]. A private
+/// broker is never given to clients, and its client endpoint list is empty.
+/// Absence means public, so clusters without the label behave as before. It
+/// rides the first registration, so a private node is never visible without
+/// it.
+pub const VISIBILITY_LABEL: &str = "fibril/visibility";
+pub const PRIVATE_VISIBILITY: &str = "private";
 /// Advisory label carrying the node's raft id, so observability can correlate
 /// broker node ids with consensus membership.
 pub const RAFT_ID_LABEL: &str = "fibril/raft-id";
