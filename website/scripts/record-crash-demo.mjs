@@ -3,6 +3,10 @@
 // src/components/crash-terminal/transcripts.mjs still match what they print.
 //
 // Usage: node scripts/record-crash-demo.mjs [--bin-dir DIR] [--out DIR] [--only single|failover]
+//        [--eager-grace MS]
+//
+// --eager-grace turns on eager failover for the cluster with that reconnect
+// grace, to compare against plain heartbeat expiry (9 s liveness TTL).
 //
 // Build the binaries first (cargo build --bin fibril-server --bin fibrilctl).
 // Brokers listen on 9876 to 9878 as in compose.cluster.example.yaml, so stop
@@ -29,7 +33,9 @@ const targetDir = () =>
   JSON.parse(execFileSync("cargo", ["metadata", "--format-version", "1", "--no-deps"], { cwd: repo, encoding: "utf8" })).target_directory;
 const binDir = arg("--bin-dir") ?? join(targetDir(), "debug");
 const out = arg("--out") ?? mkdtempSync(join(tmpdir(), "fibril-crash-demo-"));
+mkdirSync(out, { recursive: true });
 const only = arg("--only");
+const eagerGrace = arg("--eager-grace");
 const SERVER = join(binDir, "fibril-server");
 const CTL = join(binDir, "fibrilctl");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -112,6 +118,12 @@ async function single() {
 
 async function failover() {
   const secret = randomBytes(32).toString("hex");
+  let config = {};
+  if (eagerGrace !== undefined) {
+    const file = join(out, "eager.toml");
+    writeFileSync(file, `[runtime_seed.replication]\neager_failover = true\neager_failover_grace_ms = ${Number(eagerGrace)}\n`);
+    config = { FIBRIL_CONFIG: file };
+  }
   const peers = [1, 2, 3].map((i) => `${i}=127.0.0.1:${7000 + i}`).join(",");
   const nodes = [1, 2, 3].map((i) => {
     const dir = join(out, `node-${i}-data`);
@@ -127,6 +139,7 @@ async function failover() {
       FIBRIL_COORDINATION_LISTEN: `127.0.0.1:${7000 + i}`,
       FIBRIL_COORDINATION_PEERS: peers,
       FIBRIL_COORDINATION_ASSIGNMENT_DURABILITY: "replica_durable:2",
+      ...config,
       ...(i === 1 ? { FIBRIL_COORDINATION_BOOTSTRAP: "true" } : {}),
     });
   });
