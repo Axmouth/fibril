@@ -516,6 +516,12 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Changed
 
+- A newly elected metadata leader runs its controller pass as soon as it
+  wins, instead of waiting for the next tick (2 s by default). With eager
+  failover this acts on the peer failures seen during the election right
+  away. A local run that lost the owner and the raft leader together, with
+  tight raft timings and zero grace, went from 3.7 s to about 2 s.
+
 - Quieter failover logs. A follower logs the first replication tick failure
   as a warning and identical repeats at debug, then `follower replication
   resumed` with the failed tick count once it recovers. The recovery seal

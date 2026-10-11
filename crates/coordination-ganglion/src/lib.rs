@@ -2532,6 +2532,10 @@ impl GanglionCoordination {
         let handle = tokio::spawn(async move {
             let mut watch = provider.watch();
             let mut transport = provider.node.peer_transport_failures();
+            // Wakes the loop as soon as this node wins an election. Otherwise a
+            // new leader could sleep up to a full tick before acting on the
+            // transport failures it already saw while electing.
+            let mut leader = provider.node.watch_leader();
             let mut detector = eager_failover::Detector::default();
             let mut previous_suspects = std::collections::BTreeSet::new();
             let mut previous_attention = Vec::new();
@@ -2685,6 +2689,11 @@ impl GanglionCoordination {
                 }
 
                 tokio::select! {
+                    changed = leader.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                    }
                     changed = transport.changed(), if active && policy.eager_failover => {
                         if changed.is_err() {
                             return;
