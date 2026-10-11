@@ -13,6 +13,8 @@ func TestRetryClassification(t *testing.T) {
 		{"redirect", &RedirectError{}, RetryRetry},
 		{"not owner 409", &ServerError{Code: 409}, RetryRetry},
 		{"server 500", &ServerError{Code: 500}, RetryRetry},
+		{"unavailable 503", &ServerError{Code: 503}, RetryRetry},
+		{"gateway timeout 504", &ServerError{Code: 504}, RetryDoNotRetry},
 		{"not found 404", &ServerError{Code: 404}, RetryDoNotRetry},
 		{"invalid 400", &ServerError{Code: 400}, RetryDoNotRetry},
 		{"auth 401", &ServerError{Code: 401}, RetryDoNotRetry},

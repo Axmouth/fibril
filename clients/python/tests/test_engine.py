@@ -23,6 +23,7 @@ from fibril.errors import (
     RedirectError,
     ServerError,
     StaleDeliveryError,
+    is_retryable,
     is_transient_error,
     retry_advice,
 )
@@ -197,6 +198,14 @@ async def test_held_delivery_settles_to_current_engine_across_a_resumed_reconnec
         assert broker.acks[0].topic == item.topic
     finally:
         eng2.shutdown()
+
+
+# 504 means a broker forwarded the request and lost the owner after sending: the
+# outcome is unknown, so it is never retried blindly, unlike other 5xx codes.
+def test_gateway_timeout_is_do_not_retry() -> None:
+    assert retry_advice(ServerError(504, "outcome unknown")) == "do_not_retry"
+    assert is_retryable(ServerError(504, "outcome unknown")) is False
+    assert retry_advice(ServerError(503, "busy")) == "retry"
 
 
 # A stale delivery is do-not-retry and not a transient transport failure - the

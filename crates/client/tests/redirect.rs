@@ -34,6 +34,8 @@ enum MockBehavior {
     /// Answer `ERR_UNAVAILABLE` (owner recovering) while the counter is above
     /// zero, counting it down, then confirm.
     UnavailableThen(Arc<AtomicUsize>),
+    /// Answer every publish with `ERR_GATEWAY_TIMEOUT`, counting them.
+    GatewayTimeout(Arc<AtomicUsize>),
 }
 
 /// A self-owned multi-partition spread for one queue identity `(topic, group)`.
@@ -300,6 +302,15 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                                     wire::encode_publish_ok(frame.request_id, &PublishOk { offset: 0 })
                                         .unwrap()
                                 }
+                            }
+                            Some(MockBehavior::GatewayTimeout(seen)) => {
+                                seen.fetch_add(1, Ordering::SeqCst);
+                                fibril_wire::helper::error_frame(
+                                    frame.request_id,
+                                    fibril_wire::ERR_GATEWAY_TIMEOUT,
+                                    "the partition owner did not answer, the outcome is unknown",
+                                )
+                                .unwrap()
                             }
                             Some(MockBehavior::RedirectToSelf) => {
                                 let redirect = Redirect {
@@ -893,6 +904,47 @@ async fn recovering_owner_fails_fast_without_a_budget() {
         "got {err:?}"
     );
     assert!(err.is_retryable());
+}
+
+/// A gateway that lost the owner after forwarding a publish answers `504`:
+/// the publish may have been applied. The client surfaces it at once instead
+/// of replaying it, even with a retry budget, and advises against a blind
+/// retry. The reliable publisher stops on it too.
+#[tokio::test]
+async fn gateway_timeout_is_not_replayed() {
+    let seen = Arc::new(AtomicUsize::new(0));
+    let mock = spawn_mock(MockBehavior::GatewayTimeout(seen.clone())).await;
+    let client = Client::connect(mock, ClientOptions::new().publish_timeout_ms(5_000))
+        .await
+        .unwrap();
+    let publisher = client.publisher("jobs").unwrap();
+
+    let err = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        publisher.publish_confirmed("hello"),
+    )
+    .await
+    .expect("must not wait out the retry budget")
+    .unwrap_err();
+    assert!(
+        matches!(err, FibrilError::Failure { code: fibril_wire::ERR_GATEWAY_TIMEOUT, .. }),
+        "got {err:?}"
+    );
+    assert_eq!(err.retry_advice(), fibril_client::RetryAdvice::DoNotRetry);
+    assert!(!err.is_retryable());
+    assert_eq!(seen.load(Ordering::SeqCst), 1, "a 504 publish was replayed");
+
+    let reliable = client.publisher("jobs").unwrap().reliable();
+    let err = tokio::time::timeout(std::time::Duration::from_secs(5), reliable.publish("again"))
+        .await
+        .expect("the reliable publisher must not loop on 504")
+        .unwrap_err();
+    assert!(
+        matches!(err, FibrilError::Failure { code: fibril_wire::ERR_GATEWAY_TIMEOUT, .. }),
+        "got {err:?}"
+    );
+    assert_eq!(seen.load(Ordering::SeqCst), 2);
+    client.shutdown().await;
 }
 
 /// A subscribe the broker answers with a non-retryable error must fail

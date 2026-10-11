@@ -11,6 +11,7 @@ public class ErrorsTest
     [InlineData(400, RetryAdvice.DoNotRetry)] // invalid: do not retry
     [InlineData(500, RetryAdvice.Retry)]   // server transient
     [InlineData(503, RetryAdvice.Retry)]
+    [InlineData(504, RetryAdvice.DoNotRetry)] // forwarded, outcome unknown: never blind retry
     [InlineData(403, RetryAdvice.DoNotRetry)] // other 4xx
     public void ServerErrorRetryClassification(int code, RetryAdvice want)
     {

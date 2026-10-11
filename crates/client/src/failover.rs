@@ -12,7 +12,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
 use fibril_wire::{
-    ERR_INVALID, ERR_NOT_FOUND, ERR_NOT_OWNER, Partition, Subscribe, SubscribeStream,
+    ERR_GATEWAY_TIMEOUT, ERR_INVALID, ERR_NOT_FOUND, ERR_NOT_OWNER, Partition, Subscribe,
+    SubscribeStream,
 };
 
 use crate::{
@@ -75,6 +76,11 @@ pub enum RetryAdvice {
     /// Do not retry: a request/permanent error retrying will not fix - an unknown
     /// topic/partition, an invalid argument, a bad name, or a payload that failed
     /// to (de)serialize. Fix the request instead.
+    ///
+    /// Also `504` (`ERR_GATEWAY_TIMEOUT`): a broker forwarded the request to the
+    /// partition owner and lost it after sending. The request may have been
+    /// applied, so neither the client nor this advice replays it. Re-issue it
+    /// yourself only if a duplicate is acceptable.
     DoNotRetry,
 }
 
@@ -106,6 +112,9 @@ impl FibrilError {
                 ERR_NOT_OWNER => RetryAdvice::Retry,
                 // 404 not-found / 400 invalid: the caller must fix the request.
                 ERR_NOT_FOUND | ERR_INVALID => RetryAdvice::DoNotRetry,
+                // 504: forwarded and lost after sending, outcome unknown. Never
+                // replayed blindly, see RetryAdvice::DoNotRetry.
+                ERR_GATEWAY_TIMEOUT => RetryAdvice::DoNotRetry,
                 // Server-side (5xx) is transient; other 4xx are caller errors.
                 code if code >= 500 => RetryAdvice::Retry,
                 _ => RetryAdvice::DoNotRetry,
@@ -467,6 +476,10 @@ mod tests {
         no(FibrilError::Failure {
             code: fibril_wire::ERR_TOO_LARGE,
             msg: "message too large".into(),
+        });
+        no(FibrilError::Failure {
+            code: fibril_wire::ERR_GATEWAY_TIMEOUT,
+            msg: "outcome unknown".into(),
         });
         no(FibrilError::SerializationFailure {
             msg: "bad payload".into(),

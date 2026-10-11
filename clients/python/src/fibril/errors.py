@@ -212,6 +212,9 @@ RetryAdvice = Literal["retry", "do_not_retry"]
 _ERR_INVALID = 400  # malformed request: fix it, do not retry
 _ERR_NOT_FOUND = 404  # topic/partition not in the cluster: do not retry
 _ERR_NOT_OWNER = 409  # topology conflict: a retry re-routes
+# A broker forwarded the request to the partition owner and lost it after
+# sending: the publish may have been applied, so it is never replayed blindly.
+_ERR_GATEWAY_TIMEOUT = 504
 
 
 def retry_advice(err: BaseException) -> RetryAdvice:
@@ -219,7 +222,8 @@ def retry_advice(err: BaseException) -> RetryAdvice:
 
     Transport failures, redirects, topology conflicts, and server-transient
     (5xx) errors are worth retrying. Not-found, invalid, and local request
-    errors are not. Note the duplicate-publish caveat: a confirmed publish that
+    errors are not, and neither is 504: a broker forwarded the request and lost
+    the owner after sending, so the outcome is unknown. Note the duplicate-publish caveat: a confirmed publish that
     fails after the broker may have accepted it can duplicate on retry until
     owner-side dedup ships.
     """
@@ -228,7 +232,7 @@ def retry_advice(err: BaseException) -> RetryAdvice:
     if isinstance(err, ServerError):
         if err.code == _ERR_NOT_OWNER:
             return "retry"
-        if err.code in (_ERR_NOT_FOUND, _ERR_INVALID):
+        if err.code in (_ERR_NOT_FOUND, _ERR_INVALID, _ERR_GATEWAY_TIMEOUT):
             return "do_not_retry"
         if err.code >= 500:
             return "retry"

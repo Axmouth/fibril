@@ -258,11 +258,16 @@ export type RetryAdvice = "retry" | "do_not_retry";
 const ERR_INVALID = 400; // malformed request: fix it, do not retry
 const ERR_NOT_FOUND = 404; // topic/partition not in the cluster: do not retry
 const ERR_NOT_OWNER = 409; // topology conflict: a retry re-routes
+// A broker forwarded the request to the partition owner and lost it after
+// sending: the publish may have been applied, so it is never replayed blindly.
+const ERR_GATEWAY_TIMEOUT = 504;
 
 /**
  * How a caller should treat an error. Transport failures, redirects, topology
  * conflicts, and server-transient (5xx) errors are worth retrying. Not-found,
- * invalid, and local request errors are not. Note the duplicate-publish caveat:
+ * invalid, and local request errors are not, and neither is 504: a broker
+ * forwarded the request and lost the owner after sending, so the outcome is
+ * unknown. Note the duplicate-publish caveat:
  * a confirmed publish that fails after the broker may have accepted it can
  * duplicate on retry until owner-side dedup ships.
  */
@@ -278,6 +283,7 @@ export function retryAdvice(err: unknown): RetryAdvice {
   if (err instanceof ServerError) {
     if (err.code === ERR_NOT_OWNER) return "retry";
     if (err.code === ERR_NOT_FOUND || err.code === ERR_INVALID) return "do_not_retry";
+    if (err.code === ERR_GATEWAY_TIMEOUT) return "do_not_retry";
     if (err.code >= 500) return "retry";
     return "do_not_retry";
   }

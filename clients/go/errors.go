@@ -175,12 +175,16 @@ const (
 	errCodeInvalid  = 400 // malformed request: fix it, do not retry
 	errCodeNotFound = 404 // topic/partition not in the cluster: do not retry
 	errCodeNotOwner = 409 // topology conflict: a retry re-routes
+	// A broker forwarded the request to the partition owner and lost it after
+	// sending: the publish may have been applied, so it is never replayed blindly.
+	errCodeGatewayTimeout = 504
 )
 
 // AdviseRetry reports how a caller should treat an error when deciding whether to
 // re-issue an operation. Transport failures, redirects, topology conflicts, and
 // server-transient (5xx) errors are worth retrying; not-found, invalid, and local
-// request errors are not. A confirmed publish that fails after the broker may
+// request errors are not, and neither is 504: a broker forwarded the request and
+// lost the owner after sending, so the outcome is unknown. A confirmed publish that fails after the broker may
 // have accepted it can duplicate on retry until owner-side dedup ships.
 func AdviseRetry(err error) RetryAdvice {
 	var d *DisconnectionError
@@ -195,6 +199,8 @@ func AdviseRetry(err error) RetryAdvice {
 		case se.Code == errCodeNotOwner:
 			return RetryRetry
 		case se.Code == errCodeNotFound || se.Code == errCodeInvalid:
+			return RetryDoNotRetry
+		case se.Code == errCodeGatewayTimeout:
 			return RetryDoNotRetry
 		case se.Code >= 500:
 			return RetryRetry

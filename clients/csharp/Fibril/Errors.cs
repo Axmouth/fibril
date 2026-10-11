@@ -185,6 +185,9 @@ internal static class BrokerErrorCode
     public const ushort Invalid = 400; // malformed request: fix it, do not retry
     public const ushort NotFound = 404; // topic/partition not in the cluster: do not retry
     public const ushort NotOwner = 409; // topology conflict: a retry re-routes
+    // A broker forwarded the request to the partition owner and lost it after
+    // sending: the publish may have been applied, so it is never replayed blindly.
+    public const ushort GatewayTimeout = 504;
 }
 
 /// <summary>Whether re-issuing an operation is worthwhile.</summary>
@@ -201,7 +204,9 @@ public static class Retry
     /// Reports how a caller should treat an error when deciding whether to re-issue
     /// an operation. Transport failures, redirects, topology conflicts, and
     /// server-transient (5xx) errors are worth retrying. Not-found, invalid, and
-    /// local request errors are not. A confirmed publish that fails after the
+    /// local request errors are not, and neither is 504: a broker forwarded the
+    /// request and lost the owner after sending, so the outcome is unknown. A
+    /// confirmed publish that fails after the
     /// broker may have accepted it can duplicate on retry until owner-side dedup
     /// ships.
     /// </summary>
@@ -219,7 +224,8 @@ public static class Retry
             {
                 return RetryAdvice.Retry;
             }
-            if (se.Code is BrokerErrorCode.NotFound or BrokerErrorCode.Invalid)
+            if (se.Code is BrokerErrorCode.NotFound or BrokerErrorCode.Invalid
+                or BrokerErrorCode.GatewayTimeout)
             {
                 return RetryAdvice.DoNotRetry;
             }

@@ -37,11 +37,12 @@ test("retryAdvice classifies errors intuitively", () => {
     assert.equal(retryAdvice(err), "retry", err.name);
     assert.equal(isRetryable(err), true, err.name);
   }
-  // Not-found, invalid, a stale delivery (it redelivers on its own), and local
-  // request errors do not retry.
+  // Not-found, invalid, an unknown outcome after forwarding (504), a stale
+  // delivery (it redelivers on its own), and local request errors do not retry.
   for (const err of [
     new ServerError(404, "gone"),
     new ServerError(400, "bad"),
+    new ServerError(504, "outcome unknown"),
     new StaleDeliveryError(),
     new DeserializationError("x"),
     new SerializationError("x"),
