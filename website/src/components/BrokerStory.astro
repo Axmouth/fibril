@@ -1,20 +1,40 @@
 ---
 import { scenes, failoverSteps, placementSteps, checkpointSteps, rebalanceSteps, delivery } from './broker-story/scenarios.mjs';
-interface Props { scene: import('./broker-story/types').SceneId; }
-const { scene } = Astro.props;
+interface Props {
+  scene: import('./broker-story/types').SceneId;
+  /** Variant ids to show, in order. Defaults to every variant not marked hidden. */
+  variants?: string[];
+}
+const { scene, variants: only } = Astro.props;
 const config = scenes[scene];
+function pick<V extends { id: string; hidden?: boolean }>(list: readonly V[]): V[] {
+  const picked = only
+    ? only.map(id => {
+        const v = list.find(v => v.id === id);
+        if (!v) throw new Error(`BrokerStory ${scene}: unknown variant ${id}`);
+        return v;
+      })
+    : list.filter(v => !v.hidden);
+  if (picked.length === 0) throw new Error(`BrokerStory ${scene}: no variants to show`);
+  return picked;
+}
+const shown = pick<{ id: string; label: string; hidden?: boolean }>(config.variants);
 const outlines = scene === 'delivery'
-  ? delivery.variants.map(v => ({ title: `${v.label} · ${v.badge}`, steps: v.milestones.map(m => ({ title: m[1], text: m[2] })) }))
-  : scene === 'checkpoint' ? scenes.checkpoint.variants.map(v => ({ title: v.label, steps: checkpointSteps(v.id) }))
-  : scene === 'rebalance' ? scenes.rebalance.variants.map(v => ({ title: `${v.label} · Proposed`, steps: rebalanceSteps(v.id) }))
-  : [{ title: config.title, steps: scene === 'placement' ? placementSteps() : failoverSteps('recover') },
-    ...(scene === 'failover' ? [{ title: 'When evidence is unavailable', steps: failoverSteps('fenced').slice(-1) }] : [])];
+  ? pick(delivery.variants).map(v => ({ title: `${v.label} · ${v.badge}`, steps: v.milestones.map((m: [number, string, string]) => ({ title: m[1], text: m[2] })) }))
+  : scene === 'checkpoint' ? shown.map(v => ({ title: v.label, steps: checkpointSteps(v.id) }))
+  : scene === 'rebalance' ? shown.map(v => ({ title: `${v.label} · Proposed`, steps: rebalanceSteps(v.id) }))
+  : scene === 'placement' ? [{ title: config.title, steps: placementSteps() }]
+  // The fenced story shares its opening steps with recovery, so only its last
+  // step is new when both are shown.
+  : shown.map(v => v.id === 'recover'
+    ? { title: config.title, steps: failoverSteps('recover') }
+    : { title: 'When evidence is unavailable', steps: shown.length > 1 ? failoverSteps('fenced').slice(-1) : failoverSteps('fenced') });
 ---
-<broker-story data-scene={scene} class="broker-story">
+<broker-story data-scene={scene} data-variants={shown.map(v => v.id).join(' ')} class="broker-story">
   <div class="story-top"><span class="story-eyebrow">INSIDE FIBRIL / {scene === 'delivery' ? 'THE MESSAGE PATH' : scene === 'placement' ? 'PARTITION PLACEMENT' : scene === 'checkpoint' ? 'AN AGREED BASE' : scene === 'rebalance' ? 'LIVE REBALANCING' : 'FAILOVER & RETURN'}</span><span class="story-badge" data-badge>{config.badge || 'Current main'}</span></div>
   <h3>{config.title}</h3>
-  {config.variants.length > 1 && <div class="story-variants" role="group" aria-label="Choose a story">
-    {config.variants.map((v, i) => <button type="button" data-variant={v.id} aria-pressed={i === 0}>{v.label}</button>)}
+  {shown.length > 1 && <div class="story-variants" role="group" aria-label="Choose a story">
+    {shown.map((v, i) => <button type="button" data-variant={v.id} aria-pressed={i === 0}>{v.label}</button>)}
   </div>}
   <p class="story-contract" data-contract>{config.note}</p>
   <div class="story-canvas" tabindex="0" role="region" aria-label="Animated broker diagram. Scroll horizontally on small screens">

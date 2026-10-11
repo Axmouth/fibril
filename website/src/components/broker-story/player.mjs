@@ -201,7 +201,8 @@ export function registerStories() {
         const signal = this.abort.signal;
         this.scene = this.dataset.scene;
         this.config = scenes[this.scene];
-        this.variant = this.config.variants[0].id;
+        this.variant =
+          this.dataset.variants?.split(" ")[0] || this.config.variants[0].id;
         this.svg = this.querySelector("[data-stage]");
         this.position = this.querySelector("[data-position]");
         this.markerPrefix = `story-${crypto.randomUUID()}`;

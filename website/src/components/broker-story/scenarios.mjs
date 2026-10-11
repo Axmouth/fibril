@@ -234,7 +234,7 @@ export const delivery = {
     {
       id: "early",
       label: "Early replication",
-      badge: "Unmerged experiment",
+      badge: "Experimental · opt-in setting",
       text: "Expose written batches to followers before owner fsync completes. Local and follower persistence can overlap. The publisher still waits for the required durable evidence.",
       segments: [
         segment(0, 1, 5, "append + fsync"),
@@ -288,6 +288,8 @@ export const delivery = {
       id: "speculative",
       label: "Local speculation",
       badge: "Unmerged prototype · no replication",
+      // Hidden until the prototype lands. A page can still list it explicitly.
+      hidden: true,
       text: "When ordering and receiver-slot checks permit, deliver before fsync. The experimental contract allows confirmation after a processing ACK or required durability. In this example, processing ACK wins the race.",
       segments: [
         segment(0, 1, 8, "append + fsync"),
@@ -341,6 +343,7 @@ export const delivery = {
       id: "replicated-speculation",
       label: "Replicated speculation",
       badge: "Proposed · correctness work pending",
+      hidden: true,
       text: "A proposed path combines early delivery with overlapping replication. This scene deliberately keeps confirmation behind required durability. An ACK-based shortcut needs its own recovery and dependency proof.",
       segments: [
         segment(0, 1, 5, "append + fsync"),

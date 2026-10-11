@@ -58,6 +58,8 @@ export interface TimedFlow extends Flow {
 export interface Variant<Id extends string = string> {
   id: Id;
   label: string;
+  /** Left out unless a page lists the variant explicitly. */
+  hidden?: boolean;
 }
 export interface DeliveryVariant extends Variant<
   "durable" | "early" | "speculative" | "replicated-speculation"
