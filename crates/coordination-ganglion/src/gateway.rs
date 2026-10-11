@@ -66,16 +66,14 @@ pub fn rendezvous_gateway<'a>(
     group: Option<&str>,
     partition: u32,
 ) -> Option<&'a GatewayCandidate> {
-    candidates
-        .iter()
-        .max_by_key(|candidate| {
-            (
-                rendezvous_score(topic, group, partition, &candidate.node_id),
-                // Ties are vanishingly rare; break them by id so the answer
-                // never depends on input order.
-                std::cmp::Reverse(candidate.node_id.as_str()),
-            )
-        })
+    candidates.iter().max_by_key(|candidate| {
+        (
+            rendezvous_score(topic, group, partition, &candidate.node_id),
+            // Ties are vanishingly rare; break them by id so the answer
+            // never depends on input order.
+            std::cmp::Reverse(candidate.node_id.as_str()),
+        )
+    })
 }
 
 /// A stable 64-bit score. Hand-rolled FNV-1a with a splitmix64 finalizer so

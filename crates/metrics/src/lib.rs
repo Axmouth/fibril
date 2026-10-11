@@ -987,6 +987,7 @@ struct MetricsInner {
     pub tcp: Arc<TcpStats>,
     pub conn: Arc<ConnectionStats>,
     pub sys: Arc<SystemStats>,
+    pub forward: Arc<ForwardStats>,
     // later: protocol, client, etc
 }
 
@@ -999,6 +1000,7 @@ impl Metrics {
                 tcp: TcpStats::new(buckets),
                 conn: ConnectionStats::new(),
                 sys: SystemStats::new(),
+                forward: ForwardStats::new(),
             }),
         }
     }
@@ -1029,6 +1031,10 @@ impl Metrics {
 
     pub fn system(&self) -> Arc<SystemStats> {
         self.inner.sys.clone()
+    }
+
+    pub fn forward(&self) -> Arc<ForwardStats> {
+        self.inner.forward.clone()
     }
 }
 
@@ -1261,6 +1267,9 @@ struct ConnectionState {
     // Messages this connection published. Arc so the frame loop clones it
     // once at connection start and increments without touching the map.
     published: Arc<AtomicU64>,
+    // Set on an owner for a session a public broker opened for one of its
+    // clients: (origin node, acting user).
+    forwarded: Option<(String, String)>,
 }
 
 impl ConnectionState {
@@ -1277,6 +1286,7 @@ impl ConnectionState {
             authenticated,
             subs: DashMap::new(),
             published: Arc::new(AtomicU64::new(0)),
+            forwarded: None,
         }
     }
 
@@ -1350,6 +1360,14 @@ impl ConnectionStats {
         }
     }
 
+    /// Mark a connection as a forwarded session from `origin_node` acting for
+    /// `acting_user`, for the connections view.
+    pub fn set_connection_forwarded(&self, key: &Uuid, origin_node: &str, acting_user: &str) {
+        if let Some(mut conn) = self.connections.get_mut(key) {
+            conn.forwarded = Some((origin_node.to_string(), acting_user.to_string()));
+        }
+    }
+
     pub fn add_sub(
         &self,
         conn_id: &ConnId,
@@ -1398,6 +1416,10 @@ impl ConnectionStats {
                 "authenticated": c.authenticated,
                 "subs": c.subs.len(),
                 "published": c.published.load(Ordering::Relaxed),
+                "forwarded": c.forwarded.as_ref().map(|(node, user)| json!({
+                    "origin_node": node,
+                    "acting_user": user,
+                })),
             }));
         }
 
@@ -1443,5 +1465,282 @@ mod tests {
 
         // Unknown connections yield no counter.
         assert!(stats.publish_counter(&Uuid::now_v7()).is_none());
+    }
+}
+
+/// Forwarded operation kinds counted by [`ForwardStats`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForwardOp {
+    Publish,
+    PublishDelayed,
+    Subscribe,
+}
+
+impl ForwardOp {
+    pub const ALL: [ForwardOp; 3] = [Self::Publish, Self::PublishDelayed, Self::Subscribe];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Publish => "publish",
+            Self::PublishDelayed => "publish_delayed",
+            Self::Subscribe => "subscribe",
+        }
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// How a forwarded request ended, as counted by [`ForwardStats`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForwardOutcome {
+    /// The owner answered with success.
+    Ok,
+    /// The gateway answered with a redirect it built from its own view.
+    Redirected,
+    /// `503`: nothing was applied, retry shortly.
+    Unavailable,
+    /// `504`: sent upstream, then the owner was lost or timed out.
+    Timeout,
+    /// An owner error relayed to the client unchanged.
+    RelayedError,
+}
+
+impl ForwardOutcome {
+    pub const ALL: [ForwardOutcome; 5] = [
+        Self::Ok,
+        Self::Redirected,
+        Self::Unavailable,
+        Self::Timeout,
+        Self::RelayedError,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Redirected => "redirected",
+            Self::Unavailable => "503",
+            Self::Timeout => "504",
+            Self::RelayedError => "relayed_error",
+        }
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// Forwarding limits that can reject an operation, as counted by
+/// [`ForwardStats`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForwardLimit {
+    UpstreamSessions,
+    UpstreamSessionsPerOwner,
+    InflightForwardBytes,
+}
+
+impl ForwardLimit {
+    pub const ALL: [ForwardLimit; 3] = [
+        Self::UpstreamSessions,
+        Self::UpstreamSessionsPerOwner,
+        Self::InflightForwardBytes,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UpstreamSessions => "max_upstream_sessions",
+            Self::UpstreamSessionsPerOwner => "max_upstream_sessions_per_owner",
+            Self::InflightForwardBytes => "max_inflight_forward_bytes",
+        }
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// Counters for forwarding to private partition owners. The gateway side
+/// counts upstream sessions, requests and bytes. The owner side counts the
+/// forwarded sessions it serves.
+#[derive(Debug, Default)]
+pub struct ForwardStats {
+    upstream_sessions: AtomicU64,
+    upstream_by_owner: parking_lot::Mutex<HashMap<String, u64>>,
+    requests: [AtomicU64; 15],
+    rejected: [AtomicU64; 3],
+    bytes_in: AtomicU64,
+    bytes_out: AtomicU64,
+    inflight_bytes: AtomicU64,
+    dropped: AtomicU64,
+    forwarded_sessions: AtomicU64,
+    pub confirm_latency: LatencyStats,
+}
+
+impl ForwardStats {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    pub fn upstream_opened(&self, owner: &str) {
+        self.upstream_sessions.fetch_add(1, Ordering::Relaxed);
+        *self
+            .upstream_by_owner
+            .lock()
+            .entry(owner.to_string())
+            .or_insert(0) += 1;
+    }
+
+    pub fn upstream_closed(&self, owner: &str) {
+        self.upstream_sessions.fetch_sub(1, Ordering::Relaxed);
+        let mut by_owner = self.upstream_by_owner.lock();
+        if let Some(count) = by_owner.get_mut(owner) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                by_owner.remove(owner);
+            }
+        }
+    }
+
+    pub fn upstream_sessions(&self) -> u64 {
+        self.upstream_sessions.load(Ordering::Relaxed)
+    }
+
+    pub fn upstream_sessions_for(&self, owner: &str) -> u64 {
+        self.upstream_by_owner.lock().get(owner).copied().unwrap_or(0)
+    }
+
+    /// Open upstream sessions per owner node, sorted by owner.
+    pub fn upstream_sessions_by_owner(&self) -> Vec<(String, u64)> {
+        let mut out: Vec<_> = self
+            .upstream_by_owner
+            .lock()
+            .iter()
+            .map(|(owner, count)| (owner.clone(), *count))
+            .collect();
+        out.sort();
+        out
+    }
+
+    pub fn request(&self, op: ForwardOp, outcome: ForwardOutcome) {
+        self.requests[op.index() * ForwardOutcome::ALL.len() + outcome.index()]
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn requests(&self, op: ForwardOp, outcome: ForwardOutcome) -> u64 {
+        self.requests[op.index() * ForwardOutcome::ALL.len() + outcome.index()]
+            .load(Ordering::Relaxed)
+    }
+
+    pub fn rejected(&self, limit: ForwardLimit) {
+        self.rejected[limit.index()].fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn rejected_total(&self, limit: ForwardLimit) -> u64 {
+        self.rejected[limit.index()].load(Ordering::Relaxed)
+    }
+
+    pub fn bytes_in(&self, n: u64) {
+        self.bytes_in.fetch_add(n, Ordering::Relaxed);
+    }
+
+    pub fn bytes_out(&self, n: u64) {
+        self.bytes_out.fetch_add(n, Ordering::Relaxed);
+    }
+
+    pub fn bytes_in_total(&self) -> u64 {
+        self.bytes_in.load(Ordering::Relaxed)
+    }
+
+    pub fn bytes_out_total(&self) -> u64 {
+        self.bytes_out.load(Ordering::Relaxed)
+    }
+
+    /// Reserve `n` in-flight bytes if the total stays within `max`. One
+    /// request larger than `max` still passes when nothing else is in flight,
+    /// so a low cap never blocks a single message forever.
+    pub fn try_reserve_inflight(&self, n: u64, max: u64) -> bool {
+        self.inflight_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                (current == 0 || current.saturating_add(n) <= max)
+                    .then(|| current.saturating_add(n))
+            })
+            .is_ok()
+    }
+
+    pub fn release_inflight(&self, n: u64) {
+        let _ = self
+            .inflight_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                Some(current.saturating_sub(n))
+            });
+    }
+
+    pub fn inflight_bytes(&self) -> u64 {
+        self.inflight_bytes.load(Ordering::Relaxed)
+    }
+
+    /// A fire-and-forget publish that could not be sent upstream.
+    pub fn dropped(&self) {
+        self.dropped.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn dropped_total(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+
+    pub fn forwarded_session_opened(&self) {
+        self.forwarded_sessions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn forwarded_session_closed(&self) {
+        let _ = self
+            .forwarded_sessions
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                Some(current.saturating_sub(1))
+            });
+    }
+
+    pub fn forwarded_sessions(&self) -> u64 {
+        self.forwarded_sessions.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod forward_stats_tests {
+    use super::*;
+
+    #[test]
+    fn inflight_reservation_respects_the_cap_and_admits_one_oversized_request() {
+        let stats = ForwardStats::default();
+        assert!(stats.try_reserve_inflight(60, 100));
+        assert!(!stats.try_reserve_inflight(50, 100));
+        assert!(stats.try_reserve_inflight(40, 100));
+        stats.release_inflight(100);
+        assert_eq!(stats.inflight_bytes(), 0);
+        // Nothing in flight: one request over the cap still passes.
+        assert!(stats.try_reserve_inflight(500, 100));
+        assert!(!stats.try_reserve_inflight(1, 100));
+        stats.release_inflight(500);
+        assert_eq!(stats.inflight_bytes(), 0);
+    }
+
+    #[test]
+    fn per_owner_session_counts_track_open_and_close() {
+        let stats = ForwardStats::default();
+        stats.upstream_opened("b");
+        stats.upstream_opened("a");
+        stats.upstream_opened("b");
+        assert_eq!(stats.upstream_sessions(), 3);
+        assert_eq!(stats.upstream_sessions_for("b"), 2);
+        stats.upstream_closed("b");
+        stats.upstream_closed("a");
+        assert_eq!(
+            stats.upstream_sessions_by_owner(),
+            vec![("b".to_string(), 1)]
+        );
+        stats.request(ForwardOp::Subscribe, ForwardOutcome::Timeout);
+        assert_eq!(stats.requests(ForwardOp::Subscribe, ForwardOutcome::Timeout), 1);
+        assert_eq!(stats.requests(ForwardOp::Publish, ForwardOutcome::Timeout), 0);
     }
 }

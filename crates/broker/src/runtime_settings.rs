@@ -27,6 +27,45 @@ pub struct RuntimeSettings {
     pub consumer_groups: ConsumerGroupRuntimeSettings,
     #[serde(default)]
     pub stream: StreamRuntimeSettings,
+    #[serde(default)]
+    pub routing: RoutingRuntimeSettings,
+}
+
+/// Limits for forwarding client operations to private partition owners. Only
+/// public brokers in a cluster with private nodes use them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct RoutingRuntimeSettings {
+    /// Upstream sessions this broker keeps open to owners in total. New
+    /// forwarded operations get `503` at the cap.
+    pub max_upstream_sessions: usize,
+    /// Upstream sessions to any one owner.
+    pub max_upstream_sessions_per_owner: usize,
+    /// Publish payload bytes sent upstream and not yet answered. A publish
+    /// waits briefly for room, then gets `503`.
+    pub max_inflight_forward_bytes: u64,
+    /// How long a forwarded request waits for the owner's answer before the
+    /// client gets `504` (outcome unknown).
+    pub forward_timeout_ms: u64,
+    /// Upper bound on opening an upstream session (connect, handshake and
+    /// forwarding setup). `None` uses `replication.owner_connect_timeout_ms`.
+    pub upstream_connect_timeout_ms: Option<u64>,
+    /// An upstream session with no subscription and no pending request closes
+    /// after this long.
+    pub upstream_idle_close_ms: u64,
+}
+
+impl Default for RoutingRuntimeSettings {
+    fn default() -> Self {
+        Self {
+            max_upstream_sessions: 4096,
+            max_upstream_sessions_per_owner: 1024,
+            max_inflight_forward_bytes: 256 * 1024 * 1024,
+            forward_timeout_ms: 30_000,
+            upstream_connect_timeout_ms: None,
+            upstream_idle_close_ms: 30_000,
+        }
+    }
 }
 
 /// Partitioning-related runtime settings.
@@ -164,6 +203,18 @@ impl RuntimeSettings {
             self.connection.max_message_bytes,
         )
         .map_err(RuntimeSettingsError::Invalid)?;
+        let routing = &self.routing;
+        if routing.max_upstream_sessions == 0
+            || routing.max_upstream_sessions_per_owner == 0
+            || routing.max_inflight_forward_bytes == 0
+            || routing.forward_timeout_ms == 0
+            || routing.upstream_connect_timeout_ms == Some(0)
+            || routing.upstream_idle_close_ms == 0
+        {
+            return Err(RuntimeSettingsError::Invalid(
+                "routing limits and timeouts must be at least 1".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -184,6 +235,7 @@ impl Default for RuntimeSettings {
             partitioning: PartitioningRuntimeSettings::default(),
             consumer_groups: ConsumerGroupRuntimeSettings::default(),
             stream: StreamRuntimeSettings::default(),
+            routing: RoutingRuntimeSettings::default(),
         }
     }
 }
@@ -869,6 +921,7 @@ mod tests {
             partitioning: PartitioningRuntimeSettings::default(),
             consumer_groups: ConsumerGroupRuntimeSettings::default(),
             stream: StreamRuntimeSettings::default(),
+            routing: RoutingRuntimeSettings::default(),
         };
 
         let decoded = decode_snapshot(GlobalValue {
@@ -911,6 +964,7 @@ mod tests {
             partitioning: PartitioningRuntimeSettings::default(),
             consumer_groups: ConsumerGroupRuntimeSettings::default(),
             stream: StreamRuntimeSettings::default(),
+            routing: RoutingRuntimeSettings::default(),
         };
 
         let config = BrokerConfig::from_runtime_settings(&settings);
@@ -1026,6 +1080,37 @@ mod tests {
             decoded.warn_message_bytes,
             message_size::DEFAULT_WARN_MESSAGE_BYTES
         );
+    }
+
+    #[test]
+    fn routing_settings_default_and_reject_zero_limits() {
+        let decoded: RuntimeSettings = serde_json::from_value(serde_json::json!({
+            "delivery": serde_json::to_value(DeliveryRuntimeSettings::default()).unwrap(),
+            "idle_queue_cleanup":
+                serde_json::to_value(IdleQueueCleanupRuntimeSettings::default()).unwrap(),
+        }))
+        .unwrap();
+        assert_eq!(decoded.routing, RoutingRuntimeSettings::default());
+        assert_eq!(decoded.routing.max_upstream_sessions, 4096);
+        assert_eq!(decoded.routing.upstream_connect_timeout_ms, None);
+        decoded.validate().unwrap();
+
+        let zeroed: [fn(&mut RoutingRuntimeSettings); 6] = [
+            |r| r.max_upstream_sessions = 0,
+            |r| r.max_upstream_sessions_per_owner = 0,
+            |r| r.max_inflight_forward_bytes = 0,
+            |r| r.forward_timeout_ms = 0,
+            |r| r.upstream_connect_timeout_ms = Some(0),
+            |r| r.upstream_idle_close_ms = 0,
+        ];
+        for zero in zeroed {
+            let mut settings = RuntimeSettings::default();
+            zero(&mut settings.routing);
+            assert!(matches!(
+                settings.validate(),
+                Err(RuntimeSettingsError::Invalid(message)) if message.contains("routing")
+            ));
+        }
     }
 
     #[tokio::test]

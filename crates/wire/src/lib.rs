@@ -156,6 +156,12 @@ pub enum Op {
     RecoveryTransfer = 110,
     RecoveryTransferOk = 111,
 
+    /// gateway->owner, node-only: mark an upstream session as acting for one
+    /// client session of the sending broker. Sent right after AUTH.
+    ForwardedSession = 113,
+    /// owner->gateway: the session is accepted as forwarded.
+    ForwardedSessionOk = 114,
+
     Error = 255,
 }
 
@@ -224,6 +230,8 @@ impl Op {
         Op::HistoryReplication,
         Op::RecoveryTransfer,
         Op::RecoveryTransferOk,
+        Op::ForwardedSession,
+        Op::ForwardedSessionOk,
         Op::Error,
     ];
 
@@ -249,6 +257,7 @@ impl Op {
                 | Op::RecoveryTransfer
                 | Op::InitialHistoryPrepare
                 | Op::HistoryReplication
+                | Op::ForwardedSession
         )
     }
 
@@ -1077,6 +1086,12 @@ pub const ERR_TOO_LARGE: u16 = 413;
 /// The partition belongs to this broker but cannot serve yet, for example while
 /// its history recovery runs after a restart. Retry the same broker shortly.
 pub const ERR_UNAVAILABLE: u16 = 503;
+/// A broker forwarded the request to the partition owner and lost the owner, or
+/// timed out waiting for it, after the request was sent. The outcome is
+/// unknown: a publish may or may not have been applied. Like a lost connection,
+/// clients must not replay it automatically. The caller decides whether a
+/// duplicate is acceptable.
+pub const ERR_GATEWAY_TIMEOUT: u16 = 504;
 
 // ----- Header namespaces (shared by broker rejection + client guard) ---------
 
@@ -1422,3 +1437,34 @@ pub struct RecoveryTransfer {
     pub body: Vec<u8>,
 }
 pub const MAX_RECOVERY_TRANSFER_FRAME_BYTES: usize = 34 * 1024 * 1024;
+
+/// Version of the forwarding contract an owner answers in
+/// [`ForwardedSessionOk`].
+pub const FORWARDING_PROTOCOL_VERSION: u16 = 1;
+
+/// Forwarding is one hop: a public broker forwards to the owner and the owner
+/// never forwards again. A session marked with any other hop count is refused.
+pub const MAX_FORWARD_HOPS: u8 = 1;
+
+/// Node-only marker sent by a public broker on an upstream session it opened
+/// for one of its client sessions. The owner records the acting user and never
+/// forwards on this session. The client fields are for logs and the
+/// connections view only, they grant nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardedSession {
+    /// Node id of the broker that opened the session.
+    pub origin_node: String,
+    /// Forwarding hops so far. Always 1 from a gateway.
+    pub hop_count: u8,
+    /// The user the client authenticated as on the gateway. Empty when the
+    /// gateway runs without authentication.
+    pub acting_user: String,
+    pub client_id: Uuid,
+    pub client_conn_id: Uuid,
+    pub client_addr: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardedSessionOk {
+    pub forwarding_version: u16,
+}

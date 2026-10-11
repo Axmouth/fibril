@@ -3576,7 +3576,14 @@ mod history_replication_tests {
             // travel the other way and are never dispatched by the server.
             let reply_or_push = name.ends_with("Ok")
                 || matches!(op, Op::QueuePushBatch | Op::QueuePushEnd);
-            let internal = ["Replication", "Recovery", "History", "QueuePush", "QueueCheckpoint"]
+            let internal = [
+                "Replication",
+                "Recovery",
+                "History",
+                "QueuePush",
+                "QueueCheckpoint",
+                "Forwarded",
+            ]
                 .iter()
                 .any(|family| name.contains(family));
             if internal && !reply_or_push {
@@ -3655,11 +3662,13 @@ mod history_replication_tests {
             | Op::HistoryReplication
             | Op::RecoveryTransfer
             | Op::RecoveryTransferOk
+            | Op::ForwardedSession
+            | Op::ForwardedSessionOk
             | Op::Error => {}
             }
         }
         Op::ALL.iter().copied().for_each(listed);
-        assert_eq!(Op::ALL.len(), 56);
+        assert_eq!(Op::ALL.len(), 58);
         for retired in [82u16, 83, 86, 87] {
             assert_eq!(Op::from_code(retired), None);
         }
@@ -3819,5 +3828,155 @@ mod recovery_transfer_tests {
             old.payload = body.into();
             assert!(decode_recovery_transfer(&old, reply).is_err());
         }
+    }
+}
+
+pub fn encode_forwarded_session(
+    request_id: u64,
+    session: &crate::ForwardedSession,
+) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FFS1");
+    put_str(&mut out, &session.origin_node)?;
+    out.put_u8(session.hop_count);
+    put_str(&mut out, &session.acting_user)?;
+    put_uuid(&mut out, session.client_id);
+    put_uuid(&mut out, session.client_conn_id);
+    put_optional_str(&mut out, session.client_addr.as_deref())?;
+    Ok(frame(Op::ForwardedSession, request_id, out.freeze()))
+}
+
+pub fn decode_forwarded_session(frame: &Frame) -> WireResult<crate::ForwardedSession> {
+    expect_op(frame, Op::ForwardedSession)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FFS1", "forwarded session")?;
+    let session = crate::ForwardedSession {
+        origin_node: reader.str()?.to_owned(),
+        hop_count: reader.u8()?,
+        acting_user: reader.str()?.to_owned(),
+        client_id: reader.uuid()?,
+        client_conn_id: reader.uuid()?,
+        client_addr: reader.optional_str()?.map(ToOwned::to_owned),
+    };
+    reader.finish()?;
+    Ok(session)
+}
+
+pub fn encode_forwarded_session_ok(
+    request_id: u64,
+    ok: &crate::ForwardedSessionOk,
+) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FFO1");
+    out.put_u16(ok.forwarding_version);
+    Ok(frame(Op::ForwardedSessionOk, request_id, out.freeze()))
+}
+
+pub fn decode_forwarded_session_ok(frame: &Frame) -> WireResult<crate::ForwardedSessionOk> {
+    expect_op(frame, Op::ForwardedSessionOk)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FFO1", "forwarded session ok")?;
+    let ok = crate::ForwardedSessionOk {
+        forwarding_version: reader.u16()?,
+    };
+    reader.finish()?;
+    Ok(ok)
+}
+
+/// Replace the subscription id of an encoded `Deliver` frame without decoding
+/// the rest. A gateway relays owner deliveries under its own client-facing id,
+/// and the body after the id (delivery tag included) stays byte for byte.
+pub fn rewrite_deliver_sub_id(frame: &Frame, sub_id: u64) -> WireResult<Frame> {
+    expect_op(frame, Op::Deliver)?;
+    let payload = &frame.payload;
+    if payload.len() < 12 {
+        return Err(WireError::UnexpectedEof);
+    }
+    if &payload[..4] != b"FDL1" {
+        return Err(WireError::InvalidMagic { context: "deliver" });
+    }
+    let mut out = BytesMut::with_capacity(payload.len());
+    out.extend_from_slice(&payload[..4]);
+    out.put_u64(sub_id);
+    out.extend_from_slice(&payload[12..]);
+    Ok(Frame {
+        payload: out.freeze(),
+        ..frame.clone()
+    })
+}
+
+/// The subscription id of an encoded `Deliver` frame.
+pub fn deliver_sub_id(frame: &Frame) -> WireResult<u64> {
+    expect_op(frame, Op::Deliver)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FDL1", "deliver")?;
+    reader.u64()
+}
+
+#[cfg(test)]
+mod forwarding_wire_tests {
+    use super::*;
+
+    fn session() -> crate::ForwardedSession {
+        crate::ForwardedSession {
+            origin_node: "gateway-1".into(),
+            hop_count: 1,
+            acting_user: "alice".into(),
+            client_id: Uuid::from_bytes([7; 16]),
+            client_conn_id: Uuid::from_bytes([9; 16]),
+            client_addr: Some("10.0.0.5:51000".into()),
+        }
+    }
+
+    #[test]
+    fn forwarded_session_round_trips_and_rejects_truncation() {
+        for value in [
+            session(),
+            crate::ForwardedSession {
+                client_addr: None,
+                acting_user: String::new(),
+                ..session()
+            },
+        ] {
+            let encoded = encode_forwarded_session(3, &value).unwrap();
+            assert_eq!(encoded.opcode, Op::ForwardedSession as u16);
+            assert_eq!(decode_forwarded_session(&encoded).unwrap(), value);
+            for len in 0..encoded.payload.len() {
+                let mut short = encoded.clone();
+                short.payload = short.payload.slice(..len);
+                assert!(decode_forwarded_session(&short).is_err());
+            }
+        }
+        let ok = crate::ForwardedSessionOk {
+            forwarding_version: crate::FORWARDING_PROTOCOL_VERSION,
+        };
+        let encoded = encode_forwarded_session_ok(3, &ok).unwrap();
+        assert_eq!(decode_forwarded_session_ok(&encoded).unwrap(), ok);
+        assert!(decode_forwarded_session(&encoded).is_err());
+    }
+
+    #[test]
+    fn deliver_sub_id_rewrite_keeps_the_rest_of_the_body() {
+        let deliver = crate::Deliver {
+            sub_id: 5,
+            topic: "orders".into(),
+            group: Some("g".into()),
+            partition: Partition::new(2),
+            offset: 40,
+            delivery_tag: DeliveryTag { epoch: 77 },
+            published: 1,
+            publish_received: 2,
+            content_type: None,
+            headers: HashMap::new(),
+            payload: b"hello".to_vec(),
+        };
+        let encoded = encode_deliver(11, &deliver).unwrap();
+        assert_eq!(deliver_sub_id(&encoded).unwrap(), 5);
+        let rewritten = rewrite_deliver_sub_id(&encoded, 1 << 48).unwrap();
+        assert_eq!(rewritten.request_id, 11);
+        let decoded = decode_deliver(&rewritten).unwrap();
+        assert_eq!(decoded.sub_id, 1 << 48);
+        assert_eq!(decoded.delivery_tag, deliver.delivery_tag);
+        assert_eq!(decoded.payload, deliver.payload);
+        assert_eq!(decoded.offset, 40);
+        assert_eq!(&rewritten.payload[12..], &encoded.payload[12..]);
     }
 }

@@ -59,6 +59,8 @@ use fibril_protocol::v1::handler::{
     ConnectionSettings, DeclareCoordinator, ProtocolServerError, TopologyAdoptionTracker,
     run_server as run_protocol_server,
 };
+use fibril_protocol::v1::forwarding::{Forwarder, ForwardingConfig, PartitionRoute, RoutingLimits};
+use fibril_protocol::v1::replication::{PeerTlsConnector, ProtocolOwnerPeerAuth};
 use fibril_protocol::v1::session_store::SessionSkeletonStore;
 use fibril_protocol::v1::{
     AdvertisedAddress, Partition, QueueTopologyEntry, StreamRetention, StreamTopologyEntry,
@@ -145,6 +147,7 @@ pub fn runtime_seed_from_config(config: &ServerConfig) -> RuntimeSettings {
         // runtime-tunable via the cluster settings document; the static seed
         // uses the defaults.
         stream: StreamRuntimeSettings::default(),
+        routing: Default::default(),
     }
 }
 
@@ -1039,6 +1042,46 @@ impl Default for HeartbeatRateTracker {
     }
 }
 
+/// Forwarding limits from the `routing` runtime settings. The connect timeout
+/// falls back to the replication owner connect timeout.
+pub fn routing_limits(settings: &RuntimeSettings) -> RoutingLimits {
+    let routing = &settings.routing;
+    RoutingLimits {
+        max_upstream_sessions: routing.max_upstream_sessions as u64,
+        max_upstream_sessions_per_owner: routing.max_upstream_sessions_per_owner as u64,
+        max_inflight_forward_bytes: routing.max_inflight_forward_bytes,
+        forward_timeout_ms: routing.forward_timeout_ms,
+        upstream_connect_timeout_ms: routing
+            .upstream_connect_timeout_ms
+            .unwrap_or(settings.replication.owner_connect_timeout_ms),
+        upstream_idle_close_ms: routing.upstream_idle_close_ms,
+    }
+}
+
+/// Warn, at most once a minute, while the cluster has a private node but no
+/// live public broker to forward for it. Clients then see no route for
+/// private-owned partitions.
+fn spawn_gateway_watch(coordination: Arc<GanglionCoordination>, interval: Duration) {
+    tokio::spawn(async move {
+        let mut warned_at: Option<std::time::Instant> = None;
+        loop {
+            tokio::time::sleep(interval).await;
+            if coordination.private_nodes_without_gateway() {
+                if warned_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(60)) {
+                    tracing::warn!(
+                        "the cluster has private brokers but no live public broker to forward \
+                         for them. Clients get no route to partitions owned by private brokers \
+                         until a public broker is up"
+                    );
+                    warned_at = Some(std::time::Instant::now());
+                }
+            } else if warned_at.take().is_some() {
+                tracing::info!("a public broker is available again to forward for private brokers");
+            }
+        }
+    });
+}
+
 /// Say how this broker is reached, and warn about client advertise entries a
 /// private broker never hands out.
 fn log_visibility_at_startup(config: &ServerConfig) {
@@ -1498,8 +1541,13 @@ pub fn spawn_ganglion_broker_tasks(
     }
 }
 
-/// Protocol topology source for Ganglion-backed routing.
-pub fn topology_source_for_ganglion(parts: &TcpGanglionParts) -> Arc<dyn ClientTopologySource> {
+/// Protocol topology source for Ganglion-backed routing. `local_client_endpoints`
+/// is this broker's own client list (empty when private), which it never
+/// redirects a client to.
+pub fn topology_source_for_ganglion(
+    parts: &TcpGanglionParts,
+    local_client_endpoints: Vec<String>,
+) -> Arc<dyn ClientTopologySource> {
     let coordination = parts.coordination.clone();
     let full = CoordinationTopologySource {
         fetch: Arc::new(move || coordination.client_topology()),
@@ -1507,12 +1555,27 @@ pub fn topology_source_for_ganglion(parts: &TcpGanglionParts) -> Arc<dyn ClientT
     Arc::new(TargetedCoordinationTopologySource {
         full,
         coordination: parts.coordination.clone(),
+        local_client_endpoints,
     })
 }
 
 struct TargetedCoordinationTopologySource {
     full: CoordinationTopologySource,
     coordination: Arc<GanglionCoordination>,
+    local_client_endpoints: Vec<String>,
+}
+
+fn partition_route(
+    route: fibril_coordination_ganglion::ClientRoute,
+    owner_is_local: bool,
+) -> PartitionRoute {
+    PartitionRoute {
+        owner_node_id: Some(route.owner_node_id),
+        owner_is_local,
+        owner_endpoints: route.owner_endpoints,
+        client_endpoints: route.client_endpoints,
+        partitioning_version: route.partitioning_version,
+    }
 }
 
 impl ClientTopologySource for TargetedCoordinationTopologySource {
@@ -1549,6 +1612,43 @@ impl ClientTopologySource for TargetedCoordinationTopologySource {
             topic,
             partition,
         )
+    }
+
+    fn queue_route(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+    ) -> Option<PartitionRoute> {
+        let owner_is_local = self.owner_is_local(topic, partition, group);
+        match self.coordination.client_queue_route(topic, partition, group) {
+            Some(route) => Some(partition_route(route, owner_is_local)),
+            None if owner_is_local => Some(PartitionRoute {
+                owner_is_local,
+                ..PartitionRoute::default()
+            }),
+            None => None,
+        }
+    }
+
+    fn stream_route(&self, topic: &str, partition: Partition) -> Option<PartitionRoute> {
+        let owner_is_local = self.stream_owner_is_local(topic, partition);
+        match self.coordination.client_stream_route(topic, partition) {
+            Some(route) => Some(partition_route(route, owner_is_local)),
+            None if owner_is_local => Some(PartitionRoute {
+                owner_is_local,
+                ..PartitionRoute::default()
+            }),
+            None => None,
+        }
+    }
+
+    fn local_client_endpoints(&self) -> Vec<String> {
+        self.local_client_endpoints.clone()
+    }
+
+    fn node_peer_address(&self, node_id: &str) -> Option<String> {
+        self.coordination.node_peer_address(node_id)
     }
 }
 
@@ -2123,6 +2223,35 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     if let Some(store) = session_store {
         connection_settings = connection_settings.with_session_store(store);
     }
+    connection_settings = connection_settings.with_forward_stats(metrics.forward());
+    // Public brokers in a cluster forward operations for partitions they cannot
+    // send clients to. Private brokers never forward.
+    if let (Some(parts), Some(secret)) = (ganglion_parts.as_ref(), cluster_secret.as_deref()) {
+        spawn_gateway_watch(
+            parts.coordination.clone(),
+            Duration::from_millis(config.coordination.ganglion.heartbeat_interval_ms),
+        );
+        if !config.broker.visibility.is_private() {
+            let tls = if config.tls.inter_broker_enabled() {
+                Some(PeerTlsConnector(peer_connector_from_config(&config)?))
+            } else {
+                None
+            };
+            let forwarder = Forwarder::new(
+                ForwardingConfig {
+                    node_id: config.coordination.node_id.clone(),
+                    auth: ProtocolOwnerPeerAuth {
+                        username: NODE_PRINCIPAL.to_string(),
+                        password: secret.to_string(),
+                    },
+                    tls,
+                },
+                routing_limits(runtime),
+                metrics.forward(),
+            );
+            connection_settings = connection_settings.with_forwarder(Arc::new(forwarder));
+        }
+    }
     {
         let broker = broker.clone();
         let connection_settings = connection_settings.clone();
@@ -2148,6 +2277,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
                     max_message_bytes: snapshot.settings.connection.max_message_bytes,
                     warn_message_bytes: snapshot.settings.connection.warn_message_bytes,
                 });
+                connection_settings.update_routing_limits(routing_limits(&snapshot.settings));
                 if let Some(manager) = runtime_settings.upgrade() {
                     manager.record_runtime_application(snapshot);
                 } else {
@@ -2192,7 +2322,10 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     // so a single node still tells clients its stream partition counts (queue
     // partitioning is cluster-only for now).
     let topology_source: Option<Arc<dyn ClientTopologySource>> = match ganglion_parts.as_ref() {
-        Some(parts) => Some(topology_source_for_ganglion(parts)),
+        Some(parts) => Some(topology_source_for_ganglion(
+            parts,
+            config.broker_client_addresses(),
+        )),
         None => Some(Arc::new(LocalTopologySource {
             broker: broker.clone(),
         })),

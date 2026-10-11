@@ -214,6 +214,12 @@ pub fn try_encode<T: Serialize + Any>(op: Op, req_id: u64, msg: &T) -> ProtocolR
         Op::HistoryReplication => encode_typed(msg, "HistoryReplication", |msg| {
             wire::encode_history_replication(req_id, msg)
         }),
+        Op::ForwardedSession => encode_typed(msg, "ForwardedSession", |msg| {
+            wire::encode_forwarded_session(req_id, msg)
+        }),
+        Op::ForwardedSessionOk => encode_typed(msg, "ForwardedSessionOk", |msg| {
+            wire::encode_forwarded_session_ok(req_id, msg)
+        }),
         Op::Error => encode_error_like(op, req_id, msg),
     }
 }
@@ -377,6 +383,12 @@ pub fn try_decode<T: for<'de> Deserialize<'de> + Any>(frame: &Frame) -> Protocol
             .map_err(wire_decode_error)
             .and_then(cast_decoded),
         x if x == Op::HistoryReplication as u16 => wire::decode_history_replication(frame)
+            .map_err(wire_decode_error)
+            .and_then(cast_decoded),
+        x if x == Op::ForwardedSession as u16 => wire::decode_forwarded_session(frame)
+            .map_err(wire_decode_error)
+            .and_then(cast_decoded),
+        x if x == Op::ForwardedSessionOk as u16 => wire::decode_forwarded_session_ok(frame)
             .map_err(wire_decode_error)
             .and_then(cast_decoded),
         x if x == Op::Error as u16 => decode_error_like(frame),
