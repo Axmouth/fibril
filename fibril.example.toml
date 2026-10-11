@@ -6,6 +6,14 @@
 # and place them under <data_dir>/node.
 data_dir = "server_data"
 
+[broker]
+# Private brokers are never given to clients. Public brokers forward their
+# clients' operations to them (cluster mode only).
+# visibility = "private"
+# The address other brokers dial for replication and forwarding, when it
+# differs from the client advertise address.
+# peer_advertise = "broker-2.internal:9876"
+
 [broker.listener]
 bind = "0.0.0.0:9876"
 

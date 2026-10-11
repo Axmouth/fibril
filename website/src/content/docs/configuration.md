@@ -18,6 +18,14 @@ The config file format is TOML. The repository includes `fibril.example.toml`:
 [server]
 data_dir = "server_data"
 
+[broker]
+# Private brokers are never given to clients. Public brokers forward their
+# clients' operations to them (cluster mode only).
+# visibility = "private"
+# The address other brokers dial for replication and forwarding, when it
+# differs from the client advertise address.
+# peer_advertise = "broker-2.internal:9876"
+
 [broker.listener]
 bind = "0.0.0.0:9876"
 
@@ -154,6 +162,8 @@ These fields are read on process start.
 | `server.data_dir` | `FIBRIL_DATA_DIR` | `--data-dir` | `server_data` |
 | `broker.listener.bind` | `FIBRIL_BROKER_BIND` | `--broker-bind` | `0.0.0.0:9876` |
 | `broker.listener.advertise` | `FIBRIL_BROKER_ADVERTISE` | none | derived (see below) |
+| `broker.visibility` | `FIBRIL_BROKER_VISIBILITY` | none | `public` |
+| `broker.peer_advertise` | `FIBRIL_BROKER_PEER_ADVERTISE` | none | first client advertise address, then `bind` |
 | `admin.listener.bind` | `FIBRIL_ADMIN_BIND` | `--admin-bind` | `0.0.0.0:8081` |
 | `admin.listener.advertise` | `FIBRIL_ADMIN_ADVERTISE` | none | derived (see below) |
 | `admin.auth.enabled` | `FIBRIL_ADMIN_AUTH_ENABLED` | `--admin-auth-enabled` | `false` |
@@ -240,6 +250,25 @@ fine, it is resolved at connect time), or several comma-separated entries in
 otherwise falls back to `bind`. Standalone single-broker deployments do not need
 it (clients connect to the broker directly). Only the first entry is dialed today;
 the rest are carried for forward compatibility.
+
+`broker.peer_advertise` is the single `host:port` other brokers dial for
+replication and forwarding. The cluster node table carries it, while clients
+get the `broker.listener.advertise` list. Unset, peers dial the first client
+advertise address, then `bind`. Set it when the client address is a load
+balancer address shared by several brokers (a peer dialing it would land on
+any of them) or is not reachable from inside the cluster. With TLS, the peer
+host joins the generated certificate names, and operator certificates must
+cover it.
+
+`broker.visibility` is `public` (the default) or `private`. A private broker is
+never given to clients: it publishes no client addresses, so topology answers
+and redirects never name it. Public brokers serve the partitions it owns by
+forwarding client operations to it over internal, node-authenticated
+connections, see [private brokers](#private-brokers). Private needs
+`coordination.mode = "ganglion"` and fails validation in standalone mode. A
+private broker still accepts ordinary client connections from clients that can
+reach it, serves the partitions it owns and redirects the rest to public
+brokers.
 
 `admin.listener.advertise` is the same idea for the dashboard: the address a
 node registers with the cluster so the Cluster page's "open its admin" links
@@ -404,6 +433,50 @@ is that a registered node that never comes back delays owner failover by up to
 this long after every leader change. `0` disables the grace. While it is active,
 the controller status in the admin topology response lists the nodes it is
 waiting for under `consensus.controller.startup_grace_waiting_for`.
+
+## Private Brokers
+
+A cluster can run some brokers private, for example behind a load balancer or
+a Docker Swarm service that publishes one address in front of the public
+brokers. Clients then only ever talk to public brokers:
+
+- Every partition owned by a private broker is advertised with the client
+  addresses of one live, non-draining public broker, chosen by rendezvous
+  hashing of the partition, so every broker gives the same answer.
+- A public broker that receives an operation for such a partition forwards it
+  to the owner on an upstream session opened for that client session. The
+  owner answers exactly as it would answer the client: a forwarded publish is
+  confirmed only when the owner confirms, with the owner's offset.
+- Confirmed and fire-and-forget publishes, delayed publishes, plain queue
+  subscriptions, acks and nacks are forwarded. Streams and exclusive consumer
+  groups are not forwarded yet: operations on them through a public broker
+  get error `400` with an explanation. Use a public owner for those, or
+  connect to the owner directly.
+- When the owner is lost after a request was sent, the client gets error
+  `504`: the outcome is unknown and clients do not replay it. When nothing was
+  sent (owner unreachable, a forwarding limit, ownership moving), the client
+  gets the retryable `503`.
+- With no live public broker, private-owned partitions show no endpoints and
+  each broker logs a warning once a minute.
+
+Mark brokers private only after every broker runs a version that understands
+the `fibril/visibility` label. An older broker would still hand out a private
+broker's peer address to clients.
+
+The `routing` runtime settings bound the forwarding work of a public broker.
+They are shared by the cluster and adjustable live from the settings page.
+
+| Runtime setting | Default | Meaning |
+| --- | --- | --- |
+| `routing.max_upstream_sessions` | `4096` | Upstream sessions this broker keeps open to owners, one per client session and owner. At the cap new forwarded operations get `503`. |
+| `routing.max_upstream_sessions_per_owner` | `1024` | Upstream sessions to any one owner. At the cap that owner's partitions get `503`. |
+| `routing.max_inflight_forward_bytes` | `268435456` | Publish payload bytes sent upstream and not answered yet. A publish waits up to the forward timeout, at most a few seconds, for room and then gets `503`. |
+| `routing.forward_timeout_ms` | `30000` | How long a forwarded request waits for the owner's answer. Past it the client gets `504` and the upstream session is closed. |
+| `routing.upstream_connect_timeout_ms` | unset | Upper bound on opening an upstream session. Unset uses `replication.owner_connect_timeout_ms`. On expiry the client gets `503`. |
+| `routing.upstream_idle_close_ms` | `30000` | An upstream session with no subscription and no pending request closes after this long. |
+
+Forwarded traffic shows in `/metrics` as the `fibril_forward_*` families on
+public brokers and `fibril_forwarded_sessions` on owners.
 
 ## Linux Memory Policy
 
@@ -721,5 +794,8 @@ Current validation rules:
 - `runtime_seed.replication.min_in_sync_replicas` must be at least `1`
 - `runtime_seed.replication.isr_timeout_ms` must be at least `1`
 - `runtime_seed.partitioning.default_partition_count` must be at least `1`
+- `broker.visibility = "private"` requires `coordination.mode = "ganglion"`
+- `broker.peer_advertise`, when set, must be a `host:port` address
+- the `routing` runtime limits and timeouts must be at least `1`
 
 More validation will be added as more settings become user-facing.

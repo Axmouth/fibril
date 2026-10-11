@@ -129,6 +129,48 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- Private brokers. `broker.visibility = "private"`
+  (`FIBRIL_BROKER_VISIBILITY`) keeps a broker out of every topology answer and
+  redirect. Each partition it owns is advertised with the client addresses of
+  one live, non-draining public broker, chosen by rendezvous hashing so every
+  broker agrees, and public brokers forward the operations to the owner on
+  node-authenticated upstream sessions over the peer TLS connector. A
+  forwarded confirm is the owner's confirm with the owner's offset. Publish,
+  delayed publish, plain queue subscribe, ack and nack are forwarded. Streams
+  and exclusive consumer groups through a public broker get a clear `400` for
+  now. A broker never redirects a client to one of its own addresses, which
+  also fixes redirect ping-pong between public brokers behind one shared
+  address. Private needs cluster mode. Clients need no change.
+
+- `broker.peer_advertise` (`FIBRIL_BROKER_PEER_ADVERTISE`), the address other
+  brokers dial for replication and forwarding. The cluster node table carries
+  it and clients keep getting the advertise list. Unset, peers dial the first
+  client advertise address as before.
+
+- Error code `504` (`ERR_GATEWAY_TIMEOUT`): a broker forwarded a request to the
+  partition owner and lost it after sending, so the outcome is unknown. All
+  five clients classify it as not retryable, so neither callers following the
+  retry advice nor the reliable publishers replay it blindly.
+
+- `routing.*` runtime settings bound forwarding on a public broker: upstream
+  sessions in total (`max_upstream_sessions`, default 4096) and per owner
+  (`max_upstream_sessions_per_owner`, 1024), in-flight forward bytes
+  (`max_inflight_forward_bytes`, 256 MiB), the forward timeout
+  (`forward_timeout_ms`, 30000), the upstream connect timeout
+  (`upstream_connect_timeout_ms`, defaults to the replication owner connect
+  timeout) and idle close (`upstream_idle_close_ms`, 30000). A cap answers
+  `503`. They are shared by the cluster and adjustable live from the settings
+  page.
+
+- Forwarding metrics: `fibril_forward_upstream_sessions` (per owner with
+  `admin.metrics_per_channel`), `fibril_forward_requests_total` by op and
+  outcome, `fibril_forward_bytes_in_total`, `fibril_forward_bytes_out_total`,
+  `fibril_forward_inflight_bytes`, `fibril_forward_rejected_total` by limit,
+  `fibril_forward_dropped_total`, `fibril_forward_confirms_total` with
+  `fibril_forward_confirm_latency_microseconds_total`, and
+  `fibril_forwarded_sessions` on owners. The connections API marks forwarded
+  sessions with their origin node and acting user.
+
 - A broker message size limit. `connection.max_message_bytes` (default
   8388608, 1 KiB to 15 MiB) caps the message payload, and a larger publish
   gets error `413` while the connection stays open. The ceiling keeps one

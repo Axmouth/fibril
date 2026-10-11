@@ -78,12 +78,14 @@ avoidance remain a further design requiring explicit ordering and crash semantic
 
 ### Public/private endpoints and routing fallback
 
-Design public entry brokers that can forward to owners on private endpoints,
-while retaining direct owner routing where reachable. Define advertisement scope,
-authentication, failure/retry outcomes, loop prevention and bounded forwarding.
-Overlapping topology groups and arbitrary multi-hop routing remain later options
-that require a concrete deployment use case.
-The proposed design is in
+Private brokers and public brokers that forward to them are implemented for
+publishes, delayed publishes, plain queue subscriptions and settles, see
+[private brokers](/configuration/#private-brokers). Remaining: streams and
+exclusive consumer groups through a gateway, upstream session resume across
+link drops, a clean session-close signal, dashboard marking of private nodes,
+and later tagged private endpoints for internal clients. Overlapping topology
+groups and arbitrary multi-hop routing remain later options that require a
+concrete deployment use case. The design is in
 [private nodes and internal routing](/development/private-nodes-design/).
 
 ### MCP server and agent integration

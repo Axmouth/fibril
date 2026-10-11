@@ -1,10 +1,13 @@
 ---
 title: Private nodes and internal routing
-description: Proposed design for brokers that are never advertised to clients, with public brokers forwarding to them over internal connections.
+description: Design for brokers that are never advertised to clients, with public brokers forwarding to them over internal connections.
 ---
 
-This design note records proposed work. None of it is implemented. It expands
-the roadmap entry
+This design note records the design of private brokers. Phase 1 (section 9) is
+implemented, section 11 lists where the build differs from the text, and phases
+2 and 3 are proposed work. User-facing behavior is in
+[private brokers](/configuration/#private-brokers). It expands the roadmap
+entry
 [public/private endpoints and routing fallback](/roadmap/#publicprivate-endpoints-and-routing-fallback).
 Current routing is described in [partition routing](/development/partition-routing/)
 and [live routing and cutover](/development/live-routing-and-cutover/), sessions
@@ -82,8 +85,9 @@ table's `broker_addr` is the first client advertise entry, and replication
 dials it. Behind a shared load balancer address that breaks: a peer would dial
 the shared address and land on any broker. Add `broker.peer_advertise` with
 `FIBRIL_BROKER_PEER_ADVERTISE`, a single `host:port` that defaults to the
-address `derive_advertise_from_peers` already computes, then to the first
-client entry, then to the bind address. The node table carries the peer
+first client advertise entry (explicit entries first, then the address
+`derive_advertise_from_peers` computes), then to the bind address. That is the
+address peers dialed before, so existing clusters keep their peer traffic. The node table carries the peer
 address. The `fibril/advertise` label carries the client list.
 
 | Node | `broker_addr` (peers) | `fibril/advertise` (clients) |
@@ -408,8 +412,11 @@ lets the owner's drain move partitions and relays the resulting
 
 **Clean close.** When a client session ends for good (grace expired or explicit
 close), the public broker should end its upstream sessions without leaving them
-dormant on the owner, otherwise redelivery waits for two grace windows. That
-needs a small session-close signal, see open questions.
+dormant on the owner, otherwise redelivery waits for two grace windows. Phase 1
+sends an empty `ReconcileClient` on each upstream session before closing it,
+so the owner closes every forwarded subscription and redelivers its unsettled
+messages at once. The owner's session object itself still waits out its grace
+holding nothing. A real session-close signal stays an open question.
 
 ## 7. Mixed setups
 
@@ -464,8 +471,8 @@ owner shows forwarded sessions as "via node P for user U".
 
 ## 9. Phased plan
 
-**Phase 1: the Swarm slice.** Enough for a load balancer in front of one or a
-few public brokers, with every SDK unchanged.
+**Phase 1: the Swarm slice (implemented, see section 11).** Enough for a load
+balancer in front of one or a few public brokers, with every SDK unchanged.
 
 - `broker.visibility`, `broker.peer_advertise`, their env vars, validation and
   the `fibril/visibility` label.
@@ -546,6 +553,7 @@ Still open:
    clients, or must they always go through a gateway?
 2. Clean session close: a new node-control op, or a `ForwardedSession` option
    that makes the owner skip grace on a clean socket close from the gateway.
+   Phase 1 already releases subscriptions with an empty reconcile.
 3. Is per-client upstream connection count acceptable for the expected client
    counts, or should the multiplexed link come before 1.0?
 4. Should placement prefer public nodes as owners for hot partitions, so less
@@ -555,3 +563,101 @@ Still open:
 6. Should a deployment be able to force gateway mode for every partition, even
    for public owners with their own addresses, for operators who want all
    client traffic to enter through one place?
+
+## 11. Phase 1 as built
+
+Phase 1 follows sections 1 to 8 with these differences, found while building
+it. Code: `crates/protocol/src/v1/forwarding.rs` (routing rule, forwarder,
+upstream sessions), `crates/coordination-ganglion/src/gateway.rs` (gateway
+choice), the handler in `crates/protocol/src/v1/handler.rs`.
+
+**Configuration.**
+
+- The peer address defaults to the first client advertise entry, then the
+  bind address, as described in section 1, rather than to the derived address
+  first. Peers keep dialing what they dialed before the setting existed.
+- The `routing.*` limits are runtime settings with built-in defaults and no
+  `runtime_seed.routing` boot seed, the same as the `stream` settings.
+- The no-live-public-node condition is a rate-limited log on every broker. The
+  admin Cluster page does not show it yet.
+
+**Advertisement.**
+
+- The rendezvous score is a fixed FNV-1a hash with a splitmix64 finish over
+  `(topic, group, partition, node id)`, so brokers on different Rust versions
+  agree. Liveness compares heartbeat labels with each broker's clock, so near
+  the TTL two brokers can briefly name different gateways. Serve where you land
+  makes that harmless.
+- The stale partitioning fence still redirects to the client-facing endpoints
+  even when they are this broker's own: the redirect carries the newer version,
+  which is the point of the fence, and owners already did this for themselves.
+  Every other redirect follows the never-self rule.
+- A private broker, or any broker on a forwarded session, answers an operation
+  for a partition it does not own with a redirect to the gateway endpoints, or
+  the usual not-owner error when those are its own.
+
+**Forwarding.**
+
+- Client-facing subscription ids of forwarded subscriptions come from a range
+  starting at 2^48, so they never collide with the broker's own ids on one
+  connection and stay exact in every SDK.
+- `Deliver` frames are relayed by rewriting the subscription id in place. The
+  rest of the body, delivery tag included, is byte for byte the owner's.
+- Deliveries are relayed with no buffer: the upstream reader waits on the
+  client's connection, which is the backpressure section 3 describes.
+- Streams and exclusive consumer groups through a gateway answer `400` with an
+  explanation. A retry cannot help until phase 2, so `503` would only loop.
+- A publish waits for in-flight byte room for the forward timeout capped at the
+  client heartbeat interval (5 s), not the full forward timeout. The wait holds
+  the client's connection loop, and a longer wait would trip the heartbeat
+  timeout on both sides.
+- A request past the forward timeout closes its whole upstream session. Every
+  pending publish gets `504`, pending subscribes get `503` and the session's
+  subscriptions close. An owner that sits on one request that long is not
+  serving the session, and a timed-out subscribe could otherwise leave a
+  subscription on the owner that a retried subscribe would collide with.
+- When an upstream session is lost, pending subscribes answer `503`, not
+  `504`: the owner drops the subscription with the session, so a retry is safe.
+  The session's subscriptions close with `OwnerMoved`, which every SDK's
+  supervisor answers by resubscribing through the public broker.
+- Upstream resume is phase 2, so a lost upstream session is not resumed. The
+  owner keeps the dormant session for its reconnect grace and then redelivers.
+- A public broker that held a local publisher for a partition that moved to a
+  private owner drops cached publishers it no longer owns on each topology
+  tick, and answers a publish that hit the old publisher with `503` instead of
+  `409`, so the client retries and the retry is forwarded.
+- A reconcile counts forwarded subscriptions as server-side subscriptions. A
+  missing manual-ack subscription on a forwarded partition gets
+  `RecreateClientSide` under either policy, so the client resubscribes through
+  the normal forwarded path. Server-only forwarded subscriptions are closed on
+  the owner with a reconcile that lists the ones to keep.
+- After an owner refused to connect, operations for it fail fast with `503` for
+  one second instead of each waiting out a connect timeout.
+
+**Observability.**
+
+- Forwarded confirm latency is exported as `fibril_forward_confirms_total` and
+  `fibril_forward_confirm_latency_microseconds_total`, a count and sum pair,
+  rather than buckets.
+- Heartbeat labels carry visibility but not the upstream session count yet.
+- The connections API marks a forwarded session with its origin node and
+  acting user. The dashboard does not render it yet.
+
+**Tests.**
+
+- `crates/protocol/tests/forwarding_tests.rs` drives a gateway handler against
+  real and scripted owners: confirm only with the owner's confirm and offset,
+  `504` on a dropped upstream, `503` when nothing was sent, rebuilt redirects,
+  the one retry on a move to another private owner, the per-owner cap, cohort
+  refusal, and the `ForwardedSession` checks (node principal only, one hop,
+  once per session, never forwarding again).
+- `crates/fibril/tests/private_nodes.rs` runs three broker processes, two of
+  them private with only an unroutable client address, and kills the private
+  owner mid-test. The partition moves to the other private broker and the
+  client keeps publishing with confirms and consuming through the public one.
+- Client classification tests for `504` exist in all five SDKs, and the Rust
+  client has a mock broker test that a `504` publish is never replayed.
+- No `clients/wire_vectors.json` entry for `ForwardedSession`: SDK conformance
+  tests require every vector to be encodable by the SDK, and the op is node
+  only. The Rust wire tests cover its codec.
+- No recorded `private` crash demo scenario and no simulation tests yet.
