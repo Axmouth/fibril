@@ -1,0 +1,101 @@
+name: Server scheduled tests
+
+# Slower and narrower checks that do not need to gate every pull request.
+on:
+  schedule:
+    # Mondays at 04:17 UTC.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Awarnings
+
+jobs:
+  cluster-tests-two-cpus:
+    name: Cluster tests on 2 CPUs
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # The multi-node, replication and raft suites. Tests that read a node's
+      # view right after a commit have flaked on small machines, so these run
+      # pinned to two cores and repeated to shake out timing races.
+      CLUSTER_TESTS: >-
+        -p fibril -p fibril-coordination-ganglion -p fibril-protocol
+        --lib --test recovery_driver --test raft_tls --test handler_tests
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Use git Stroma source
+        run: scripts/ci-stroma-source.sh
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      # Build on every core so only the test run itself is pinned.
+      - name: Build cluster tests
+        run: cargo test --no-run $CLUSTER_TESTS
+
+      - name: Run cluster tests pinned to 2 CPUs, 3 times
+        run: |
+          ulimit -n 4096
+          for i in 1 2 3; do
+            echo "::group::Iteration $i"
+            taskset -c 0,1 cargo test $CLUSTER_TESTS
+            echo "::endgroup::"
+          done
+
+  fault-injection-tests:
+    name: Fault injection tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Use git Stroma source
+        run: scripts/ci-stroma-source.sh
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      # The feature compiles test-only file operation faults into keratin-log,
+      # so it gets its own build instead of joining the workspace run.
+      - name: Run tests with injected I/O faults
+        run: |
+          ulimit -n 4096
+          cargo test -p fibril -p fibril-broker --features fibril/io-fault-injection
+
+  simulation-tests:
+    name: Simulation tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Use git Stroma source
+        run: scripts/ci-stroma-source.sh
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      # The turmoil scenarios only compile under the simulation feature, which
+      # swaps the broker network for simulated TCP.
+      - name: Run turmoil simulation tests
+        run: |
+          ulimit -n 4096
+          cargo test -p fibril-protocol --features simulation --test simulation_tests
