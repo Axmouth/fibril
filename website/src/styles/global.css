@@ -68,9 +68,12 @@ html {
 body {
   min-height: 100vh;
   margin: 0;
+  /* Glows sit behind the hero, measured from the centred content column and
+     the page top so they stay put however tall the page gets. The max() and
+     min() keep them on screen on narrow viewports. */
   background:
-    radial-gradient(circle at 80% 0%, var(--accent-soft), transparent 29rem),
-    radial-gradient(circle at 16% 18%, var(--organic-soft), transparent 25rem),
+    radial-gradient(circle at min(80%, calc(50% + 400px)) 40px, var(--accent-soft), transparent 29rem),
+    radial-gradient(circle at max(16%, calc(50% - 380px)) 300px, var(--organic-soft), transparent 25rem),
     var(--bg);
 }
 
