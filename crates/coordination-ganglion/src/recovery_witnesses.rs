@@ -144,7 +144,7 @@ impl RecoveryWitnessSet {
             required = self.required, history = %blake3::Hash::from_bytes(history.id),
             transition = %blake3::Hash::from_bytes(self.command.transition),
             logs = ?history.logs,
-            "recovery seal witness admitted; compatible history remains unproven"
+            "recovery seal accepted from old replica, history compatibility is checked once the required seals arrive"
         );
         self.reports.insert(contacted_node.to_owned(), report);
         Ok(())

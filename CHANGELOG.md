@@ -516,6 +516,16 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Changed
 
+- Clearer broker logs for failover and restarts. A broker logs
+  `queue recovered from disk` with the log tail and lowest unsettled offset
+  the first time it serves a queue as owner with data already on disk, such
+  as after a restart or a promotion. The controller leader warns once with
+  `broker heartbeat expired` when a broker's heartbeat goes past the
+  liveness TTL, and logs `broker heartbeat resumed` when it comes back. A
+  follower that waits for storage history admission on first join logs at
+  INFO instead of ERROR, and recovery seal collection says what it is still
+  waiting for.
+
 - A queue follower whose broker process restarts no longer fences the queue
   for recovery. The queue keeps serving, and the restarted follower stops
   counting toward confirms until it rejoins through learner admission under

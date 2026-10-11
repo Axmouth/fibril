@@ -1653,6 +1653,30 @@ fn shrink_sources(r: u32, n_new: u32, n_old: u32) -> impl Iterator<Item = u32> {
     (r..n_old).step_by(step)
 }
 
+/// A follower refused for missing history admission is expected on a node's
+/// first join. The transition stays pending and is retried after admission.
+fn log_assignment_transition_error(transition: &LocalAssignmentTransition, err: &BrokerError) {
+    if transition.intent == LocalAssignmentIntent::BecomeFollower
+        && matches!(err, BrokerError::Engine(StromaError::HistoryAdmissionRequired { .. }))
+    {
+        tracing::info!(
+            topic = %transition.queue.topic,
+            partition = transition.queue.partition.id(),
+            group = ?transition.queue.group,
+            owner = ?transition.next.as_ref().map(|a| a.owner.as_str()),
+            "follower waiting for storage history admission before replicating, will retry"
+        );
+        return;
+    }
+    tracing::error!(
+        topic = %transition.queue.topic,
+        partition = transition.queue.partition.id(),
+        group = ?transition.queue.group,
+        intent = ?transition.intent,
+        "failed to apply assignment transition: {err:?}"
+    );
+}
+
 /// One stream partition's stats for the admin surface: position and the declared
 /// durability and retention.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -2265,6 +2289,13 @@ impl<
             part: partition,
             group: group.map(str::to_string),
         };
+        // Read the log tail before the owner epoch and declaration add their own
+        // records, so a brand new queue still reads as empty here.
+        let recovered = if self.locally_owned.contains_key(&key) {
+            None
+        } else {
+            self.recovered_queue_offsets(topic, partition.id(), group).await
+        };
         let epoch = self
             .assignment_cache
             .get(&key)
@@ -2280,8 +2311,34 @@ impl<
         self.initialize_queue_dependencies(&key).await?;
         // Declaration-created owners need demotion even if the assignment
         // watcher coalesces the assignment that originally admitted them.
-        self.locally_owned.insert(key, ());
+        let newly_owned = self.locally_owned.insert(key.clone(), ()).is_none();
+        // Logged the first time this broker serves the queue as owner with data
+        // already on disk, such as after a restart or a promotion.
+        if let (true, Some((next_offset, unsettled_from))) = (newly_owned, recovered) {
+            tracing::info!(
+                topic, partition = partition.id(), group = ?group, epoch = ?epoch,
+                next_offset,
+                unsettled_from = ?unsettled_from,
+                "queue recovered from disk"
+            );
+        }
         Ok(())
+    }
+
+    /// Log tail and lowest unsettled offset of a queue that already holds
+    /// records, or None for an empty log.
+    async fn recovered_queue_offsets(
+        &self,
+        topic: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Option<(Offset, Option<Offset>)> {
+        let next = self.engine.current_next_offset(topic, part, group).await.ok()?;
+        if next == 0 {
+            return None;
+        }
+        let unsettled = self.engine.lowest_unsettled_offset(topic, part, group).await.ok();
+        Some((next, unsettled))
     }
 
     async fn initialize_queue_dependencies(&self, key: &QueueKey) -> Result<(), BrokerError> {
@@ -4836,13 +4893,7 @@ impl Broker<StromaEngine> {
         for transition in transitions {
             let result = self.apply_assignment_transition(&transition).await;
             if let Err(err) = &result {
-                tracing::error!(
-                    topic = %transition.queue.topic,
-                    partition = transition.queue.partition.id(),
-                    group = ?transition.queue.group,
-                    intent = ?transition.intent,
-                    "failed to apply assignment transition: {err:?}"
-                );
+                log_assignment_transition_error(&transition, err);
             }
             outcomes.push(result);
         }
@@ -4900,15 +4951,7 @@ impl Broker<StromaEngine> {
                         }
                     }
                 }
-                Err(err) => {
-                    tracing::error!(
-                        topic = %transition.queue.topic,
-                        partition = transition.queue.partition.id(),
-                        group = ?transition.queue.group,
-                        intent = ?transition.intent,
-                        "failed to apply assignment transition: {err:?}"
-                    );
-                }
+                Err(err) => log_assignment_transition_error(&transition, err),
                 _ => {}
             }
             outcomes.push(result);

@@ -2535,6 +2535,7 @@ impl GanglionCoordination {
             let mut detector = eager_failover::Detector::default();
             let mut previous_suspects = std::collections::BTreeSet::new();
             let mut previous_attention = Vec::new();
+            let mut previous_expired = std::collections::BTreeMap::<String, u64>::new();
             // When this node won leadership, and whether the startup grace
             // has ended for that term.
             let mut leader_since: Option<std::time::Instant> = None;
@@ -2577,6 +2578,33 @@ impl GanglionCoordination {
                 } else {
                     Vec::new()
                 };
+                // Only the leader reports, once per expiry and once per return.
+                // Labels go stale while a whole cluster is down, so wait for the
+                // startup grace before reporting, and never report this node.
+                let mut expired = if active && grace_over {
+                    provider.expired_heartbeats(config.liveness_ttl)
+                } else {
+                    std::collections::BTreeMap::new()
+                };
+                expired.remove(&provider.node_id);
+                for (node, age_ms) in &expired {
+                    if !previous_expired.contains_key(node) {
+                        tracing::warn!(
+                            node = %node,
+                            since_last_heartbeat_ms = age_ms,
+                            ttl_ms = config.liveness_ttl.as_millis() as u64,
+                            "broker heartbeat expired, node is excluded from placement"
+                        );
+                    }
+                }
+                if active {
+                    for node in previous_expired.keys().filter(|n| !expired.contains_key(*n)) {
+                        if live.contains_key(node) {
+                            tracing::info!(node = %node, "broker heartbeat resumed");
+                        }
+                    }
+                }
+                previous_expired = expired;
                 provider.node.set_monitor_idle_peer_connections(
                     active && policy.eager_failover && policy.eager_failover_grace_ms == 0,
                 );
@@ -2818,6 +2846,24 @@ impl GanglionCoordination {
                     .and_then(|raw| raw.parse().ok())
                     .unwrap_or(0);
                 Some((node.node_id.clone(), (published, delivered)))
+            })
+            .collect()
+    }
+
+    /// Nodes whose last heartbeat is older than `ttl`, mapped to the heartbeat
+    /// age in milliseconds. Nodes without a heartbeat label never expire,
+    /// matching `live_nodes`.
+    pub fn expired_heartbeats(&self, ttl: std::time::Duration) -> std::collections::BTreeMap<String, u64> {
+        let now = unix_millis_now();
+        let ttl_ms = ttl.as_millis() as u64;
+        self.node
+            .committed_snapshot()
+            .nodes
+            .values()
+            .filter_map(|node| {
+                let beat = node.labels.get(HEARTBEAT_LABEL)?.parse::<u64>().ok()?;
+                let age = now.saturating_sub(beat);
+                (age > ttl_ms).then(|| (node.node_id.clone(), age))
             })
             .collect()
     }
