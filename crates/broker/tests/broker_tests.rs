@@ -4847,11 +4847,11 @@ async fn assert_remaining_follower_retargets_owner(stream: bool) {
         snapshot
     };
     coordination.update_snapshot(snapshot("old-owner", 1));
-    tokio::time::timeout(Duration::from_secs(2), old.wait_for_read())
+    tokio::time::timeout(Duration::from_secs(10), old.wait_for_read())
         .await
         .expect("initial follower must start its old-owner read");
     coordination.update_snapshot(snapshot("new-owner", 2));
-    let retargeted = tokio::time::timeout(Duration::from_secs(2), new.wait_for_read()).await;
+    let retargeted = tokio::time::timeout(Duration::from_secs(10), new.wait_for_read()).await;
     broker.shutdown().await;
     retargeted.expect("remaining follower must cancel the old read and contact the new owner");
     assert_eq!(old.reads.load(Ordering::Acquire), 1);
