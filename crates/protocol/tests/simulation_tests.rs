@@ -43,7 +43,10 @@ use fibril_protocol::v1::handler::{
     run_server,
 };
 use fibril_protocol::v1::helper::{try_decode, try_encode};
-use fibril_protocol::v1::replication::CoordinationProtocolOwnerPeerResolver;
+use fibril_broker::auth_store::NODE_PRINCIPAL;
+use fibril_protocol::v1::replication::{
+    CoordinationProtocolOwnerPeerResolver, ProtocolOwnerPeerResolverConfig,
+};
 use fibril_protocol::v1::{
     AdvertisedAddress, Hello, HelloOk, Op, PROTOCOL_V1, QueueTopologyEntry, TopologyOk,
     TopologyUpdateAck,
@@ -73,6 +76,32 @@ async fn open_engine(tag: &str) -> (StromaEngine, TempDir) {
     .await
     .unwrap();
     (engine, dir)
+}
+
+/// Shared secret every simulated node uses for node-to-node connections.
+/// Replication ops are refused unless the connection authenticated as the
+/// node principal, so every listener and resolver here is wired the same way
+/// the server binary wires them.
+const CLUSTER_SECRET: &str = "sim-cluster-secret";
+
+/// Listener auth that accepts the node principal with the cluster secret.
+fn node_auth() -> Option<StaticAuthHandler> {
+    Some(StaticAuthHandler::new(
+        NODE_PRINCIPAL.into(),
+        CLUSTER_SECRET.into(),
+    ))
+}
+
+/// Owner peer resolver that reports as the local node and authenticates as
+/// the node principal, matching the production Ganglion wiring.
+fn node_resolver(coordination: Arc<dyn Coordination>) -> CoordinationProtocolOwnerPeerResolver {
+    let reporter = coordination.node_id().to_string();
+    CoordinationProtocolOwnerPeerResolver::with_config(
+        coordination,
+        ProtocolOwnerPeerResolverConfig::new(HashMap::new())
+            .with_reporter(reporter)
+            .with_auth(NODE_PRINCIPAL, CLUSTER_SECRET),
+    )
 }
 
 fn test_broker_config() -> BrokerConfig {
@@ -220,7 +249,7 @@ fn spawn_owner_host(sim: &mut turmoil::Sim<'_>, topic: &'static str, payloads: &
             broker,
             TcpStats::new(10),
             ConnectionStats::new(),
-            None::<StaticAuthHandler>,
+            node_auth(),
             ConnectionSettings::new(Some(60)),
             None,
             None,
@@ -248,9 +277,7 @@ async fn run_catch_up_follower(
         "b-follower",
         follower_snapshot(topic, 1, 1),
     ));
-    let resolver = Arc::new(CoordinationProtocolOwnerPeerResolver::new(
-        coordination.clone(),
-    ));
+    let resolver = Arc::new(node_resolver(coordination.clone()));
     broker.spawn_assignment_watcher_with_follower_replication(
         coordination.clone(),
         resolver.clone(),
@@ -356,9 +383,7 @@ fn owner_partition_fails_over_to_caught_up_follower() {
             "b-follower",
             follower_snapshot(topic, 1, 1),
         ));
-        let resolver = Arc::new(CoordinationProtocolOwnerPeerResolver::new(
-            coordination.clone(),
-        ));
+        let resolver = Arc::new(node_resolver(coordination.clone()));
         broker.spawn_assignment_watcher_with_follower_replication(
             coordination.clone(),
             resolver.clone(),
@@ -687,6 +712,34 @@ async fn start_split_brain_node(name: &'static str, id: u64) -> Arc<GanglionCoor
     Arc::new(GanglionCoordination::new(name, node))
 }
 
+/// Record an operator's acceptance of losing what only `owner` kept, so the
+/// controller may move `queue` off it. These scenarios run a legacy
+/// LocalDurable queue, which the controller otherwise holds on its owner. Real
+/// cluster queues enroll in the accepted-history protocol and move through the
+/// recovery driver, which this harness does not run. Returns true once the
+/// acceptance is committed. Leader-side only, like every write here.
+async fn accept_owner_loss(
+    coordination: &GanglionCoordination,
+    queue: &QueueIdentity,
+    owner: &str,
+) -> bool {
+    let owned = coordination
+        .snapshot()
+        .assignments
+        .get(queue)
+        .is_some_and(|assignment| assignment.owner == owner);
+    owned
+        && coordination
+            .accept_owner_loss(&ganglion_core::ResourceIdentity::new(
+                "fibril/queue",
+                queue.topic.to_string(),
+                u64::from(queue.partition.id()),
+                queue.group.as_deref().map(str::to_owned),
+            ))
+            .await
+            .is_ok()
+}
+
 /// The placement controller every host runs. `control_iteration` no-ops on a
 /// non-leader, so only the current leader plans, which keeps writes on the leader
 /// (the bridge applies leader writes locally over the raft network and never has
@@ -700,6 +753,7 @@ async fn run_split_brain_controller(
 ) {
     let queues = [queue];
     let no_streams: Vec<StreamIdentity> = Vec::new();
+    let mut loss_accepted = false;
     while !done.load(Ordering::SeqCst) {
         if coordination.consensus_node().is_leader().await {
             let snapshot = coordination.snapshot();
@@ -735,6 +789,9 @@ async fn run_split_brain_controller(
                 && snapshot.nodes.contains_key("b-follower")
                 && current_owner.as_deref() != Some(want_owner)
             {
+                if want_owner == "b-follower" && !loss_accepted {
+                    loss_accepted = accept_owner_loss(&coordination, &queues[0], "a-owner").await;
+                }
                 let live = split_brain_live(owner_partitioned.load(Ordering::SeqCst));
                 coordination
                     .control_iteration(
@@ -821,16 +878,14 @@ fn ganglion_returning_old_owner_is_demoted_under_simulated_partition() {
                 serve_broker,
                 TcpStats::new(10),
                 ConnectionStats::new(),
-                None::<StaticAuthHandler>,
+                node_auth(),
                 ConnectionSettings::new(Some(60)),
                 None,
                 None,
                 None,
             ));
 
-            let resolver = Arc::new(CoordinationProtocolOwnerPeerResolver::new(
-                coordination.clone(),
-            ));
+            let resolver = Arc::new(node_resolver(coordination.clone()));
             broker.spawn_assignment_watcher_with_follower_replication(
                 coordination.clone(),
                 resolver,
@@ -930,16 +985,14 @@ fn ganglion_returning_old_owner_is_demoted_under_simulated_partition() {
                 serve_broker,
                 TcpStats::new(10),
                 ConnectionStats::new(),
-                None::<StaticAuthHandler>,
+                node_auth(),
                 ConnectionSettings::new(Some(60)),
                 None,
                 None,
                 None,
             ));
 
-            let resolver = Arc::new(CoordinationProtocolOwnerPeerResolver::new(
-                coordination.clone(),
-            ));
+            let resolver = Arc::new(node_resolver(coordination.clone()));
             broker.spawn_assignment_watcher_with_follower_replication(
                 coordination.clone(),
                 resolver,
@@ -1088,6 +1141,7 @@ async fn run_drain_controller(
     let tail_label = fibril_coordination_ganglion::applied_tail_label(&queue);
     let queues = [queue];
     let no_streams: Vec<StreamIdentity> = Vec::new();
+    let mut loss_accepted = false;
     while !done.load(Ordering::SeqCst) {
         if coordination.consensus_node().is_leader().await {
             let snapshot = coordination.snapshot();
@@ -1144,6 +1198,10 @@ async fn run_drain_controller(
                         .register_self_with_labels(&split_brain_node_info("a-owner"), labels)
                         .await
                         .ok();
+                } else if !loss_accepted {
+                    // Accept only once the label is committed. A live owner
+                    // that is not draining clears a pending acceptance.
+                    loss_accepted = accept_owner_loss(&coordination, &queues[0], "a-owner").await;
                 }
             }
             if snapshot.nodes.contains_key("a-owner") && snapshot.nodes.contains_key("b-follower") {
@@ -1230,15 +1288,13 @@ fn ganglion_draining_owner_hands_off_before_stopping() {
                 serve_broker,
                 TcpStats::new(10),
                 ConnectionStats::new(),
-                None::<StaticAuthHandler>,
+                node_auth(),
                 ConnectionSettings::new(Some(60)),
                 None,
                 None,
                 None,
             ));
-            let resolver = Arc::new(CoordinationProtocolOwnerPeerResolver::new(
-                coordination.clone(),
-            ));
+            let resolver = Arc::new(node_resolver(coordination.clone()));
             broker.spawn_assignment_watcher_with_follower_replication(
                 coordination.clone(),
                 resolver,
@@ -1362,15 +1418,13 @@ fn ganglion_draining_owner_hands_off_before_stopping() {
                 serve_broker,
                 TcpStats::new(10),
                 ConnectionStats::new(),
-                None::<StaticAuthHandler>,
+                node_auth(),
                 ConnectionSettings::new(Some(60)),
                 None,
                 None,
                 None,
             ));
-            let resolver = Arc::new(CoordinationProtocolOwnerPeerResolver::new(
-                coordination.clone(),
-            ));
+            let resolver = Arc::new(node_resolver(coordination.clone()));
             broker.spawn_assignment_watcher_with_follower_replication(
                 coordination.clone(),
                 resolver,
@@ -1665,7 +1719,7 @@ fn durable_publish_unconfirmed_while_replica_partitioned() {
                 serve_broker,
                 TcpStats::new(10),
                 ConnectionStats::new(),
-                None::<StaticAuthHandler>,
+                node_auth(),
                 ConnectionSettings::new(Some(60)),
                 None,
                 None,
@@ -1782,9 +1836,7 @@ fn durable_publish_unconfirmed_while_replica_partitioned() {
                 "b-follower",
                 follower_snapshot(topic, 1, 1),
             ));
-            let resolver = Arc::new(CoordinationProtocolOwnerPeerResolver::new(
-                coordination.clone(),
-            ));
+            let resolver = Arc::new(node_resolver(coordination.clone()));
             // Short caught-up poll so a new owner write is picked up and reported
             // promptly, well inside the confirm timeout.
             broker.spawn_assignment_watcher_with_follower_replication(
@@ -1909,7 +1961,7 @@ fn follower_installs_checkpoint_after_owner_truncates() {
             broker,
             TcpStats::new(10),
             ConnectionStats::new(),
-            None::<StaticAuthHandler>,
+            node_auth(),
             ConnectionSettings::new(Some(60)),
             None,
             None,
@@ -1928,9 +1980,7 @@ fn follower_installs_checkpoint_after_owner_truncates() {
             "b-follower",
             follower_snapshot(topic, 1, 1),
         ));
-        let resolver = Arc::new(CoordinationProtocolOwnerPeerResolver::new(
-            coordination.clone(),
-        ));
+        let resolver = Arc::new(node_resolver(coordination.clone()));
         broker.spawn_assignment_watcher_with_follower_replication(
             coordination.clone(),
             resolver.clone(),

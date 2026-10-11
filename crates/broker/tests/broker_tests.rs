@@ -5148,6 +5148,113 @@ async fn follower_worker_tick_long_polls_only_after_caught_up() {
     follower.shutdown().await;
 }
 
+/// Serves the first read from a real owner, then fails every later read the
+/// way a dropped connection does in the middle of a catch-up pass.
+struct FailAfterFirstReadPeer<'a> {
+    owner: &'a Broker<StromaEngine>,
+    reads: AtomicUsize,
+}
+
+impl BrokerOwnerReplicationPeer for FailAfterFirstReadPeer<'_> {
+    fn read_owner_queue_records<'a>(
+        &'a self,
+        topic: &'a str,
+        partition: fibril_broker::storage::Partition,
+        group: Option<&'a str>,
+        from: Offset,
+        max_records: usize,
+        max_bytes: usize,
+        max_wait_ms: u64,
+    ) -> BoxFuture<'a, Result<OwnerReplicationRead<stroma_core::StromaEvent>, BrokerError>> {
+        if self.reads.fetch_add(1, Ordering::AcqRel) > 0 {
+            return Box::pin(async { Err(BrokerError::Unknown("connection dropped".into())) });
+        }
+        BrokerOwnerReplicationPeer::read_owner_queue_records(
+            self.owner,
+            topic,
+            partition,
+            group,
+            from,
+            max_records,
+            max_bytes,
+            max_wait_ms,
+        )
+    }
+
+    fn export_queue_state_checkpoint<'a>(
+        &'a self,
+        topic: &'a str,
+        partition: fibril_broker::storage::Partition,
+        group: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<QueueStateCheckpoint, BrokerError>> {
+        BrokerOwnerReplicationPeer::export_queue_state_checkpoint(self.owner, topic, partition, group)
+    }
+}
+
+#[tokio::test]
+async fn follower_worker_keeps_applied_progress_when_a_later_read_fails() {
+    let topic = "worker-partial-progress";
+    let (owner, _owner_dir) = open_test_broker().await;
+    let (follower, _follower_dir) = open_test_broker().await;
+    follower
+        .apply_assignment_transition(&assignment_transition(
+            topic,
+            LocalAssignmentIntent::BecomeFollower,
+            None,
+            Some(LocalAssignmentRole::Follower),
+        ))
+        .await
+        .unwrap();
+
+    let group = Some("workers".to_string());
+    let publisher = owner
+        .get_publisher(topic, Partition::new(0), &group)
+        .await
+        .unwrap();
+    for payload in [b"first".as_slice(), b"second".as_slice()] {
+        publisher
+            .publish(payload.to_vec(), unix_millis(), unix_millis(), None, Default::default(), None)
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    let queue = QueueIdentity::new(topic, Partition::new(0), Some("workers"));
+    let cfg = FollowerReplicationWorkerConfig::default();
+    let flaky = FailAfterFirstReadPeer {
+        owner: &owner,
+        reads: AtomicUsize::new(0),
+    };
+    follower
+        .run_follower_replication_worker_once(&flaky, &queue, ReplicationResourceKind::Queue, cfg)
+        .await
+        .expect_err("the second read fails");
+    let state = follower
+        .follower_replication_worker_snapshot(topic, Partition::new(0), Some("workers"))
+        .await
+        .unwrap();
+    let FollowerCursor::Queue { next_offset } = state.cursor else {
+        panic!("queue worker has a queue cursor")
+    };
+    assert!(next_offset > 0, "cursor keeps the batch applied before the failure");
+
+    // Resuming from the kept cursor appends after the local tail instead of
+    // overlapping it and asking for a checkpoint.
+    let outcome = follower
+        .run_follower_replication_worker_once(&owner, &queue, ReplicationResourceKind::Queue, cfg)
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, FollowerCatchUp::Queue(BrokerQueueCatchUp::CaughtUp(_))),
+        "unexpected outcome {outcome:?}"
+    );
+
+    follower.shutdown().await;
+    owner.shutdown().await;
+}
+
 #[tokio::test]
 async fn owner_replication_long_poll_wakes_on_broker_shutdown() {
     let (owner, _owner_dir) = open_test_broker().await;

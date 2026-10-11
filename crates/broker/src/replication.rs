@@ -3063,6 +3063,36 @@ impl Broker<StromaEngine> {
         group: Option<&str>,
         options: QueueCatchUpOptions,
     ) -> Result<BrokerQueueCatchUp, BrokerError> {
+        let mut progress = QueueCatchUpProgress {
+            next_offset: options.from,
+            ..Default::default()
+        };
+        self.catch_up_queue_follower_tracked(
+            engine,
+            owner,
+            topic,
+            partition,
+            group,
+            options,
+            &mut progress,
+        )
+        .await
+    }
+
+    /// Queue catch-up that keeps `progress` current after every applied
+    /// batch, so a caller still knows how far the local log got when a
+    /// later read fails.
+    #[allow(clippy::too_many_arguments)]
+    async fn catch_up_queue_follower_tracked(
+        &self,
+        engine: &StromaEngine,
+        owner: &dyn BrokerOwnerReplicationPeer,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        options: QueueCatchUpOptions,
+        progress: &mut QueueCatchUpProgress,
+    ) -> Result<BrokerQueueCatchUp, BrokerError> {
         if options.max_records_per_read == 0
             || options.max_bytes_per_read == 0
             || options.max_iterations == 0
@@ -3071,11 +3101,6 @@ impl Broker<StromaEngine> {
                 "replication catch-up limits must be greater than zero".into(),
             ));
         }
-
-        let mut progress = QueueCatchUpProgress {
-            next_offset: options.from,
-            ..Default::default()
-        };
 
         for _ in 0..options.max_iterations {
             let read = {
@@ -3108,7 +3133,7 @@ impl Broker<StromaEngine> {
                 .await?;
                 return match apply {
                     BrokerQueueFollowerApply::CheckpointRequired(required) => {
-                        Ok(BrokerQueueCatchUp::CheckpointRequired { progress, required })
+                        Ok(BrokerQueueCatchUp::CheckpointRequired { progress: *progress, required })
                     }
                     BrokerQueueFollowerApply::Applied(_) => {
                         tracing::error!(
@@ -3132,24 +3157,24 @@ impl Broker<StromaEngine> {
             let outcome = match apply {
                 BrokerQueueFollowerApply::Applied(outcome) => outcome,
                 BrokerQueueFollowerApply::CheckpointRequired(required) => {
-                    return Ok(BrokerQueueCatchUp::CheckpointRequired { progress, required });
+                    return Ok(BrokerQueueCatchUp::CheckpointRequired { progress: *progress, required });
                 }
             };
             match replicated_append_progress_after_apply("queue", &read_progress, outcome.as_ref())? {
                 ReplicatedAppendProgress::Advanced(next) => progress.next_offset = next,
                 ReplicatedAppendProgress::CheckpointRequired(required) => {
-                    return Ok(BrokerQueueCatchUp::CheckpointRequired { progress, required });
+                    return Ok(BrokerQueueCatchUp::CheckpointRequired { progress: *progress, required });
                 }
             }
 
             progress.iterations += 1;
             progress.applied_records += read_progress.record_count;
             if read_progress.record_count == 0 {
-                return Ok(BrokerQueueCatchUp::CaughtUp(progress));
+                return Ok(BrokerQueueCatchUp::CaughtUp(*progress));
             }
         }
 
-        Ok(BrokerQueueCatchUp::IterationLimit { progress })
+        Ok(BrokerQueueCatchUp::IterationLimit { progress: *progress })
     }
 
     /// Queue catch-up that requests a coordinated reseed when the owner has
@@ -3188,6 +3213,25 @@ impl Broker<StromaEngine> {
         partition: Partition,
         options: StreamCatchUpOptions,
     ) -> Result<BrokerStreamCatchUp, BrokerError> {
+        let mut progress = StreamCatchUpProgress {
+            message_next_offset: options.message_from,
+            event_next_offset: options.event_from,
+            ..Default::default()
+        };
+        self.catch_up_stream_follower_tracked(owner, topic, partition, options, &mut progress)
+            .await
+    }
+
+    /// Stream catch-up that keeps `progress` current after every applied
+    /// batch, like [`Self::catch_up_queue_follower_tracked`].
+    async fn catch_up_stream_follower_tracked(
+        &self,
+        owner: &dyn BrokerOwnerReplicationPeer,
+        topic: &str,
+        partition: Partition,
+        options: StreamCatchUpOptions,
+        progress: &mut StreamCatchUpProgress,
+    ) -> Result<BrokerStreamCatchUp, BrokerError> {
         if options.max_messages_per_read == 0
             || options.max_events_per_read == 0
             || options.max_bytes_per_read == 0
@@ -3197,12 +3241,6 @@ impl Broker<StromaEngine> {
                 "replication catch-up limits must be greater than zero".into(),
             ));
         }
-
-        let mut progress = StreamCatchUpProgress {
-            message_next_offset: options.message_from,
-            event_next_offset: options.event_from,
-            ..Default::default()
-        };
 
         for _ in 0..options.max_iterations {
             let records = {
@@ -3244,7 +3282,7 @@ impl Broker<StromaEngine> {
                     return match apply {
                         BrokerStreamFollowerApply::CheckpointRequired { messages, events } => {
                             Ok(BrokerStreamCatchUp::CheckpointRequired {
-                                progress,
+                                progress: *progress,
                                 messages,
                                 events,
                             })
@@ -3281,7 +3319,7 @@ impl Broker<StromaEngine> {
                         }
                         ReplicatedAppendProgress::CheckpointRequired(checkpoint) => {
                             return Ok(BrokerStreamCatchUp::CheckpointRequired {
-                                progress,
+                                progress: *progress,
                                 messages: Some(checkpoint),
                                 events: None,
                             });
@@ -3297,7 +3335,7 @@ impl Broker<StromaEngine> {
                         }
                         ReplicatedAppendProgress::CheckpointRequired(checkpoint) => {
                             return Ok(BrokerStreamCatchUp::CheckpointRequired {
-                                progress,
+                                progress: *progress,
                                 messages: None,
                                 events: Some(checkpoint),
                             });
@@ -3306,7 +3344,7 @@ impl Broker<StromaEngine> {
                 }
                 BrokerStreamFollowerApply::CheckpointRequired { messages, events } => {
                     return Ok(BrokerStreamCatchUp::CheckpointRequired {
-                        progress,
+                        progress: *progress,
                         messages,
                         events,
                     });
@@ -3318,11 +3356,11 @@ impl Broker<StromaEngine> {
             progress.applied_event_records += event_progress.record_count;
 
             if message_progress.record_count == 0 && event_progress.record_count == 0 {
-                return Ok(BrokerStreamCatchUp::CaughtUp(progress));
+                return Ok(BrokerStreamCatchUp::CaughtUp(*progress));
             }
         }
 
-        Ok(BrokerStreamCatchUp::IterationLimit { progress })
+        Ok(BrokerStreamCatchUp::IterationLimit { progress: *progress })
     }
 
     pub async fn catch_up_stream_follower_with_checkpoint(
@@ -3397,27 +3435,74 @@ impl Broker<StromaEngine> {
             ReplicationResourceKind::Queue => {
                 let options = worker.lock().await.queue_catch_up_options(cfg)?;
                 let group = queue.group.as_deref();
-                FollowerCatchUp::Queue(if cfg.allow_checkpoint_install {
-                    self.catch_up_queue_follower_with_checkpoint(
-                        owner, topic, queue.partition, group, options,
+                let mut progress = QueueCatchUpProgress {
+                    next_offset: options.from,
+                    ..Default::default()
+                };
+                let result = self
+                    .catch_up_queue_follower_tracked(
+                        &self.engine,
+                        owner,
+                        topic,
+                        queue.partition,
+                        group,
+                        options,
+                        &mut progress,
                     )
-                    .await?
-                } else {
-                    self.catch_up_queue_follower(owner, topic, queue.partition, group, options)
-                        .await?
-                })
+                    .await;
+                // Batches applied before a failed read are in the local log.
+                // Keep the cursor past them, or the next pass re-reads them,
+                // sees an overlap and asks for a checkpoint it cannot get.
+                let outcome = match result {
+                    Ok(outcome) => outcome,
+                    Err(err) => {
+                        worker.lock().await.cursor = FollowerCursor::Queue {
+                            next_offset: progress.next_offset,
+                        };
+                        return Err(err);
+                    }
+                };
+                if cfg.allow_checkpoint_install
+                    && matches!(outcome, BrokerQueueCatchUp::CheckpointRequired { .. })
+                {
+                    self.request_reseed_for_exhausted_history(topic, queue.partition, group)
+                        .await?;
+                }
+                FollowerCatchUp::Queue(outcome)
             }
             ReplicationResourceKind::Stream => {
                 let options = worker.lock().await.stream_catch_up_options(cfg)?;
-                FollowerCatchUp::Stream(if cfg.allow_checkpoint_install {
-                    self.catch_up_stream_follower_with_checkpoint(
-                        owner, topic, queue.partition, options,
+                let mut progress = StreamCatchUpProgress {
+                    message_next_offset: options.message_from,
+                    event_next_offset: options.event_from,
+                    ..Default::default()
+                };
+                let result = self
+                    .catch_up_stream_follower_tracked(
+                        owner,
+                        topic,
+                        queue.partition,
+                        options,
+                        &mut progress,
                     )
-                    .await?
-                } else {
-                    self.catch_up_stream_follower(owner, topic, queue.partition, options)
-                        .await?
-                })
+                    .await;
+                let outcome = match result {
+                    Ok(outcome) => outcome,
+                    Err(err) => {
+                        worker.lock().await.cursor = FollowerCursor::Stream {
+                            message_next_offset: progress.message_next_offset,
+                            event_next_offset: progress.event_next_offset,
+                        };
+                        return Err(err);
+                    }
+                };
+                if cfg.allow_checkpoint_install
+                    && matches!(outcome, BrokerStreamCatchUp::CheckpointRequired { .. })
+                {
+                    self.request_reseed_for_exhausted_history(topic, queue.partition, None)
+                        .await?;
+                }
+                FollowerCatchUp::Stream(outcome)
             }
         };
 
