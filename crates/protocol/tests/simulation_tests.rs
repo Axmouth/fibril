@@ -123,7 +123,11 @@ fn test_broker_config() -> BrokerConfig {
 /// and simulated time before any cluster scenario builds on it.
 #[test]
 fn broker_runs_inside_turmoil_host() {
-    let mut sim = turmoil::Builder::new().build();
+    // Explicit bound instead of the 10s turmoil default, so a stuck publish fails
+    // the test rather than relying on an implicit limit.
+    let mut sim = turmoil::Builder::new()
+        .simulation_duration(Duration::from_secs(60))
+        .build();
 
     sim.client("node", async {
         let topic = "sim.smoke";
@@ -316,7 +320,11 @@ fn follower_catches_up_over_simulated_network() {
     let topic = "sim.catchup";
     let payloads: &[&[u8]] = &[b"first", b"second"];
 
-    let mut sim = turmoil::Builder::new().build();
+    // Explicit bound instead of the 10s turmoil default, above the 30s catch-up
+    // deadline.
+    let mut sim = turmoil::Builder::new()
+        .simulation_duration(Duration::from_secs(120))
+        .build();
     spawn_owner_host(&mut sim, topic, payloads);
     sim.client("b-follower", async move {
         run_catch_up_follower(topic, "follower", Duration::from_secs(30)).await
@@ -367,7 +375,11 @@ fn owner_partition_fails_over_to_caught_up_follower() {
     let topic = "sim.failover";
     let payloads: &[&[u8]] = &[b"failover-first", b"failover-second"];
 
-    let mut sim = turmoil::Builder::new().build();
+    // Explicit bound instead of the 10s turmoil default, above the three 30s phase
+    // timeouts below.
+    let mut sim = turmoil::Builder::new()
+        .simulation_duration(Duration::from_secs(300))
+        .build();
     spawn_owner_host(&mut sim, topic, payloads);
 
     let caught_up = Arc::new(AtomicBool::new(false));
