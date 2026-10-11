@@ -118,6 +118,9 @@ pub fn decode_advertise(raw: &str) -> Vec<String> {
 /// from its advertise label when present and non-empty, otherwise the single
 /// registered endpoint (empty when that is absent too).
 fn node_advertise_endpoints(node: &ganglion_core::NodeInfo) -> Vec<String> {
+    if gateway::node_is_private(node) {
+        return Vec::new();
+    }
     advertise_endpoints(
         &node.endpoint,
         node.labels.get(ADVERTISE_LABEL).map(String::as_str),
@@ -137,6 +140,7 @@ fn advertise_endpoints(endpoint: &str, advertised: Option<&str>) -> Vec<String> 
         })
 }
 
+pub mod gateway;
 mod targeted_route;
 
 /// Serialize a broker's local cohort membership for its heartbeat label.
@@ -632,9 +636,14 @@ pub struct ClientQueueTopology {
     pub partition: fibril_broker::Partition,
     pub group: Option<String>,
     pub owner_node_id: String,
-    /// Broker endpoints of the owner in priority order, empty when the node is
-    /// not in the registry. Clients try them in order.
+    /// Client endpoints for the partition in priority order, empty when the
+    /// owner is not in the registry, or is private with no live public broker
+    /// to serve it. Clients try them in order.
     pub owner_endpoints: Vec<String>,
+    /// Set when the owner is private and `owner_endpoints` belong to the
+    /// public broker chosen to forward for it.
+    #[serde(default)]
+    pub via_gateway: bool,
     pub partitioning_version: u64,
     /// Total partition count of this queue `(topic, group)` — authoritative N
     /// for key routing.
@@ -649,13 +658,29 @@ pub struct ClientStreamTopology {
     pub topic: String,
     pub partition: fibril_broker::Partition,
     pub owner_node_id: String,
-    /// Broker endpoints of the owner in priority order, empty when the node is
-    /// not in the registry. Clients try them in order.
+    /// Client endpoints for the partition in priority order, see
+    /// [`ClientQueueTopology::owner_endpoints`].
     pub owner_endpoints: Vec<String>,
+    /// See [`ClientQueueTopology::via_gateway`].
+    #[serde(default)]
+    pub via_gateway: bool,
     pub partitioning_version: u64,
     /// Total partition count of this stream topic — authoritative N for key
     /// routing.
     pub partition_count: u32,
+}
+
+/// Routing view of one partition for the protocol handler: who owns it, the
+/// owner's own client endpoints, and what clients are told.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientRoute {
+    pub owner_node_id: String,
+    /// The owner's own client endpoints. Empty when the owner is private.
+    pub owner_endpoints: Vec<String>,
+    /// What topology answers and redirects carry: the owner's endpoints, or a
+    /// gateway's when the owner is private. Empty with no live gateway.
+    pub client_endpoints: Vec<String>,
+    pub partitioning_version: u64,
 }
 
 /// Client-facing topology snapshot: the owner/endpoint of every assigned queue
@@ -1143,6 +1168,9 @@ pub struct GanglionCoordination {
     forwarder: tokio::task::JoinHandle<()>,
     wire_format: WireFormat,
     forwarded_write_policy: ForwardedWritePolicy,
+    // Heartbeat age past which a public broker stops being a gateway. Set
+    // from the controller's liveness TTL at startup.
+    gateway_liveness_ttl_ms: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for GanglionCoordination {
@@ -1217,7 +1245,51 @@ impl GanglionCoordination {
             forwarder,
             wire_format,
             forwarded_write_policy,
+            gateway_liveness_ttl_ms: std::sync::atomic::AtomicU64::new(
+                ControllerConfig::default().liveness_ttl.as_millis() as u64,
+            ),
         }
+    }
+
+    /// Use the controller's liveness TTL when choosing gateways, so a public
+    /// broker the controller considers dead is never named to clients.
+    pub fn set_gateway_liveness_ttl(&self, ttl: std::time::Duration) {
+        self.gateway_liveness_ttl_ms
+            .store(ttl.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn gateway_liveness_ttl_ms(&self) -> u64 {
+        self.gateway_liveness_ttl_ms
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The address peers dial for `node_id` (the node table endpoint).
+    pub fn node_peer_address(&self, node_id: &str) -> Option<String> {
+        self.node.read_committed(|state| {
+            state
+                .nodes
+                .values()
+                .rev()
+                .find(|node| node.node_id == node_id)
+                .map(|node| node.endpoint.clone())
+                .filter(|endpoint| !endpoint.is_empty())
+        })
+    }
+
+    /// Whether the current view holds a private node but no live public
+    /// broker that could forward for it. Clients then get empty endpoints for
+    /// private-owned partitions.
+    pub fn private_nodes_without_gateway(&self) -> bool {
+        let state = self.node.committed_snapshot();
+        let any_private = state.nodes.values().any(gateway::node_is_private);
+        any_private
+            && gateway::gateway_candidates(
+                state.nodes.values(),
+                unix_millis_now(),
+                self.gateway_liveness_ttl_ms(),
+                node_advertise_endpoints,
+            )
+            .is_empty()
     }
 
     /// Register (or refresh) this broker in the committed snapshot.
@@ -2954,6 +3026,35 @@ impl GanglionCoordination {
             .values()
             .map(|node| (node.node_id.clone(), node_advertise_endpoints(node)))
             .collect();
+        let private: std::collections::HashSet<String> = committed
+            .nodes
+            .values()
+            .filter(|node| gateway::node_is_private(node))
+            .map(|node| node.node_id.clone())
+            .collect();
+        let gateways = if private.is_empty() {
+            Vec::new()
+        } else {
+            gateway::gateway_candidates(
+                committed.nodes.values(),
+                unix_millis_now(),
+                self.gateway_liveness_ttl_ms(),
+                node_advertise_endpoints,
+            )
+        };
+        // A private owner's partition is served through the gateway the
+        // rendezvous choice names. Every route clients see goes through here
+        // or through the targeted route, which applies the same rule.
+        let client_endpoints = |owner: &str, topic: &str, group: Option<&str>, partition: u32| {
+            if private.contains(owner) {
+                let chosen = gateway::rendezvous_gateway(&gateways, topic, group, partition)
+                    .map(|gateway| gateway.endpoints.clone())
+                    .unwrap_or_default();
+                (chosen, true)
+            } else {
+                (endpoints.get(owner).cloned().unwrap_or_default(), false)
+            }
+        };
         let generation = committed.generation;
         // Authoritative partitioning (count + version) per (topic, group), read
         // from the committed attributes we already hold.
@@ -2974,15 +3075,19 @@ impl GanglionCoordination {
             .map(|assignment| {
                 let group = assignment.queue.group.as_ref().map(ToString::to_string);
                 let part = partitioning(&assignment.queue.topic, group.as_deref());
+                let (owner_endpoints, via_gateway) = client_endpoints(
+                    &assignment.owner,
+                    &assignment.queue.topic,
+                    group.as_deref(),
+                    assignment.queue.partition.id(),
+                );
                 ClientQueueTopology {
                     topic: assignment.queue.topic.to_string(),
                     partition: assignment.queue.partition,
                     group,
                     owner_node_id: assignment.owner.clone(),
-                    owner_endpoints: endpoints
-                        .get(&assignment.owner)
-                        .cloned()
-                        .unwrap_or_default(),
+                    owner_endpoints,
+                    via_gateway,
                     partitioning_version: part.partitioning_version,
                     partition_count: part.partition_count,
                 }
@@ -3011,14 +3116,18 @@ impl GanglionCoordination {
             .map(|assignment| {
                 let (partition_count, partitioning_version) =
                     stream_partitioning(&assignment.stream.topic);
+                let (owner_endpoints, via_gateway) = client_endpoints(
+                    &assignment.owner,
+                    &assignment.stream.topic,
+                    None,
+                    assignment.stream.partition.id(),
+                );
                 ClientStreamTopology {
                     topic: assignment.stream.topic.to_string(),
                     partition: assignment.stream.partition,
                     owner_node_id: assignment.owner.clone(),
-                    owner_endpoints: endpoints
-                        .get(&assignment.owner)
-                        .cloned()
-                        .unwrap_or_default(),
+                    owner_endpoints,
+                    via_gateway,
                     partitioning_version,
                     partition_count,
                 }

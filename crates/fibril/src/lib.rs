@@ -807,6 +807,8 @@ pub async fn open_tcp_ganglion_parts(
                 wire_format,
                 forwarded_write_policy_from_config(config),
             ));
+            coordination
+                .set_gateway_liveness_ttl(Duration::from_millis(section.liveness_ttl_ms));
             let (controller_task, controller_status) = coordination.spawn_controller(
                 Arc::new(DeterministicPartitionPlacement),
                 fibril_coordination_ganglion::ControllerConfig {

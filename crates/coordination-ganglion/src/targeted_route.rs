@@ -10,37 +10,109 @@ impl GanglionCoordination {
         partition: Partition,
         group: Option<&str>,
     ) -> Option<(String, u64)> {
+        let route = self.client_queue_route(topic, partition, group)?;
+        let version = route.partitioning_version;
+        route
+            .client_endpoints
+            .into_iter()
+            .next()
+            .map(|endpoint| (endpoint, version))
+    }
+
+    /// Routing view of one queue partition, with the same gateway rule as
+    /// [`GanglionCoordination::client_topology`].
+    pub fn client_queue_route(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+    ) -> Option<ClientRoute> {
         let resource = to_ganglion_resource(&QueueIdentity::new(topic, partition, group));
         let key = queue_partitioning_key(topic, group);
         // Keep this callback limited to lookups and copying route inputs. Parsing,
         // formatting, I/O, and calls back into coordination belong outside the lock.
-        let (endpoint, advertised, partitioning) = self.node.read_committed(|state| {
-            let assignment = state.assignments.get(&resource)?;
-            // Full topology keys endpoints by NodeInfo.node_id, with the last
-            // BTreeMap value winning duplicates. Preserve that behavior even
-            // for installed snapshots with noncanonical node map keys.
-            let node = state
-                .nodes
-                .values()
-                .rev()
-                .find(|node| node.node_id == assignment.owner)?;
-            Some((
-                node.endpoint.clone(),
-                node.labels.get(ADVERTISE_LABEL).cloned(),
-                state.attributes.get(&key).cloned(),
-            ))
-        })?;
+        let (owner, endpoint, advertised, private, gateway_inputs, partitioning) =
+            self.node.read_committed(|state| {
+                let assignment = state.assignments.get(&resource)?;
+                // Full topology keys endpoints by NodeInfo.node_id, with the last
+                // BTreeMap value winning duplicates. Preserve that behavior even
+                // for installed snapshots with noncanonical node map keys.
+                let node = state
+                    .nodes
+                    .values()
+                    .rev()
+                    .find(|node| node.node_id == assignment.owner)?;
+                let private = gateway::node_is_private(node);
+                // Gateway inputs are only needed for a private owner.
+                let gateway_inputs: Vec<ganglion_core::NodeInfo> = if private {
+                    state
+                        .nodes
+                        .values()
+                        .filter(|node| !gateway::node_is_private(node))
+                        .cloned()
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                Some((
+                    assignment.owner.clone(),
+                    node.endpoint.clone(),
+                    node.labels.get(ADVERTISE_LABEL).cloned(),
+                    private,
+                    gateway_inputs,
+                    state.attributes.get(&key).cloned(),
+                ))
+            })?;
         // Parsing is outside the state-machine lock; all inputs came from the
-        // same committed state, so owner and partition version remain coherent.
-        let version = partitioning
+        // same state, so owner and partition version remain coherent.
+        let partitioning_version = partitioning
             .as_deref()
             .and_then(|raw| serde_json::from_str::<QueuePartitioning>(raw).ok())
             .map(|part| part.partitioning_version)
             .unwrap_or(DEFAULT_PARTITIONING_VERSION);
-        advertise_endpoints(&endpoint, advertised.as_deref())
+        let (owner_endpoints, client_endpoints) = if private {
+            let candidates = gateway::gateway_candidates(
+                gateway_inputs.iter(),
+                unix_millis_now(),
+                self.gateway_liveness_ttl_ms(),
+                node_advertise_endpoints,
+            );
+            let chosen =
+                gateway::rendezvous_gateway(&candidates, topic, group, partition.id())
+                    .map(|gateway| gateway.endpoints.clone())
+                    .unwrap_or_default();
+            (Vec::new(), chosen)
+        } else {
+            let own = advertise_endpoints(&endpoint, advertised.as_deref());
+            (own.clone(), own)
+        };
+        Some(ClientRoute {
+            owner_node_id: owner,
+            owner_endpoints,
+            client_endpoints,
+            partitioning_version,
+        })
+    }
+
+    /// Routing view of one stream partition. Streams are rare on this path,
+    /// so it reads the full topology.
+    pub fn client_stream_route(&self, topic: &str, partition: Partition) -> Option<ClientRoute> {
+        let topology = self.client_topology();
+        let stream = topology
+            .streams
             .into_iter()
-            .next()
-            .map(|endpoint| (endpoint, version))
+            .find(|stream| stream.topic == topic && stream.partition == partition)?;
+        let owner_endpoints = if stream.via_gateway {
+            Vec::new()
+        } else {
+            stream.owner_endpoints.clone()
+        };
+        Some(ClientRoute {
+            owner_node_id: stream.owner_node_id,
+            owner_endpoints,
+            client_endpoints: stream.owner_endpoints,
+            partitioning_version: stream.partitioning_version,
+        })
     }
 }
 
@@ -284,6 +356,90 @@ mod tests {
                 );
             }
         }
+        provider.consensus_node().shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn private_owner_routes_through_a_live_public_gateway() {
+        let router = InProcessRouter::new();
+        let node = RaftMetadataNode::start(1, default_raft_config().unwrap(), &router)
+            .await
+            .unwrap();
+        node.initialize(BTreeMap::from([(
+            1,
+            ganglion_openraft::openraft::BasicNode::new("one"),
+        )]))
+        .await
+        .unwrap();
+        node.wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .unwrap();
+        let provider = GanglionCoordination::new("public-a", node);
+        let mut state = ganglion_core::CoordinationSnapshot {
+            generation: 1,
+            ..Default::default()
+        };
+        let mut private = ganglion_core::NodeInfo::new("private-p", "10.0.0.9:9876", None);
+        private
+            .labels
+            .insert(VISIBILITY_LABEL.into(), PRIVATE_VISIBILITY.into());
+        state.nodes.insert("private-p".into(), private);
+        let mut public = ganglion_core::NodeInfo::new("public-a", "10.0.0.1:9876", None);
+        public.labels.insert(
+            ADVERTISE_LABEL.into(),
+            encode_advertise(&["lb.example:9876".into()]),
+        );
+        public
+            .labels
+            .insert(HEARTBEAT_LABEL.into(), unix_millis_now().to_string());
+        state.nodes.insert("public-a".into(), public);
+        let resource = to_ganglion_resource(&QueueIdentity::new("orders", Partition::new(0), None));
+        state.assignments.insert(
+            resource.clone(),
+            ganglion_core::PartitionAssignment::new(resource, "private-p", vec![], 1),
+        );
+        provider
+            .consensus_node()
+            .write_snapshot(state.clone())
+            .await
+            .unwrap();
+
+        let route = provider
+            .client_queue_route("orders", Partition::new(0), None)
+            .unwrap();
+        assert_eq!(route.owner_node_id, "private-p");
+        assert!(route.owner_endpoints.is_empty());
+        assert_eq!(route.client_endpoints, vec!["lb.example:9876".to_string()]);
+        let full = provider.client_topology();
+        assert!(full.queues[0].via_gateway);
+        assert_eq!(full.queues[0].owner_endpoints, route.client_endpoints);
+        // The private node's own peer address never reaches clients.
+        assert!(!format!("{full:?}").contains("10.0.0.9"));
+        assert_eq!(
+            provider.node_peer_address("private-p").as_deref(),
+            Some("10.0.0.9:9876")
+        );
+        assert_matches_full(&provider);
+        assert!(!provider.private_nodes_without_gateway());
+
+        // A dead public broker is no gateway: the route stays owned but has no
+        // client endpoints, which clients treat as an unknown owner.
+        state.generation = 2;
+        state.nodes.get_mut("public-a").unwrap().labels.insert(
+            HEARTBEAT_LABEL.into(),
+            (unix_millis_now() - 600_000).to_string(),
+        );
+        provider
+            .consensus_node()
+            .write_snapshot(state.clone())
+            .await
+            .unwrap();
+        let route = provider
+            .client_queue_route("orders", Partition::new(0), None)
+            .unwrap();
+        assert!(route.client_endpoints.is_empty());
+        assert_matches_full(&provider);
+        assert!(provider.private_nodes_without_gateway());
         provider.consensus_node().shutdown().await.unwrap();
     }
 }
