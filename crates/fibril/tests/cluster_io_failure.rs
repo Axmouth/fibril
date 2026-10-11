@@ -1,7 +1,4 @@
-#![cfg(all(
-    feature = "early-replication-experiment",
-    feature = "io-fault-injection"
-))]
+#![cfg(feature = "io-fault-injection")]
 use fibril_broker::{
     Partition,
     broker::{Broker, BrokerConfig},
@@ -59,13 +56,16 @@ async fn serve_test_broker(
     (address, task)
 }
 
+fn early_config() -> BrokerConfig {
+    BrokerConfig {
+        replication_early: true,
+        ..BrokerConfig::default()
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn admitted_cluster_owner_io_failure_recovery_and_rejoin() {
     fibril_util::init_tracing();
-    assert_eq!(
-        std::env::var("FIBRIL_EXPERIMENT_EARLY_REPLICATION").as_deref(),
-        Ok("1")
-    );
     for all in [false, true] {
         for after_sync in [false, true] {
             tokio::time::timeout(Duration::from_secs(180), run_case(all, after_sync))
@@ -134,7 +134,7 @@ async fn run_case(all: bool, after_sync: bool) {
         .await
         .unwrap();
         let broker =
-            Broker::new_with_ownership(engine, BrokerConfig::default(), None, providers[i].clone());
+            Broker::new_with_ownership(engine, early_config(), None, providers[i].clone());
         let (address, listener) = serve_test_broker(broker.clone()).await;
         providers[i]
             .register_self(&NodeInfo {
@@ -483,7 +483,7 @@ async fn run_case(all: bool, after_sync: bool) {
     .await
     .unwrap();
     let broker =
-        Broker::new_with_ownership(engine, BrokerConfig::default(), None, restarted.clone());
+        Broker::new_with_ownership(engine, early_config(), None, restarted.clone());
     let (address, listener) = serve_test_broker(broker.clone()).await;
     config.nodes.insert("a".into(), address.clone());
     restarted
@@ -564,7 +564,7 @@ async fn run_case(all: bool, after_sync: bool) {
         .queue_durable_commit("q", 0, None)
         .await
         .unwrap()
-        .next();
+        .next;
     let confirmation = publisher
         .publish(
             99u64.to_le_bytes().to_vec(),

@@ -9,6 +9,7 @@ use crate::{broker::BrokerConfig, queue_engine::StromaEngine};
 const ENVELOPE_VERSION: u16 = 1;
 pub const RUNTIME_SETTINGS_NAMESPACE: &str = "fibril.runtime";
 pub const RUNTIME_SETTINGS_KEY: &str = "settings";
+pub const MAX_STREAM_INITIAL_CREDIT_BYTES: u64 = 128 * 1024 * 1024;
 
 /// Mutable broker settings loaded from the boot seed and then persisted in Stroma.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -99,6 +100,16 @@ impl RuntimeSettings {
                 "replication.eager_failover_grace_ms must be between 0 and 60000".into(),
             ));
         }
+        if self.replication.stream_initial_credit_bytes > MAX_STREAM_INITIAL_CREDIT_BYTES {
+            return Err(RuntimeSettingsError::Invalid(format!(
+                "replication.stream_initial_credit_bytes must be at most {MAX_STREAM_INITIAL_CREDIT_BYTES}"
+            )));
+        }
+        if self.replication.stream_apply_open_batch > 3 {
+            return Err(RuntimeSettingsError::Invalid(
+                "replication.stream_apply_open_batch must be between 0 and 3".into(),
+            ));
+        }
 
         if self.delivery.expiry_batch_max == 0 {
             return Err(RuntimeSettingsError::Invalid(
@@ -186,6 +197,10 @@ pub struct DeliveryRuntimeSettings {
 pub struct ReplicationRuntimeSettings {
     /// Opt-in controller suspicion from repeated explicit Raft transport errors.
     pub eager_failover: bool,
+    /// Experimental. Owners of history-bound queues send written records to
+    /// followers before their own fsync. Confirms still wait for owner
+    /// durability.
+    pub early_replication: bool,
     /// Background agreed checkpoints; zero disables new attempts.
     pub agreed_checkpoint_interval_ms: u64,
     /// Start earlier after this many events beyond the agreed cut; 0 disables.
@@ -242,12 +257,24 @@ pub struct ReplicationRuntimeSettings {
     /// In-flight batch buffer depth (credit window) for the streaming follower.
     /// Read at stream establish (setup-time): a change applies on the next stream.
     pub stream_buffer_batches: usize,
+    /// Experimental. Initial byte credit a follower grants a push stream; 0
+    /// uses `max_bytes_per_read`. Read at stream establish.
+    pub stream_initial_credit_bytes: u64,
+    /// Experimental. Collect for one fixed linger budget from the first frame
+    /// instead of ending the wait at the next arrival.
+    pub stream_apply_fixed_deadline: bool,
+    /// Experimental follower open batch mode. 0 off, 1 stage frames as they
+    /// arrive, 2 collect first then use the same sync path (a measurement
+    /// control), 3 like 1 and also drain queued continuations without a fresh
+    /// wait.
+    pub stream_apply_open_batch: u8,
 }
 
 impl Default for ReplicationRuntimeSettings {
     fn default() -> Self {
         Self {
             eager_failover: false,
+            early_replication: false,
             agreed_checkpoint_interval_ms: 0,
             agreed_checkpoint_max_events: 0,
             agreed_checkpoint_max_bytes: 0,
@@ -268,6 +295,9 @@ impl Default for ReplicationRuntimeSettings {
             stream_apply_linger_us: 2_000,
             stream_apply_max_merge_bytes: 16 * 1024 * 1024,
             stream_buffer_batches: 8,
+            stream_initial_credit_bytes: 0,
+            stream_apply_fixed_deadline: false,
+            stream_apply_open_batch: 0,
         }
     }
 }
@@ -573,11 +603,15 @@ impl BrokerConfig {
             replication_read_timeout_slack_ms: settings.replication.read_timeout_slack_ms,
             replication_owner_connect_timeout_ms: settings.replication.owner_connect_timeout_ms,
             replication_stream_enabled: settings.replication.stream_enabled,
+            replication_early: settings.replication.early_replication,
             replication_stream_apply_linger_us: settings.replication.stream_apply_linger_us,
             replication_stream_apply_max_merge_bytes: settings
                 .replication
                 .stream_apply_max_merge_bytes,
             replication_stream_buffer_batches: settings.replication.stream_buffer_batches,
+            replication_stream_initial_credit_bytes: settings.replication.stream_initial_credit_bytes,
+            replication_stream_apply_fixed_deadline: settings.replication.stream_apply_fixed_deadline,
+            replication_stream_apply_open_batch: settings.replication.stream_apply_open_batch,
             default_partition_count: settings.partitioning.default_partition_count,
             stream_cursor_commit_window_us: settings.stream.cursor_commit_window_us,
             stream_cursor_commit_max_batch: settings.stream.cursor_commit_max_batch,

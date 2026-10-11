@@ -8487,6 +8487,8 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
                         keepalive_ms: 20,
                         apply_linger_us: 0,
                         max_merge_bytes: 65536,
+                        fixed_deadline: false,
+                        open_batch: 0,
                     }),
                     4,
                     apply,

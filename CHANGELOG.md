@@ -12,6 +12,21 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Breaking changes
 
+- Early replication is the `replication.early_replication` runtime setting,
+  off by default, shared by the cluster and adjustable live from the settings
+  page. The `early-replication-experiment` build feature, the
+  `FIBRIL_EXPERIMENT_EARLY_REPLICATION` and
+  `FIBRIL_EXPERIMENT_EVENT_TAIL_CACHE_BYTES` variables are removed. Targeted queue routing
+  loses its `targeted-routing-experiment` feature and
+  `FIBRIL_EXPERIMENT_TARGETED_ROUTING=0` override and is always on.
+
+- Two follower batching experiments are runtime settings, off by default and
+  adjustable live: `replication.stream_apply_fixed_deadline` and
+  `replication.stream_apply_open_batch`. Their build features
+  (`fixed-coalesce-deadline-experiment`, `open-follower-batch-experiment`) and
+  variables (`FIBRIL_EXPERIMENT_FIXED_COALESCE_DEADLINE`,
+  `FIBRIL_EXPERIMENT_OPEN_FOLLOWER_BATCH`) are removed.
+
 - Queues finish the move to one replicated log. The broker no longer
   re-exports `QueueLogLayout`, and recovery inspection journals no longer
   record a `stream` flag, so journal and phase caches from earlier builds are
@@ -114,10 +129,9 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
-- `replication-credit-experiment`, an off-by-default broker feature for
-  measurements. With it built in, `REPL_STREAM_CREDIT_BYTES` (1 to 134217728)
-  sets the follower queue push credit apart from the per-read byte budget.
-  Unset, the credit stays at one read budget. Default builds are unchanged.
+- `replication.stream_initial_credit_bytes`, an experimental runtime setting
+  (0 to 134217728, default 0) that sets the follower queue push credit apart
+  from the per-read byte budget. Zero keeps the credit at one read budget.
 
 - `steady_c --rate-per-sec 0` publishes as fast as the client allows with no
   interval pacing, so a saturation run measures the client instead of the

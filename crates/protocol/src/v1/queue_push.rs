@@ -433,59 +433,6 @@ pub trait FollowerPushSink: Send + Sync + 'static {
     async fn apply(&self, batch: QueueReplicationReadOk) -> FollowerApplyOutcome;
 }
 
-/// Drain in-order batches from the reader and apply them durably, sending a
-/// combined progress+credit refill after each one. Ends when the reader channel
-/// closes (push torn down) or an apply error occurs. The reader feeds
-/// `batch_rx`; the transport encodes `control_tx` items to frames.
-///
-/// `from` is the starting durable cursor. When no batch arrives within
-/// `keepalive` (the follower is caught up), a zero-credit progress frame is
-/// sent so the owner's in-sync freshness check stays satisfied for an
-/// idle-but-current follower (the pull path gets this for free via caught-up
-/// polling). `keepalive` of zero disables the keepalive.
-pub async fn run_follower_push_applier<S: FollowerPushSink>(
-    sink: Arc<S>,
-    batch_rx: mpsc::Receiver<QueueReplicationReadOk>,
-    control_tx: mpsc::Sender<FollowerPushControl>,
-    from: u64,
-    tunables: StreamApplyTunablesFn,
-) -> ApplierExit {
-    #[cfg(feature = "fixed-coalesce-deadline-experiment")]
-    let deadline_policy = {
-        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *ENABLED.get_or_init(|| {
-            std::env::var("FIBRIL_EXPERIMENT_FIXED_COALESCE_DEADLINE").as_deref() == Ok("1")
-        })
-    };
-    #[cfg(not(feature = "fixed-coalesce-deadline-experiment"))]
-    let deadline_policy = false;
-    run_follower_push_applier_with_policy(
-        sink,
-        batch_rx,
-        control_tx,
-        from,
-        tunables,
-        deadline_policy,
-        open_batch_policy(),
-    )
-    .await
-}
-
-fn open_batch_policy() -> u8 {
-    #[cfg(feature = "open-follower-batch-experiment")]
-    {
-        static POLICY: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
-        *POLICY.get_or_init(|| match std::env::var("FIBRIL_EXPERIMENT_OPEN_FOLLOWER_BATCH").as_deref() {
-            Ok("1") => 1, // stage as input arrives
-            Ok("2") => 2, // attribution control: same sync path, collect first
-            Ok("3") => 3, // open batches, drain queued continuation without a fresh wait
-            _ => 0,
-        })
-    }
-    #[cfg(not(feature = "open-follower-batch-experiment"))]
-    { 0 }
-}
-
 /// Input is polled by storage after each frame is staged, keeping one recovery
 /// guard across the open group. No record clones and no detached apply task.
 struct OpenBatchInput<'a> {
@@ -532,14 +479,22 @@ impl OpenBatchInput<'_> {
     }
 }
 
-async fn run_follower_push_applier_with_policy<S: FollowerPushSink>(
+/// Drain in-order batches from the reader and apply them durably, sending a
+/// combined progress+credit refill after each one. Ends when the reader channel
+/// closes (push torn down) or an apply error occurs. The reader feeds
+/// `batch_rx`; the transport encodes `control_tx` items to frames.
+///
+/// `from` is the starting durable cursor. When no batch arrives within
+/// `keepalive` (the follower is caught up), a zero-credit progress frame is
+/// sent so the owner's in-sync freshness check stays satisfied for an
+/// idle-but-current follower (the pull path gets this for free via caught-up
+/// polling). `keepalive` of zero disables the keepalive.
+pub async fn run_follower_push_applier<S: FollowerPushSink>(
     sink: Arc<S>,
     mut batch_rx: mpsc::Receiver<QueueReplicationReadOk>,
     control_tx: mpsc::Sender<FollowerPushControl>,
     from: u64,
     tunables: StreamApplyTunablesFn,
-    deadline_policy: bool,
-    open_policy: u8,
 ) -> ApplierExit {
     // Microbatch the apply: pushed frames arrive small (the owner reads whatever
     // has trickled in), and applying each one separately means one follower fsync
@@ -565,6 +520,8 @@ async fn run_follower_push_applier_with_policy<S: FollowerPushSink>(
         let keepalive = std::time::Duration::from_millis(knobs.keepalive_ms);
         let apply_linger = std::time::Duration::from_micros(knobs.apply_linger_us);
         let max_merge_bytes = knobs.max_merge_bytes;
+        let deadline_policy = knobs.fixed_deadline;
+        let open_policy = knobs.open_batch;
 
         // First frame for this apply: a carried-over unmergeable frame, otherwise
         // a fresh receive. Ok(Some) = batch, Ok(None) = reader closed, Err(()) =
@@ -730,7 +687,27 @@ mod tests {
             keepalive_ms,
             apply_linger_us,
             max_merge_bytes,
+            fixed_deadline: false,
+            open_batch: 0,
         })
+    }
+
+    /// Same applier with the experimental batching policies forced on.
+    fn run_follower_push_applier_with_policy<S: FollowerPushSink>(
+        sink: Arc<S>,
+        batch_rx: mpsc::Receiver<QueueReplicationReadOk>,
+        control_tx: mpsc::Sender<FollowerPushControl>,
+        from: u64,
+        tunables: StreamApplyTunablesFn,
+        fixed_deadline: bool,
+        open_batch: u8,
+    ) -> impl std::future::Future<Output = ApplierExit> {
+        let tunables: StreamApplyTunablesFn = Arc::new(move || StreamApplyTunables {
+            fixed_deadline,
+            open_batch,
+            ..tunables()
+        });
+        run_follower_push_applier(sink, batch_rx, control_tx, from, tunables)
     }
 
     /// A mock queue log of `total` records (REC_BYTES each, offsets 0..total).
@@ -1620,6 +1597,8 @@ mod tests {
                 keepalive_ms: 0,
                 apply_linger_us: 0,
                 max_merge_bytes: 1,
+                fixed_deadline: false,
+                open_batch: 0,
             }
         });
 

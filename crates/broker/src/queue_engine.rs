@@ -910,7 +910,6 @@ impl StromaEngine {
         self.inner.global_store().await
     }
 
-    #[cfg(feature = "early-replication-experiment")]
     pub async fn subscribe_owner_written(
         &self,
         tp: &str,
@@ -926,7 +925,6 @@ impl StromaEngine {
         self.inner.subscribe_owner_written(tp, part, group).await
     }
 
-    #[cfg(feature = "early-replication-experiment")]
     pub async fn subscribe_owner_queue_written(
         &self,
         tp: &str,
@@ -950,7 +948,6 @@ impl StromaEngine {
             .await
     }
 
-    #[cfg(feature = "early-replication-experiment")]
     pub async fn read_owner_queue_records_early(
         &self,
         tp: &str,
@@ -978,7 +975,6 @@ impl StromaEngine {
             .await
     }
 
-    #[cfg(feature = "early-replication-experiment")]
     pub async fn read_owner_stream_records_early(
         &self,
         tp: &str,
@@ -1005,7 +1001,6 @@ impl StromaEngine {
             .await
     }
 
-    #[cfg(feature = "early-replication-experiment")]
     pub async fn read_owner_stream_cursor_events_early(
         &self,
         tp: &str,

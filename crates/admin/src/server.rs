@@ -4262,6 +4262,10 @@ mod tests {
         assert!(!body.contains("consumer group"));
         assert!(body.contains("id=\"replication.eager_failover\""));
         assert!(body.contains("id=\"replication.eager_failover_grace_ms\""));
+        assert!(body.contains("id=\"replication.early_replication\""));
+        assert!(body.contains("id=\"replication.stream_initial_credit_bytes\""));
+        assert!(body.contains("id=\"replication.stream_apply_open_batch\""));
+        assert!(body.contains("id=\"replication.stream_apply_fixed_deadline\""));
         // New runtime fields must be represented by the shared form. Its generic
         // collector preserves unknown fields too, including newer server fields.
         let settings = serde_json::to_value(RuntimeSettings::default()).unwrap();

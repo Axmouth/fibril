@@ -494,6 +494,7 @@ These settings apply to the experimental cluster replication path.
 | `runtime_seed.replication.agreed_checkpoint_max_events` | `0` | Start an enabled checkpoint earlier after this many events beyond its agreed cut; 0 disables the event trigger. |
 | `runtime_seed.replication.agreed_checkpoint_max_bytes` | `0` | Start earlier after approximately this many local append content bytes since observing the last certificate; 0 disables. The counter resets on reopen and excludes record framing; the periodic interval remains the fallback. |
 | `runtime_seed.replication.eager_failover` | `false` | Opt-in explicit peer-connection failure detection on the active metadata controller. Recovery proof is still required; see [eager failover](/reliability/replication/#eager-failover). |
+| `runtime_seed.replication.early_replication` | `false` | Experimental. Owners of history-bound queues send written records to followers before their own fsync. Publish confirms still wait for owner durability. Adjustable live from the settings page; see [owner I/O failure](/development/recovery-continuation/#early-replication-under-owner-io-failure). |
 | `runtime_seed.replication.eager_failover_grace_ms` | `1000` | Failed-reconnect grace, 0–60000 ms. Zero enables idle-disconnect monitoring and immediate reconnect verification on the active controller. Positive values require failed contact across the interval; heartbeat expiry handles silent failures. |
 | `runtime_seed.replication.caught_up_poll_ms` | `1000` | Caught-up pull interval and streaming owner long-poll timeout. Streaming reads wake when new work arrives, without waiting for the timeout. |
 | `runtime_seed.replication.retry_poll_ms` | `100` | Follower retry interval after a partial pull or transient replication error. |
@@ -510,6 +511,9 @@ These settings apply to the experimental cluster replication path.
 | `runtime_seed.replication.stream_apply_linger_us` | `2000` | Microseconds a streaming follower gathers contiguous frames before one fsynced apply. Higher trades apply latency for fsync amortization. `0` is drain-only. |
 | `runtime_seed.replication.stream_apply_max_merge_bytes` | `16777216` | Byte threshold for a coalesced streaming apply. Whole frames can cross it. Trades peak memory and overlap against fsync amortization. |
 | `runtime_seed.replication.stream_buffer_batches` | `8` | Queued frame count for the streaming follower, separate from byte credit. Applied on the next stream. |
+| `runtime_seed.replication.stream_initial_credit_bytes` | `0` | Experimental. Bytes a follower lets the owner push before its first progress report, up to 134217728. Zero uses `max_bytes_per_read`. Applied on the next stream. |
+| `runtime_seed.replication.stream_apply_fixed_deadline` | `false` | Experimental. Collect frames for the whole `stream_apply_linger_us` window from the first frame instead of stopping at the next arrival. Adjustable live. |
+| `runtime_seed.replication.stream_apply_open_batch` | `0` | Experimental follower batching mode. `0` off, `1` stages frames as they arrive under one sync, `2` collects first then uses the same sync path (a measurement control), `3` is `1` plus draining already queued frames without a fresh wait. Adjustable live. |
 
 Streaming owner reads adopt updated record and byte limits at the next batch.
 The initial credit window changes when a new follower stream starts. Oversized

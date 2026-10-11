@@ -1735,6 +1735,8 @@ pub struct ConsumerGroupSettings {
 #[serde(default)]
 pub struct ReplicationSettings {
     pub eager_failover: bool,
+    /// Experimental. See the runtime setting of the same name.
+    pub early_replication: bool,
     pub agreed_checkpoint_interval_ms: u64,
     /// Start earlier after this many events beyond the agreed cut; 0 disables.
     pub agreed_checkpoint_max_events: u64,
@@ -1786,6 +1788,12 @@ pub struct ReplicationSettings {
     /// takes effect on the next stream, not mid-stream.
     #[serde(default = "default_stream_buffer_batches")]
     pub stream_buffer_batches: usize,
+    /// Experimental. See the runtime setting of the same name.
+    pub stream_initial_credit_bytes: u64,
+    /// Experimental. See the runtime setting of the same name.
+    pub stream_apply_fixed_deadline: bool,
+    /// Experimental. See the runtime setting of the same name.
+    pub stream_apply_open_batch: u8,
 }
 
 fn default_read_timeout_slack_ms() -> u64 {
@@ -1812,6 +1820,7 @@ impl Default for ReplicationSettings {
     fn default() -> Self {
         Self {
             eager_failover: false,
+            early_replication: false,
             agreed_checkpoint_interval_ms: 0,
             agreed_checkpoint_max_events: 0,
             agreed_checkpoint_max_bytes: 0,
@@ -1838,6 +1847,9 @@ impl Default for ReplicationSettings {
             stream_apply_linger_us: default_stream_apply_linger_us(),
             stream_apply_max_merge_bytes: default_stream_apply_max_merge_bytes(),
             stream_buffer_batches: default_stream_buffer_batches(),
+            stream_initial_credit_bytes: 0,
+            stream_apply_fixed_deadline: false,
+            stream_apply_open_batch: 0,
         }
     }
 }

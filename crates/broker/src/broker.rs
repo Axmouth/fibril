@@ -412,6 +412,9 @@ pub struct BrokerConfig {
     /// pull loop. Default true (fold + failover validated); pull stays the
     /// automatic fallback on checkpoint/error.
     pub replication_stream_enabled: bool,
+    /// Send written but not yet durable records to followers of history-bound
+    /// queues this broker owns.
+    pub replication_early: bool,
     /// Linger (microseconds) the streaming follower spends gathering more
     /// contiguous frames before applying them as one fsynced batch. 0 = drain-only.
     pub replication_stream_apply_linger_us: u64,
@@ -421,6 +424,10 @@ pub struct BrokerConfig {
     /// In-flight batch buffer depth (credit window) for the streaming follower
     /// (setup-time: applies on the next stream).
     pub replication_stream_buffer_batches: usize,
+    /// Initial push credit in bytes; 0 uses the per-read byte budget.
+    pub replication_stream_initial_credit_bytes: u64,
+    pub replication_stream_apply_fixed_deadline: bool,
+    pub replication_stream_apply_open_batch: u8,
     /// Microbatch window (microseconds) the per-stream cursor-commit coalescer
     /// lingers to gather more acks before flushing them as ONE durable batch event
     /// and ONE actor command. A cursor is a monotonic high-water mark, so a window
@@ -465,9 +472,13 @@ impl Default for BrokerConfig {
             replication_read_timeout_slack_ms: 10_000,
             replication_owner_connect_timeout_ms: 5_000,
             replication_stream_enabled: true,
+            replication_early: false,
             replication_stream_apply_linger_us: 2_000,
             replication_stream_apply_max_merge_bytes: 16 * 1024 * 1024,
             replication_stream_buffer_batches: FOLLOWER_STREAM_BUFFER_BATCHES,
+            replication_stream_initial_credit_bytes: 0,
+            replication_stream_apply_fixed_deadline: false,
+            replication_stream_apply_open_batch: 0,
             stream_cursor_commit_window_us: 100,
             stream_cursor_commit_max_batch: 1024,
             default_partition_count: 1,

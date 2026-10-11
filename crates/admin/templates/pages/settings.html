@@ -275,7 +275,32 @@
           <input id="replication.stream_buffer_batches" data-runtime-setting type="number" min="1" step="1">
         <span id="seed.replication.stream_buffer_batches" class="settings-help"></span>
       </label>
+        <label class="settings-field">
+          <span class="settings-label">Stream initial credit bytes (experimental)</span>
+          <span class="settings-help">Bytes a follower lets the owner send before the first progress report. Zero uses the per-read byte budget. Larger values can raise saturated throughput at some CPU and memory cost. Applied on the next stream.</span>
+          <input id="replication.stream_initial_credit_bytes" data-runtime-setting type="number" min="0" max="134217728" step="1">
+        <span id="seed.replication.stream_initial_credit_bytes" class="settings-help"></span>
+      </label>
+        <label class="settings-field">
+          <span class="settings-label">Stream apply open batch (experimental)</span>
+          <span class="settings-help">How a follower groups frames before one disk sync. Staging on arrival can help steady load at a small CPU cost.</span>
+          <select id="replication.stream_apply_open_batch" data-runtime-setting>
+            <option value="0">Off</option>
+            <option value="1">Stage frames as they arrive</option>
+            <option value="2">Collect first (measurement control)</option>
+            <option value="3">Stage as they arrive and drain queued frames</option>
+          </select>
+        <span id="seed.replication.stream_apply_open_batch" class="settings-help"></span>
+      </label>
       </div>
+      <label class="checkbox-label">
+        <input id="replication.stream_apply_fixed_deadline" data-runtime-setting type="checkbox">
+        <span>
+          <span class="settings-label">Fixed apply deadline (experimental)</span>
+          <span class="settings-help">Keep collecting frames for the whole linger window instead of stopping at the next arrival. Helped bursts and cost a little latency under smooth load.</span>
+          <span id="seed.replication.stream_apply_fixed_deadline" class="settings-help"></span>
+        </span>
+      </label>
       <label class="settings-field">
         <span class="settings-label">Agreed checkpoint interval (ms)</span>
         <span class="settings-help">Opt-in background checkpoints on all admitted queue replicas. 0 disables new attempts. 1000–86400000 sets the periodic interval. Work thresholds can start an attempt earlier, at most once per second. Existing attempts finish. Snapshot and payload verification uses bounded background work.</span>
@@ -309,6 +334,14 @@
         <span class="settings-help">Require failed reconnects across this interval. Zero reacts after an immediate failed reconnect check. Changing the policy restarts pending suspicion; Raft timers stay unchanged.</span>
         <input id="replication.eager_failover_grace_ms" data-runtime-setting type="number" min="0" max="60000" step="1">
       <span id="seed.replication.eager_failover_grace_ms" class="settings-help"></span>
+      </label>
+      <label class="checkbox-label">
+        <input id="replication.early_replication" data-runtime-setting type="checkbox">
+        <span>
+          <span class="settings-label">Early replication (experimental)</span>
+          <span class="settings-help">Owners send new records to followers before their own disk sync, which can lower replicated publish latency. Publish confirms still wait for the owner's disk. If the owner's disk fails, followers can keep records that were never confirmed. Applies on the next replication read.</span>
+          <span id="seed.replication.early_replication" class="settings-help"></span>
+        </span>
       </label>
     </section>
 

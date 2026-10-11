@@ -102,6 +102,7 @@ pub fn runtime_seed_from_config(config: &ServerConfig) -> RuntimeSettings {
         },
         replication: ReplicationRuntimeSettings {
             eager_failover: config.runtime_seed.replication.eager_failover,
+            early_replication: config.runtime_seed.replication.early_replication,
             agreed_checkpoint_interval_ms: config.runtime_seed.replication.agreed_checkpoint_interval_ms,
             agreed_checkpoint_max_events: config.runtime_seed.replication.agreed_checkpoint_max_events,
             agreed_checkpoint_max_bytes: config.runtime_seed.replication.agreed_checkpoint_max_bytes,
@@ -125,6 +126,9 @@ pub fn runtime_seed_from_config(config: &ServerConfig) -> RuntimeSettings {
                 .replication
                 .stream_apply_max_merge_bytes,
             stream_buffer_batches: config.runtime_seed.replication.stream_buffer_batches,
+            stream_initial_credit_bytes: config.runtime_seed.replication.stream_initial_credit_bytes,
+            stream_apply_fixed_deadline: config.runtime_seed.replication.stream_apply_fixed_deadline,
+            stream_apply_open_batch: config.runtime_seed.replication.stream_apply_open_batch,
         },
         partitioning: PartitioningRuntimeSettings {
             default_partition_count: config.runtime_seed.partitioning.default_partition_count,
@@ -1460,15 +1464,10 @@ pub fn topology_source_for_ganglion(parts: &TcpGanglionParts) -> Arc<dyn ClientT
     let full = CoordinationTopologySource {
         fetch: Arc::new(move || coordination.client_topology()),
     };
-    // Retain the original A/B override for diagnostics; targeted reads are the default.
-    if std::env::var("FIBRIL_EXPERIMENT_TARGETED_ROUTING").as_deref() != Ok("0") {
-        tracing::info!("targeted committed queue routing enabled");
-        return Arc::new(TargetedCoordinationTopologySource {
-            full,
-            coordination: parts.coordination.clone(),
-        });
-    }
-    Arc::new(full) as Arc<dyn ClientTopologySource>
+    Arc::new(TargetedCoordinationTopologySource {
+        full,
+        coordination: parts.coordination.clone(),
+    })
 }
 
 struct TargetedCoordinationTopologySource {
@@ -1775,16 +1774,6 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         adaptive_staging,
         ..keratin_default
     };
-    // Independently switchable so the experiment can compare durable versus
-    // early replication with the same bounded cache. Ordinary builds retain 0.
-    #[cfg(feature = "early-replication-experiment")]
-    let event_tail_cache_bytes = std::env::var("FIBRIL_EXPERIMENT_EVENT_TAIL_CACHE_BYTES")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0)
-        .min(4 * 1024 * 1024);
-    #[cfg(not(feature = "early-replication-experiment"))]
-    let event_tail_cache_bytes = 0;
     let keratin_event_cfg = KeratinConfig {
         fsync_interval_ms: config.storage.keratin.fsync_interval_ms,
         min_fsync_interval_ms: config.storage.keratin.min_fsync_interval_ms,
@@ -1795,7 +1784,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         index_stride_bytes: keratin_default.index_stride_bytes / 8,
         // Replication can tail-follow enqueue/settlement events even though
         // ordinary consumers only tail-follow the message log.
-        tail_cache_bytes: event_tail_cache_bytes,
+        tail_cache_bytes: 0,
         segment_preallocate_bytes: config.storage.keratin.segment_preallocate_bytes,
         max_inflight_fsyncs: config.storage.keratin.max_inflight_fsyncs,
         pipeline_commit_records: config.storage.keratin.pipeline_commit_records,

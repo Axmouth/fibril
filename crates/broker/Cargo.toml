@@ -43,10 +43,6 @@ harness = false
 
 [features]
 writer-stage-trace = ["stroma-core/writer-stage-trace"]
-early-replication-experiment = ["stroma-core/early-replication-experiment"]
-# Measurement only, off by default. Lets REPL_STREAM_CREDIT_BYTES set the
-# follower push credit apart from the per-read byte budget.
-replication-credit-experiment = []
 # Exposes coordination::contract_tests so other crates can run the shared
 # provider contract suite against their Coordination implementations.
 provider-contract-tests = []

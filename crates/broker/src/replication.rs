@@ -841,6 +841,11 @@ pub struct StreamApplyTunables {
     pub apply_linger_us: u64,
     /// Byte cap on one coalesced apply.
     pub max_merge_bytes: u64,
+    /// Experimental. One collection budget from the first frame that later
+    /// arrivals do not end early.
+    pub fixed_deadline: bool,
+    /// Experimental open batch mode, see `replication.stream_apply_open_batch`.
+    pub open_batch: u8,
 }
 
 /// A live reader of [`StreamApplyTunables`]: the applier calls it once per apply
@@ -860,6 +865,8 @@ pub(crate) fn stream_apply_tunables_from(
             keepalive_ms: c.replication_caught_up_poll_ms,
             apply_linger_us: c.replication_stream_apply_linger_us,
             max_merge_bytes: c.replication_stream_apply_max_merge_bytes,
+            fixed_deadline: c.replication_stream_apply_fixed_deadline,
+            open_batch: c.replication_stream_apply_open_batch,
         }
     })
 }
@@ -2244,6 +2251,8 @@ mod stream_tunables_tests {
                 keepalive_ms: 333,
                 apply_linger_us: 222,
                 max_merge_bytes: 111,
+                fixed_deadline: false,
+                open_batch: 0,
             }
         );
 
@@ -2252,6 +2261,8 @@ mod stream_tunables_tests {
             replication_caught_up_poll_ms: 777,
             replication_stream_apply_linger_us: 888,
             replication_stream_apply_max_merge_bytes: 999,
+            replication_stream_apply_fixed_deadline: true,
+            replication_stream_apply_open_batch: 3,
             ..BrokerConfig::default()
         }));
         assert_eq!(
@@ -2260,6 +2271,8 @@ mod stream_tunables_tests {
                 keepalive_ms: 777,
                 apply_linger_us: 888,
                 max_merge_bytes: 999,
+                fixed_deadline: true,
+                open_batch: 3,
             },
             "live config change must be reflected on the next read"
         );
@@ -2413,17 +2426,13 @@ mod replication_byte_limit_tests {
 // ---------------- impl Broker<StromaEngine>: replication engine methods ----------------
 
 impl Broker<StromaEngine> {
-    #[cfg(feature = "early-replication-experiment")]
     fn early_replication_enabled(
         &self,
         topic: &str,
         partition: Partition,
         group: Option<&str>,
     ) -> bool {
-        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *ENABLED.get_or_init(|| {
-            std::env::var("FIBRIL_EXPERIMENT_EARLY_REPLICATION").as_deref() == Ok("1")
-        }) && self
+        self.config_snapshot().replication_early && self
             .assignment_cache
             .get(&QueueKey {
                 tp: topic.into(),
@@ -2465,7 +2474,6 @@ impl Broker<StromaEngine> {
         let qs = self.queue(&key).await;
         // Watch receivers register before the first read, so writes during that
         // read remain observable even if the select has not been polled yet.
-        #[cfg(feature = "early-replication-experiment")]
         let mut written = if self.early_replication_enabled(topic, partition, group) {
             Some(
                 self.engine
@@ -2476,7 +2484,6 @@ impl Broker<StromaEngine> {
             None
         };
         let early_wake = async {
-            #[cfg(feature = "early-replication-experiment")]
             if let Some(written) = &mut written {
                 let _ = written.changed().await;
                 return;
@@ -2515,7 +2522,6 @@ impl Broker<StromaEngine> {
     ) -> Result<OwnerReplicationRead<StromaEvent>, BrokerError> {
         self.ensure_replication_source_owner(topic, partition, group)?;
         let _owner_read_timer = self.replication_timing.owner_read.timer();
-        #[cfg(feature = "early-replication-experiment")]
         if self.early_replication_enabled(topic, partition, group) {
             let records = self
                 .engine
@@ -2580,7 +2586,6 @@ impl Broker<StromaEngine> {
         let qs = self.queue(&key).await;
         // Watch receivers register before the first read, so writes during that
         // read remain observable even if the select has not been polled yet.
-        #[cfg(feature = "early-replication-experiment")]
         let mut written = if self.early_replication_enabled(topic, partition, None) {
             Some(
                 self.engine
@@ -2591,7 +2596,6 @@ impl Broker<StromaEngine> {
             None
         };
         let early_wake = async {
-            #[cfg(feature = "early-replication-experiment")]
             if let Some((messages, events)) = &mut written {
                 tokio::select! { _ = messages.changed() => {}, _ = events.changed() => {} }
                 return;
@@ -2659,7 +2663,6 @@ impl Broker<StromaEngine> {
     ) -> Result<BrokerOwnerStreamRecords, BrokerError> {
         self.ensure_replication_source_owner(topic, partition, None)?;
         let _owner_read_timer = self.replication_timing.owner_read.timer();
-        #[cfg(feature = "early-replication-experiment")]
         if self.early_replication_enabled(topic, partition, None) {
             let messages = self
                 .engine
@@ -3639,13 +3642,10 @@ impl Broker<StromaEngine> {
         // (no restart). See the live-settings-propagation principle.
         let tunables = stream_apply_tunables_from(self.cfg.clone());
 
-        let initial_credit = cfg.max_bytes_per_read as u64;
-        #[cfg(feature = "replication-credit-experiment")]
-        let initial_credit = experimental_stream_credit(
-            initial_credit,
-            std::env::var("REPL_STREAM_CREDIT_BYTES").ok().as_deref(),
-        )
-        .expect("invalid experimental replication credit");
+        let initial_credit = match self.config_snapshot().replication_stream_initial_credit_bytes {
+            0 => cfg.max_bytes_per_read as u64,
+            credit => credit,
+        };
 
         let exit = owner
             .push_queue_replication_fenced(
@@ -5099,29 +5099,3 @@ impl Broker<StromaEngine> {
     }
 }
 
-/// Measurement only. `REPL_STREAM_CREDIT_BYTES` sets the follower's push
-/// credit apart from the owner's per-read byte budget, so the two can be
-/// varied separately. Unset keeps the default of one read budget.
-#[cfg(feature = "replication-credit-experiment")]
-fn experimental_stream_credit(default: u64, raw: Option<&str>) -> Result<u64, &'static str> {
-    let Some(raw) = raw else { return Ok(default) };
-    let value = raw.parse::<u64>().map_err(|_| "credit must be an integer")?;
-    if value == 0 || value > 128 * 1024 * 1024 {
-        return Err("experimental credit must be 1..134217728 bytes");
-    }
-    Ok(value)
-}
-
-#[cfg(all(test, feature = "replication-credit-experiment"))]
-mod credit_experiment_tests {
-    use super::experimental_stream_credit;
-    #[test]
-    fn independent_credit_preserves_default_and_rejects_invalid_budgets() {
-        assert_eq!(experimental_stream_credit(8, None), Ok(8));
-        assert_eq!(experimental_stream_credit(8, Some("16")), Ok(16));
-        assert_eq!(experimental_stream_credit(8, Some("4")), Ok(4));
-        for raw in ["0", "-1", "abc", "134217729", "18446744073709551616"] {
-            assert!(experimental_stream_credit(8, Some(raw)).is_err());
-        }
-    }
-}
