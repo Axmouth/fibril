@@ -60,6 +60,8 @@ jobs:
   workspace-tests:
     name: Workspace tests
     runs-on: ubuntu-latest
+    # A hung test otherwise holds the runner until the 6 hour job limit.
+    timeout-minutes: 45
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
