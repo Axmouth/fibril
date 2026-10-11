@@ -516,6 +516,12 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Changed
 
+- Quieter failover logs. A follower logs the first replication tick failure
+  as a warning and identical repeats at debug, then `follower replication
+  resumed` with the failed tick count once it recovers. The recovery seal
+  line is logged once per seal by the recovery driver instead of each time a
+  stored plan is validated.
+
 - Clearer broker logs for failover and restarts. A broker logs
   `queue recovered from disk` with the log tail and lowest unsettled offset
   the first time it serves a queue as owner with data already on disk, such

@@ -321,6 +321,11 @@ async fn recover_queue_attempt(
                         node,
                         report.clone(),
                     )?;
+                    tracing::info!(
+                        replica = %node, topic = %pending.previous.resource.name,
+                        partition = pending.previous.resource.partition,
+                        "recovery seal accepted from old replica, history compatibility is checked once the required seals arrive"
+                    );
                     match artifact.expect("a sealed source was inspected") {
                         Ok(artifact) => {
                             artifacts.insert(node.clone(), artifact);

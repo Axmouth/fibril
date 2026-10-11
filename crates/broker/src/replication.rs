@@ -3434,6 +3434,9 @@ impl Broker<StromaEngine> {
         shutdown: CancellationToken,
     ) -> Result<FollowerReplicationWorkerLoopExit, BrokerError> {
         let mut ticks = 0;
+        // Repeats of the same tick error log at debug, so a dead owner does not
+        // flood the log until failover. Holds (error text, repeats, first seen).
+        let mut failing: Option<(String, u64, std::time::Instant)> = None;
         let mut initialized_history_offsets = false;
         loop {
             let cfg = if cfg.follow_runtime_settings {
@@ -3565,6 +3568,17 @@ impl Broker<StromaEngine> {
             match tick_result {
                 Ok(_) => {
                     ticks += 1;
+                    if let Some((_, count, since)) = failing.take() {
+                        tracing::info!(
+                            topic = %assignment.queue.topic,
+                            partition = assignment.queue.partition.id(),
+                            group = ?assignment.queue.group,
+                            owner = %assignment.owner,
+                            failed_ticks = count,
+                            failing_ms = since.elapsed().as_millis() as u64,
+                            "follower replication resumed"
+                        );
+                    }
                 }
                 Err(BrokerError::InvalidArgument(_))
                     if !self
@@ -3585,15 +3599,39 @@ impl Broker<StromaEngine> {
                 }
                 Err(err) => {
                     let cursor = runtime.state.lock().await.cursor;
-                    tracing::warn!(
-                        topic = %assignment.queue.topic,
-                        partition = assignment.queue.partition.id(),
-                        group = ?assignment.queue.group,
-                        owner = %assignment.owner,
-                        assignment_epoch = assignment.epoch,
-                        ?cursor,
-                        "follower replication worker tick failed: {err:?}"
-                    );
+                    let text = format!("{err:?}");
+                    let repeat = match &mut failing {
+                        Some((last, count, _)) if *last == text => {
+                            *count += 1;
+                            true
+                        }
+                        _ => {
+                            let since = failing.take().map_or_else(std::time::Instant::now, |f| f.2);
+                            failing = Some((text.clone(), 1, since));
+                            false
+                        }
+                    };
+                    if repeat {
+                        tracing::debug!(
+                            topic = %assignment.queue.topic,
+                            partition = assignment.queue.partition.id(),
+                            group = ?assignment.queue.group,
+                            owner = %assignment.owner,
+                            assignment_epoch = assignment.epoch,
+                            ?cursor,
+                            "follower replication worker tick failed again: {text}"
+                        );
+                    } else {
+                        tracing::warn!(
+                            topic = %assignment.queue.topic,
+                            partition = assignment.queue.partition.id(),
+                            group = ?assignment.queue.group,
+                            owner = %assignment.owner,
+                            assignment_epoch = assignment.epoch,
+                            ?cursor,
+                            "follower replication worker tick failed: {text}"
+                        );
+                    }
                     drop(_tick_guard);
                     wait_for_follower_worker_delay(cfg.retry_poll_ms, &shutdown, &runtime.shutdown)
                         .await;

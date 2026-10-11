@@ -138,7 +138,9 @@ impl RecoveryWitnessSet {
             }
             return Ok(());
         }
-        tracing::info!(
+        // Plan validation replays stored seals through here on every check, so
+        // this stays at debug. The recovery driver logs seals as they arrive.
+        tracing::debug!(
             replica = contacted_node, topic = self.command.topic, group = self.command.group.as_deref(),
             partition = self.command.partition.id(), received = self.reports.len() + 1,
             required = self.required, history = %blake3::Hash::from_bytes(history.id),
