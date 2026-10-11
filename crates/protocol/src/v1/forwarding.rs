@@ -707,9 +707,10 @@ impl ForwardSession {
                     permit: None,
                 });
             }
-            if upstream.tx.try_send(UpstreamWrite::Close).is_err() {
-                upstream.cancel.cancel();
-            }
+            let _ = upstream.tx.try_send(UpstreamWrite::Close);
+            // Also wakes a session waiting on a dormant client. It writes what
+            // is already queued, the reconcile included, before closing.
+            upstream.cancel.cancel();
         }
     }
 
@@ -1084,6 +1085,15 @@ async fn run_upstream(
             _ = upstream.cancel.cancelled() => break UpstreamEnd::Closed,
         }
     };
+    if matches!(end, UpstreamEnd::Closed) {
+        // Flush what the session queued before closing, such as the reconcile
+        // that releases the owner's subscriptions.
+        while let Ok(UpstreamWrite::Frame { frame, .. }) = rx.try_recv() {
+            if sink.send(frame).await.is_err() {
+                break;
+            }
+        }
+    }
     let _ = sink.close().await;
     finish_upstream(
         &session,
@@ -1199,8 +1209,10 @@ async fn handle_upstream_frame(
         if let Ok(rewritten) = wire::rewrite_deliver_sub_id(&frame, client_sub_id) {
             // Waits on the client's own connection, which is the backpressure:
             // a slow client stops reading its upstream and only its upstream.
-            let _ = crate::v1::handler::send_to_current_transport(transport, cached_tx, rewritten)
-                .await;
+            tokio::select! {
+                _ = crate::v1::handler::send_to_current_transport(transport, cached_tx, rewritten) => {}
+                _ = upstream.cancel.cancelled() => {}
+            }
         }
         return;
     }

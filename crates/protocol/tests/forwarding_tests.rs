@@ -752,6 +752,54 @@ async fn forwarded_subscribe_delivers_and_settles_on_the_owner() {
 }
 
 #[tokio::test]
+async fn ending_the_client_session_releases_the_owners_subscriptions() {
+    let (owner_addr, mut owners) = scripted_owner().await;
+    let gateway = gateway(owner_addr, RoutingLimits::default()).await;
+    let mut client = gateway.client().await;
+
+    client
+        .send(publish_frame(1, "orders", b"x", true))
+        .await
+        .unwrap();
+    let (mut owner, _) = owners.recv().await.unwrap();
+    let upstream = next_upstream_request(&mut owner).await;
+    owner
+        .send(wire::encode_publish_ok(upstream.request_id, &PublishOk { offset: 0 }).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(recv(&mut client).await.opcode, Op::PublishOk as u16);
+
+    // No reconnect grace: the client session ends with the connection.
+    drop(client);
+    let reconcile = next_upstream_request(&mut owner).await;
+    assert_eq!(reconcile.opcode, Op::ReconcileClient as u16);
+    let body: fibril_protocol::v1::ReconcileClient = try_decode(&reconcile).unwrap();
+    assert!(
+        body.subscriptions.is_empty(),
+        "the owner keeps nothing for an ended session"
+    );
+    // Then the upstream session closes.
+    let end = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match owner.next().await {
+                None | Some(Err(_)) => return,
+                Some(Ok(frame)) if frame.opcode == Op::Pong as u16 => continue,
+                Some(Ok(frame)) => panic!("unexpected frame {}", frame.opcode),
+            }
+        }
+    })
+    .await;
+    assert!(end.is_ok(), "the upstream session stayed open");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while gateway.stats.upstream_sessions() != 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the session slot is released");
+}
+
+#[tokio::test]
 async fn cohort_subscribe_through_a_gateway_is_refused_clearly() {
     let (owner_addr, _owners) = scripted_owner().await;
     let gateway = gateway(owner_addr, RoutingLimits::default()).await;
