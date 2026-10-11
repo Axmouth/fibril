@@ -1856,6 +1856,14 @@ async fn admitted_replica_reseed(
     })
     .await
     .unwrap();
+    // c can see Ready in the same pass in which its broker applied an older
+    // view, before the reseed. Apply c's current view so its old copy freezes.
+    for result in brokers[2]
+        .apply_assignment_snapshot_transitions("c", &CoordinationSnapshot::default(), &providers[2].snapshot())
+        .await
+    {
+        result.unwrap();
+    }
     assert!(
         brokers[0]
             .authorize_history_replication(&old_session, true)
@@ -1958,6 +1966,14 @@ async fn admitted_replica_reseed(
     .await
     .unwrap();
     repair_worker.abort();
+    // Each broker applies its own node's view, so every view must include the
+    // readmission. Otherwise c's broker misses it and the second reseed below
+    // never sees c's old copy revoked.
+    wait_for_views(
+        &providers.iter().map(|p| &**p).collect::<Vec<_>>(),
+        providers[0].snapshot().generation,
+    )
+    .await;
     for i in 0..3 {
         for result in brokers[i]
             .apply_assignment_snapshot_transitions(
