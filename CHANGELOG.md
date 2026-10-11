@@ -114,6 +114,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- `replication-credit-experiment`, an off-by-default broker feature for
+  measurements. With it built in, `REPL_STREAM_CREDIT_BYTES` (1 to 134217728)
+  sets the follower queue push credit apart from the per-read byte budget.
+  Unset, the credit stays at one read budget. Default builds are unchanged.
+
 - `steady_c --rate-per-sec 0` publishes as fast as the client allows with no
   interval pacing, so a saturation run measures the client instead of the
   bench rate limiter. Any other rate keeps the paced behavior.

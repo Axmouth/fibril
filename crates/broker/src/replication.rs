@@ -3639,13 +3639,21 @@ impl Broker<StromaEngine> {
         // (no restart). See the live-settings-propagation principle.
         let tunables = stream_apply_tunables_from(self.cfg.clone());
 
+        let initial_credit = cfg.max_bytes_per_read as u64;
+        #[cfg(feature = "replication-credit-experiment")]
+        let initial_credit = experimental_stream_credit(
+            initial_credit,
+            std::env::var("REPL_STREAM_CREDIT_BYTES").ok().as_deref(),
+        )
+        .expect("invalid experimental replication credit");
+
         let exit = owner
             .push_queue_replication_fenced(
                 queue.topic.as_str(),
                 queue.partition,
                 queue.group.as_deref(),
                 from,
-                cfg.max_bytes_per_read as u64,
+                initial_credit,
                 tunables,
                 cfg.stream_buffer_batches,
                 apply.clone(),
@@ -5088,5 +5096,32 @@ impl Broker<StromaEngine> {
             group,
         ))
         .await;
+    }
+}
+
+/// Measurement only. `REPL_STREAM_CREDIT_BYTES` sets the follower's push
+/// credit apart from the owner's per-read byte budget, so the two can be
+/// varied separately. Unset keeps the default of one read budget.
+#[cfg(feature = "replication-credit-experiment")]
+fn experimental_stream_credit(default: u64, raw: Option<&str>) -> Result<u64, &'static str> {
+    let Some(raw) = raw else { return Ok(default) };
+    let value = raw.parse::<u64>().map_err(|_| "credit must be an integer")?;
+    if value == 0 || value > 128 * 1024 * 1024 {
+        return Err("experimental credit must be 1..134217728 bytes");
+    }
+    Ok(value)
+}
+
+#[cfg(all(test, feature = "replication-credit-experiment"))]
+mod credit_experiment_tests {
+    use super::experimental_stream_credit;
+    #[test]
+    fn independent_credit_preserves_default_and_rejects_invalid_budgets() {
+        assert_eq!(experimental_stream_credit(8, None), Ok(8));
+        assert_eq!(experimental_stream_credit(8, Some("16")), Ok(16));
+        assert_eq!(experimental_stream_credit(8, Some("4")), Ok(4));
+        for raw in ["0", "-1", "abc", "134217729", "18446744073709551616"] {
+            assert!(experimental_stream_credit(8, Some(raw)).is_err());
+        }
     }
 }
