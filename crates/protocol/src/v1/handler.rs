@@ -130,6 +130,19 @@ pub trait ClientTopologySource: Send + Sync {
     fn stream_owner_endpoint(&self, _topic: &str, _partition: Partition) -> Option<(String, u64)> {
         None
     }
+
+    /// Whether this broker is the named owner of the queue partition. A named
+    /// owner that refuses an operation is fenced, typically while recovery
+    /// runs, so it answers with a retryable error instead of redirecting to
+    /// itself.
+    fn owner_is_local(&self, _topic: &str, _partition: Partition, _group: Option<&str>) -> bool {
+        false
+    }
+
+    /// Stream counterpart of [`Self::owner_is_local`].
+    fn stream_owner_is_local(&self, _topic: &str, _partition: Partition) -> bool {
+        false
+    }
 }
 
 /// Tracks, per live client connection, the highest topology generation that
@@ -370,6 +383,13 @@ fn broker_error_response(err: &BrokerError) -> (u16, String) {
         // caller resolves the owner and retries, so the message stays as is.
         BrokerError::NotOwner { .. } => (ERR_NOT_OWNER, err.to_string()),
 
+        // This broker owns the queue but its recovered history is not admitted
+        // yet, a short window after an ownership change. Same answer as a fenced
+        // owner: retry the same broker shortly.
+        BrokerError::Engine(StromaError::HistoryAdmissionRequired { .. }) => {
+            (ERR_UNAVAILABLE, RECOVERING_OWNER_MESSAGE.to_string())
+        }
+
         // The request itself is malformed or out of range. A client fix, not a
         // server fault, so 400 (retry_advice reads this as DoNotRetry) rather
         // than a retryable 500. The call site's message already says what.
@@ -417,20 +437,29 @@ fn broker_error_response(err: &BrokerError) -> (u16, String) {
     }
 }
 
-/// Build an `Op::Redirect` frame for a queue partition if the topology source
-/// can resolve its current owner. Redirect is control flow (not an error): it
-/// tells the client to retry against the right broker. `None` => no source or
-/// owner unknown, so the caller should fall back to its terminal error.
-fn owner_redirect_frame(
-    topology_source: &Option<Arc<dyn ClientTopologySource>>,
+/// Where to send a client whose operation this broker refused as not-owner.
+enum OwnerRoute {
+    /// Another broker owns the partition. Carries the encoded `Op::Redirect`.
+    Redirect(Frame),
+    /// This broker is the named owner but is fenced, usually while history
+    /// recovery runs. Redirecting would point the client back here.
+    LocalRecovering,
+    /// No topology source, or the owner is unknown.
+    Unknown,
+}
+
+const RECOVERING_OWNER_MESSAGE: &str = "this broker owns the partition but cannot serve it yet, \
+    usually because its history recovery is still running after a restart or failover. \
+    Retry shortly against the same broker";
+
+fn redirect_route(
     request_id: u64,
     topic: &str,
     partition: Partition,
     group: Option<&str>,
-) -> Option<Frame> {
-    let (owner_endpoint, partitioning_version) = topology_source
-        .as_ref()?
-        .owner_endpoint(topic, partition, group)?;
+    owner_endpoint: String,
+    partitioning_version: u64,
+) -> OwnerRoute {
     let redirect = Redirect {
         topic: topic.to_string(),
         partition,
@@ -440,31 +469,54 @@ fn owner_redirect_frame(
             .collect(),
         partitioning_version,
     };
-    try_encode(Op::Redirect, request_id, &redirect).ok()
+    match try_encode(Op::Redirect, request_id, &redirect) {
+        Ok(frame) => OwnerRoute::Redirect(frame),
+        Err(_) => OwnerRoute::Unknown,
+    }
 }
 
-/// Build an `Op::Redirect` frame for a stream partition if the topology source
-/// can resolve its owner. Streams have no group. `None` => fall back to a plain
-/// not-owner error.
-fn stream_owner_redirect_frame(
+/// Route a refused queue operation. Redirect is control flow, not an error:
+/// it tells the client to retry against the right broker.
+fn queue_owner_route(
     topology_source: &Option<Arc<dyn ClientTopologySource>>,
     request_id: u64,
     topic: &str,
     partition: Partition,
-) -> Option<Frame> {
-    let (owner_endpoint, partitioning_version) = topology_source
-        .as_ref()?
-        .stream_owner_endpoint(topic, partition)?;
-    let redirect = Redirect {
-        topic: topic.to_string(),
-        partition,
-        group: None,
-        owner_endpoints: AdvertisedAddress::parse(&owner_endpoint)
-            .into_iter()
-            .collect(),
-        partitioning_version,
+    group: Option<&str>,
+) -> OwnerRoute {
+    let Some(source) = topology_source.as_ref() else {
+        return OwnerRoute::Unknown;
     };
-    try_encode(Op::Redirect, request_id, &redirect).ok()
+    if source.owner_is_local(topic, partition, group) {
+        return OwnerRoute::LocalRecovering;
+    }
+    match source.owner_endpoint(topic, partition, group) {
+        Some((endpoint, version)) => {
+            redirect_route(request_id, topic, partition, group, endpoint, version)
+        }
+        None => OwnerRoute::Unknown,
+    }
+}
+
+/// Route a refused stream operation. Streams have no group.
+fn stream_owner_route(
+    topology_source: &Option<Arc<dyn ClientTopologySource>>,
+    request_id: u64,
+    topic: &str,
+    partition: Partition,
+) -> OwnerRoute {
+    let Some(source) = topology_source.as_ref() else {
+        return OwnerRoute::Unknown;
+    };
+    if source.stream_owner_is_local(topic, partition) {
+        return OwnerRoute::LocalRecovering;
+    }
+    match source.stream_owner_endpoint(topic, partition) {
+        Some((endpoint, version)) => {
+            redirect_route(request_id, topic, partition, None, endpoint, version)
+        }
+        None => OwnerRoute::Unknown,
+    }
 }
 
 /// Fence a publish against a stale partitioning view. The client stamps the
@@ -509,8 +561,9 @@ async fn fence_stale_partitioning(
 }
 
 /// Respond to a client-facing operation error. On `NotOwner`, emit a redirect
-/// when the owner is resolvable; otherwise fall back to the plain error
-/// (terminal `ERR_NOT_OWNER` when the owner is unknown).
+/// when another broker owns the partition, a retryable `ERR_UNAVAILABLE` when
+/// this broker is the fenced owner, and otherwise the plain error (terminal
+/// `ERR_NOT_OWNER` when the owner is unknown).
 async fn send_owner_redirect_or_error(
     tx: &FrameSink,
     metrics: &TcpStats,
@@ -522,12 +575,24 @@ async fn send_owner_redirect_or_error(
     err: &BrokerError,
 ) {
     if matches!(err, BrokerError::NotOwner { .. }) {
-        if let Some(frame) =
-            owner_redirect_frame(topology_source, request_id, topic, partition, group)
-        {
-            if tx.send(frame).await.is_ok() {
+        match queue_owner_route(topology_source, request_id, topic, partition, group) {
+            OwnerRoute::Redirect(frame) => {
+                if tx.send(frame).await.is_ok() {
+                    return;
+                }
+            }
+            OwnerRoute::LocalRecovering => {
+                send_error_response_and_count(
+                    tx,
+                    metrics,
+                    request_id,
+                    ERR_UNAVAILABLE,
+                    RECOVERING_OWNER_MESSAGE,
+                )
+                .await;
                 return;
             }
+            OwnerRoute::Unknown => {}
         }
     }
     let (code, message) = broker_error_response(err);
@@ -3812,15 +3877,32 @@ where
                             &err,
                             InstallSubscriptionError::Broker(BrokerError::NotOwner { .. })
                         ) {
-                            if let Some(redirect) = owner_redirect_frame(
+                            match queue_owner_route(
                                 &topology_source,
                                 frame.request_id,
                                 &sub_topic,
                                 sub_partition,
                                 sub_group.as_deref(),
                             ) {
-                                frame_tx_high_prio.send(redirect).await?;
-                                continue;
+                                OwnerRoute::Redirect(redirect) => {
+                                    frame_tx_high_prio.send(redirect).await?;
+                                    continue;
+                                }
+                                OwnerRoute::LocalRecovering => {
+                                    frame_tx_high_prio
+                                        .send(try_encode(
+                                            Op::SubscribeErr,
+                                            frame.request_id,
+                                            &ErrorMsg {
+                                                code: ERR_UNAVAILABLE,
+                                                message: RECOVERING_OWNER_MESSAGE.into(),
+                                            },
+                                        )?)
+                                        .await?;
+                                    metrics.error();
+                                    continue;
+                                }
+                                OwnerRoute::Unknown => {}
                             }
                         }
                         let (code, message) = install_subscription_error_response(&err);
@@ -4124,13 +4206,26 @@ where
                         .ensure_stream_owner(&sub.topic, sub.partition.id())
                         .is_err()
                 {
-                    if let Some(frame) = stream_owner_redirect_frame(
+                    let route = stream_owner_route(
                         &topology_source,
                         frame.request_id,
                         &sub.topic,
                         sub.partition,
-                    ) {
-                        let _ = frame_tx_high_prio.send(frame).await;
+                    );
+                    if let OwnerRoute::Redirect(redirect) = route {
+                        let _ = frame_tx_high_prio.send(redirect).await;
+                    } else if let OwnerRoute::LocalRecovering = route {
+                        frame_tx_high_prio
+                            .send(try_encode(
+                                Op::SubscribeErr,
+                                frame.request_id,
+                                &ErrorMsg {
+                                    code: ERR_UNAVAILABLE,
+                                    message: RECOVERING_OWNER_MESSAGE.into(),
+                                },
+                            )?)
+                            .await?;
+                        metrics.error();
                     } else {
                         frame_tx_high_prio
                             .send(try_encode(
@@ -4321,13 +4416,23 @@ where
                             .ensure_stream_owner(&pubreq.topic, pubreq.partition.id())
                             .is_err()
                         {
-                            if let Some(frame) = stream_owner_redirect_frame(
+                            let route = stream_owner_route(
                                 &topology_source,
                                 frame.request_id,
                                 &pubreq.topic,
                                 pubreq.partition,
-                            ) {
-                                let _ = frame_tx_low_prio.send(frame).await;
+                            );
+                            if let OwnerRoute::Redirect(redirect) = route {
+                                let _ = frame_tx_low_prio.send(redirect).await;
+                            } else if let OwnerRoute::LocalRecovering = route {
+                                send_error_response_and_count(
+                                    &frame_tx_low_prio,
+                                    &metrics,
+                                    frame.request_id,
+                                    ERR_UNAVAILABLE,
+                                    RECOVERING_OWNER_MESSAGE,
+                                )
+                                .await;
                             } else {
                                 send_error_response_and_count(
                                     &frame_tx_low_prio,

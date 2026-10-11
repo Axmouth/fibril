@@ -1493,6 +1493,23 @@ impl ClientTopologySource for TargetedCoordinationTopologySource {
     fn stream_owner_endpoint(&self, topic: &str, partition: Partition) -> Option<(String, u64)> {
         self.full.stream_owner_endpoint(topic, partition)
     }
+
+    fn owner_is_local(&self, topic: &str, partition: Partition, group: Option<&str>) -> bool {
+        fibril_broker::coordination::Coordination::owns_queue(
+            self.coordination.as_ref(),
+            topic,
+            partition,
+            group,
+        )
+    }
+
+    fn stream_owner_is_local(&self, topic: &str, partition: Partition) -> bool {
+        fibril_broker::broker::StreamOwnership::owns_stream(
+            self.coordination.as_ref(),
+            topic,
+            partition,
+        )
+    }
 }
 
 /// Protocol declare coordinator for Ganglion-backed partition metadata and

@@ -31,6 +31,9 @@ enum MockBehavior {
     RedirectToSelf,
     /// Confirm publishes with offset 0.
     ConfirmOk,
+    /// Answer `ERR_UNAVAILABLE` (owner recovering) while the counter is above
+    /// zero, counting it down, then confirm.
+    UnavailableThen(Arc<AtomicUsize>),
 }
 
 /// A self-owned multi-partition spread for one queue identity `(topic, group)`.
@@ -49,6 +52,8 @@ struct SelfPartitions {
 struct MockConfig {
     stop: Option<Arc<tokio::sync::Notify>>,
     reject_subscribes: Option<Arc<AtomicUsize>>,
+    /// Code and opcode for rejected subscribes. Defaults to a 503 `Op::Error`.
+    reject_with: Option<(u16, Op)>,
     publish: Option<MockBehavior>,
     /// If set, answer `Op::Topology` with this.
     topology: Option<TopologyOk>,
@@ -134,8 +139,9 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                         if config.reject_subscribes.as_ref().is_some_and(|remaining| {
                             remaining.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok()
                         }) {
-                            let reply = fibril_wire::ErrorMsg { code: 503, message: "recovering".into() };
-                            framed.send(try_encode(Op::Error, frame.request_id, &reply).unwrap()).await.unwrap();
+                            let (code, op) = config.reject_with.unwrap_or((503, Op::Error));
+                            let reply = fibril_wire::ErrorMsg { code, message: "rejected".into() };
+                            framed.send(try_encode(op, frame.request_id, &reply).unwrap()).await.unwrap();
                             continue;
                         }
                         if let Some(recorder) = &config.subscribe_partitions {
@@ -277,6 +283,24 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                                 };
                                 try_encode(Op::Redirect, frame.request_id, &redirect).unwrap()
                             }
+                            Some(MockBehavior::UnavailableThen(left)) => {
+                                if left
+                                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                                        n.checked_sub(1)
+                                    })
+                                    .is_ok()
+                                {
+                                    fibril_wire::helper::error_frame(
+                                        frame.request_id,
+                                        fibril_wire::ERR_UNAVAILABLE,
+                                        "recovering",
+                                    )
+                                    .unwrap()
+                                } else {
+                                    wire::encode_publish_ok(frame.request_id, &PublishOk { offset: 0 })
+                                        .unwrap()
+                                }
+                            }
                             Some(MockBehavior::RedirectToSelf) => {
                                 let redirect = Redirect {
                                     topic: publish.topic,
@@ -334,13 +358,14 @@ async fn redirect_to_dead_endpoint_errors_without_hanging() {
     );
 }
 
-/// A redirect ping-pong (owner keeps redirecting to itself) is capped by
-/// `max_redirects` and returns a clear terminal error instead of spinning.
+/// A redirect ping-pong (owner keeps redirecting to itself) backs off past
+/// `max_redirects` until the publish budget, then returns a clear terminal
+/// error instead of spinning.
 #[tokio::test]
 async fn redirect_ping_pong_is_capped_by_max_redirects() {
     let mock = spawn_mock(MockBehavior::RedirectToSelf).await;
 
-    let mut opts = ClientOptions::new();
+    let mut opts = ClientOptions::new().publish_timeout_ms(300);
     opts.max_redirects = 2;
     let client = Client::connect(mock, opts).await.unwrap();
     let publisher = client.publisher("jobs").unwrap();
@@ -829,4 +854,70 @@ async fn subscriber_discovers_survivor_and_waits_through_recovery() {
     assert!(delivered.is_some());
     assert_eq!(retries.load(Ordering::SeqCst), 0);
     client.shutdown().await;
+}
+
+/// An owner that is still recovering answers `ERR_UNAVAILABLE`. A confirmed
+/// publish waits it out with backoff instead of failing.
+#[tokio::test]
+async fn publish_waits_out_a_recovering_owner() {
+    let left = Arc::new(AtomicUsize::new(3));
+    let mock = spawn_mock(MockBehavior::UnavailableThen(left.clone())).await;
+    let client = Client::connect(mock, ClientOptions::new().publish_timeout_ms(5_000))
+        .await
+        .unwrap();
+    let publisher = client.publisher("jobs").unwrap();
+
+    let offset = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        publisher.publish_confirmed("hello"),
+    )
+    .await
+    .expect("must not hang")
+    .expect("publish succeeds once the owner is ready");
+    assert_eq!(offset, 0);
+    assert_eq!(left.load(Ordering::SeqCst), 0, "every unavailable reply was retried");
+}
+
+/// With the retry budget disabled, a recovering owner surfaces its retryable
+/// `ERR_UNAVAILABLE` at once.
+#[tokio::test]
+async fn recovering_owner_fails_fast_without_a_budget() {
+    let mock = spawn_mock(MockBehavior::UnavailableThen(Arc::new(AtomicUsize::new(100)))).await;
+    let client = Client::connect(mock, ClientOptions::new().publish_timeout_ms(0))
+        .await
+        .unwrap();
+    let publisher = client.publisher("jobs").unwrap();
+    let err = publisher.publish_confirmed("hello").await.unwrap_err();
+    assert!(
+        matches!(err, FibrilError::Failure { code: fibril_wire::ERR_UNAVAILABLE, .. }),
+        "got {err:?}"
+    );
+    assert!(err.is_retryable());
+}
+
+/// A subscribe the broker answers with a non-retryable error must fail
+/// promptly, never leave `sub()` waiting.
+#[tokio::test]
+async fn subscribe_error_reply_does_not_hang() {
+    for (code, op) in [(500, Op::SubscribeErr), (500, Op::Error), (503, Op::SubscribeErr)] {
+        let mock = spawn_configurable_mock(MockConfig {
+            reject_subscribes: Some(Arc::new(AtomicUsize::new(usize::MAX))),
+            reject_with: Some((code, op)),
+            ..Default::default()
+        })
+        .await;
+        let client = Client::connect(mock, ClientOptions::new().publish_timeout_ms(500))
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.subscribe("jobs").unwrap().sub(),
+        )
+        .await;
+        assert!(
+            matches!(result, Ok(Err(_))),
+            "code {code} via {op:?} must fail, got {:?}",
+            result.map(|r| r.map(|_| ()))
+        );
+    }
 }

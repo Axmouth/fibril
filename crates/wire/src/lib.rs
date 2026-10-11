@@ -1069,6 +1069,9 @@ pub const ERR_NOT_FOUND: u16 = 404;
 /// of an unexplained disconnect. Distinct from certificate trust failures,
 /// which surface through the TLS handshake itself.
 pub const ERR_TLS_REQUIRED: u16 = 426;
+/// The partition belongs to this broker but cannot serve yet, for example while
+/// its history recovery runs after a restart. Retry the same broker shortly.
+pub const ERR_UNAVAILABLE: u16 = 503;
 
 // ----- Header namespaces (shared by broker rejection + client guard) ---------
 

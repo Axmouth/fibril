@@ -2103,7 +2103,7 @@ async fn subscribe_partition_manual(
     client: &Client,
     req: Subscribe,
 ) -> FibrilResult<PartRx<InflightMessage>> {
-    let mut attempts = 0u32;
+    let mut state = PublishRetryState::new(client.shared.opts.publish_timeout_ms);
     loop {
         let engine = client
             .shared
@@ -2111,20 +2111,13 @@ async fn subscribe_partition_manual(
             .await?;
         match engine.subscribe(req.clone()).await {
             Ok(rx) => return Ok(rx),
-            Err(FibrilError::Redirect(redirect)) => {
-                if attempts >= client.shared.opts.max_redirects {
-                    return Err(FibrilError::Failure {
-                        code: ERR_NOT_OWNER,
-                        msg: format!(
-                            "exceeded max redirects ({}) subscribing {}/{}",
-                            client.shared.opts.max_redirects, req.topic, req.partition
-                        ),
-                    });
-                }
-                client.shared.apply_redirect(&redirect);
-                attempts += 1;
+            Err(err) => {
+                let what = format!("subscribing {}/{}", req.topic, req.partition);
+                client
+                    .shared
+                    .follow_redirect_or_wait(err, &mut state, &what)
+                    .await?;
             }
-            Err(other) => return Err(other),
         }
     }
 }
@@ -2134,7 +2127,7 @@ async fn subscribe_partition_auto(
     client: &Client,
     req: Subscribe,
 ) -> FibrilResult<PartRx<Message>> {
-    let mut attempts = 0u32;
+    let mut state = PublishRetryState::new(client.shared.opts.publish_timeout_ms);
     loop {
         let engine = client
             .shared
@@ -2142,20 +2135,13 @@ async fn subscribe_partition_auto(
             .await?;
         match engine.subscribe_auto_ack(req.clone()).await {
             Ok(rx) => return Ok(rx),
-            Err(FibrilError::Redirect(redirect)) => {
-                if attempts >= client.shared.opts.max_redirects {
-                    return Err(FibrilError::Failure {
-                        code: ERR_NOT_OWNER,
-                        msg: format!(
-                            "exceeded max redirects ({}) subscribing {}/{}",
-                            client.shared.opts.max_redirects, req.topic, req.partition
-                        ),
-                    });
-                }
-                client.shared.apply_redirect(&redirect);
-                attempts += 1;
+            Err(err) => {
+                let what = format!("subscribing {}/{}", req.topic, req.partition);
+                client
+                    .shared
+                    .follow_redirect_or_wait(err, &mut state, &what)
+                    .await?;
             }
-            Err(other) => return Err(other),
         }
     }
 }
@@ -2165,7 +2151,7 @@ async fn subscribe_stream_partition_manual(
     client: &Client,
     req: SubscribeStream,
 ) -> FibrilResult<PartRx<InflightMessage>> {
-    let mut attempts = 0u32;
+    let mut state = PublishRetryState::new(client.shared.opts.publish_timeout_ms);
     loop {
         let engine = client
             .shared
@@ -2173,20 +2159,13 @@ async fn subscribe_stream_partition_manual(
             .await?;
         match engine.subscribe_stream(req.clone()).await {
             Ok(rx) => return Ok(rx),
-            Err(FibrilError::Redirect(redirect)) => {
-                if attempts >= client.shared.opts.max_redirects {
-                    return Err(FibrilError::Failure {
-                        code: ERR_NOT_OWNER,
-                        msg: format!(
-                            "exceeded max redirects ({}) subscribing stream {}/{}",
-                            client.shared.opts.max_redirects, req.topic, req.partition
-                        ),
-                    });
-                }
-                client.shared.apply_redirect(&redirect);
-                attempts += 1;
+            Err(err) => {
+                let what = format!("subscribing stream {}/{}", req.topic, req.partition);
+                client
+                    .shared
+                    .follow_redirect_or_wait(err, &mut state, &what)
+                    .await?;
             }
-            Err(other) => return Err(other),
         }
     }
 }
@@ -2196,7 +2175,7 @@ async fn subscribe_stream_partition_auto(
     client: &Client,
     req: SubscribeStream,
 ) -> FibrilResult<PartRx<Message>> {
-    let mut attempts = 0u32;
+    let mut state = PublishRetryState::new(client.shared.opts.publish_timeout_ms);
     loop {
         let engine = client
             .shared
@@ -2204,20 +2183,13 @@ async fn subscribe_stream_partition_auto(
             .await?;
         match engine.subscribe_stream_auto_ack(req.clone()).await {
             Ok(rx) => return Ok(rx),
-            Err(FibrilError::Redirect(redirect)) => {
-                if attempts >= client.shared.opts.max_redirects {
-                    return Err(FibrilError::Failure {
-                        code: ERR_NOT_OWNER,
-                        msg: format!(
-                            "exceeded max redirects ({}) subscribing stream {}/{}",
-                            client.shared.opts.max_redirects, req.topic, req.partition
-                        ),
-                    });
-                }
-                client.shared.apply_redirect(&redirect);
-                attempts += 1;
+            Err(err) => {
+                let what = format!("subscribing stream {}/{}", req.topic, req.partition);
+                client
+                    .shared
+                    .follow_redirect_or_wait(err, &mut state, &what)
+                    .await?;
             }
-            Err(other) => return Err(other),
         }
     }
 }
@@ -2543,8 +2515,8 @@ impl Publisher {
     /// Shared retry decision for confirmed-publish paths after one attempt fails.
     /// Returns `Ok(())` to retry the loop, or `Err(e)` to give up with `e`.
     ///
-    /// - Redirect: point-update routing to the named owner and retry (bounded by
-    ///   `max_redirects`).
+    /// - Redirect or a recovering owner (`ERR_UNAVAILABLE`): follow or wait, see
+    ///   `ClientShared::follow_redirect_or_wait`.
     /// - Transient transport failure (owner unreachable mid-failover): refresh
     ///   topology from a reachable node so the next attempt re-resolves the new
     ///   owner, then back off until the deadline. If a refresh lands against a
@@ -2560,19 +2532,14 @@ impl Publisher {
         state: &mut PublishRetryState,
     ) -> FibrilResult<()> {
         match err {
-            FibrilError::Redirect(redirect) => {
-                if state.redirects >= self.shared.opts.max_redirects {
-                    return Err(FibrilError::Failure {
-                        code: ERR_NOT_OWNER,
-                        msg: format!(
-                            "exceeded max redirects ({}) routing {topic}/{partition}",
-                            self.shared.opts.max_redirects
-                        ),
-                    });
-                }
-                self.shared.apply_redirect(&redirect);
-                state.redirects += 1;
-                Ok(())
+            err @ (FibrilError::Redirect(_)
+            | FibrilError::Failure {
+                code: ERR_UNAVAILABLE,
+                ..
+            }) => {
+                self.shared
+                    .follow_redirect_or_wait(err, state, &format!("routing {topic}/{partition}"))
+                    .await
             }
             err if err.is_transient() => {
                 let Some(deadline) = state.deadline else {
@@ -3380,6 +3347,52 @@ impl ClientShared {
             updated.apply_redirect(redirect);
             updated
         });
+    }
+
+    /// Shared handling for an operation that hit a redirect or a busy owner.
+    /// Returns `Ok(())` to retry, or the error to give up with.
+    ///
+    /// The first `max_redirects` redirects are followed at once. Beyond that,
+    /// and for `ERR_UNAVAILABLE` (the owner is recovering), the client backs
+    /// off and retries until the `publish_timeout_ms` deadline, so a request
+    /// made while the cluster settles waits instead of failing.
+    async fn follow_redirect_or_wait(
+        &self,
+        err: FibrilError,
+        state: &mut PublishRetryState,
+        what: &str,
+    ) -> FibrilResult<()> {
+        let busy = match &err {
+            FibrilError::Redirect(redirect) => {
+                self.apply_redirect(redirect);
+                state.redirects += 1;
+                if state.redirects <= self.opts.max_redirects {
+                    return Ok(());
+                }
+                true
+            }
+            FibrilError::Failure { code, .. } => *code == ERR_UNAVAILABLE,
+            _ => false,
+        };
+        if !busy {
+            return Err(err);
+        }
+        let Some(deadline) = state.deadline.filter(|d| Instant::now() < *d) else {
+            return Err(match err {
+                FibrilError::Redirect(_) => FibrilError::Failure {
+                    code: ERR_NOT_OWNER,
+                    msg: format!(
+                        "exceeded max redirects ({}) {what}",
+                        self.opts.max_redirects
+                    ),
+                },
+                other => other,
+            });
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        tokio::time::sleep(publish_retry_nap(state.backoff_ms).min(remaining)).await;
+        state.backoff_ms = (state.backoff_ms * 2).min(PUBLISH_RETRY_MAX_BACKOFF_MS);
+        Ok(())
     }
 }
 
@@ -4911,7 +4924,9 @@ where
                                 }
                             }
                         }
-                        x if x == Op::Error as u16 => {
+                        // A refused subscribe answers with SubscribeErr, which
+                        // carries the same payload as Error.
+                        x if x == Op::Error as u16 || x == Op::SubscribeErr as u16 => {
                             let err: ErrorMsg = match decode_protocol(&frame) {
                                 Ok(err) => err,
                                 Err(err) => {
@@ -4968,6 +4983,9 @@ where
                                         }
                                     }
                                 }
+                            } else if frame.opcode == Op::SubscribeErr as u16 {
+                                // The subscribe it answers was already abandoned.
+                                tracing::debug!(request_id = frame.request_id, "subscribe error for a request no longer waiting");
                             } else {
                                 // Connection-level error (no correlated request).
                                 // A non-retryable code (bad credentials, forbidden,
@@ -5383,7 +5401,8 @@ pub struct ClientOptions {
     /// subscriptions (no `partition_resubscribe_interval_ms`) always surface
     /// the close.
     pub auto_resubscribe: bool,
-    /// Max times a single operation will follow `Op::Redirect` before failing.
+    /// Redirects a single operation follows at once. Further redirects back off
+    /// and retry until `publish_timeout_ms`, then fail.
     pub max_redirects: u32,
     /// Minimum interval between client topology refreshes (anti-storm).
     pub topology_refresh_cooldown_ms: u64,

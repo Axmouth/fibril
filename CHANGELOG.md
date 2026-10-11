@@ -809,6 +809,18 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- The Rust client ignored `SubscribeErr` replies, so a subscribe the broker
+  refused left `sub()` waiting forever. It now fails with the broker's error,
+  as the other SDKs already did.
+
+- A broker that is the named owner of a queue but still recovering its
+  history, such as right after a whole-cluster restart, answers with a
+  retryable `503` instead of redirecting clients to itself or reporting an
+  internal error. Rust client subscribes and confirmed publishes follow the
+  first `max_redirects` redirects at once, then back off and retry redirects
+  and `503` replies until `publish_timeout_ms` (30 s by default) instead of
+  failing with `exceeded max redirects`.
+
 - Subscribers on the speculative and ephemeral stream tiers could
   permanently miss records. Those tiers put records in the in-memory ring
   before they are durable, while log backfill reads durable records only. A
