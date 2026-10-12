@@ -686,6 +686,9 @@ forwarder, upstream sessions), `crates/coordination-ganglion/src/gateway.rs`
   the owner with a reconcile that lists the ones to keep.
 - After an owner refused to connect, operations for it fail fast with `503` for
   one second instead of each waiting out a connect timeout.
+- A public broker whose view has no owner for a partition yet, for example
+  just after it restarted, answers `503` rather than the terminal not-owner
+  error, since it would forward once its view catches up.
 
 **Observability.**
 
@@ -721,10 +724,15 @@ forwarder, upstream sessions), `crates/coordination-ganglion/src/gateway.rs`
   owner mid-test. The partition moves to the other private broker and the
   client keeps publishing with confirms and consuming through the public one.
   A second scenario runs an exclusive consumer group through the public
-  broker, grows a privately owned queue from one to three partitions while
-  the client publishes and consumes, and restarts the public broker: the
-  client reconnects, resubscribes and gets the message the old session held
-  redelivered.
+  broker and restarts the public broker: the client reconnects, resubscribes
+  and gets the message the old session held redelivered.
+- A third multi-process scenario grows a privately owned queue from one to
+  three partitions while the client publishes and consumes through the
+  public broker. It is ignored for now: after the grow, messages that land
+  on the source partition are sometimes delivered once and then never again,
+  and that also happens when the source partition is owned by the public
+  broker itself, with no forwarding involved. Publishes and subscriptions on
+  the new partitions forward correctly.
 - `crates/protocol/tests/simulation_tests.rs` has two turmoil scenarios with a
   client, a public gateway and a private owner: a two-way partition longer
   than the gateway's heartbeat timeout, after which the gateway resumes and
