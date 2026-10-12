@@ -62,8 +62,9 @@ The overview page is intentionally curated. It leads with a needs-attention
 panel - conditions the broker itself flags, like a backlog with no consumer
 reading it (or one growing despite consumers), a certificate near expiry, a
 failed settings load, a quarantined partition, low disk on the data
-directory, a stalled replication follower, or a broker left draining, each
-linking to where it is fixed - then live
+directory, a stalled replication follower, a broker left draining, or a
+cluster with private brokers but no live public broker to forward for them,
+each linking to where it is fixed - then live
 throughput and backlog-over-time charts, state-colored stat cards, process
 resource use, reconnect outcomes, and a small set of storage health signals.
 The disk card carries a segmented breakdown of which queues the bytes belong
@@ -323,6 +324,13 @@ endpoint spotlights its strand and its table row. In a cluster the smart
 clients follow partition ownership, so a connection appears on the broker
 it actually talks to.
 
+On a private broker, sessions opened by a public broker on behalf of its
+clients are marked forwarded and read "via node P for user U" (or just "via
+node P" when no user is attached), naming the public broker they came
+through and the user they act for. The connections API carries the same
+facts in each connection's `forwarded` object (`origin_node`,
+`acting_user`), which is null for ordinary client connections.
+
 <DashboardDemo view="connections" title="Client connections" />
 
 ## Subscriptions and Cohorts
@@ -387,6 +395,22 @@ and uptime, TLS state with certificate expiry, and live rates, with an
 open-its-admin link on every other node - above a placement matrix of
 owned partitions per broker per topic. The view choice sticks per browser
 and answers to `?view=list` in the URL.
+
+Private brokers carry a "private" badge in both views, and their
+open-its-admin link is marked as an internal address, since it usually only
+opens from inside the cluster network. Each public broker shows how many
+upstream sessions it holds open to private owners while forwarding for its
+clients, and a broker serving forwarded sessions shows that count too. When
+the cluster has private brokers but no live public broker, a banner at the
+top of the page says so: clients get empty owner endpoints for partitions
+owned by private brokers until a public broker is live. The same condition
+appears in the needs-attention panel as `no_live_public_broker`.
+
+In the topology API each node's `runtime` block carries `visibility`
+(`public` or `private`), `upstream_sessions` and `forwarded_sessions`, and
+`coordination.no_live_public_broker` is true while the banner shows. The
+counts travel on the coordination heartbeat as the `fibril/upstream_sessions`
+and `fibril/forwarded_sessions` labels, sent only while non-zero.
 
 The page also exposes three operator actions, each with a confirmation:
 

@@ -3,7 +3,9 @@
 <h4 class="metrics-header">Connections</h4>
 <p class="page-desc">Every open client connection on this broker. A connection
   carries any number of subscriptions; drops enter a short reconnect grace
-  before their state is released.</p>
+  before their state is released. A forwarded session is opened by a public
+  broker for one of its clients and names the node it came through and the
+  user it acts for.</p>
 
 <div id="conn-strip" class="stat-strip"></div>
 
@@ -52,6 +54,7 @@
 <script src="/static/js/api.js"></script>
 <script src="/static/js/admin.js"></script>
 <script src="/static/js/tendrils.js"></script>
+<script src="/static/js/forwarding-view.js"></script>
 <script>
 // Async completions belong to this visit, including errors and response bodies.
 const pageActive = window.__capturePage();
@@ -129,10 +132,11 @@ function buildDiagram(list) {
       id: c.id,
       x, y: cy + (i - (n - 1) / 2) * 42,
       label: midTrunc(c.peer || c.id, 17),
-      sub: x < 430
+      sub: (c.forwarded ? "forwarded \u00b7 " : "") + (x < 430
         ? (connRate(c) > 0 ? fmtRate(connRate(c)) : "publisher")
-        : `${c.subs} sub${c.subs === 1 ? "" : "s"}`,
+        : `${c.subs} sub${c.subs === 1 ? "" : "s"}`),
       rate: connRate(c), subs: c.subs ?? 0,
+      via: FibrilForwarding.forwardedVia(c),
     }));
     if (more) {
       out.push({ id: null, x, y: cy + (n - 1 - (n - 1) / 2) * 42,
@@ -184,6 +188,7 @@ function buildDiagram(list) {
         cx: ep.x, cy: ep.y, r: 24, fill: "transparent", "data-conn": ep.id,
         style: "cursor: pointer",
       });
+      if (ep.via) hit.appendChild(el("title", {}, ep.via));
       hit.addEventListener("mouseenter", () => setFocus(ep.id));
       hit.addEventListener("mouseleave", () => setFocus(null));
       svg.appendChild(hit);
@@ -389,7 +394,7 @@ function render(bundle) {
   trackRates(list);
   const search = (document.getElementById("conn-search")?.value || "").trim().toLowerCase();
   const visible = list.filter((r) =>
-    !search || `${r.peer || ""} ${r.id || ""}`.toLowerCase().includes(search));
+    !search || `${r.peer || ""} ${r.id || ""} ${FibrilForwarding.forwardedVia(r)}`.toLowerCase().includes(search));
 
   const authed = list.filter((r) => r.authenticated).length;
   const subs = list.reduce((acc, r) => acc + (r.subs || 0), 0);
@@ -406,6 +411,7 @@ function render(bundle) {
       <td>
         <div class="ident-name mono">${escapeHtml(r.peer)}</div>
         <div class="ident-sub mono">${escapeHtml(r.id)}</div>
+        ${r.forwarded ? `<div class="ident-sub"><span class="chip-plain">forwarded</span> ${escapeHtml(FibrilForwarding.forwardedVia(r))}</div>` : ""}
       </td>
       <td class="text-right ${connRate(r) > 0 ? "v-active" : "v-dim"}">${
         connRate(r) > 0 ? escapeHtml(fmtRate(connRate(r))) : (r.published ?? 0)}</td>

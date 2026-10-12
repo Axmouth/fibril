@@ -52,6 +52,8 @@
   embedded consensus group when one is active. Solid edges point from queue owners to followers.
 </p>
 
+<div id="gateway-notice" class="quarantine-banner" role="alert" hidden></div>
+
 <section class="overview-panel" aria-label="Drain this broker">
   <div class="overview-panel-heading">
     <h5>Drain this broker</h5>
@@ -178,6 +180,7 @@
 <script src="/static/js/admin.js"></script>
 <script src="/static/js/tendrils.js"></script>
 <script src="/static/js/recovery-timeline.js"></script>
+<script src="/static/js/forwarding-view.js"></script>
 <script>
 // Async completions belong to this visit, including errors and response bodies.
 const pageActive = window.__capturePage();
@@ -240,6 +243,9 @@ function renderSummary(data) {
       (learners ? `, learners [${learners}]` : ""));
   }
   document.getElementById("topology-summary").innerHTML = parts.join(" · ");
+  const notice = document.getElementById("gateway-notice");
+  notice.innerHTML = FibrilForwarding.gatewayNotice(coordination);
+  notice.hidden = !notice.innerHTML;
   FibrilRecoveryTimeline.render(document.getElementById("recovery-timeline"), raft?.recovery_timeline, coordination?.node_id);
   const checkpoints = raft?.queue_checkpoints;
   const entries = checkpoints?.entries || [];
@@ -508,7 +514,8 @@ function renderDiagram(data) {
       ? "last seen " + timeAgoShort(node.__lastSeen / 1000)
       : ghost
         ? "unreachable \u00b7 " + node.broker_addr
-        : node.broker_addr + (owned ? " \u00b7 owns " + owned : "")
+        : [node.broker_addr, ...FibrilForwarding.captionTags(node)].join(" \u00b7 ")
+          + (owned ? " \u00b7 owns " + owned : "")
           + (rate > 0 ? " \u00b7 " + fmtRate(rate) : "");
     group.appendChild(el("text", {
       x: pos.x, y: pos.y + S / 2 + 32, "text-anchor": "middle", "font-size": 11,
@@ -998,7 +1005,7 @@ function renderBrokerDetail(id) {
   const node = (data.coordination?.nodes ?? []).find((n) => String(n.node_id) === String(id));
   const { owned, followed } = partitionsFor(data, id);
   const roles = brokerRoles(data, id);
-  sub.innerHTML = `<b>${escapeHtml(id)}</b> · ${escapeHtml(node?.broker_addr ?? "unknown addr")}` +
+  sub.innerHTML = `<b>${escapeHtml(id)}</b> ${FibrilForwarding.badge(node)} · ${escapeHtml(node?.broker_addr ?? "unknown addr")}` +
     (roles.length ? ` · ${escapeHtml(roles.join(", "))}` : "");
   body.innerHTML = detailSection("Owns", owned, "owner", true) +
     detailSection("Follows", followed, "follow", false);
@@ -1056,6 +1063,7 @@ function renderList(data) {
           <span class="node-dot ${live ? "node-dot-ok" : "node-dot-bad"}"></span>
           <span class="mono node-card-name">${leads(node) ? "\u2605 " : ""}${escapeHtml(node.node_id)}</span>
           ${node.node_id === selfId ? '<span class="chip-plain">this node</span>' : ""}
+          ${FibrilForwarding.badge(node)}
           ${live ? "" : '<span class="chip-bad">unreachable</span>'}
         </div>
         <div class="node-card-body">
@@ -1064,12 +1072,13 @@ function renderList(data) {
           ${rt.version ? `<div class="node-kv"><span>version \u00b7 uptime</span><b>${escapeHtml(rt.version)}${up ? " \u00b7 " + escapeHtml(up) : ""}</b></div>` : ""}
           <div class="node-kv"><span>TLS</span><b>${tlsCell}</b></div>
           <div class="node-kv"><span>publish \u00b7 delivered /s</span><b>${fmtCompact(node.rate_pub ?? 0)} \u00b7 ${fmtCompact(node.rate_dlv ?? 0)}</b></div>
+          ${FibrilForwarding.nodeRows(node)}
         </div>
         <div class="node-card-foot">
           ${node.node_id === selfId
             ? '<span class="settings-note">draining this node lives in the panel above</span>'
             : adminLinkable(node.admin_addr)
-              ? `<a data-no-boost href="${location.protocol}//${escapeHtml(node.admin_addr)}${location.pathname}">open its admin</a>`
+              ? `<a data-no-boost href="${location.protocol}//${escapeHtml(node.admin_addr)}${location.pathname}">${escapeHtml(FibrilForwarding.adminLinkText(node))}</a>`
               : '<span class="settings-note">no reachable admin address registered</span>'}
         </div>
       </div>`;
