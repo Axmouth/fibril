@@ -2213,3 +2213,22 @@ async fn a_real_owner_session_resumes_while_its_old_connection_lingers() {
         publish_and_consume(&mut client, &format!("late-{i}")).await;
     }
 }
+
+#[tokio::test]
+async fn a_gateway_without_a_route_yet_answers_503() {
+    let (owner_addr, _owners) = scripted_owner().await;
+    let gateway = gateway(owner_addr, RoutingLimits::default()).await;
+    // Its view has no owner for the partition, as right after a restart.
+    gateway.topology.set_route(None);
+    let mut client = gateway.client().await;
+    client
+        .send(publish_frame(1, "orders", b"x", true))
+        .await
+        .unwrap();
+    let reply = recv(&mut client).await;
+    assert_eq!(error_of(&reply).code, ERR_UNAVAILABLE);
+    client.send(subscribe_frame(2, "orders", 1)).await.unwrap();
+    let reply = recv(&mut client).await;
+    assert_eq!(reply.opcode, Op::SubscribeErr as u16);
+    assert_eq!(error_of(&reply).code, ERR_UNAVAILABLE);
+}

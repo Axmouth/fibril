@@ -549,6 +549,10 @@ enum OwnerRoute {
 const OWNER_MOVING_MESSAGE: &str = "partition ownership changed while this request was \
     handled and nothing was applied. Retry shortly against the same broker";
 
+const NO_ROUTE_YET_MESSAGE: &str = "this broker does not know the partition owner yet, \
+    usually just after it started or the partition was created, and nothing was applied. \
+    Retry shortly against the same broker";
+
 /// Turn a routing decision for a refused operation into an [`OwnerRoute`].
 fn owner_route_from_decision(
     decision: RouteDecision,
@@ -711,6 +715,20 @@ async fn send_owner_redirect_or_error(
                     request_id,
                     ERR_UNAVAILABLE,
                     OWNER_MOVING_MESSAGE,
+                )
+                .await;
+                return;
+            }
+            // A gateway serves every partition its clients are sent to, so
+            // a missing route means its view has not caught up (for example
+            // right after it started). Nothing was applied.
+            OwnerRoute::Unknown if may_forward => {
+                send_error_response_and_count(
+                    tx,
+                    metrics,
+                    request_id,
+                    ERR_UNAVAILABLE,
+                    NO_ROUTE_YET_MESSAGE,
                 )
                 .await;
                 return;
@@ -4678,6 +4696,20 @@ where
                                             &ErrorMsg {
                                                 code: ERR_UNAVAILABLE,
                                                 message: RECOVERING_OWNER_MESSAGE.into(),
+                                            },
+                                        )?)
+                                        .await?;
+                                    metrics.error();
+                                    continue;
+                                }
+                                OwnerRoute::Unknown if may_forward => {
+                                    frame_tx_high_prio
+                                        .send(try_encode(
+                                            Op::SubscribeErr,
+                                            frame.request_id,
+                                            &ErrorMsg {
+                                                code: ERR_UNAVAILABLE,
+                                                message: NO_ROUTE_YET_MESSAGE.into(),
                                             },
                                         )?)
                                         .await?;
