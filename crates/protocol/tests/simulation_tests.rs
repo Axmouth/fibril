@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use fibril_broker::broker::{
     Broker, BrokerConfig, FollowerReplicationWorkerConfig, FollowerReplicationWorkerStatus,
-    QueueOwnership,
+    QueueOwnership, StaticQueueOwnership,
 };
 use fibril_broker::coordination::{
     Coordination, CoordinationSnapshot, DeterministicPartitionPlacement,
@@ -36,7 +36,7 @@ use fibril_broker::coordination::{
 use fibril_broker::queue_engine::StromaEngine;
 use fibril_broker::storage::Partition;
 use fibril_coordination_ganglion::GanglionCoordination;
-use fibril_metrics::{ConnectionStats, TcpStats};
+use fibril_metrics::{ConnectionStats, ForwardStats, TcpStats};
 use fibril_protocol::v1::frame::ProtoCodec;
 use fibril_protocol::v1::handler::{
     ClientTopologySource, ConnectionSettings, TopologyAdoptionTracker, handle_connection,
@@ -44,12 +44,15 @@ use fibril_protocol::v1::handler::{
 };
 use fibril_protocol::v1::helper::{try_decode, try_encode};
 use fibril_broker::auth_store::NODE_PRINCIPAL;
+use fibril_protocol::v1::forwarding::{
+    Forwarder, ForwardingConfig, PartitionRoute, RoutingLimits,
+};
 use fibril_protocol::v1::replication::{
-    CoordinationProtocolOwnerPeerResolver, ProtocolOwnerPeerResolverConfig,
+    CoordinationProtocolOwnerPeerResolver, ProtocolOwnerPeerAuth, ProtocolOwnerPeerResolverConfig,
 };
 use fibril_protocol::v1::{
-    AdvertisedAddress, Hello, HelloOk, Op, PROTOCOL_V1, QueueTopologyEntry, TopologyOk,
-    TopologyUpdateAck,
+    AdvertisedAddress, Hello, HelloOk, Op, PROTOCOL_V1, Publish, QueueTopologyEntry, Subscribe,
+    TopologyOk, TopologyUpdateAck,
 };
 use fibril_util::{StaticAuthHandler, unix_millis};
 use futures::{SinkExt, StreamExt};
@@ -2255,4 +2258,487 @@ fn queue_cursor(cursor: &fibril_broker::broker::FollowerCursor) -> u64 {
         fibril_broker::broker::FollowerCursor::Queue { next_offset } => *next_offset,
         other => panic!("expected a queue cursor, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Forwarding through a public gateway to a private owner
+// ---------------------------------------------------------------------------
+
+const GATEWAY_PORT: u16 = 9200;
+const PRIVATE_OWNER_PORT: u16 = 9300;
+
+/// Routing view of a gateway that owns nothing: every partition belongs to
+/// the private node `p-owner`, and clients are sent to the gateway itself.
+struct ForwardingTopology;
+
+impl ClientTopologySource for ForwardingTopology {
+    fn topology(&self) -> TopologyOk {
+        TopologyOk {
+            generation: 1,
+            queues: Vec::new(),
+            streams: Vec::new(),
+        }
+    }
+
+    fn owner_endpoint(&self, _: &str, _: Partition, _: Option<&str>) -> Option<(String, u64)> {
+        None
+    }
+
+    fn queue_route(&self, _: &str, _: Partition, _: Option<&str>) -> Option<PartitionRoute> {
+        Some(PartitionRoute {
+            owner_node_id: Some("p-owner".into()),
+            owner_is_local: false,
+            owner_endpoints: Vec::new(),
+            client_endpoints: vec![format!("gateway:{GATEWAY_PORT}")],
+            partitioning_version: 0,
+        })
+    }
+
+    fn stream_route(&self, topic: &str, partition: Partition) -> Option<PartitionRoute> {
+        self.queue_route(topic, partition, None)
+    }
+
+    fn local_client_endpoints(&self) -> Vec<String> {
+        vec![format!("gateway:{GATEWAY_PORT}")]
+    }
+
+    fn node_peer_address(&self, node_id: &str) -> Option<String> {
+        (node_id == "p-owner").then(|| {
+            SocketAddr::new(turmoil::lookup("p-owner"), PRIVATE_OWNER_PORT).to_string()
+        })
+    }
+}
+
+/// A private owner that serves every queue partition, with a long reconnect
+/// grace so a gateway can resume its sessions after a partition.
+fn spawn_private_owner(sim: &mut turmoil::Sim<'_>) {
+    sim.host("p-owner", || async {
+        let (engine, _dir) = open_engine("private-owner").await;
+        let broker = Broker::new(engine, test_broker_config(), None);
+        run_server(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), PRIVATE_OWNER_PORT),
+            None,
+            broker,
+            TcpStats::new(10),
+            ConnectionStats::new(),
+            node_auth(),
+            ConnectionSettings::new(Some(5)).with_reconnect_grace_ms(Some(120_000)),
+            None,
+            None,
+            None,
+        )
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        Ok(())
+    });
+}
+
+/// A public gateway that owns nothing and forwards to `p-owner`.
+fn spawn_gateway(sim: &mut turmoil::Sim<'_>, stats: Arc<ForwardStats>) {
+    sim.host("gateway", move || {
+        let stats = stats.clone();
+        async move {
+            let (engine, _dir) = open_engine("gateway").await;
+            let broker = Broker::new_with_ownership(
+                engine,
+                test_broker_config(),
+                None,
+                Arc::new(StaticQueueOwnership::new(Default::default())),
+            );
+            let forwarder = Forwarder::new(
+                ForwardingConfig {
+                    node_id: "gateway".into(),
+                    auth: ProtocolOwnerPeerAuth {
+                        username: NODE_PRINCIPAL.into(),
+                        password: CLUSTER_SECRET.into(),
+                    },
+                    tls: None,
+                },
+                RoutingLimits::default(),
+                stats.clone(),
+            );
+            let settings = ConnectionSettings::new(Some(5))
+                .with_reconnect_grace_ms(Some(60_000))
+                .with_forward_stats(stats)
+                .with_forwarder(Arc::new(forwarder));
+            run_server(
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), GATEWAY_PORT),
+                None,
+                broker,
+                TcpStats::new(10),
+                ConnectionStats::new(),
+                None::<StaticAuthHandler>,
+                settings,
+                Some(Arc::new(ForwardingTopology) as Arc<dyn ClientTopologySource>),
+                None,
+                None,
+            )
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+            Ok(())
+        }
+    });
+}
+
+/// What the gateway client saw.
+#[derive(Default)]
+struct ClientLedger {
+    /// Payloads answered with `PublishOk`.
+    confirmed: std::collections::BTreeSet<String>,
+    /// Payloads delivered to the subscription.
+    delivered: std::collections::BTreeSet<String>,
+    unknown_outcomes: usize,
+    retries: usize,
+}
+
+fn gateway_publish(request_id: u64, payload: &str) -> fibril_protocol::v1::frame::Frame {
+    try_encode(
+        Op::Publish,
+        request_id,
+        &Publish {
+            topic: "jobs".into(),
+            partition: Partition::new(0),
+            group: None,
+            require_confirm: true,
+            content_type: None,
+            headers: HashMap::new(),
+            payload: payload.as_bytes().to_vec(),
+            published: unix_millis(),
+            partition_key: None,
+            partitioning_version: 0,
+            ttl_ms: None,
+        },
+    )
+    .unwrap()
+}
+
+fn gateway_subscribe(request_id: u64) -> fibril_protocol::v1::frame::Frame {
+    try_encode(
+        Op::Subscribe,
+        request_id,
+        &Subscribe {
+            topic: "jobs".into(),
+            partition: Partition::new(0),
+            group: None,
+            prefetch: 8,
+            auto_ack: false,
+            consumer_group: None,
+            consumer_target: None,
+            member_id: None,
+        },
+    )
+    .unwrap()
+}
+
+/// Where the gateway client stops to let the test cut a link.
+struct ClientPause {
+    /// Stop publishing once this many payloads are confirmed and delivered.
+    after: usize,
+    /// Set by the client while stopped.
+    paused: Arc<AtomicBool>,
+    /// Set by the test to let the client go on.
+    go: Arc<AtomicBool>,
+}
+
+/// Publish `count` payloads one at a time with confirms through the gateway
+/// while consuming and acking them. A `503` is retried, a `504` too (the
+/// outcome is unknown, so the payload may arrive twice). Ends once every
+/// payload is confirmed and every confirmed payload was delivered.
+async fn run_gateway_client(
+    count: usize,
+    confirmed_so_far: Arc<AtomicUsize>,
+    ledger: Arc<std::sync::Mutex<ClientLedger>>,
+    pause: Option<ClientPause>,
+) -> turmoil::Result {
+    let stream = turmoil::net::TcpStream::connect(("gateway", GATEWAY_PORT)).await?;
+    let mut framed = Framed::new(stream, ProtoCodec);
+    framed
+        .send(
+            try_encode(
+                Op::Hello,
+                1,
+                &Hello {
+                    client_name: "gateway-client".into(),
+                    client_version: "0".into(),
+                    protocol_version: PROTOCOL_V1,
+                    resume: None,
+                },
+            )
+            .unwrap(),
+        )
+        .await?;
+    let mut next_request = 10u64;
+    let mut subscribe_request = Some(next_request);
+    framed.send(gateway_subscribe(next_request)).await?;
+    next_request += 1;
+    let mut current: Option<(u64, String)> = None;
+    let mut next_payload = 0usize;
+    let mut retry_at: Option<tokio::time::Instant> = None;
+
+    loop {
+        {
+            let ledger = ledger.lock().unwrap();
+            if next_payload == count
+                && current.is_none()
+                && ledger.confirmed.is_subset(&ledger.delivered)
+            {
+                return Ok(());
+            }
+        }
+        let ready = retry_at.is_none_or(|at| tokio::time::Instant::now() >= at);
+        // A pause waits until every confirmed payload was delivered and its
+        // ack had time to leave, so no settle is lost on the cut link.
+        let held = pause.as_ref().is_some_and(|pause| {
+            if next_payload < pause.after || pause.go.load(Ordering::SeqCst) {
+                return false;
+            }
+            let ledger = ledger.lock().unwrap();
+            if current.is_none() && ledger.confirmed.is_subset(&ledger.delivered) {
+                pause.paused.store(true, Ordering::SeqCst);
+            }
+            true
+        });
+        if current.is_none() && next_payload < count && ready && !held {
+            let payload = format!("m{next_payload}");
+            framed.send(gateway_publish(next_request, &payload)).await?;
+            current = Some((next_request, payload));
+            next_request += 1;
+        }
+        let frame = match tokio::time::timeout(Duration::from_millis(200), framed.next()).await {
+            Ok(Some(frame)) => frame?,
+            Ok(None) => return Err("the gateway closed the client connection".into()),
+            Err(_) => continue,
+        };
+        match frame.opcode {
+            x if x == Op::Ping as u16 => {
+                framed
+                    .send(try_encode(Op::Pong, frame.request_id, &()).unwrap())
+                    .await?;
+            }
+            x if x == Op::PublishOk as u16 => {
+                let Some((request_id, payload)) = current.take() else {
+                    continue;
+                };
+                assert_eq!(frame.request_id, request_id);
+                ledger.lock().unwrap().confirmed.insert(payload);
+                confirmed_so_far.fetch_add(1, Ordering::SeqCst);
+                next_payload += 1;
+            }
+            x if x == Op::Error as u16 => {
+                let err: fibril_protocol::v1::ErrorMsg = try_decode(&frame).unwrap();
+                if current.as_ref().is_some_and(|(id, _)| *id == frame.request_id) {
+                    // 503: nothing applied. 504: maybe applied. Both retry
+                    // the same payload, so the only effect is a duplicate.
+                    assert!(
+                        err.code == fibril_protocol::v1::ERR_UNAVAILABLE
+                            || err.code == fibril_protocol::v1::ERR_GATEWAY_TIMEOUT,
+                        "unexpected publish error {} {}",
+                        err.code,
+                        err.message
+                    );
+                    let mut ledger = ledger.lock().unwrap();
+                    ledger.retries += 1;
+                    if err.code == fibril_protocol::v1::ERR_GATEWAY_TIMEOUT {
+                        ledger.unknown_outcomes += 1;
+                    }
+                    current = None;
+                    retry_at = Some(tokio::time::Instant::now() + Duration::from_millis(500));
+                }
+            }
+            x if x == Op::SubscribeOk as u16 => subscribe_request = None,
+            x if x == Op::SubscribeErr as u16 || x == Op::SubscriptionClosed as u16 => {
+                // Resubscribe, as an SDK supervisor would.
+                if x == Op::SubscribeErr as u16 || subscribe_request.is_none() {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    framed.send(gateway_subscribe(next_request)).await?;
+                    subscribe_request = Some(next_request);
+                    next_request += 1;
+                }
+            }
+            x if x == Op::Deliver as u16 => {
+                let deliver = fibril_protocol::v1::wire::decode_deliver(&frame).unwrap();
+                ledger
+                    .lock()
+                    .unwrap()
+                    .delivered
+                    .insert(String::from_utf8(deliver.payload).unwrap());
+                framed
+                    .send(
+                        try_encode(
+                            Op::Ack,
+                            next_request,
+                            &fibril_protocol::v1::Ack {
+                                topic: "jobs".into(),
+                                group: None,
+                                partition: Partition::new(0),
+                                tags: vec![deliver.delivery_tag],
+                            },
+                        )
+                        .unwrap(),
+                    )
+                    .await?;
+                next_request += 1;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A client publishes with confirms and consumes through a public gateway
+/// while the link between the gateway and the private owner is cut for
+/// longer than the gateway's heartbeat timeout. Every publish the client saw
+/// confirmed is delivered, so the gateway never answered `PublishOk` without
+/// the owner's confirm, and the gateway resumes its upstream session.
+#[test]
+fn gateway_resumes_its_upstream_after_a_partition_and_never_confirms_early() {
+    let mut sim = turmoil::Builder::new()
+        .simulation_duration(Duration::from_secs(300))
+        .tick_duration(Duration::from_millis(10))
+        .build();
+    let stats = ForwardStats::new();
+    spawn_private_owner(&mut sim);
+    spawn_gateway(&mut sim, stats.clone());
+
+    let confirmed = Arc::new(AtomicUsize::new(0));
+    let ledger = Arc::new(std::sync::Mutex::new(ClientLedger::default()));
+    let done = Arc::new(AtomicBool::new(false));
+    let paused = Arc::new(AtomicBool::new(false));
+    let go = Arc::new(AtomicBool::new(false));
+    {
+        let confirmed = confirmed.clone();
+        let ledger = ledger.clone();
+        let done = done.clone();
+        let pause = ClientPause {
+            after: 5,
+            paused: paused.clone(),
+            go: go.clone(),
+        };
+        sim.client("client", async move {
+            run_gateway_client(20, confirmed, ledger, Some(pause)).await?;
+            done.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+    }
+
+    let mut phase = 0u8;
+    let mut cut_at = Duration::ZERO;
+    loop {
+        let finished = sim.step().unwrap_or(true);
+        let now = sim.elapsed();
+        match phase {
+            // The client stopped with everything settled. Give its last
+            // ack a moment to land, then cut the link and let it publish
+            // into the partition.
+            0 if paused.load(Ordering::SeqCst) => {
+                cut_at = now;
+                phase = 1;
+            }
+            1 if now >= cut_at + Duration::from_millis(500) => {
+                sim.partition("gateway", "p-owner");
+                go.store(true, Ordering::SeqCst);
+                cut_at = now;
+                phase = 2;
+            }
+            // Longer than the gateway's 15s heartbeat timeout, shorter than
+            // its resume window and the owner's grace.
+            2 if now >= cut_at + Duration::from_secs(25) => {
+                sim.repair("gateway", "p-owner");
+                phase = 3;
+            }
+            _ => {}
+        }
+        if done.load(Ordering::SeqCst) || finished {
+            break;
+        }
+    }
+    let ledger = ledger.lock().unwrap();
+    assert!(
+        done.load(Ordering::SeqCst),
+        "the client finished: confirmed {}, delivered {}, retries {}, unknown {}, resumed {}, lost {}, upstreams {}",
+        ledger.confirmed.len(),
+        ledger.delivered.len(),
+        ledger.retries,
+        ledger.unknown_outcomes,
+        stats.upstream_resumes(true),
+        stats.upstream_resumes(false),
+        stats.upstream_sessions()
+    );
+    assert_eq!(ledger.confirmed.len(), 20);
+    assert!(ledger.confirmed.is_subset(&ledger.delivered));
+    assert!(
+        stats.upstream_resumes(true) >= 1,
+        "the gateway resumed its upstream session (resumed {}, lost {}, retries {})",
+        stats.upstream_resumes(true),
+        stats.upstream_resumes(false),
+        ledger.retries
+    );
+}
+
+/// The owner's answers stop reaching the gateway while a confirmed publish
+/// is in flight. The owner may apply it, so the client must get `504` or a
+/// real confirm, never an invented one, and the payload must not be lost
+/// once confirmed.
+#[test]
+fn one_way_loss_toward_the_gateway_answers_unknown_outcome() {
+    let mut sim = turmoil::Builder::new()
+        .simulation_duration(Duration::from_secs(300))
+        .tick_duration(Duration::from_millis(10))
+        .build();
+    let stats = ForwardStats::new();
+    spawn_private_owner(&mut sim);
+    spawn_gateway(&mut sim, stats.clone());
+
+    let confirmed = Arc::new(AtomicUsize::new(0));
+    let ledger = Arc::new(std::sync::Mutex::new(ClientLedger::default()));
+    let done = Arc::new(AtomicBool::new(false));
+    {
+        let confirmed = confirmed.clone();
+        let ledger = ledger.clone();
+        let done = done.clone();
+        sim.client("client", async move {
+            run_gateway_client(10, confirmed, ledger, None).await?;
+            done.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+    }
+
+    let mut phase = 0u8;
+    let mut cut_at = Duration::ZERO;
+    loop {
+        let finished = sim.step().unwrap_or(true);
+        let now = sim.elapsed();
+        match phase {
+            0 if confirmed.load(Ordering::SeqCst) >= 3 => {
+                sim.partition_oneway("p-owner", "gateway");
+                cut_at = now;
+                phase = 1;
+            }
+            1 if now >= cut_at + Duration::from_secs(25) => {
+                sim.repair_oneway("p-owner", "gateway");
+                phase = 2;
+            }
+            _ => {}
+        }
+        if done.load(Ordering::SeqCst) || finished {
+            break;
+        }
+    }
+    let ledger = ledger.lock().unwrap();
+    assert!(
+        done.load(Ordering::SeqCst),
+        "the client finished: confirmed {}, delivered {}, retries {}, unknown {}, resumed {}, lost {}, upstreams {}",
+        ledger.confirmed.len(),
+        ledger.delivered.len(),
+        ledger.retries,
+        ledger.unknown_outcomes,
+        stats.upstream_resumes(true),
+        stats.upstream_resumes(false),
+        stats.upstream_sessions()
+    );
+    assert_eq!(ledger.confirmed.len(), 10);
+    assert!(ledger.confirmed.is_subset(&ledger.delivered));
+    assert!(
+        ledger.unknown_outcomes >= 1,
+        "the publish in flight when the owner went silent answered 504"
+    );
 }
