@@ -30,13 +30,16 @@ use std::{
         Arc, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use arc_swap::ArcSwap;
 use fibril_metrics::{ForwardLimit, ForwardOp, ForwardOutcome, ForwardStats};
 use futures::{SinkExt, StreamExt};
 use tokio::sync::{Notify, mpsc, watch};
+// Tokio's clock, so deadlines and timeouts follow simulated time in the
+// deterministic simulation tests.
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -318,7 +321,7 @@ impl Forwarder {
 
     /// Reserve in-flight publish bytes, waiting up to `wait` for room.
     async fn reserve_bytes(&self, bytes: u64, wait: Duration) -> Option<BytesPermit> {
-        let deadline = tokio::time::Instant::now() + wait;
+        let deadline = Instant::now() + wait;
         loop {
             // Register before checking so a release between the check and
             // the wait is not missed.
@@ -1718,7 +1721,7 @@ async fn relay_to_client(
     let send = crate::v1::handler::send_to_current_transport(transport, cached_tx, frame);
     tokio::pin!(send);
     let every = Duration::from_secs(DEFAULT_HEARTBEAT_INTERVAL);
-    let mut keepalive = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+    let mut keepalive = tokio::time::interval_at(Instant::now() + every, every);
     loop {
         tokio::select! {
             _ = &mut send => return Ok(()),

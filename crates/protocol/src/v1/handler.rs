@@ -1054,6 +1054,12 @@ pub(crate) async fn send_to_current_transport(
     mut frame: Frame,
 ) -> Result<(), ()> {
     loop {
+        // A resumed session attaches a new transport while the old connection
+        // may still look alive until its heartbeat times out. Switch at once,
+        // so frames do not keep going down the abandoned socket.
+        if cached_tx.is_some() && transport_rx.has_changed().unwrap_or(false) {
+            *cached_tx = None;
+        }
         if cached_tx.is_none() {
             *cached_tx = transport_rx.borrow_and_update().clone();
         }
@@ -5686,6 +5692,12 @@ where
             .reconnect_grace_ms
             .unwrap_or_default()
     };
+    // The session resumed on a newer connection while this one lingered (its
+    // peer went silent rather than closing). That connection owns the
+    // session now, so this one neither starts a grace nor cleans it up.
+    let superseded = |logical: &LogicalConnection| {
+        logical.generation.load(Ordering::Acquire) != transport_generation
+    };
     let entered_grace = reconnect_grace_ms > 0 && logical.mark_dormant(transport_generation);
 
     if entered_grace {
@@ -5736,7 +5748,7 @@ where
     writer_task.abort();
     pub_queue_handle.await?;
 
-    if !entered_grace {
+    if !entered_grace && !superseded(&logical) {
         cleanup_connection_state(broker.clone(), logical.clone()).await;
         let forgotten = connection_settings.resume_sessions.forget_if_generation(
             logical.client_id,

@@ -2037,3 +2037,179 @@ async fn gateway_falls_back_when_an_owner_refuses_release_on_close() {
     );
     assert_eq!(markers.recv().await, Some(true), "then the old body");
 }
+
+/// A TCP relay between a gateway and an owner. `cut` drops every gateway
+/// side socket and keeps the owner side open, so the owner sees nothing, as
+/// with a network partition, while the gateway sees its link fail.
+struct CuttableLink {
+    addr: String,
+    cut: tokio::sync::watch::Sender<u64>,
+    _owner_sides: Arc<Mutex<Vec<tokio::net::tcp::OwnedWriteHalf>>>,
+}
+
+impl CuttableLink {
+    async fn new(owner_addr: String) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let (cut, _) = tokio::sync::watch::channel(0u64);
+        let owner_sides = Arc::new(Mutex::new(Vec::new()));
+        let cuts = cut.clone();
+        let keep = owner_sides.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((gateway_side, _)) = listener.accept().await else {
+                    return;
+                };
+                let owner_side = TcpStream::connect(&owner_addr).await.unwrap();
+                let (mut gr, mut gw) = gateway_side.into_split();
+                let (mut or, ow) = owner_side.into_split();
+                let mut cut_rx = cuts.subscribe();
+                cut_rx.borrow_and_update();
+                let keep = keep.clone();
+                tokio::spawn(async move {
+                    let mut ow = ow;
+                    let up = async {
+                        let _ = tokio::io::copy(&mut gr, &mut ow).await;
+                    };
+                    let down = async {
+                        let _ = tokio::io::copy(&mut or, &mut gw).await;
+                    };
+                    tokio::select! {
+                        _ = up => {}
+                        _ = down => {}
+                        _ = cut_rx.changed() => {}
+                    }
+                    // The owner side stays open and silent.
+                    keep.lock().unwrap().push(ow);
+                    std::mem::forget(or);
+                });
+            }
+        });
+        Self {
+            addr,
+            cut,
+            _owner_sides: owner_sides,
+        }
+    }
+
+    fn cut(&self) {
+        self.cut.send_modify(|n| *n += 1);
+    }
+
+    /// Close the owner side of every cut connection in order, as a peer
+    /// whose link comes back long after the session moved on.
+    fn close_lingering(&self) {
+        self._owner_sides.lock().unwrap().clear();
+    }
+}
+
+#[tokio::test]
+async fn a_real_owner_session_resumes_while_its_old_connection_lingers() {
+    // The owner never sees the old connection fail, so it is still open when
+    // the gateway resumes on a new one.
+    let (owner_broker, _owner_dir) = open_broker(true).await;
+    let owner_addr = serve_owner_with(
+        owner_broker,
+        ConnectionSettings::new(Some(60)).with_reconnect_grace_ms(Some(60_000)),
+    )
+    .await;
+    let link = CuttableLink::new(owner_addr).await;
+    let gateway =
+        gateway_with_grace(link.addr.clone(), RoutingLimits::default(), Some(10_000)).await;
+    let mut client = gateway.client().await;
+    client.send(subscribe_frame(1, "jobs", 8)).await.unwrap();
+    let ok: SubscribeOk = try_decode(&recv(&mut client).await).unwrap();
+
+    let mut next_id = 10;
+    let mut publish_and_consume = async |client: &mut Conn, payload: &str| {
+        next_id += 1;
+        client
+            .send(publish_frame(next_id, "jobs", payload.as_bytes(), true))
+            .await
+            .unwrap();
+        let mut confirmed = false;
+        let mut delivered = false;
+        while !confirmed || !delivered {
+            let frame = recv(client).await;
+            match frame.opcode {
+                x if x == Op::PublishOk as u16 => confirmed = true,
+                x if x == Op::Deliver as u16 => {
+                    let deliver = wire::decode_deliver(&frame).unwrap();
+                    assert_eq!(deliver.sub_id, ok.sub_id);
+                    if deliver.payload == payload.as_bytes() {
+                        delivered = true;
+                    }
+                    next_id += 1;
+                    client
+                        .send(
+                            try_encode(
+                                Op::Ack,
+                                next_id,
+                                &Ack {
+                                    topic: "jobs".into(),
+                                    group: None,
+                                    partition: Partition::new(0),
+                                    tags: vec![deliver.delivery_tag],
+                                },
+                            )
+                            .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                }
+                other => panic!("unexpected opcode {other}"),
+            }
+        }
+    };
+    publish_and_consume(&mut client, "before").await;
+    // One delivery is held unsettled across the cut.
+    client
+        .send(publish_frame(5, "jobs", b"held", true))
+        .await
+        .unwrap();
+    let mut held = None;
+    let mut confirmed = false;
+    while held.is_none() || !confirmed {
+        let frame = recv(&mut client).await;
+        match frame.opcode {
+            x if x == Op::PublishOk as u16 => confirmed = true,
+            x if x == Op::Deliver as u16 => held = Some(wire::decode_deliver(&frame).unwrap()),
+            other => panic!("unexpected opcode {other}"),
+        }
+    }
+    link.cut();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while gateway.stats.upstream_resumes(true) == 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the gateway resumed");
+    // The held delivery settles on the resumed session.
+    client
+        .send(
+            try_encode(
+                Op::Ack,
+                6,
+                &Ack {
+                    topic: "jobs".into(),
+                    group: None,
+                    partition: Partition::new(0),
+                    tags: vec![held.unwrap().delivery_tag],
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    for i in 0..5 {
+        publish_and_consume(&mut client, &format!("after-{i}")).await;
+    }
+    // The owner's old connection finally ends. The session lives on the
+    // resumed connection, so this must not clean it up.
+    link.close_lingering();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    for i in 0..3 {
+        publish_and_consume(&mut client, &format!("late-{i}")).await;
+    }
+}
