@@ -268,6 +268,20 @@ fn forward_families(server: &AdminServer, per_channel: bool) -> Vec<MetricFamily
                 .total_micros
                 .load(std::sync::atomic::Ordering::Relaxed),
         ),
+        MetricFamily {
+            name: "fibril_forward_upstream_resumes_total",
+            help: "Lost upstream sessions the gateway tried to resume, by outcome. resumed kept the owner session and its subscriptions, lost closed them for the client to resubscribe.",
+            kind: MetricKind::Counter,
+            samples: [("resumed", true), ("lost", false)]
+                .into_iter()
+                .map(|(outcome, resumed)| {
+                    Sample::labeled(
+                        vec![("outcome", outcome.to_string())],
+                        forward.upstream_resumes(resumed) as f64,
+                    )
+                })
+                .collect(),
+        },
         gauge(
             "fibril_forwarded_sessions",
             "Sessions this broker serves for public brokers forwarding their clients.",

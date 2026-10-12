@@ -30,7 +30,7 @@ use crate::v1::{
     Auth, ERR_NOT_OWNER, ErrorMsg, Hello, HelloOk, Op, PROTOCOL_V1, QueuePushProgress,
     QueuePushReset, QueuePushStart, QueueReplicationRead, QueueReplicationReadOk,
     QueueCheckpointExport, ReplicationEventRead,
-    ReplicationMessageRead, StreamReplicationRead, StreamReplicationReadOk,
+    ReplicationMessageRead, ResumeIdentity, StreamReplicationRead, StreamReplicationReadOk,
     frame::Frame,
     helper::{self, Conn, try_decode, try_encode},
     queue_push::{
@@ -411,6 +411,30 @@ pub(super) async fn open_protocol_owner_conn(
     client_version: &str,
     connect_timeout_ms: u64,
 ) -> Result<Conn, BrokerError> {
+    open_protocol_owner_session(
+        addr,
+        auth,
+        tls,
+        client_name,
+        client_version,
+        connect_timeout_ms,
+        None,
+    )
+    .await
+    .map(|(conn, _)| conn)
+}
+
+/// Like [`open_protocol_owner_conn`], but presents `resume` in HELLO and
+/// returns the owner's `HelloOk`, which says whether the session resumed.
+pub(super) async fn open_protocol_owner_session(
+    addr: String,
+    auth: Option<&ProtocolOwnerPeerAuth>,
+    tls: Option<&PeerTlsConnector>,
+    client_name: &str,
+    client_version: &str,
+    connect_timeout_ms: u64,
+    resume: Option<ResumeIdentity>,
+) -> Result<(Conn, HelloOk), BrokerError> {
     // Bound connect plus handshake: a partition that drops the SYN or a handshake
     // response must not hang the follower worker on a half-open connection. On
     // timeout the worker errors out and retries, redialing once the link is back.
@@ -438,7 +462,7 @@ pub(super) async fn open_protocol_owner_conn(
                     client_name: client_name.to_string(),
                     client_version: client_version.to_string(),
                     protocol_version: PROTOCOL_V1,
-                    resume: None,
+                    resume,
                 },
             )
             .map_err(protocol_error)?,
@@ -446,7 +470,7 @@ pub(super) async fn open_protocol_owner_conn(
         .await
         .map_err(|err| BrokerError::Unknown(format!("owner peer hello send failed: {err}")))?;
 
-        let _: HelloOk = recv_response(&mut conn, request_id, Op::HelloOk)
+        let hello_ok: HelloOk = recv_response(&mut conn, request_id, Op::HelloOk)
             .await
             .map_err(|err| BrokerError::Unknown(err.to_string()))?;
 
@@ -471,7 +495,7 @@ pub(super) async fn open_protocol_owner_conn(
                 .map_err(|err| BrokerError::Unknown(err.to_string()))?;
         }
 
-        Ok::<Conn, BrokerError>(conn)
+        Ok::<(Conn, HelloOk), BrokerError>((conn, hello_ok))
     };
 
     match tokio::time::timeout(std::time::Duration::from_millis(connect_timeout_ms), setup).await {

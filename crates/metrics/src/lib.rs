@@ -1471,19 +1471,28 @@ mod tests {
 /// Forwarded operation kinds counted by [`ForwardStats`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForwardOp {
+    /// Queue and stream publishes.
     Publish,
     PublishDelayed,
+    /// Queue subscribes, exclusive consumer groups included.
     Subscribe,
+    SubscribeStream,
 }
 
 impl ForwardOp {
-    pub const ALL: [ForwardOp; 3] = [Self::Publish, Self::PublishDelayed, Self::Subscribe];
+    pub const ALL: [ForwardOp; 4] = [
+        Self::Publish,
+        Self::PublishDelayed,
+        Self::Subscribe,
+        Self::SubscribeStream,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Publish => "publish",
             Self::PublishDelayed => "publish_delayed",
             Self::Subscribe => "subscribe",
+            Self::SubscribeStream => "subscribe_stream",
         }
     }
 
@@ -1567,8 +1576,10 @@ impl ForwardLimit {
 pub struct ForwardStats {
     upstream_sessions: AtomicU64,
     upstream_by_owner: parking_lot::Mutex<HashMap<String, u64>>,
-    requests: [AtomicU64; 15],
+    requests: [AtomicU64; 20],
     rejected: [AtomicU64; 3],
+    upstream_resumed: AtomicU64,
+    upstream_resume_failed: AtomicU64,
     bytes_in: AtomicU64,
     bytes_out: AtomicU64,
     inflight_bytes: AtomicU64,
@@ -1630,6 +1641,24 @@ impl ForwardStats {
     pub fn requests(&self, op: ForwardOp, outcome: ForwardOutcome) -> u64 {
         self.requests[op.index() * ForwardOutcome::ALL.len() + outcome.index()]
             .load(Ordering::Relaxed)
+    }
+
+    /// A lost upstream session was resumed on the owner with its
+    /// subscriptions, or `false` when it could not be and they closed.
+    pub fn upstream_resume(&self, resumed: bool) {
+        if resumed {
+            self.upstream_resumed.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.upstream_resume_failed.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn upstream_resumes(&self, resumed: bool) -> u64 {
+        if resumed {
+            self.upstream_resumed.load(Ordering::Relaxed)
+        } else {
+            self.upstream_resume_failed.load(Ordering::Relaxed)
+        }
     }
 
     pub fn rejected(&self, limit: ForwardLimit) {

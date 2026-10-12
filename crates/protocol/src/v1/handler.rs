@@ -10,8 +10,8 @@ use std::{
 
 use crate::v1::{
     forwarding::{
-        ForwardIdentity, ForwardRequest, ForwardSession, Forwarder, PartitionRoute,
-        RouteDecision, RoutingLimits, client_redirect_frame, decide_route,
+        CohortFields, ForwardIdentity, ForwardRequest, ForwardSession, Forwarder, PartitionRoute,
+        RouteDecision, RoutingLimits, SubKind, client_redirect_frame, decide_route,
     },
     frame::{Frame, FrameLimit, OversizedFrame, ProtoCodec, ServerCodec, ServerFrame},
     helper::{ProtocolError, error_frame, try_decode, try_encode},
@@ -549,16 +549,6 @@ enum OwnerRoute {
 const OWNER_MOVING_MESSAGE: &str = "partition ownership changed while this request was \
     handled and nothing was applied. Retry shortly against the same broker";
 
-/// Message for a stream operation that would need forwarding.
-const STREAM_GATEWAY_MESSAGE: &str = "this stream partition is owned by a private broker, and \
-    streams are not served through a gateway yet. Make the stream partition owner public, or \
-    connect to it directly";
-
-/// Message for an exclusive consumer group subscribe that would need forwarding.
-const COHORT_GATEWAY_MESSAGE: &str = "this queue partition is owned by a private broker, and \
-    exclusive consumer groups are not served through a gateway yet. Subscribe without a \
-    consumer group, or connect to the partition owner directly";
-
 /// Turn a routing decision for a refused operation into an [`OwnerRoute`].
 fn owner_route_from_decision(
     decision: RouteDecision,
@@ -613,8 +603,9 @@ fn queue_owner_route(
     owner_route_from_decision(decision, request_id, topic, partition, group)
 }
 
-/// Route a refused stream operation. Streams have no group. Streams are not
-/// forwarded, so a forward decision becomes a plain refusal at the caller.
+/// Route a refused stream operation. Streams have no group. Callers that
+/// forward check that first, so a forward decision here means the owner is
+/// moving.
 fn stream_owner_route(
     topology_source: &Option<Arc<dyn ClientTopologySource>>,
     request_id: u64,
@@ -1255,6 +1246,31 @@ struct InstallSubscriptionArgs {
     member_id: Option<Uuid>,
 }
 
+/// Resolve the exclusive group member id for a subscribe on this session:
+/// the id the client carried, else the one the session already uses, else a
+/// new one. Local and forwarded subscriptions count alike, so a session is
+/// one member on every owner. A nil id is invalid, a different id than the
+/// established one is a conflict.
+async fn resolve_cohort_member(
+    logical: &Arc<LogicalConnection>,
+    requested: Option<Uuid>,
+) -> Result<Uuid, InstallSubscriptionError> {
+    if matches!(requested, Some(id) if id.is_nil()) {
+        return Err(InstallSubscriptionError::InvalidMemberId);
+    }
+    let established = {
+        let state = logical.state.lock().await;
+        state.subs.values().find_map(|sub| sub.cohort_member)
+    }
+    .or_else(|| logical.forward.get().and_then(|f| f.cohort_member()));
+    match (requested, established) {
+        (Some(id), Some(prev)) if id != prev => Err(InstallSubscriptionError::MemberIdConflict),
+        (Some(id), _) => Ok(id),
+        (None, Some(prev)) => Ok(prev),
+        (None, None) => Ok(Uuid::new_v4()),
+    }
+}
+
 async fn install_subscription(
     args: InstallSubscriptionArgs,
 ) -> Result<SubscribeOk, InstallSubscriptionError> {
@@ -1284,22 +1300,7 @@ async fn install_subscription(
     // same connection must reuse it. A nil id is rejected, a mismatching id is a
     // conflict. `None` for non-exclusive subs.
     let cohort_member: Option<Uuid> = if args.consumer_group.is_some() {
-        if matches!(args.member_id, Some(id) if id.is_nil()) {
-            return Err(InstallSubscriptionError::InvalidMemberId);
-        }
-        let established = {
-            let state = args.logical.state.lock().await;
-            state.subs.values().find_map(|sub| sub.cohort_member)
-        };
-        let resolved = match (args.member_id, established) {
-            (Some(id), Some(prev)) if id != prev => {
-                return Err(InstallSubscriptionError::MemberIdConflict);
-            }
-            (Some(id), _) => id,
-            (None, Some(prev)) => prev,
-            (None, None) => Uuid::new_v4(),
-        };
-        Some(resolved)
+        Some(resolve_cohort_member(&args.logical, args.member_id).await?)
     } else {
         None
     };
@@ -1876,6 +1877,94 @@ async fn handle_stream_publish(
     Ok(())
 }
 
+/// What a gateway's reconcile needs to judge and restore forwarded
+/// subscriptions.
+struct ReconcileForwarding<'a> {
+    /// The owner to forward to, when this broker forwards the partition.
+    owner: &'a (dyn Fn(&str, Partition, Option<&str>) -> Option<String> + Sync),
+    forwarder: Arc<Forwarder>,
+    topology: Arc<dyn ClientTopologySource>,
+    identity: ForwardIdentity,
+}
+
+/// Restore one missing subscription on a forwarded partition by relaying
+/// the subscribe to the owner and waiting for its answer.
+async fn restore_forwarded_subscription(
+    logical: &Arc<LogicalConnection>,
+    forwarding: &ReconcileForwarding<'_>,
+    owner: String,
+    client: ReconcileSubscription,
+) -> ReconcileSubscriptionResult {
+    let failed = |client: ReconcileSubscription, why: String| {
+        tracing::warn!("failed to restore a forwarded subscription during reconcile: {why}");
+        ReconcileSubscriptionResult {
+            client: Some(client),
+            server: None,
+            action: ReconcileAction::CloseClientSide,
+            code: ReasonCode::ServerRestoreFailed,
+            reason: "server_restore_failed".into(),
+        }
+    };
+    let body = Subscribe {
+        topic: client.topic.clone(),
+        partition: client.partition,
+        group: client.group.clone(),
+        prefetch: client.prefetch,
+        auto_ack: client.auto_ack,
+        consumer_group: client.consumer_group.clone(),
+        consumer_target: client.consumer_target,
+        member_id: client.member_id,
+    };
+    let key: SubKey = (client.topic.clone(), client.partition, client.group.clone());
+    let frame = match try_encode(Op::Subscribe, 0, &body) {
+        Ok(frame) => frame,
+        Err(err) => return failed(client, err.to_string()),
+    };
+    let request = match forwarded_subscribe_request(logical, owner, &frame, body, key).await {
+        Ok(request) => request,
+        Err((_, message)) => return failed(client, message),
+    };
+    let session = forward_session_for(
+        logical,
+        &forwarding.forwarder,
+        &forwarding.topology,
+        forwarding.identity.clone(),
+    );
+    let answer = match session.forward_and_wait(request).await {
+        Ok(answer) => answer,
+        Err(reject) => return failed(client, reject.message),
+    };
+    if answer.opcode != Op::SubscribeOk as u16 {
+        let why = try_decode::<ErrorMsg>(&answer)
+            .map(|err| format!("{} {}", err.code, err.message))
+            .unwrap_or_else(|_| format!("the owner answered opcode {}", answer.opcode));
+        return failed(client, why);
+    }
+    match try_decode::<SubscribeOk>(&answer) {
+        Ok(ok) => {
+            let auto_ack = client.auto_ack;
+            ReconcileSubscriptionResult {
+                client: Some(client),
+                server: Some(ReconcileSubscription {
+                    sub_id: ok.sub_id,
+                    topic: ok.topic,
+                    group: ok.group,
+                    partition: ok.partition,
+                    auto_ack,
+                    prefetch: ok.prefetch,
+                    consumer_group: ok.consumer_group,
+                    consumer_target: ok.consumer_target,
+                    member_id: ok.member_id,
+                }),
+                action: ReconcileAction::Keep,
+                code: ReasonCode::ServerRestored,
+                reason: "server_restored".into(),
+            }
+        }
+        Err(err) => failed(client, err.to_string()),
+    }
+}
+
 async fn reconcile_subscriptions(
     broker: Arc<Broker<StromaEngine>>,
     logical: Arc<LogicalConnection>,
@@ -1885,7 +1974,7 @@ async fn reconcile_subscriptions(
     conn_id: Uuid,
     client_id: Uuid,
     reconcile: ReconcileClient,
-    forwardable: &(dyn Fn(&str, Partition, Option<&str>) -> bool + Sync),
+    forwarding: Option<&ReconcileForwarding<'_>>,
 ) -> ReconcileResult {
     let policy = reconcile.policy;
     let mut results = Vec::new();
@@ -1906,13 +1995,24 @@ async fn reconcile_subscriptions(
         // A forwarded subscription is as live as a local one.
         .or_else(|| forward.as_ref().and_then(|f| f.reconcile_view(&key)));
 
-        // This broker forwards the partition: the client subscribes again
-        // through the normal path, which relays it to the owner. Exclusive
-        // and auto-ack subscriptions keep their usual verdicts.
-        if server.is_none()
-            && client.consumer_group.is_none()
-            && forwardable(&client.topic, client.partition, client.group.as_deref())
-        {
+        // This broker forwards the partition. Restore relays the subscribe
+        // to the owner now. Otherwise a manual-ack subscription is recreated
+        // by the client through the normal path, and an auto-ack one closes
+        // because deliveries in flight at the disconnect were settled at
+        // send.
+        let forward_owner = forwarding
+            .filter(|_| server.is_none())
+            .and_then(|forwarding| {
+                (forwarding.owner)(&client.topic, client.partition, client.group.as_deref())
+                    .map(|owner| (forwarding, owner))
+            });
+        if let Some((forwarding, owner)) = forward_owner {
+            if policy == ReconcilePolicy::Restore {
+                let result =
+                    restore_forwarded_subscription(&logical, forwarding, owner, client).await;
+                results.push(result);
+                continue;
+            }
             let (action, code, reason) = if client.auto_ack {
                 (
                     ReconcileAction::CloseClientSide,
@@ -2425,6 +2525,11 @@ impl ConnectionSettings {
     /// Enable forwarding for partitions this broker cannot redirect clients
     /// to. Only a public broker in cluster mode sets this.
     pub fn with_forwarder(mut self, forwarder: Arc<Forwarder>) -> Self {
+        forwarder.set_resume_window_ms(
+            self.runtime_snapshot()
+                .reconnect_grace_ms
+                .unwrap_or_default(),
+        );
         self.forwarder = Some(forwarder);
         self
     }
@@ -2488,6 +2593,12 @@ impl ConnectionSettings {
     }
 
     pub fn update_runtime(&self, settings: ConnectionRuntimeSettings) {
+        // A gateway retries a lost upstream session for as long as it would
+        // keep a client session, which matches the owners' grace when the
+        // cluster uses one setting.
+        if let Some(forwarder) = &self.forwarder {
+            forwarder.set_resume_window_ms(settings.reconnect_grace_ms.unwrap_or_default());
+        }
         self.runtime.store(Arc::new(settings));
     }
 
@@ -2880,6 +2991,7 @@ async fn forward_publish(
     op: ForwardOp,
     frame: &Frame,
     key: SubKey,
+    kind: SubKind,
     require_confirm: bool,
     reply: &FrameSink,
     metrics: &TcpStats,
@@ -2894,10 +3006,12 @@ async fn forward_publish(
         op,
         frame: frame.clone(),
         key,
+        kind,
         reply: reply.clone(),
         confirm: require_confirm,
         prefetch: 0,
         auto_ack: false,
+        cohort: CohortFields::default(),
     };
     if let Err(reject) = session.forward(request).await {
         if require_confirm {
@@ -2914,6 +3028,53 @@ async fn forward_publish(
             forward_stats.dropped();
         }
     }
+}
+
+/// Build the upstream request for a forwarded queue subscribe. An exclusive
+/// group subscribe gets the member id settled here, written into the body,
+/// so the owner never mints one. `Err` carries the code and message to
+/// answer when the member id is invalid or conflicts. The reply sink is the
+/// caller's to set.
+async fn forwarded_subscribe_request(
+    logical: &Arc<LogicalConnection>,
+    owner: String,
+    frame: &Frame,
+    sub: Subscribe,
+    key: SubKey,
+) -> Result<ForwardRequest, (u16, String)> {
+    let (frame, cohort) = match sub.consumer_group.clone() {
+        None => (frame.clone(), CohortFields::default()),
+        Some(consumer_group) => {
+            let member = resolve_cohort_member(logical, sub.member_id)
+                .await
+                .map_err(|err| install_subscription_error_response(&err))?;
+            let cohort = CohortFields {
+                consumer_group: Some(consumer_group),
+                consumer_target: sub.consumer_target,
+                member_id: Some(member),
+            };
+            let body = Subscribe {
+                member_id: Some(member),
+                ..sub.clone()
+            };
+            let frame = try_encode(Op::Subscribe, frame.request_id, &body)
+                .map_err(|err| (ERR_INVALID, err.to_string()))?;
+            (frame, cohort)
+        }
+    };
+    let (reply, _) = mpsc::channel(1);
+    Ok(ForwardRequest {
+        owner,
+        op: ForwardOp::Subscribe,
+        frame,
+        key,
+        kind: SubKind::Queue,
+        reply,
+        confirm: true,
+        prefetch: sub.prefetch,
+        auto_ack: sub.auto_ack,
+        cohort,
+    })
 }
 
 /// Routing decision for an operation on a connection that may forward.
@@ -3712,12 +3873,20 @@ where
             x if x == Op::ReconcileClient as u16 => {
                 let reconcile: ReconcileClient =
                     decode_or_400!(frame, frame_tx_high_prio, metrics, ReconcileClient);
-                let forwardable = |topic: &str, partition: Partition, group: Option<&str>| {
-                    may_forward
-                        && matches!(
-                            forwarding_decision(&topology_source, topic, partition, group, false),
-                            RouteDecision::Forward { .. }
-                        )
+                let forward_owner = |topic: &str, partition: Partition, group: Option<&str>| {
+                    match forwarding_decision(&topology_source, topic, partition, group, false) {
+                        RouteDecision::Forward { owner } => Some(owner),
+                        _ => None,
+                    }
+                };
+                let forwarding = match (may_forward, forwarder.as_ref(), topology_source.as_ref()) {
+                    (true, Some(forwarder), Some(topology)) => Some(ReconcileForwarding {
+                        owner: &forward_owner,
+                        forwarder: forwarder.clone(),
+                        topology: topology.clone(),
+                        identity: forward_identity(),
+                    }),
+                    _ => None,
                 };
                 let result = reconcile_subscriptions(
                     broker.clone(),
@@ -3728,7 +3897,7 @@ where
                     conn_id,
                     client_id,
                     reconcile,
-                    &forwardable,
+                    forwarding.as_ref(),
                 )
                 .await;
                 frame_tx_high_prio
@@ -4395,46 +4564,38 @@ where
                         false,
                     )
                 {
-                    let refusal = if sub.consumer_group.is_some() {
-                        Some((ERR_INVALID, COHORT_GATEWAY_MESSAGE.to_string()))
-                    } else {
-                        let key: SubKey = (sub.topic.clone(), sub.partition, sub.group.clone());
-                        let exists = logical.state.lock().await.subs.contains_key(&key)
-                            || logical.forward.get().is_some_and(|f| f.has_sub(&key));
-                        if exists {
-                            Some((ERR_CONFLICT, "already subscribed".to_string()))
-                        } else if let Some(topology) = topology_source.as_ref()
-                            && let Some(forwarder) = forwarder.as_ref()
-                        {
-                            let session = forward_session_for(
-                                &logical,
-                                forwarder,
-                                topology,
-                                forward_identity(),
-                            );
-                            let request = ForwardRequest {
-                                owner,
-                                op: ForwardOp::Subscribe,
-                                frame: frame.clone(),
-                                key,
-                                reply: frame_tx_high_prio.clone(),
-                                confirm: true,
-                                prefetch: sub.prefetch,
-                                auto_ack: sub.auto_ack,
-                            };
-                            match session.forward(request).await {
-                                Ok(()) => None,
-                                Err(reject) => {
-                                    forward_stats.request(
-                                        ForwardOp::Subscribe,
-                                        fibril_metrics::ForwardOutcome::Unavailable,
-                                    );
-                                    Some((ERR_UNAVAILABLE, reject.message))
+                    let key: SubKey = (sub.topic.clone(), sub.partition, sub.group.clone());
+                    let exists = logical.state.lock().await.subs.contains_key(&key)
+                        || logical.forward.get().is_some_and(|f| f.has_sub(&key));
+                    let refusal = if exists {
+                        Some((ERR_CONFLICT, "already subscribed".to_string()))
+                    } else if let Some(topology) = topology_source.as_ref()
+                        && let Some(forwarder) = forwarder.as_ref()
+                    {
+                        match forwarded_subscribe_request(&logical, owner, &frame, sub, key).await {
+                            Ok(mut request) => {
+                                request.reply = frame_tx_high_prio.clone();
+                                let session = forward_session_for(
+                                    &logical,
+                                    forwarder,
+                                    topology,
+                                    forward_identity(),
+                                );
+                                match session.forward(request).await {
+                                    Ok(()) => None,
+                                    Err(reject) => {
+                                        forward_stats.request(
+                                            ForwardOp::Subscribe,
+                                            fibril_metrics::ForwardOutcome::Unavailable,
+                                        );
+                                        Some((ERR_UNAVAILABLE, reject.message))
+                                    }
                                 }
                             }
-                        } else {
-                            None
+                            Err(refused) => Some(refused),
                         }
+                    } else {
+                        None
                     };
                     if let Some((code, message)) = refusal {
                         frame_tx_high_prio
@@ -4822,28 +4983,51 @@ where
                         .is_err()
                 {
                     if may_forward
-                        && matches!(
-                            forwarding_decision(
-                                &topology_source,
-                                &sub.topic,
-                                sub.partition,
-                                None,
-                                true
-                            ),
-                            RouteDecision::Forward { .. }
+                        && let RouteDecision::Forward { owner } = forwarding_decision(
+                            &topology_source,
+                            &sub.topic,
+                            sub.partition,
+                            None,
+                            true,
                         )
+                        && let Some(topology) = topology_source.as_ref()
+                        && let Some(forwarder) = forwarder.as_ref()
                     {
-                        frame_tx_high_prio
-                            .send(try_encode(
-                                Op::SubscribeErr,
-                                frame.request_id,
-                                &ErrorMsg {
-                                    code: ERR_INVALID,
-                                    message: STREAM_GATEWAY_MESSAGE.into(),
-                                },
-                            )?)
-                            .await?;
-                        metrics.error();
+                        // The owner resolves the durable cursor, start
+                        // position and filter, the body is relayed as is. A
+                        // second subscribe to the same partition replaces the
+                        // first, as on a direct connection.
+                        let session =
+                            forward_session_for(&logical, forwarder, topology, forward_identity());
+                        let request = ForwardRequest {
+                            owner,
+                            op: ForwardOp::SubscribeStream,
+                            frame: frame.clone(),
+                            key: (sub.topic.clone(), sub.partition, None),
+                            kind: SubKind::Stream,
+                            reply: frame_tx_high_prio.clone(),
+                            confirm: true,
+                            prefetch: sub.prefetch,
+                            auto_ack: sub.auto_ack,
+                            cohort: CohortFields::default(),
+                        };
+                        if let Err(reject) = session.forward(request).await {
+                            forward_stats.request(
+                                ForwardOp::SubscribeStream,
+                                fibril_metrics::ForwardOutcome::Unavailable,
+                            );
+                            frame_tx_high_prio
+                                .send(try_encode(
+                                    Op::SubscribeErr,
+                                    frame.request_id,
+                                    &ErrorMsg {
+                                        code: ERR_UNAVAILABLE,
+                                        message: reject.message,
+                                    },
+                                )?)
+                                .await?;
+                            metrics.error();
+                        }
                         continue;
                     }
                     let route = stream_owner_route(
@@ -5090,32 +5274,30 @@ where
                             pubreq.group.as_deref(),
                             stream,
                         ) {
-                            if stream {
-                                send_error_response_and_count(
-                                    &frame_tx_low_prio,
-                                    &metrics,
-                                    frame.request_id,
-                                    ERR_INVALID,
-                                    STREAM_GATEWAY_MESSAGE,
-                                )
-                                .await;
+                            // A stream publish keeps its body, so the owner
+                            // applies its own durability tier and replication
+                            // policy before it confirms.
+                            let kind = if stream {
+                                SubKind::Stream
                             } else {
-                                forward_publish(
-                                    &logical,
-                                    forwarder.as_ref(),
-                                    &topology_source,
-                                    forward_identity(),
-                                    owner,
-                                    ForwardOp::Publish,
-                                    &frame,
-                                    key,
-                                    pubreq.require_confirm,
-                                    &frame_tx_low_prio,
-                                    &metrics,
-                                    &forward_stats,
-                                )
-                                .await;
-                            }
+                                SubKind::Queue
+                            };
+                            forward_publish(
+                                &logical,
+                                forwarder.as_ref(),
+                                &topology_source,
+                                forward_identity(),
+                                owner,
+                                ForwardOp::Publish,
+                                &frame,
+                                key,
+                                kind,
+                                pubreq.require_confirm,
+                                &frame_tx_low_prio,
+                                &metrics,
+                                &forward_stats,
+                            )
+                            .await;
                             continue;
                         }
                     }
@@ -5353,6 +5535,7 @@ where
                             ForwardOp::PublishDelayed,
                             &frame,
                             key,
+                            SubKind::Queue,
                             pubreq.require_confirm,
                             &frame_tx_low_prio,
                             &metrics,
