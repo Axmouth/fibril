@@ -1967,7 +1967,31 @@ impl<
             )
             .await?,
         );
+        self.fence_opened_stream_owner(&key).await?;
         Ok(self.streams.entry(key).or_insert(opened).value().clone())
+    }
+
+    /// Stamp a stream this node owns with its assignment epoch when it opens.
+    /// The owner transition only fences streams that are already open, and
+    /// owners open cold streams on first traffic, so without this the owner
+    /// writes at epoch 0 and its followers reject every record as stale.
+    /// Never changes the storage role. A stream held in another role cannot
+    /// write, so it has nothing to fence here.
+    async fn fence_opened_stream_owner(&self, key: &QueueKey) -> Result<(), StromaError> {
+        if !self.owns_stream(&key.tp, key.part.id()) {
+            return Ok(());
+        }
+        let Some(epoch) = self.assignment_cache.get(key).map(|a| a.epoch) else {
+            return Ok(());
+        };
+        match self
+            .engine
+            .ensure_queue_owner_epoch(&key.tp, key.part.id(), None, Some(epoch))
+            .await
+        {
+            Err(StromaError::WrongQueueRole { .. }) => Ok(()),
+            result => result,
+        }
     }
 
     /// Durability signal of a hosted stream channel, for waking caught-up
@@ -4932,7 +4956,7 @@ impl Broker<StromaEngine> {
         previous: &CoordinationSnapshot,
         next: &CoordinationSnapshot,
     ) -> Vec<Result<BrokerAssignmentTransitionApply, BrokerError>> {
-        let previous = self.snapshot_with_cached_local_assignments(node_id, previous);
+        let previous = self.snapshot_with_cached_local_assignments(node_id, previous, next);
         let transitions = plan_local_assignment_transitions(node_id, &previous, next);
         self.pending_follower_admissions.retain(|queue, _| {
             let local = next
@@ -4968,7 +4992,7 @@ impl Broker<StromaEngine> {
         resolver: Arc<dyn BrokerOwnerReplicationPeerResolver>,
         cfg: FollowerReplicationWorkerConfig,
     ) -> Vec<Result<BrokerAssignmentTransitionApply, BrokerError>> {
-        let previous = self.snapshot_with_cached_local_assignments(node_id, previous);
+        let previous = self.snapshot_with_cached_local_assignments(node_id, previous, next);
         let transitions = plan_local_assignment_transitions(node_id, &previous, next);
         self.pending_follower_admissions.retain(|queue, _| {
             let local = next
@@ -5087,6 +5111,7 @@ impl Broker<StromaEngine> {
         &self,
         node_id: &str,
         previous: &CoordinationSnapshot,
+        next: &CoordinationSnapshot,
     ) -> CoordinationSnapshot {
         let mut previous = previous.clone();
         for entry in self.assignment_cache.iter() {
@@ -5095,6 +5120,18 @@ impl Broker<StromaEngine> {
                 continue;
             }
             let key = entry.key();
+            // Stream assignments share this cache under a group-less key. They
+            // are never in the queue snapshot, so planning them here would
+            // freeze or stop the stream as a removed queue. The stream planner
+            // owns their transitions.
+            if key.group.is_none() {
+                let stream = crate::coordination::StreamIdentity::new(key.tp.clone(), key.part);
+                if previous.stream_assignments.contains_key(&stream)
+                    || next.stream_assignments.contains_key(&stream)
+                {
+                    continue;
+                }
+            }
             previous.assignments.insert(
                 QueueIdentity::new(key.tp.clone(), key.part, key.group.as_deref()),
                 assignment.clone(),
@@ -5590,6 +5627,12 @@ impl Broker<StromaEngine> {
                 Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
             }
             LocalAssignmentIntent::FreezeOwner => {
+                // Nothing to fence when this node never stored the stream.
+                // Opening it here would create a queue partition, the default
+                // kind, and the stream could never open on this node again.
+                if !self.engine.durable_is_stream(&topic, partition.id()) {
+                    return Ok(BrokerAssignmentTransitionApply::Noop(transition.intent));
+                }
                 // Owner role removed entirely: bump the fencing epoch so this
                 // deposed owner can no longer serve writes.
                 self.engine
@@ -5646,9 +5689,13 @@ impl Broker<StromaEngine> {
             }
             LocalAssignmentIntent::StopFollower => {
                 let stopped_worker = self.stop_follower_replication_worker(&identity).await;
-                self.engine
-                    .advance_stream_epoch(&topic, partition.id(), assignment_epoch)
-                    .await?;
+                // Same rule as FreezeOwner: never create a stream partition
+                // just to fence it.
+                if self.engine.durable_is_stream(&topic, partition.id()) {
+                    self.engine
+                        .advance_stream_epoch(&topic, partition.id(), assignment_epoch)
+                        .await?;
+                }
                 tracing::debug!(
                     topic,
                     partition = partition.id(),

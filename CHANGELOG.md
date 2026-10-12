@@ -889,6 +889,27 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- Plexus streams in a cluster could break right after they were declared. A
+  node could create a queue partition for a stream topic it had not opened
+  yet, either when a stream follower pulled from it before its first publish
+  or when a stream assignment moved away from it, and from then on that node
+  refused the stream with "partition kind mismatch: expected Stream, this
+  partition is Queue". Stream assignments were also read back as queue
+  assignments on the next coordination change, which froze an open stream
+  owner ("stream record failed to persist") or stopped a stream follower, and
+  dropped the assignment that replica-durable stream confirms wait on, so
+  those confirms quietly stopped waiting for followers. A stream owner that
+  opened a cold stream also wrote at epoch 0, and its followers rejected every
+  record as stale. Owners now open a stream as a stream for a follower pull,
+  fence a newly opened stream at its assignment epoch, and only the stream
+  planner acts on stream assignments. A node that already holds a queue
+  partition for a stream topic keeps refusing that stream after the upgrade.
+  The partition holds no stream data: stop the node, remove its directory
+  under the data directory, `storage/partitions/@none/<topic>/0000000000` for
+  partition 0 (the `kind` file in it reads `queue`), and start it again. The
+  node then takes its stream role again, and a follower copies the stream
+  from its owner.
+
 - A session that resumed on a new connection while its old connection still
   looked alive kept sending deliveries down the old socket until that
   connection timed out, and when it finally ended it cleaned up the session

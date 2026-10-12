@@ -24,7 +24,7 @@ use crate::coordination::PartitionAssignment;
 use crate::queue_engine::{
     KDurability, QueueEngine, QueuePromotionOutcome, QueueStateCheckpoint, ReplicatedAppendOutcome,
     ReplicatedEventBatch, ReplicatedMessageBatch, ReplicatedStreamApplyOutcome, StreamPromotionOutcome,
-    StromaEngine,
+    StreamStore, StromaEngine,
 };
 
 // Protect transient lag, while allowing an offline/stuck replica to fall back
@@ -2562,6 +2562,22 @@ impl Broker<StromaEngine> {
             return Err(BrokerError::InvalidArgument(
                 "replication read limits must be greater than zero".into(),
             ));
+        }
+
+        // Owners open a cold stream on first traffic, and a follower pull can
+        // be the first. Open it as a stream with the declared config before
+        // any storage read, which would create it with the default queue kind.
+        if !self.engine.is_materialized(topic, partition.id(), None)
+            && !self.engine.durable_is_stream(topic, partition.id())
+        {
+            self.ensure_replication_source_owner(topic, partition, None)?;
+            if self.route_stream(topic, partition.id()).await.is_none() {
+                return Err(BrokerError::NotOwner {
+                    topic: topic.to_string(),
+                    partition,
+                    group: None,
+                });
+            }
         }
 
         if max_wait_ms == 0 {

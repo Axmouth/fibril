@@ -3492,6 +3492,153 @@ async fn owner_replication_read_serves_coordination_declared_stream() {
     broker.shutdown().await;
 }
 
+/// Owners open a cold stream on first traffic, so a follower can pull before
+/// the owner ever opened it. The read must open the partition as a stream.
+/// Reading an absent partition used to create it with the default queue kind,
+/// after which the owner refused the stream as a kind mismatch.
+#[tokio::test]
+async fn owner_replication_read_of_a_cold_stream_opens_it_as_a_stream() {
+    use fibril_broker::broker::{StreamOpenConfig, StreamOwnership};
+    use fibril_broker::queue_engine::StreamStore;
+    use fibril_broker::stream::StreamDurability;
+
+    #[derive(Debug)]
+    struct OwnsEventsStream;
+    impl StreamOwnership for OwnsEventsStream {
+        fn owns_stream(&self, topic: &str, _partition: Partition) -> bool {
+            topic == "events"
+        }
+        fn stream_open_config(&self, topic: &str) -> Option<StreamOpenConfig> {
+            (topic == "events").then(|| StreamOpenConfig {
+                durability: StreamDurability::Durable,
+                retention: None,
+            })
+        }
+    }
+
+    let (broker, _dir) = open_test_broker_with_ownerships(
+        Arc::new(StaticQueueOwnership::new(StdHashSet::new())),
+        Arc::new(OwnsEventsStream),
+    )
+    .await;
+    for max_wait_ms in [0, 10] {
+        broker
+            .read_owner_stream_records(
+                "events",
+                Partition::new(0),
+                0,
+                0,
+                10,
+                10,
+                usize::MAX,
+                max_wait_ms,
+            )
+            .await
+            .expect("a cold stream owner serves replication reads");
+    }
+    assert!(broker.engine().durable_is_stream("events", 0));
+    let channel = broker
+        .get_or_open_stream("events", 0, StreamDurability::Durable, None)
+        .await
+        .expect("the stream opens as a stream after a replication read");
+    channel
+        .publish(
+            MessageHeaders {
+                published: unix_millis(),
+                publish_received: unix_millis(),
+                content_type: None,
+                extra: Default::default(),
+            },
+            b"record".to_vec(),
+        )
+        .await
+        .unwrap();
+    broker.shutdown().await;
+}
+
+/// The owner transition of a cold stream is a no-op, and the owner opens the
+/// stream later on first traffic. It must still write at the assignment
+/// epoch, or its followers reject every record as stale and replica-durable
+/// confirms never complete.
+#[tokio::test]
+async fn stream_owner_opened_after_its_assignment_writes_at_the_assignment_epoch() {
+    use fibril_broker::stream::StreamDurability;
+
+    let (owner, _owner_dir) = open_test_broker().await;
+    let (follower, _follower_dir) = open_test_broker().await;
+    let stream = StreamIdentity::new("events", Partition::new(0));
+    let assignment =
+        StreamAssignment::new(stream.clone(), "owner", vec!["follower".to_string()], 1);
+
+    let become_owner = LocalStreamAssignmentTransition {
+        stream: stream.clone(),
+        previous_role: None,
+        next_role: Some(LocalAssignmentRole::Owner),
+        previous: None,
+        next: Some(assignment.clone()),
+        intent: LocalAssignmentIntent::BecomeOwner,
+    };
+    assert!(matches!(
+        owner
+            .apply_stream_assignment_transition(&become_owner)
+            .await
+            .unwrap(),
+        BrokerAssignmentTransitionApply::Noop(LocalAssignmentIntent::BecomeOwner)
+    ));
+    let channel = owner
+        .get_or_open_stream("events", 0, StreamDurability::Durable, None)
+        .await
+        .unwrap();
+    channel
+        .publish(
+            MessageHeaders {
+                published: unix_millis(),
+                publish_received: unix_millis(),
+                content_type: None,
+                extra: Default::default(),
+            },
+            b"first".to_vec(),
+        )
+        .await
+        .unwrap();
+
+    let become_follower = LocalStreamAssignmentTransition {
+        stream: stream.clone(),
+        previous_role: None,
+        next_role: Some(LocalAssignmentRole::Follower),
+        previous: None,
+        next: Some(assignment),
+        intent: LocalAssignmentIntent::BecomeFollower,
+    };
+    follower
+        .apply_stream_assignment_transition(&become_follower)
+        .await
+        .unwrap();
+    let outcome = follower
+        .catch_up_stream_follower(
+            owner.as_ref(),
+            "events",
+            Partition::new(0),
+            StreamCatchUpOptions {
+                message_from: 0,
+                event_from: 0,
+                max_messages_per_read: 10,
+                max_events_per_read: 10,
+                max_bytes_per_read: usize::MAX,
+                max_iterations: 4,
+                max_wait_ms: 0,
+            },
+        )
+        .await
+        .expect("the follower accepts the owner's records");
+    let BrokerStreamCatchUp::CaughtUp(progress) = outcome else {
+        panic!("stream follower did not catch up: {outcome:?}");
+    };
+    assert_eq!(progress.applied_message_records, 1);
+    owner.shutdown().await;
+    follower.shutdown().await;
+}
+
 /// A caught-up stream follower's long-poll must wake when the owner makes a
 /// new record durable, instead of sleeping out the whole `max_wait_ms`.
 #[tokio::test]
@@ -3676,6 +3823,108 @@ async fn broker_replication_read_applies_to_follower_and_promotes() {
 
     owner.shutdown().await;
     follower.shutdown().await;
+}
+
+/// Stream assignments are cached next to queue assignments, under the same
+/// group-less key. The queue planner must not read them back as queue
+/// assignments: a queue snapshot never holds the stream, so it would freeze
+/// the stream owner as a removed queue and drop the assignment its confirm
+/// gate reads.
+#[tokio::test]
+async fn cached_stream_assignment_is_not_planned_as_a_queue() {
+    use fibril_broker::stream::StreamDurability;
+
+    let (broker, _dir) = open_test_broker().await;
+    let stream = StreamIdentity::new("events", Partition::new(0));
+    let channel = broker
+        .get_or_open_stream("events", 0, StreamDurability::Durable, None)
+        .await
+        .unwrap();
+    let assignment = StreamAssignment::new(stream.clone(), "owner", Vec::new(), 1);
+    let become_owner = LocalStreamAssignmentTransition {
+        stream: stream.clone(),
+        previous_role: None,
+        next_role: Some(LocalAssignmentRole::Owner),
+        previous: None,
+        next: Some(assignment.clone()),
+        intent: LocalAssignmentIntent::BecomeOwner,
+    };
+    broker
+        .apply_stream_assignment_transition(&become_owner)
+        .await
+        .unwrap();
+
+    let empty = CoordinationSnapshot::default();
+    let mut snapshot = CoordinationSnapshot::default();
+    snapshot.stream_assignments.insert(stream.clone(), assignment);
+    for (previous, next) in [(&empty, &snapshot), (&snapshot, &snapshot)] {
+        let outcomes = broker
+            .apply_assignment_snapshot_transitions("owner", previous, next)
+            .await;
+        assert!(outcomes.is_empty(), "queue transitions for a stream: {outcomes:?}");
+    }
+
+    let headers = MessageHeaders {
+        published: unix_millis(),
+        publish_received: unix_millis(),
+        content_type: None,
+        extra: Default::default(),
+    };
+    channel
+        .publish(headers, b"after".to_vec())
+        .await
+        .expect("the stream owner still accepts writes");
+}
+
+/// A stream role change that only fences (freeze an owner, stop a follower)
+/// must not create the partition on a node that never held it. Opening it
+/// there defaults to a queue partition, and the stream can never open on
+/// that node again.
+#[tokio::test]
+async fn fencing_a_stream_this_node_never_held_creates_nothing() {
+    use fibril_broker::stream::StreamDurability;
+
+    for intent in [
+        LocalAssignmentIntent::FreezeOwner,
+        LocalAssignmentIntent::StopFollower,
+    ] {
+        let (broker, _dir) = open_test_broker().await;
+        let stream = StreamIdentity::new("cold", Partition::new(0));
+        let (previous_role, previous) = match intent {
+            LocalAssignmentIntent::FreezeOwner => (
+                LocalAssignmentRole::Owner,
+                StreamAssignment::new(stream.clone(), "a", Vec::new(), 1),
+            ),
+            _ => (
+                LocalAssignmentRole::Follower,
+                StreamAssignment::new(stream.clone(), "b", vec!["a".to_string()], 1),
+            ),
+        };
+        let transition = LocalStreamAssignmentTransition {
+            stream: stream.clone(),
+            previous_role: Some(previous_role),
+            next_role: None,
+            previous: Some(previous),
+            next: Some(StreamAssignment::new(stream.clone(), "c", Vec::new(), 2)),
+            intent,
+        };
+        broker
+            .apply_stream_assignment_transition(&transition)
+            .await
+            .unwrap();
+        assert!(
+            !broker.engine().is_materialized("cold", 0, None),
+            "{intent:?} materialized a partition this node never held"
+        );
+        assert!(
+            broker.engine().list_partitions().await.unwrap().is_empty(),
+            "{intent:?} created a partition this node never held"
+        );
+        broker
+            .get_or_open_stream("cold", 0, StreamDurability::Durable, None)
+            .await
+            .expect("the stream still opens as a stream");
+    }
 }
 
 /// Durable stream replication end to end through the stream-mode pull path: an
