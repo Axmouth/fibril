@@ -931,12 +931,13 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   telling the consumer. A fetch now never moves the cache to an older
   generation, the same rule pushed topology already followed.
 
-- The TypeScript client had the same two faults. Its subscription supervisor
-  also took the owner appearing in the topology cache for a move, closed the
-  live subscription and re-subscribed on the same connection against the
-  broker's refusal, so the partition went quiet, and on a real move it
-  dropped what the old subscription still delivered. Its topology fetch also
-  applied an older view. Both now follow the Rust client.
+- The TypeScript and Python clients had the same two faults. Their
+  subscription supervisors also took the owner appearing in the topology
+  cache for a move, closed the live subscription and re-subscribed on the
+  same connection against the broker's refusal, so the partition went quiet,
+  and on a real move they dropped what the old subscription still delivered.
+  Their topology fetches also applied an older view. Both now follow the
+  Rust client.
 
 - A session that resumed on a new connection while its old connection still
   looked alive kept sending deliveries down the old socket until that

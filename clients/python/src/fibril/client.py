@@ -351,6 +351,10 @@ class SubscribeHandle:
 
     engine: Engine
     queue: BoundedQueue[object]
+    #: The endpoint the subscribe went through: the cached owner, or the
+    #: bootstrap endpoint on a cache miss. The supervisor compares the topology
+    #: owner against this to tell a real owner move from the cache catching up.
+    endpoint: str
 
 
 @dataclass
@@ -1063,9 +1067,13 @@ class Client:
         else:
             assert last_error is not None
             raise last_error
-        self._topology.replace(topology)
+        # Never regress to an older view, the same rule a push follows. A broker
+        # that just restarted can answer from a snapshot that predates queues
+        # declared since, and applying it would make them look deleted.
+        if topology.generation >= self._topology.generation:
+            self._topology.replace(topology)
+            _prune_pool_to_topology(self._topology, self._pool)
         self._topology.last_refresh_ms = asyncio.get_running_loop().time() * 1000
-        _prune_pool_to_topology(self._topology, self._pool)
         _refresh_catalogue(topology, self._catalogue)
         return topology
 
@@ -1138,8 +1146,16 @@ class Client:
     async def engine_for(
         self, topic: str, partition: int, group: Optional[str]
     ) -> Engine:
+        _, engine = await self._routed_engine_for(topic, partition, group)
+        return engine
+
+    async def _routed_engine_for(
+        self, topic: str, partition: int, group: Optional[str]
+    ) -> tuple[str, Engine]:
+        """``engine_for`` plus the endpoint it routed to."""
         owner = self._topology.lookup(topic, partition, group)
-        return await self._engine_at(owner.endpoint if owner else self._bootstrap_endpoint)
+        endpoint = owner.endpoint if owner else self._bootstrap_endpoint
+        return endpoint, await self._engine_at(endpoint)
 
     async def _engine_at(self, endpoint: str) -> Engine:
         if endpoint == self._bootstrap_endpoint:
@@ -1162,19 +1178,19 @@ class Client:
         """Subscribe one partition to its current owner (routed). Used by the fan-in
         supervisor to (re)attach a subscription."""
         full = self._with_cohort_member(req)
-        engine = await self.engine_for(full.topic, full.partition, full.group)
+        endpoint, engine = await self._routed_engine_for(full.topic, full.partition, full.group)
         result: SubscribeResult = await engine.subscribe(
             full, supervised=self._opts.supervise_subscriptions
         )
         self._capture_cohort_member(full, result.member_id)
-        return SubscribeHandle(engine=engine, queue=result.queue)
+        return SubscribeHandle(engine=engine, queue=result.queue, endpoint=endpoint)
 
     async def subscribe_stream_once(self, req: wire.SubscribeStream) -> SubscribeHandle:
         """Subscribe one stream partition to its current owner (routed). Used by the
         stream fan-in supervisor to (re)attach a subscription."""
-        engine = await self.engine_for(req.topic, req.partition, None)
+        endpoint, engine = await self._routed_engine_for(req.topic, req.partition, None)
         result = await engine.subscribe_stream(req)
-        return SubscribeHandle(engine=engine, queue=result.queue)
+        return SubscribeHandle(engine=engine, queue=result.queue, endpoint=endpoint)
 
     def _with_cohort_member(self, req: wire.Subscribe) -> wire.Subscribe:
         if req.consumer_group is None:

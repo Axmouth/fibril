@@ -38,6 +38,11 @@ class FakeBroker:
     deliver_auto_ack: bool = False
     # When set, a TOPOLOGY_UPDATE is pushed right after HELLO_OK.
     push_topology_on_hello: Optional[wire.TopologyOk] = None
+    # When set, every SUBSCRIBE gets this error instead of SUBSCRIBE_OK.
+    error_subscribe: Optional[tuple[int, str]] = None
+    # Like the broker, refuse a second SUBSCRIBE to a partition on one
+    # connection while the first is live.
+    one_subscription_per_connection: bool = False
 
     # Records for assertions.
     publishes: list[wire.Publish] = field(default_factory=list)
@@ -48,6 +53,10 @@ class FakeBroker:
     subscribes: list[wire.Subscribe] = field(default_factory=list)
     stream_subscribes: list[wire.SubscribeStream] = field(default_factory=list)
     reconciles: list[wire.ReconcileClient] = field(default_factory=list)
+    # Accepted queue subscriptions, for delivering to them later.
+    live_subscriptions: list[tuple[asyncio.StreamWriter, int, wire.Subscribe]] = field(
+        default_factory=list
+    )
     topology_acks: list[wire.TopologyUpdateAck] = field(default_factory=list)
 
     # When set, the broker serves TLS with this server-side context.
@@ -187,6 +196,16 @@ class FakeBroker:
             req = decode_body(Op.SUBSCRIBE, frame.payload)
             assert isinstance(req, wire.Subscribe)
             self.subscribes.append(req)
+            if self.error_subscribe is not None:
+                code, text = self.error_subscribe
+                await self._error(writer, Op.ERROR, rid, code, text)
+                return
+            if self.one_subscription_per_connection and any(
+                w is writer and r.topic == req.topic and r.partition == req.partition
+                for w, _, r in self.live_subscriptions
+            ):
+                await self._error(writer, Op.ERROR, rid, 409, "already subscribed")
+                return
             self._sub_id += 1
             sub_id = self._sub_id
             ok = wire.SubscribeOk(
@@ -199,6 +218,7 @@ class FakeBroker:
                 consumer_target=req.consumer_target,
                 member_id=req.member_id,
             )
+            self.live_subscriptions.append((writer, sub_id, req))
             await self._send(writer, build_frame(Op.SUBSCRIBE_OK, rid, encode_body(Op.SUBSCRIBE_OK, ok)))
             for payload in self.deliver_on_subscribe:
                 await self.deliver(writer, sub_id, req, payload)

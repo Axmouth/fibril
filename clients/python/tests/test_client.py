@@ -293,6 +293,123 @@ async def test_fan_in_picks_up_grown_partition(broker: FakeBroker) -> None:
         await client.shutdown()
 
 
+def _jobs_owned_by(host: str, port: int, generation: int = 1) -> wire.TopologyOk:
+    owners = [wire.AdvertisedAddress(host, port)]
+    return wire.TopologyOk(
+        generation=generation, queues=[wire.QueueTopologyEntry("jobs", 0, None, owners, 0, 1)]
+    )
+
+
+async def _deliver_up_to(broker: FakeBroker, sent: int, target: int) -> int:
+    writer, sub_id, req = broker.live_subscriptions[0]
+    while sent < target:
+        sent += 1
+        await broker.deliver(writer, sub_id, req, bytes([sent]))
+    return sent
+
+
+async def test_subscription_keeps_delivering_when_cache_learns_its_owner(
+    broker: FakeBroker,
+) -> None:
+    # A subscribe made before the cache knows the queue goes through the
+    # bootstrap connection. The owner showing up later at that same endpoint is
+    # not a move, so the leg keeps delivering and is not re-subscribed.
+    broker.one_subscription_per_connection = True
+    broker.topology = wire.TopologyOk(generation=1, queues=[])
+    client = await Client.connect(
+        (broker.host, broker.port),
+        ClientOptions(
+            supervise_subscriptions=True,
+            subscription_supervise_interval_ms=20,
+            topology_refresh_cooldown_ms=0,
+        ),
+    )
+    try:
+        sub = await client.subscribe("jobs").prefetch(4).sub_auto_ack()
+        sent = await _deliver_up_to(broker, 0, 1)
+        msg = await asyncio.wait_for(sub.recv(), timeout=5)
+        assert msg is not None and msg.payload == bytes([1])
+
+        # The owner appears at the endpoint the leg already uses. Wait out a few
+        # owner checks.
+        broker.topology = _jobs_owned_by(broker.host, broker.port)
+        await asyncio.sleep(0.3)
+
+        # More than the prefetch, so an unread leg would also back up.
+        await _deliver_up_to(broker, sent, 12)
+        for expected in range(2, 13):
+            msg = await asyncio.wait_for(sub.recv(), timeout=5)
+            assert msg is not None and msg.payload == bytes([expected])
+        assert len(broker.subscribes) == 1, "a leg bound to its owner must not re-subscribe"
+        sub.close()
+    finally:
+        await client.shutdown()
+
+
+async def test_moved_subscription_keeps_old_leg_flowing_while_resubscribing(
+    broker: FakeBroker,
+) -> None:
+    # When the owner moves to a node that is not taking subscribes yet, the old
+    # leg can still deliver, and those deliveries must reach the consumer while
+    # the supervisor retries the new owner.
+    new_owner = FakeBroker(error_subscribe=(503, "unavailable"))
+    await new_owner.start()
+    broker.topology = _jobs_owned_by(broker.host, broker.port)
+    client = await Client.connect(
+        (broker.host, broker.port),
+        ClientOptions(
+            supervise_subscriptions=True,
+            subscription_supervise_interval_ms=20,
+            topology_refresh_cooldown_ms=0,
+        ),
+    )
+    try:
+        sub = await client.subscribe("jobs").prefetch(4).sub_auto_ack()
+        sent = await _deliver_up_to(broker, 0, 1)
+        msg = await asyncio.wait_for(sub.recv(), timeout=5)
+        assert msg is not None and msg.payload == bytes([1])
+
+        # The owner moves, and the new one keeps answering "unavailable".
+        broker.topology = _jobs_owned_by(new_owner.host, new_owner.port, generation=2)
+        for _ in range(200):
+            if new_owner.subscribes:
+                break
+            await asyncio.sleep(0.01)
+        assert new_owner.subscribes, "the supervisor should try the new owner"
+
+        await _deliver_up_to(broker, sent, 12)
+        for expected in range(2, 13):
+            msg = await asyncio.wait_for(sub.recv(), timeout=5)
+            assert msg is not None and msg.payload == bytes([expected])
+        sub.close()
+    finally:
+        await client.shutdown()
+        await new_owner.stop()
+
+
+async def test_stale_topology_fetch_does_not_regress_the_cache(broker: FakeBroker) -> None:
+    # A broker that just restarted can answer from an older snapshot, and
+    # applying it would make a live queue look deleted.
+    owners = [wire.AdvertisedAddress(broker.host, broker.port)]
+    broker.topology = wire.TopologyOk(
+        generation=2,
+        queues=[wire.QueueTopologyEntry("jobs", p, None, owners, 0, 4) for p in range(4)],
+    )
+    client = await _connect(broker)
+    try:
+        assert (await client.fetch_topology()).generation == 2
+        broker.topology = wire.TopologyOk(
+            generation=1, queues=[wire.QueueTopologyEntry("other", 0, None, owners, 0, 1)]
+        )
+        assert (await client.fetch_topology()).generation == 1
+
+        assert client._topology.generation == 2
+        assert client.partition_set("jobs", None) == [0, 1, 2, 3]
+        assert not client.is_topic_missing("jobs", None)
+    finally:
+        await client.shutdown()
+
+
 def _topology_three_queues(broker: FakeBroker) -> wire.TopologyOk:
     owners = [wire.AdvertisedAddress(broker.host, broker.port)]
     return wire.TopologyOk(

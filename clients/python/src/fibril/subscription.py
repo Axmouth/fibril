@@ -234,7 +234,14 @@ class _PartitionSupervisor:
         self._engine = first.engine
         self._part_queue: BoundedQueue[object] = first.queue
         self._stopped = False
-        self._bound_owner = self._owner_now()
+        # The endpoint the current leg subscribed through. A leg routed through
+        # the bootstrap connection before the cache knew the owner is bound to
+        # the bootstrap endpoint, so the owner showing up there later is not a
+        # move.
+        self._bound_owner: str = first.endpoint
+        # The re-subscribe in flight, shared by the stream-closed path and the
+        # owner-move path so only one runs at a time.
+        self._resubscribing: Optional[asyncio.Task[bool]] = None
         self._owner_task: Optional[asyncio.Task[None]] = None
         self._run_task = asyncio.ensure_future(self._run_then(on_stopped))
         if client.supervise_subscriptions():
@@ -258,6 +265,10 @@ class _PartitionSupervisor:
             on_stopped()
 
     async def _owner_check_loop(self) -> None:
+        # Detect a graceful owner move (ownership changed but the old connection
+        # stayed up, so the stream did not close) and re-subscribe to the new
+        # owner. The old leg keeps forwarding until the new one is in place, so
+        # what it still delivers reaches the consumer.
         interval = max(self._client.supervise_interval_ms(), 1) / 1000
         try:
             while not self._stopped and not self._client.is_shutting_down():
@@ -266,27 +277,36 @@ class _PartitionSupervisor:
                     return
                 await self._client.refresh_topology_throttled()
                 current = self._owner_now()
-                if current is not None and current != self._bound_owner:
-                    self._bound_owner = current
-                    self._part_queue.close()
+                if (
+                    current is not None
+                    and current != self._bound_owner
+                    and self._resubscribing is None
+                ):
+                    self._migrate()
         except asyncio.CancelledError:
             pass
 
     async def _run(self) -> None:
         while True:
+            # Forward the current leg. A migration that lands meanwhile swaps in
+            # a new leg and closes this one.
+            engine = self._engine
+            queue = self._part_queue
             while True:
-                raw = await self._part_queue.recv()
+                raw = await queue.recv()
                 if raw is None:
                     break
                 try:
-                    await self._merged.send(_Tagged(self._engine, raw))
+                    await self._merged.send(_Tagged(engine, raw))
                 except Exception:
                     self._stopped = True  # merged closed: the consumer is gone
                     break
+            if not self._stopped and queue is not self._part_queue:
+                continue  # replaced by a migration
             # A typed close that ends the subscription (topic deleted, server
             # error, or a recreate the user opted out of) stops the supervisor
             # and carries the reason to the consumer instead of re-subscribing.
-            close_err = self._part_queue.close_error()
+            close_err = queue.close_error()
             terminal = isinstance(close_err, SubscriptionClosedError) and _is_terminal_close(
                 close_err.code, self._client.auto_resubscribe()
             )
@@ -301,10 +321,27 @@ class _PartitionSupervisor:
                 if terminal:
                     self._merged.close(close_err)
                 return
-            if not await self._resubscribe_with_backoff():
+            if not await asyncio.shield(self._migrate()):
                 if self._owner_task is not None:
                     self._owner_task.cancel()
                 return
+
+    def _migrate(self) -> "asyncio.Task[bool]":
+        """Re-subscribe, joining one already in flight. On success the new leg
+        replaces the old one, which is closed. On a permanent failure the
+        supervisor stops."""
+        if self._resubscribing is None:
+            self._resubscribing = asyncio.ensure_future(self._migrate_once())
+        return self._resubscribing
+
+    async def _migrate_once(self) -> bool:
+        try:
+            ok = await self._resubscribe_with_backoff()
+        finally:
+            self._resubscribing = None
+        if not ok:
+            self.stop()
+        return ok
 
     async def _resubscribe_with_backoff(self) -> bool:
         backoff = PUBLISH_RETRY_INITIAL_BACKOFF_MS
@@ -319,9 +356,11 @@ class _PartitionSupervisor:
                 if self._stopped or self._client.is_shutting_down():
                     handle.queue.close()
                     return False
+                old = self._part_queue
                 self._engine = handle.engine
                 self._part_queue = handle.queue
-                self._bound_owner = self._owner_now()
+                self._bound_owner = handle.endpoint
+                old.close()
                 return True
             except Exception as err:
                 if is_retryable(err):
