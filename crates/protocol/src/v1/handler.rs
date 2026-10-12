@@ -1110,6 +1110,10 @@ async fn cleanup_connection_state(
         handle.abort();
     }
 
+    // Cohort subscriptions leave per member, naming the subscriptions this
+    // session held, so a newer session of the same member keeps its place.
+    let mut cohort_subs: HashMap<(String, Option<String>, String, Uuid), Vec<(Partition, u64)>> =
+        HashMap::new();
     for ((topic, partition, group), sub) in drained_subs {
         sub.task.abort();
         if let Err(err) = broker
@@ -1118,17 +1122,21 @@ async fn cleanup_connection_state(
         {
             tracing::warn!("Failed to unsubscribe consumer {}: {err}", sub.sub_id);
         }
-        if let (Some(consumer_group), Some(member)) =
-            (sub.consumer_group.as_deref(), sub.cohort_member)
-        {
-            broker.exclusive_group_leave(
-                &topic,
-                partition,
-                group.as_deref(),
-                consumer_group,
-                &member.to_string(),
-            );
+        if let (Some(consumer_group), Some(member)) = (sub.consumer_group, sub.cohort_member) {
+            cohort_subs
+                .entry((topic, group, consumer_group, member))
+                .or_default()
+                .push((partition, sub.sub_id));
         }
+    }
+    for ((topic, group, consumer_group, member), owned) in cohort_subs {
+        broker.exclusive_group_leave_owned(
+            &topic,
+            group.as_deref(),
+            &consumer_group,
+            &member.to_string(),
+            &owned,
+        );
     }
 }
 

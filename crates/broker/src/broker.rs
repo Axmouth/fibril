@@ -1311,6 +1311,46 @@ impl ExclusiveGroupRouter {
         }
     }
 
+    /// Drop the subscriptions one session held for `member`, given as
+    /// `(partition, sub_id)` pairs. When the member holds nothing else this is
+    /// [`Self::leave`]. When another session joined with the same member id
+    /// (a client that reconnected through another gateway while its old
+    /// session waited out its grace), only the pairs that are still the old
+    /// session's are removed, so the newer session keeps its membership,
+    /// gates and notifier.
+    fn leave_owned(
+        &mut self,
+        key: ConsumerGroupKey,
+        member: &str,
+        owned: &[(Partition, ConsumerId)],
+    ) -> Vec<GateUpdate> {
+        let Some(&(first, _)) = owned.first() else {
+            return Vec::new();
+        };
+        let Some(parts) = self.subs.get_mut(&key).and_then(|subs| subs.get_mut(member)) else {
+            return Vec::new();
+        };
+        let shared = parts
+            .iter()
+            .any(|(partition, sub_id)| !owned.contains(&(*partition, *sub_id)));
+        if !shared {
+            return self.leave(key, first, member);
+        }
+        let mut released = Vec::new();
+        parts.retain(|partition, sub_id| {
+            let mine = owned.contains(&(*partition, *sub_id));
+            if mine {
+                released.push(*partition);
+            }
+            !mine
+        });
+        if self.external.contains_key(&key) {
+            self.resolve_external_gates(&key)
+        } else {
+            self.recompute(&key, &released)
+        }
+    }
+
     /// Snapshot this broker's live per-partition cohort coverage for the admin
     /// dashboard. Unlike [`LocalCohortMembership`] (the heartbeat payload, which
     /// stays wire-stable), each member here carries the partitions it holds a
@@ -3717,6 +3757,25 @@ impl<
         }
     }
 
+    /// Remove one ending session's subscriptions from an exclusive cohort,
+    /// given as `(partition, sub_id)` pairs. Like [`Self::exclusive_group_leave`]
+    /// unless another session has joined with the same member id since, in
+    /// which case only this session's own subscriptions go.
+    pub fn exclusive_group_leave_owned(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+        consumer_group: &str,
+        member: &str,
+        owned: &[(Partition, u64)],
+    ) {
+        let key = ConsumerGroupKey::new(topic, group, consumer_group);
+        let updates = self.lock_exclusive_groups().leave_owned(key, member, owned);
+        for (partition, assignee) in updates {
+            self.set_exclusive_assignee(topic, partition, group, assignee);
+        }
+    }
+
     /// This broker's local exclusive-cohort membership, for the controller to
     /// aggregate into cluster-wide membership (e.g. published on the heartbeat).
     pub fn local_cohort_membership(&self) -> Vec<LocalCohortMembership> {
@@ -5670,6 +5729,33 @@ mod exclusive_router_tests {
         // update (the partition is owned/served elsewhere or m2 hasn't arrived).
         let plan = HashMap::from([(Partition::new(0), "m2".to_string())]);
         assert!(router.set_external(key, 0, plan).is_empty());
+    }
+
+    #[test]
+    fn leaving_with_owned_subs_spares_a_newer_session_of_the_same_member() {
+        let mut router = ExclusiveGroupRouter::new(None);
+        let key = cohort();
+        // An old session of m1 on p0 and p1, then a new session of m1 that
+        // took over p0 with its own sub.
+        router.join(key.clone(), Partition::new(0), "m1".into(), 100, None);
+        router.join(key.clone(), Partition::new(1), "m1".into(), 101, None);
+        router.join(key.clone(), Partition::new(0), "m1".into(), 300, None);
+        let rx = router.register_notifier(key.clone(), "m1".into());
+
+        // The old session ends: only its p1 sub goes, the member stays.
+        let gates = gate_map(router.leave_owned(
+            key.clone(),
+            "m1",
+            &[(Partition::new(0), 100), (Partition::new(1), 101)],
+        ));
+        assert_eq!(gates.get(&Partition::new(0)), Some(&Some(300)));
+        let coverage = router.local_coverage();
+        assert_eq!(coverage[0].members[0].partitions, vec![0]);
+        assert!(!rx.is_closed(), "the newer session keeps its notifier");
+
+        // The newer session ends with nothing else held: a full leave.
+        router.leave_owned(key.clone(), "m1", &[(Partition::new(0), 300)]);
+        assert!(router.local_coverage().is_empty());
     }
 
     #[test]
