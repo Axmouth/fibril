@@ -72,6 +72,9 @@ struct MockConfig {
     subscribe_partitions: Option<Arc<std::sync::Mutex<Vec<u32>>>>,
     /// Counts handshakes that carried a resume identity.
     resumes: Option<Arc<AtomicUsize>>,
+    /// Once the flag is set, answer `Op::Topology` with this view instead,
+    /// like a broker that restarted and still serves an older snapshot.
+    stale_topology: Option<(Arc<std::sync::atomic::AtomicBool>, TopologyOk)>,
 }
 
 async fn spawn_mock(behavior: MockBehavior) -> SocketAddr {
@@ -206,7 +209,11 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                         )
                         .unwrap()
                     } else if frame.opcode == Op::Topology as u16 {
-                        if let Some(spread) = &config.self_partitions {
+                        if let Some((stale, topology)) = &config.stale_topology
+                            && stale.load(Ordering::SeqCst)
+                        {
+                            try_encode(Op::TopologyOk, frame.request_id, topology).unwrap()
+                        } else if let Some(spread) = &config.self_partitions {
                             let count = spread
                                 .live_partition_count
                                 .as_ref()
@@ -551,6 +558,66 @@ async fn keyless_publishes_spread_keyed_publishes_stick() {
     assert!(
         keyed_partitions[0] < 4,
         "routed partition must be within partition_count"
+    );
+}
+
+/// A topology fetch that answers with an older generation than the cache
+/// already holds, as a broker that just restarted can, must not regress the
+/// cache. Here the stale view lacks the queue, and applying it would route
+/// every keyless publish to partition 0 and make the queue look deleted.
+#[tokio::test]
+async fn stale_topology_fetch_does_not_regress_the_cache() {
+    let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let stale = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mock = spawn_configurable_mock(MockConfig {
+        publish: Some(MockBehavior::ConfirmOk),
+        self_partitions: Some(SelfPartitions {
+            topic: "jobs".into(),
+            group: None,
+            partition_count: 4,
+            partitioning_version: 0,
+            live_partition_count: None,
+        }),
+        recorded_partitions: Some(recorded.clone()),
+        stale_topology: Some((
+            stale.clone(),
+            TopologyOk {
+                generation: 0,
+                queues: vec![QueueTopologyEntry {
+                    topic: "other".into(),
+                    partition: Partition::new(0),
+                    group: None,
+                    owner_endpoints: vec![],
+                    partitioning_version: 0,
+                    partition_count: 1,
+                }],
+                streams: vec![],
+            },
+        )),
+        ..Default::default()
+    })
+    .await;
+
+    let client = Client::connect(mock, ClientOptions::new()).await.unwrap();
+    assert_eq!(client.fetch_topology().await.unwrap().generation, 1);
+    stale.store(true, Ordering::SeqCst);
+    assert_eq!(client.fetch_topology().await.unwrap().generation, 0);
+
+    let publisher = client.publisher("jobs").unwrap();
+    for _ in 0..8 {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            publisher.publish_confirmed(NewMessage::text("spread")),
+        )
+        .await
+        .expect("publish must not hang")
+        .expect("publish should succeed");
+    }
+    let distinct: std::collections::HashSet<u32> =
+        recorded.lock().unwrap().iter().copied().collect();
+    assert!(
+        distinct.len() > 1,
+        "the cache should keep the newer four-partition view, saw only {distinct:?}"
     );
 }
 

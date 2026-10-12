@@ -139,3 +139,8 @@ drain-complete, bounded by `coordination.ganglion.repartition_adoption_timeout_m
   connection and the first is still live. When a real move happens, the
   supervisor keeps forwarding the old leg until the new subscribe lands, so
   deliveries already sent on it are not stranded.
+- **A topology fetch never moves the cache back.** A broker that just restarted
+  can answer from a snapshot older than what the client already holds, missing
+  queues declared since. The Rust client keeps the newer view when a fetch
+  returns a lower generation, as it already does for pushes, so a lagging answer
+  cannot make a live queue look deleted to a re-subscribing supervisor.

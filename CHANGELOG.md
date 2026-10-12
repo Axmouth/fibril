@@ -924,6 +924,13 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   re-subscribes after a real move it keeps forwarding what the old
   subscription still delivers.
 
+- A Rust client topology fetch answered by a broker that had just restarted
+  could replace the routing cache with an older view, before that broker
+  caught up with queues declared since. A subscription re-subscribing at
+  that moment took its queue for deleted and stopped for good, without
+  telling the consumer. A fetch now never moves the cache to an older
+  generation, the same rule pushed topology already followed.
+
 - A session that resumed on a new connection while its old connection still
   looked alive kept sending deliveries down the old socket until that
   connection timed out, and when it finally ended it cleaned up the session

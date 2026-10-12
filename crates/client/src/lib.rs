@@ -3291,7 +3291,13 @@ impl ClientShared {
             let refreshed_at = unix_millis();
             self.topology.rcu(|old| {
                 let mut updated = (**old).clone();
-                updated.replace(topology.clone());
+                // Never regress to an older view, the same rule a push follows.
+                // A broker that just restarted can answer from a snapshot that
+                // predates queues declared since, and applying that would make
+                // them look deleted.
+                if topology.generation >= updated.generation {
+                    updated.replace(topology.clone());
+                }
                 updated.last_refresh_ms = refreshed_at;
                 updated
             });
