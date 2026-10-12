@@ -254,6 +254,38 @@ node was down is left on disk as **inert cold storage**: it is not served and no
 materialized (serving is ownership-gated), so it cannot leak stale data. Its disk
 is not reclaimed automatically yet - reclaiming it is a manual step for now.
 
+### A node refuses a stream with "partition kind mismatch"
+
+Older releases could leave a cluster node with a queue partition for a
+Plexus stream topic, at
+`storage/partitions/@none/<topic>/<partition>` under the data directory, with a
+`kind` file that reads `queue`. The node then refuses the stream with
+"partition kind mismatch: expected Stream, this partition is Queue", or with
+"already declared as a queue", and can neither serve it as owner nor follow it.
+
+The broker repairs this itself when it is safe. When it opens the stream, or
+takes a follower role for it, it removes the queue partition only if all of
+these hold:
+
+- coordination declares the topic as a stream
+- coordination has no queue declaration, partitioning, catalogue entry or
+  assignment for the topic, under any group
+- no queue for that partition is running on the node
+- the queue never held a record: its log is still at offset 0, so no message,
+  ack or declaration was ever written
+
+It logs a warning naming the topic, partition and path, and the stream opens in
+its place. A follower then copies the stream from its owner.
+
+If any check fails, nothing is removed and the node logs an error once with the
+reason. Repair it by hand only when the partition holds no data you need:
+
+1. Stop the node.
+2. Delete the directory named in the error,
+   `storage/partitions/@none/<topic>/<partition>` under the data directory.
+   Partition 0 is `0000000000`.
+3. Start the node again.
+
 ### Growing or shrinking a queue's partitions
 
 Live repartitioning (Ganglion mode) is driven from the admin topology page. A

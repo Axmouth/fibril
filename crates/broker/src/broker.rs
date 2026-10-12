@@ -28,9 +28,8 @@ use crate::coordination::{
     plan_local_assignment_transitions, plan_local_stream_transitions,
 };
 use crate::queue_engine::{
-    DeclareMeta, DestroyOutcome, EvictOutcome, QueueEngine, QueuePromotionOutcome, StreamStore,
-    StreamPromotionOutcome,
-    StromaEngine,
+    DeclareMeta, DestroyOutcome, EmptyQueueRemoval, EvictOutcome, QueueEngine,
+    QueuePromotionOutcome, StreamPromotionOutcome, StreamStore, StromaEngine,
 };
 use crate::stream::{StreamChannel, StreamDurability};
 use stroma_core::{
@@ -580,6 +579,14 @@ pub trait StreamOwnership: std::fmt::Debug + Send + Sync {
     /// owned partition. `None` means no coordination view (standalone), where the
     /// channel is already opened at declare time with its config.
     fn stream_open_config(&self, topic: &str) -> Option<StreamOpenConfig>;
+
+    /// Whether coordination holds any queue state for `topic` under any group:
+    /// a declaration, partitioning, catalogue entry or assignment. Gates the
+    /// removal of a stray queue partition for a stream topic. An error means
+    /// it cannot tell, and nothing is removed.
+    fn topic_has_queue_state(&self, _topic: &str) -> Result<bool, String> {
+        Err("no coordination view of queues".into())
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1588,6 +1595,9 @@ pub struct Broker<
     /// A stream partition is a fan-out actor (ring + live subscribers), distinct
     /// from the lease/poll `queues` loop.
     streams: DashMap<QueueKey, Arc<crate::stream::StreamChannel>>,
+    /// Stray queue partitions already reported as needing manual repair, so a
+    /// stream that keeps failing to open logs the error once.
+    stray_queue_partition_reports: DashMap<QueueKey, ()>,
     records_by_tags: DashMap<DeliveryTag, TagRecord>,
     queue_eviction_observations: DashMap<QueueKey, QueueEvictionObservation>,
     pub(crate) follower_replication_workers:
@@ -1869,6 +1879,7 @@ impl<
             next_tag_epoch: AtomicU64::new(1),
             queues: DashMap::new(),
             streams: DashMap::new(),
+            stray_queue_partition_reports: DashMap::new(),
             records_by_tags: DashMap::new(),
             queue_eviction_observations: DashMap::new(),
             follower_replication_workers: DashMap::new(),
@@ -1954,19 +1965,27 @@ impl<
             return Ok(ch.value().clone());
         }
         let engine: Arc<dyn StreamStore> = self.engine.clone();
-        let opened = Arc::new(
+        let open = || {
             StreamChannel::open(
-                engine,
+                engine.clone(),
                 tp,
                 part,
                 durability,
-                retention,
+                retention.clone(),
                 STREAM_RING_CAPACITY,
                 STREAM_LIVE_CHANNEL_CAPACITY,
                 self.cfg.clone(),
             )
-            .await?,
-        );
+        };
+        let opened = match open().await {
+            Ok(opened) => opened,
+            Err(err) if self.remove_stray_queue_partition(tp, part).await => {
+                tracing::debug!(topic = tp, partition = part, "retrying stream open: {err}");
+                open().await?
+            }
+            Err(err) => return Err(err),
+        };
+        let opened = Arc::new(opened);
         self.fence_opened_stream_owner(&key).await?;
         Ok(self.streams.entry(key).or_insert(opened).value().clone())
     }
@@ -1992,6 +2011,86 @@ impl<
             Err(StromaError::WrongQueueRole { .. }) => Ok(()),
             result => result,
         }
+    }
+
+    /// Remove a queue partition that an older release created for a stream
+    /// topic, which makes the node refuse the stream for good. Runs only after
+    /// opening the stream failed. Returns true when the partition was removed
+    /// and the open is worth retrying.
+    ///
+    /// Removes only when coordination declares the topic as a stream, holds no
+    /// queue state for it, no queue runtime for the partition runs here, and
+    /// storage confirms the queue never held a record. Otherwise it logs the
+    /// manual repair once and keeps the partition.
+    pub(crate) async fn remove_stray_queue_partition(&self, tp: &str, part: u32) -> bool {
+        // Without a coordination view (standalone) a queue under a stream
+        // name is an ordinary declare conflict, not this leftover.
+        if self.stream_ownership.stream_open_config(tp).is_none()
+            || self.engine.durable_is_stream(tp, part)
+        {
+            return false;
+        }
+        let key = QueueKey {
+            tp: tp.to_string(),
+            part: part.into(),
+            group: None,
+        };
+        let refusal = match self.stream_ownership.topic_has_queue_state(tp) {
+            Ok(true) => Some("coordination also has queue state for this topic".to_string()),
+            Ok(false) if self.queues.contains_key(&key) => {
+                Some("a queue runtime for this partition is running on this node".to_string())
+            }
+            Ok(false) => None,
+            Err(err) => Some(format!(
+                "cannot confirm that coordination has no queue for this topic: {err}"
+            )),
+        };
+        let reason = match refusal {
+            Some(reason) => {
+                // Only report a partition that is actually there.
+                let present = self
+                    .engine
+                    .list_partitions()
+                    .await
+                    .map(|all| {
+                        all.iter()
+                            .any(|(t, p, g)| t == tp && *p == part && g.is_none())
+                    })
+                    .unwrap_or(true);
+                if !present {
+                    return false;
+                }
+                reason
+            }
+            None => match self.engine.remove_empty_queue_partition(tp, part).await {
+                Ok(EmptyQueueRemoval::Removed { path }) => {
+                    tracing::warn!(
+                        topic = tp,
+                        partition = part,
+                        path = %path.display(),
+                        "removed an empty queue partition left behind for a stream topic, the stream opens in its place"
+                    );
+                    self.stray_queue_partition_reports.remove(&key);
+                    return true;
+                }
+                Ok(EmptyQueueRemoval::Absent) => return false,
+                Ok(EmptyQueueRemoval::Kept { path, reason }) => {
+                    format!("{reason}, at {}", path.display())
+                }
+                Err(err) => err.to_string(),
+            },
+        };
+        if self.stray_queue_partition_reports.insert(key, ()).is_none() {
+            tracing::error!(
+                topic = tp,
+                partition = part,
+                "a queue partition blocks this stream and was not removed automatically: {reason}. \
+                 If it holds no data you need, stop the node, delete \
+                 storage/partitions/@none/<topic>/<partition> under the data directory \
+                 (its kind file reads queue) and start the node again"
+            );
+        }
+        false
     }
 
     /// Durability signal of a hosted stream channel, for waking caught-up
@@ -5532,6 +5631,33 @@ impl Broker<StromaEngine> {
         }
     }
 
+    /// Make this node a stream follower at `epoch`. A queue partition left
+    /// behind for the stream topic blocks this, so try removing it once.
+    async fn become_stream_follower_with_epoch(
+        &self,
+        topic: &str,
+        part: u32,
+        epoch: u64,
+    ) -> Result<(), StromaError> {
+        match self
+            .engine
+            .become_stream_follower_with_epoch(topic, part, epoch)
+            .await
+        {
+            Err(err) if self.remove_stray_queue_partition(topic, part).await => {
+                tracing::debug!(
+                    topic,
+                    partition = part,
+                    "retrying stream follower start: {err}"
+                );
+                self.engine
+                    .become_stream_follower_with_epoch(topic, part, epoch)
+                    .await
+            }
+            result => result,
+        }
+    }
+
     /// Apply one local stream role change. Mirrors [`apply_assignment_transition`]
     /// but simpler: streams have no consumer leases, tracked deliveries, or offset
     /// release. Role changes persist the assignment epoch into the (queue-handle)
@@ -5588,8 +5714,7 @@ impl Broker<StromaEngine> {
                 let saved = self
                     .stop_follower_replication_worker_preserving_state(&identity)
                     .await;
-                self.engine
-                    .become_stream_follower_with_epoch(&topic, partition.id(), assignment_epoch)
+                self.become_stream_follower_with_epoch(&topic, partition.id(), assignment_epoch)
                     .await?;
                 let runtime = self.ensure_follower_replication_worker(&identity, ReplicationResourceKind::Stream);
                 if let Some(saved) = saved {
@@ -5610,8 +5735,7 @@ impl Broker<StromaEngine> {
                 }
             }
             LocalAssignmentIntent::BecomeFollower => {
-                self.engine
-                    .become_stream_follower_with_epoch(&topic, partition.id(), assignment_epoch)
+                self.become_stream_follower_with_epoch(&topic, partition.id(), assignment_epoch)
                     .await?;
                 self.ensure_follower_replication_worker(&identity, ReplicationResourceKind::Stream);
                 Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
@@ -5620,8 +5744,7 @@ impl Broker<StromaEngine> {
                 // Becoming a follower at the new epoch fences this deposed owner's
                 // own writes at the storage layer (the stream channel can linger;
                 // role-gated appends are rejected from here on).
-                self.engine
-                    .become_stream_follower_with_epoch(&topic, partition.id(), assignment_epoch)
+                self.become_stream_follower_with_epoch(&topic, partition.id(), assignment_epoch)
                     .await?;
                 self.ensure_follower_replication_worker(&identity, ReplicationResourceKind::Stream);
                 Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))

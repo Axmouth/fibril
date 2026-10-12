@@ -3556,6 +3556,233 @@ async fn owner_replication_read_of_a_cold_stream_opens_it_as_a_stream() {
     broker.shutdown().await;
 }
 
+/// Coordination view for the stray queue partition tests: `events` is a
+/// declared stream, and `queue_state` is what coordination says about queues
+/// on that topic.
+#[derive(Debug)]
+struct DeclaresEventsStream {
+    queue_state: Result<bool, String>,
+}
+
+impl fibril_broker::broker::StreamOwnership for DeclaresEventsStream {
+    fn owns_stream(&self, topic: &str, _partition: Partition) -> bool {
+        topic == "events"
+    }
+    fn stream_open_config(&self, topic: &str) -> Option<fibril_broker::broker::StreamOpenConfig> {
+        (topic == "events").then(|| fibril_broker::broker::StreamOpenConfig {
+            durability: fibril_broker::stream::StreamDurability::Durable,
+            retention: None,
+        })
+    }
+    fn topic_has_queue_state(&self, _topic: &str) -> Result<bool, String> {
+        self.queue_state.clone()
+    }
+}
+
+async fn open_stray_test_broker(
+    root: &std::path::Path,
+    queue_state: Result<bool, String>,
+    owned_queues: StdHashSet<OwnedQueue>,
+) -> Arc<Broker<StromaEngine>> {
+    let engine = StromaEngine::open(
+        root,
+        StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+        SnapshotConfig::default(),
+    )
+    .await
+    .unwrap();
+    Broker::new_with_ownerships(
+        engine,
+        BrokerConfig::default(),
+        None,
+        Arc::new(StaticQueueOwnership::new(owned_queues)),
+        Arc::new(DeclaresEventsStream { queue_state }),
+    )
+}
+
+/// Leave the state the old bug left: fencing a stream this node never stored
+/// opened the partition with the default queue kind and wrote no record.
+async fn create_stray_queue_partition(root: &std::path::Path) {
+    let broker = open_stray_test_broker(root, Ok(false), StdHashSet::new()).await;
+    broker.engine().advance_stream_epoch("events", 0, 1).await.unwrap();
+    assert!(!fibril_broker::queue_engine::StreamStore::durable_is_stream(&broker.engine(), "events", 0));
+    broker.shutdown().await;
+    assert_eq!(stray_partition_kind(root).as_deref(), Some("queue"));
+}
+
+fn stray_partition_kind(root: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(stray_partition_dir(root).join("kind"))
+        .ok()
+        .map(|kind| kind.trim().to_string())
+}
+
+fn stray_partition_dir(root: &std::path::Path) -> std::path::PathBuf {
+    root.join("partitions/@none/events/0000000000")
+}
+
+/// Captures log lines written while the guard lives. The tests run on the
+/// current thread runtime, so a thread default subscriber sees the broker.
+#[derive(Clone, Default)]
+struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl CapturedLogs {
+    fn start() -> (Self, tracing::subscriber::DefaultGuard) {
+        let logs = Self::default();
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        (logs, tracing::subscriber::set_default(subscriber))
+    }
+
+    fn lines(&self, level: &str) -> Vec<String> {
+        String::from_utf8_lossy(&self.0.lock().unwrap())
+            .lines()
+            .filter(|line| line.contains(level))
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+fn stream_headers() -> MessageHeaders {
+    MessageHeaders {
+        published: unix_millis(),
+        publish_received: unix_millis(),
+        content_type: None,
+        extra: Default::default(),
+    }
+}
+
+/// An owner that restarts with an empty queue partition for a declared stream
+/// removes it on first stream traffic, says so, and serves the stream.
+#[tokio::test]
+async fn stream_owner_removes_an_empty_stray_queue_partition() {
+    let dir = test_dir!("stray_queue_owner");
+    create_stray_queue_partition(&dir.root).await;
+
+    let (logs, _guard) = CapturedLogs::start();
+    let broker = open_stray_test_broker(&dir.root, Ok(false), StdHashSet::new()).await;
+    let channel = broker
+        .route_stream("events", 0)
+        .await
+        .expect("the stream opens once the stray partition is gone");
+    assert_eq!(channel.publish(stream_headers(), b"first".to_vec()).await.unwrap(), 0);
+    assert!(fibril_broker::queue_engine::StreamStore::durable_is_stream(&broker.engine(), "events", 0));
+    assert_eq!(stray_partition_kind(&dir.root).as_deref(), Some("stream"));
+
+    let warnings = logs.lines("WARN");
+    let path = stray_partition_dir(&dir.root).display().to_string();
+    assert!(
+        warnings.iter().any(|line| line.contains("removed an empty queue partition")
+            && line.contains("topic=\"events\"")
+            && line.contains("partition=0")
+            && line.contains(&path)),
+        "{warnings:?}"
+    );
+    assert!(logs.lines("ERROR").is_empty());
+    broker.shutdown().await;
+}
+
+/// A follower holding an empty stray queue partition removes it when it takes
+/// its stream follower role, instead of failing that transition forever.
+#[tokio::test]
+async fn stream_follower_removes_an_empty_stray_queue_partition() {
+    let dir = test_dir!("stray_queue_follower");
+    create_stray_queue_partition(&dir.root).await;
+
+    let (logs, _guard) = CapturedLogs::start();
+    let broker = open_stray_test_broker(&dir.root, Ok(false), StdHashSet::new()).await;
+    let stream = StreamIdentity::new("events", Partition::new(0));
+    let become_follower = LocalStreamAssignmentTransition {
+        stream: stream.clone(),
+        previous_role: None,
+        next_role: Some(LocalAssignmentRole::Follower),
+        previous: None,
+        next: Some(StreamAssignment::new(stream, "owner", vec!["follower".to_string()], 2)),
+        intent: LocalAssignmentIntent::BecomeFollower,
+    };
+    broker
+        .apply_stream_assignment_transition(&become_follower)
+        .await
+        .expect("the follower role applies once the stray partition is gone");
+    assert!(fibril_broker::queue_engine::StreamStore::durable_is_stream(&broker.engine(), "events", 0));
+    assert!(logs.lines("WARN").iter().any(|line| line.contains("removed an empty queue partition")));
+    broker.shutdown().await;
+}
+
+/// A queue partition that ever held a message is never removed, even when
+/// coordination says the topic is only a stream.
+#[tokio::test]
+async fn stray_queue_partition_with_a_record_is_kept() {
+    let dir = test_dir!("stray_queue_with_record");
+    let mut owned = StdHashSet::new();
+    owned.insert(OwnedQueue::new("events", Partition::new(0), None));
+    let broker = open_stray_test_broker(&dir.root, Ok(false), owned).await;
+    let publisher = broker
+        .get_publisher("events", Partition::new(0), &None)
+        .await
+        .unwrap();
+    let reply = publisher
+        .publish(b"kept".to_vec(), unix_millis(), unix_millis(), None, Default::default(), None)
+        .await
+        .unwrap();
+    reply.await.unwrap().unwrap();
+    broker.shutdown().await;
+
+    let (logs, _guard) = CapturedLogs::start();
+    let broker = open_stray_test_broker(&dir.root, Ok(false), StdHashSet::new()).await;
+    for _ in 0..2 {
+        assert!(broker.route_stream("events", 0).await.is_none());
+    }
+    assert_eq!(stray_partition_kind(&dir.root).as_deref(), Some("queue"));
+    assert!(logs.lines("WARN").is_empty());
+    let errors = logs.lines("ERROR");
+    assert_eq!(errors.len(), 1, "reported once: {errors:?}");
+    assert!(errors[0].contains("the queue log holds records"), "{errors:?}");
+    assert!(errors[0].contains("stop the node"), "{errors:?}");
+    broker.shutdown().await;
+}
+
+/// An empty queue partition is kept when coordination also has the topic as a
+/// queue, or cannot say.
+#[tokio::test]
+async fn stray_queue_partition_is_kept_unless_coordination_rules_out_a_queue() {
+    for (queue_state, expected) in [
+        (Ok(true), "coordination also has queue state"),
+        (Err("view unavailable".to_string()), "cannot confirm"),
+    ] {
+        let dir = test_dir!("stray_queue_coordination_queue");
+        create_stray_queue_partition(&dir.root).await;
+
+        let (logs, _guard) = CapturedLogs::start();
+        let broker = open_stray_test_broker(&dir.root, queue_state, StdHashSet::new()).await;
+        assert!(broker.route_stream("events", 0).await.is_none());
+        assert!(
+            broker
+                .get_or_open_stream("events", 0, fibril_broker::stream::StreamDurability::Durable, None)
+                .await
+                .is_err()
+        );
+        assert_eq!(stray_partition_kind(&dir.root).as_deref(), Some("queue"));
+        let errors = logs.lines("ERROR");
+        assert_eq!(errors.len(), 1, "reported once: {errors:?}");
+        assert!(errors[0].contains(expected), "{errors:?}");
+        broker.shutdown().await;
+    }
+}
+
 /// The owner transition of a cold stream is a no-op, and the owner opens the
 /// stream later on first traffic. It must still write at the assignment
 /// epoch, or its followers reject every record as stale and replica-durable

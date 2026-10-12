@@ -14,7 +14,7 @@ use stroma_core::{
 };
 pub use stroma_core::{
     AdaptiveStagingConfig, AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, DestroyOutcome,
-    DiskUsedBreakdownEntry, RecoveryDiskUsage, EmptyBufferResize, EnqueuedStreamAppend, EvictOutcome,
+    DiskUsedBreakdownEntry, RecoveryDiskUsage, EmptyBufferResize, EmptyQueueRemoval, EnqueuedStreamAppend, EvictOutcome,
     GlobalDLQ,
     GlobalDlqSnapshot, GlobalDlqUpdateOutcome, GlobalKey, GlobalStore, GlobalValue, InspectMode,
     IoError, KDurability, KeratinAppendCompletion, KeratinConfig, LogRuntimeConfig,
@@ -467,6 +467,19 @@ pub trait StreamStore: Send + Sync {
     /// Read from the on-disk kind marker so the broker can route a publish to the
     /// stream path before the partition's fan-out channel is materialized.
     fn durable_is_stream(&self, tp: &str, part: u32) -> bool;
+
+    /// Remove the ungrouped queue partition `(tp, part)` only if it never held
+    /// a record. See `Stroma::remove_empty_queue_partition` for the exact rule.
+    /// Engines without that check keep everything.
+    async fn remove_empty_queue_partition(
+        &self,
+        _tp: &str,
+        _part: u32,
+    ) -> Result<EmptyQueueRemoval, StromaError> {
+        Err(StromaError::Unsupported(
+            "this engine cannot remove empty queue partitions".into(),
+        ))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -583,6 +596,16 @@ impl StreamStore for StromaEngine {
 
     fn durable_is_stream(&self, tp: &str, part: u32) -> bool {
         self.inner.partition_kind(tp, part, None) == PartitionKind::Stream
+    }
+
+    async fn remove_empty_queue_partition(
+        &self,
+        tp: &str,
+        part: u32,
+    ) -> Result<EmptyQueueRemoval, StromaError> {
+        self.inner
+            .remove_empty_queue_partition(tp, part, None)
+            .await
     }
 }
 

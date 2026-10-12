@@ -902,13 +902,20 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   opened a cold stream also wrote at epoch 0, and its followers rejected every
   record as stale. Owners now open a stream as a stream for a follower pull,
   fence a newly opened stream at its assignment epoch, and only the stream
-  planner acts on stream assignments. A node that already holds a queue
-  partition for a stream topic keeps refusing that stream after the upgrade.
-  The partition holds no stream data: stop the node, remove its directory
-  under the data directory, `storage/partitions/@none/<topic>/0000000000` for
-  partition 0 (the `kind` file in it reads `queue`), and start it again. The
-  node then takes its stream role again, and a follower copies the stream
-  from its owner.
+  planner acts on stream assignments. A node that already holds such a queue
+  partition, `storage/partitions/@none/<topic>/<partition>` under the data
+  directory with a `kind` file that reads `queue`, repairs it automatically
+  when it is safe: on opening the stream or taking a follower role for it, the
+  broker removes the partition and logs a warning with its path, but only if
+  coordination declares the topic as a stream, has no queue declaration,
+  partitioning, catalogue entry or assignment for it under any group, no queue
+  for that partition runs on the node, and the queue never held a record (its
+  log is still at offset 0). The node then takes its stream role, and a
+  follower copies the stream from its owner. Otherwise the broker keeps the
+  partition and logs an error with the reason. The manual repair is then to
+  stop the node, delete the directory named in the error
+  (`0000000000` for partition 0), and start it again, only if the partition
+  holds no data you need. See the failure modes runbook.
 
 - A Rust client subscription made before the client's topology cache knew the
   queue could stop delivering a partition for good. Once the cache learned

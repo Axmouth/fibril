@@ -3687,6 +3687,53 @@ impl fibril_broker::broker::StreamOwnership for GanglionCoordination {
             retention,
         })
     }
+
+    fn topic_has_queue_state(&self, topic: &str) -> Result<bool, String> {
+        let in_fibril_view = self
+            .tx
+            .borrow()
+            .assignments
+            .keys()
+            .any(|queue| queue.topic.as_str() == topic);
+        Ok(in_fibril_view
+            || self
+                .node
+                .read_committed(|snapshot| committed_topic_has_queue_state(snapshot, topic)))
+    }
+}
+
+/// Whether committed coordination state names `topic` as a queue under any
+/// group: a catalogue resource, an assignment, partitioning or a declaration.
+fn committed_topic_has_queue_state(
+    snapshot: &ganglion_core::CoordinationSnapshot,
+    topic: &str,
+) -> bool {
+    let has_prefix = |prefix: &str| {
+        snapshot
+            .attributes
+            .range::<str, _>((
+                std::ops::Bound::Included(prefix),
+                std::ops::Bound::Unbounded,
+            ))
+            .next()
+            .is_some_and(|(key, _)| key.starts_with(prefix))
+    };
+    let queue_resource = |resource: &ganglion_core::ResourceIdentity| {
+        resource.namespace == QUEUE_NAMESPACE && resource.name == topic
+    };
+    // Declaration keys are JSON (topic, group) tuples, so the encoded topic
+    // followed by a comma matches every group of this topic and no other topic.
+    let declaration_prefix = format!(
+        "fibril/queue_declaration/[{},",
+        serde_json::to_string(topic).unwrap_or_default()
+    );
+    snapshot.resources.iter().any(queue_resource)
+        || snapshot.assignments.keys().any(queue_resource)
+        || snapshot
+            .attributes
+            .contains_key(&queue_partitioning_key(topic, None))
+        || has_prefix(&format!("{QUEUE_PARTITIONING_ATTRIBUTE_PREFIX}{topic}/"))
+        || has_prefix(&declaration_prefix)
 }
 
 impl Coordination for GanglionCoordination {
@@ -3960,6 +4007,42 @@ mod tests {
     use std::time::Duration;
 
     use ganglion_openraft::{default_raft_config, InProcessRouter};
+
+    #[test]
+    fn topic_queue_state_covers_every_group_and_no_other_topic() {
+        let mut snapshot = ganglion_core::CoordinationSnapshot::default();
+        let attr = |snapshot: &mut ganglion_core::CoordinationSnapshot, key: String| {
+            snapshot.attributes.insert(key, String::new());
+        };
+        attr(&mut snapshot, stream_config_key("events"));
+        attr(&mut snapshot, queue_declaration_key("events2", None));
+        attr(&mut snapshot, queue_declaration_key("other", Some("events")));
+        attr(&mut snapshot, queue_partitioning_key("events2", Some("g")));
+        attr(&mut snapshot, queue_partitioning_key("event", None));
+        snapshot.resources.insert(ganglion_core::ResourceIdentity::new(STREAM_NAMESPACE, "events", 0, None));
+        assert!(!committed_topic_has_queue_state(&snapshot, "events"));
+
+        for key in [
+            queue_declaration_key("events", None),
+            queue_declaration_key("events", Some("g")),
+            queue_partitioning_key("events", None),
+            queue_partitioning_key("events", Some("g")),
+        ] {
+            let mut with_queue = snapshot.clone();
+            attr(&mut with_queue, key.clone());
+            assert!(committed_topic_has_queue_state(&with_queue, "events"), "{key}");
+        }
+        let queue = ganglion_core::ResourceIdentity::new(QUEUE_NAMESPACE, "events", 1, Some("g".into()));
+        let mut catalogued = snapshot.clone();
+        catalogued.resources.insert(queue.clone());
+        assert!(committed_topic_has_queue_state(&catalogued, "events"));
+        let mut assigned = snapshot.clone();
+        assigned.assignments.insert(
+            queue.clone(),
+            ganglion_core::PartitionAssignment::new(queue, "n1", Vec::new(), 1),
+        );
+        assert!(committed_topic_has_queue_state(&assigned, "events"));
+    }
 
     #[test]
     fn applied_tail_labels_are_parsed_by_resource_kind() {
