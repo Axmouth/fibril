@@ -79,11 +79,12 @@ avoidance remain a further design requiring explicit ordering and crash semantic
 ### Public/private endpoints and routing fallback
 
 Private brokers and public brokers that forward to them are implemented for
-publishes, delayed publishes, plain queue subscriptions and settles, see
-[private brokers](/configuration/#private-brokers). Remaining: streams and
-exclusive consumer groups through a gateway, upstream session resume across
-link drops, a clean session-close signal, dashboard marking of private nodes,
-and later tagged private endpoints for internal clients. Overlapping topology
+the full client surface, queues, streams and exclusive consumer groups, with
+upstream session resume and dashboard marking, see
+[private brokers](/configuration/#private-brokers). Remaining are later
+options: tagged private endpoints for internal clients, a multiplexed
+upstream link if connection counts become a limit, and a client tunnel for
+continuity across a public broker failure. Overlapping topology
 groups and arbitrary multi-hop routing remain later options that require a
 concrete deployment use case. The design is in
 [private nodes and internal routing](/development/private-nodes-design/).

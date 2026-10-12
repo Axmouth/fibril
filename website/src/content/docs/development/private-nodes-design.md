@@ -3,9 +3,9 @@ title: Private nodes and internal routing
 description: Design for brokers that are never advertised to clients, with public brokers forwarding to them over internal connections.
 ---
 
-This design note records the design of private brokers. Phase 1 (section 9) is
-implemented, section 11 lists where the build differs from the text, and phases
-2 and 3 are proposed work. User-facing behavior is in
+This design note records the design of private brokers. Phases 1 and 2
+(section 9) are implemented, section 11 lists where the build differs from the
+text, and phase 3 holds later options. User-facing behavior is in
 [private brokers](/configuration/#private-brokers). It expands the roadmap
 entry
 [public/private endpoints and routing fallback](/roadmap/#publicprivate-endpoints-and-routing-fallback).
@@ -397,13 +397,20 @@ already auto-retries only `ERR_UNAVAILABLE`.
 
 **Public broker dies.** The client's connection drops. In-flight requests fail
 as transport errors with no replay, exactly as on a direct broker failure. The
-client reconnects through the load balancer to another public broker. Its
-resume identity was issued by the dead broker's owner id, so the outcome is
-`resume_not_found`, reconciliation closes subscriptions client-side, and
-supervisors resubscribe. The old upstream sessions on owners go dormant for the
-owner's `reconnect_grace_ms` and then expire, and their unsettled deliveries
-redeliver. This matches the documented limit that session transfer between
-brokers needs further design. Option (c) is the path to closing it.
+client reconnects through the load balancer. On another public broker its
+resume identity names a different owner id, so the outcome is
+`resume_rejected`. On the same broker after a restart it is
+`resumed_after_restart` when the broker kept a durable session skeleton, with
+no subscriptions on the server, or `resume_not_found` without one. Either way
+reconciliation recreates or closes the forwarded subscriptions client-side and
+supervisors resubscribe through the normal forwarded path (the `restore`
+policy resubscribes them on the owner during the reconcile). The old upstream
+sessions on owners end with the dead process: its sockets close in order, and
+an owner that got `release_on_close` releases the session at once and
+redelivers what it held. When the machine or network failed instead, nothing
+closes the sockets and the owner waits out its `reconnect_grace_ms` first.
+This matches the documented limit that session transfer between brokers needs
+further design. Option (c) is the path to closing it.
 
 **Public broker drains.** It sends `GoingAway` to its clients as today. A
 `GoingAway` received on an upstream session is not relayed. The public broker
@@ -411,12 +418,15 @@ lets the owner's drain move partitions and relays the resulting
 `SubscriptionClosed` frames.
 
 **Clean close.** When a client session ends for good (grace expired or explicit
-close), the public broker should end its upstream sessions without leaving them
-dormant on the owner, otherwise redelivery waits for two grace windows. Phase 1
-sends an empty `ReconcileClient` on each upstream session before closing it,
-so the owner closes every forwarded subscription and redelivers its unsettled
-messages at once. The owner's session object itself still waits out its grace
-holding nothing. A real session-close signal stays an open question.
+close), the public broker ends its upstream sessions without leaving them
+dormant on the owner, otherwise redelivery waits for two grace windows. It
+sends an empty `ReconcileClient` on each upstream session, so the owner closes
+every forwarded subscription and redelivers its unsettled messages at once,
+and then closes the connection in order. `ForwardedSession` carries
+`release_on_close`, and an owner that got it ends the session on that orderly
+close instead of keeping the empty session object for its grace. A broken
+link, a read error or a heartbeat timeout, keeps the grace so the gateway can
+resume.
 
 ## 7. Mixed setups
 
@@ -485,7 +495,7 @@ balancer in front of one or a few public brokers, with every SDK unchanged.
 - The `routing` limits, the `504` code and the failure table above.
 - Metrics and logs from section 8.
 
-**Phase 2: full client surface.**
+**Phase 2: full client surface (implemented, see section 11).**
 
 - Streams: `SubscribeStream`, stream publish and cursor commits.
 - Exclusive consumer groups with member id resolution at the gateway.
@@ -535,7 +545,7 @@ balancer in front of one or a few public brokers, with every SDK unchanged.
 
 ## 10. Decisions and open questions
 
-Decided for phase 1:
+Decided:
 
 1. Gateway choice: rendezvous hashing over live, non-draining public nodes,
    so every broker gives the same answer.
@@ -546,30 +556,35 @@ Decided for phase 1:
    broker to broker replication without it.
 4. Private nodes accept ordinary client AUTH. Private means not advertised,
    so internal clients that can reach a private node directly keep working.
+5. Clean session close: a `ForwardedSession` option, `release_on_close`, not
+   a new op. The owner skips its grace when the gateway closes the
+   connection in order. The option is only an optimization, since the empty
+   reconcile already releases every subscription, so an owner that does not
+   know it may ignore it. To stay readable by such owners the marker keeps its
+   `FFS1` body without flags and uses `FFS2` with a flags byte only when one
+   is set. An owner that refuses `FFS2` gets the `FFS1` body on the same
+   connection, which is the phase 1 behavior.
 
 Still open:
 
 1. Should the cluster ever expose private addresses, tagged, to internal
    clients, or must they always go through a gateway?
-2. Clean session close: a new node-control op, or a `ForwardedSession` option
-   that makes the owner skip grace on a clean socket close from the gateway.
-   Phase 1 already releases subscriptions with an empty reconcile.
-3. Is per-client upstream connection count acceptable for the expected client
+2. Is per-client upstream connection count acceptable for the expected client
    counts, or should the multiplexed link come before 1.0?
-4. Should placement prefer public nodes as owners for hot partitions, so less
+3. Should placement prefer public nodes as owners for hot partitions, so less
    traffic is forwarded, or stay visibility-blind?
-5. Is losing session continuity on a public broker failure acceptable long
+4. Is losing session continuity on a public broker failure acceptable long
    term, or is the client tunnel worth its cost in all five SDKs?
-6. Should a deployment be able to force gateway mode for every partition, even
+5. Should a deployment be able to force gateway mode for every partition, even
    for public owners with their own addresses, for operators who want all
    client traffic to enter through one place?
 
-## 11. Phase 1 as built
+## 11. Phases 1 and 2 as built
 
-Phase 1 follows sections 1 to 8 with these differences, found while building
-it. Code: `crates/protocol/src/v1/forwarding.rs` (routing rule, forwarder,
-upstream sessions), `crates/coordination-ganglion/src/gateway.rs` (gateway
-choice), the handler in `crates/protocol/src/v1/handler.rs`.
+Phases 1 and 2 follow sections 1 to 8 with these differences, found while
+building them. Code: `crates/protocol/src/v1/forwarding.rs` (routing rule,
+forwarder, upstream sessions), `crates/coordination-ganglion/src/gateway.rs`
+(gateway choice), the handler in `crates/protocol/src/v1/handler.rs`.
 
 **Configuration.**
 
@@ -578,8 +593,9 @@ choice), the handler in `crates/protocol/src/v1/handler.rs`.
   first. Peers keep dialing what they dialed before the setting existed.
 - The `routing.*` limits are runtime settings with built-in defaults and no
   `runtime_seed.routing` boot seed, the same as the `stream` settings.
-- The no-live-public-node condition is a rate-limited log on every broker. The
-  admin Cluster page does not show it yet.
+- The no-live-public-node condition is a rate-limited log on every broker, a
+  critical attention item, a banner on the admin Cluster page and
+  `coordination.no_live_public_broker` in the topology API.
 
 **Advertisement.**
 
@@ -605,8 +621,17 @@ choice), the handler in `crates/protocol/src/v1/handler.rs`.
   rest of the body, delivery tag included, is byte for byte the owner's.
 - Deliveries are relayed with no buffer: the upstream reader waits on the
   client's connection, which is the backpressure section 3 describes.
-- Streams and exclusive consumer groups through a gateway answer `400` with an
-  explanation. A retry cannot help until phase 2, so `503` would only loop.
+- A stream publish is relayed with its body, so the owner applies its
+  durability tier and replication policy before it confirms. `SubscribeStream`
+  is relayed as is, the owner resolves the durable cursor, start position and
+  filter. Streams take no part in reconcile, as on a direct connection, and a
+  second stream subscribe to the same partition replaces the first on the
+  gateway as it does on the owner.
+- For an exclusive consumer group the gateway resolves the member id from the
+  session's local and forwarded subscriptions alike, including forwarded
+  subscribes still waiting for the owner, and writes it into the `Subscribe`
+  body it relays. `AssignmentChanged` frames carry no subscription id, so they
+  are relayed unchanged.
 - A publish waits for in-flight byte room for the forward timeout capped at the
   client heartbeat interval (5 s), not the full forward timeout. The wait holds
   the client's connection loop, and a longer wait would trip the heartbeat
@@ -620,8 +645,36 @@ choice), the handler in `crates/protocol/src/v1/handler.rs`.
   `504`: the owner drops the subscription with the session, so a retry is safe.
   The session's subscriptions close with `OwnerMoved`, which every SDK's
   supervisor answers by resubscribing through the public broker.
-- Upstream resume is phase 2, so a lost upstream session is not resumed. The
-  owner keeps the dormant session for its reconnect grace and then redelivers.
+- A lost upstream session is retried with the owner's resume identity for
+  the gateway's own `reconnect_grace_ms` (0 turns resume off), on the
+  assumption that the cluster uses one grace setting, with backoff from 100
+  ms up to 1 s. There is no separate routing setting for it. Requests whose
+  frame reached the socket are answered at the loss (`504` for publishes,
+  `503` for subscribes), queued ones are sent on the resumed session. After a
+  `Resumed` answer the gateway reconciles the session's queue subscriptions
+  with the owner and closes any the owner no longer has. Any other answer is
+  a fresh session and every subscription of the old one closes with
+  `OwnerMoved`.
+- A resumed session usually arrives while the owner still holds the old
+  connection, which it has not yet noticed is dead. Building resume showed
+  two handler problems this exposes, both fixed for every client: deliveries
+  kept going to the old connection until it timed out, and the old
+  connection's end cleaned up the session the new one was using. The session
+  now follows its newest connection at once, and a superseded connection
+  leaves the session alone.
+- A resumed connection that sends AUTH again, as the gateway and every SDK
+  do, is authenticated again. Authentication is per connection.
+- While a relay waits on a slow or dormant client the gateway pings the owner
+  each heartbeat interval, so a long wait does not look like a dead link.
+- Ending an old session of an exclusive group member no longer removes the
+  whole member when a newer session of that member joined meanwhile, as a
+  client that reconnected through another gateway does while its old upstream
+  session waits out the owner's grace. Only the old session's own
+  subscriptions leave.
+- With the `restore` reconcile policy the gateway relays the subscribe of a
+  missing forwarded subscription and waits for the owner's answer, reporting
+  `server_restored`. Under `conservative` a missing manual-ack forwarded
+  subscription, exclusive ones included, gets `recreate_client_side`.
 - A public broker that held a local publisher for a partition that moved to a
   private owner drops cached publishers it no longer owns on each topology
   tick, and answers a publish that hit the old publisher with `503` instead of
@@ -639,25 +692,52 @@ choice), the handler in `crates/protocol/src/v1/handler.rs`.
 - Forwarded confirm latency is exported as `fibril_forward_confirms_total` and
   `fibril_forward_confirm_latency_microseconds_total`, a count and sum pair,
   rather than buckets.
-- Heartbeat labels carry visibility but not the upstream session count yet.
+- Heartbeat labels carry visibility, and `fibril/upstream_sessions` and
+  `fibril/forwarded_sessions` carry the forwarding load while non-zero. The
+  topology API shows both counts and visibility per node, and the Cluster
+  page marks private brokers.
 - The connections API marks a forwarded session with its origin node and
-  acting user. The dashboard does not render it yet.
+  acting user, and the dashboard shows it as "via node P for user U".
+- `fibril_forward_upstream_resumes_total` counts lost upstream sessions by
+  outcome, resumed or lost.
 
 **Tests.**
 
 - `crates/protocol/tests/forwarding_tests.rs` drives a gateway handler against
   real and scripted owners: confirm only with the owner's confirm and offset,
   `504` on a dropped upstream, `503` when nothing was sent, rebuilt redirects,
-  the one retry on a move to another private owner, the per-owner cap, cohort
-  refusal, and the `ForwardedSession` checks (node principal only, one hop,
-  once per session, never forwarding again).
+  the one retry on a move to another private owner, the per-owner cap, and
+  the `ForwardedSession` checks (node principal only, one hop, once per
+  session, never forwarding again). Phase 2 adds stream publish, durable
+  cursor commit and filter against a real owner, stream subscribe
+  replacement, member id resolution and relayed assignment changes for
+  exclusive groups, upstream resume (kept, partly lost and not found),
+  resume through a relay that leaves the owner's old connection open and
+  later closes it, a client resuming on the gateway with password auth,
+  restore and conservative reconcile of forwarded subscriptions,
+  `release_on_close` on the owner and the `FFS1` fallback.
 - `crates/fibril/tests/private_nodes.rs` runs three broker processes, two of
   them private with only an unroutable client address, and kills the private
   owner mid-test. The partition moves to the other private broker and the
   client keeps publishing with confirms and consuming through the public one.
+  A second scenario runs an exclusive consumer group through the public
+  broker, grows a privately owned queue from one to three partitions while
+  the client publishes and consumes, and restarts the public broker: the
+  client reconnects, resubscribes and gets the message the old session held
+  redelivered.
+- `crates/protocol/tests/simulation_tests.rs` has two turmoil scenarios with a
+  client, a public gateway and a private owner: a two-way partition longer
+  than the gateway's heartbeat timeout, after which the gateway resumes and
+  every publish the client saw confirmed is delivered, and a one-way loss of
+  the owner's answers, where the publish in flight answers `504`.
+- Streams through a gateway are covered against a real owner in the protocol
+  tests, not in the multi-process test. Declaring a stream in that three node
+  cluster leaves the stream's owner with a queue partition for the same topic,
+  and the owner then refuses the stream as a kind mismatch. It happens at
+  declare time, before any forwarding, and is not diagnosed yet.
 - Client classification tests for `504` exist in all five SDKs, and the Rust
   client has a mock broker test that a `504` publish is never replayed.
 - No `clients/wire_vectors.json` entry for `ForwardedSession`: SDK conformance
   tests require every vector to be encodable by the SDK, and the op is node
   only. The Rust wire tests cover its codec.
-- No recorded `private` crash demo scenario and no simulation tests yet.
+- No recorded `private` crash demo scenario yet.

@@ -136,11 +136,30 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   broker agrees, and public brokers forward the operations to the owner on
   node-authenticated upstream sessions over the peer TLS connector. A
   forwarded confirm is the owner's confirm with the owner's offset. Publish,
-  delayed publish, plain queue subscribe, ack and nack are forwarded. Streams
-  and exclusive consumer groups through a public broker get a clear `400` for
-  now. A broker never redirects a client to one of its own addresses, which
-  also fixes redirect ping-pong between public brokers behind one shared
-  address. Private needs cluster mode. Clients need no change.
+  delayed publish, queue subscribe, ack and nack are forwarded, and so are
+  stream publishes (confirmed per the owner's durability tier), stream
+  subscriptions with durable cursors, start positions and filters, cursor
+  commits, and exclusive consumer groups, for which the public broker settles
+  one member id per client session and relays assignment changes. A broker
+  never redirects a client to one of its own addresses, which also fixes
+  redirect ping-pong between public brokers behind one shared address.
+  Private needs cluster mode. Clients need no change.
+
+- Public brokers resume an upstream session after its link to the owner
+  breaks, for up to their own `reconnect_grace_ms`, so forwarded
+  subscriptions and held deliveries survive a short partition. Requests that
+  reached the owner before the break answer `504` (publishes) or `503`
+  (subscribes), queued ones go out on the resumed session, and subscriptions
+  the owner no longer has close with `OwnerMoved` for the client to
+  resubscribe. A client that reconnects to the same public broker within its
+  grace keeps its forwarded subscriptions, and the `restore` reconcile policy
+  resubscribes missing forwarded subscriptions on the owner.
+
+- `ForwardedSession` gains `release_on_close`: an owner releases a forwarded
+  session as soon as the public broker closes it in order, instead of keeping
+  it empty for its reconnect grace, and a public broker whose process dies
+  has its sessions released at once. Owners before this version ignore the
+  option safely. The forwarding protocol version is 2.
 
 - `broker.peer_advertise` (`FIBRIL_BROKER_PEER_ADVERTISE`), the address other
   brokers dial for replication and forwarding. The cluster node table carries
@@ -167,9 +186,19 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   outcome, `fibril_forward_bytes_in_total`, `fibril_forward_bytes_out_total`,
   `fibril_forward_inflight_bytes`, `fibril_forward_rejected_total` by limit,
   `fibril_forward_dropped_total`, `fibril_forward_confirms_total` with
-  `fibril_forward_confirm_latency_microseconds_total`, and
+  `fibril_forward_confirm_latency_microseconds_total`,
+  `fibril_forward_upstream_resumes_total` by outcome, and
   `fibril_forwarded_sessions` on owners. The connections API marks forwarded
-  sessions with their origin node and acting user.
+  sessions with their origin node and acting user, and the dashboard shows
+  them as "via node P for user U".
+
+- Heartbeat labels `fibril/upstream_sessions` and `fibril/forwarded_sessions`
+  carry each broker's forwarding load while non-zero. The admin topology API
+  adds visibility and both counts per node and
+  `coordination.no_live_public_broker`, the Cluster page marks private
+  brokers and shows the counts, and a cluster with private brokers but no
+  live public broker raises a critical attention item and a banner on the
+  Cluster page.
 
 - A broker message size limit. `connection.max_message_bytes` (default
   8388608, 1 KiB to 15 MiB) caps the message payload, and a larger publish
@@ -859,6 +888,25 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   unchanged, matching their own language norms.
 
 ### Fixed
+
+- A session that resumed on a new connection while its old connection still
+  looked alive kept sending deliveries down the old socket until that
+  connection timed out, and when it finally ended it cleaned up the session
+  the new connection was using, dropping its subscriptions. Deliveries now
+  move to the new connection at once and the old one leaves the session
+  alone.
+
+- A client that sent AUTH again after resuming its session, as every SDK
+  does, was refused as already authenticated. Authentication is now checked
+  per connection.
+
+- A second stream subscribe to the same partition on one session left the
+  replaced subscription's tasks delivering under the old id.
+
+- When an old session of an exclusive consumer group member ended after a
+  newer session of the same member had joined, the whole member was removed,
+  including the newer session's subscriptions. Only the old session's own
+  subscriptions are removed now.
 
 - Security: the broker buffered any frame a connection declared, up to about
   4 GiB, even before authentication, so one connection could exhaust broker

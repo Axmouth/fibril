@@ -447,17 +447,34 @@ brokers. Clients then only ever talk to public brokers:
   to the owner on an upstream session opened for that client session. The
   owner answers exactly as it would answer the client: a forwarded publish is
   confirmed only when the owner confirms, with the owner's offset.
-- Confirmed and fire-and-forget publishes, delayed publishes, plain queue
-  subscriptions, acks and nacks are forwarded. Streams and exclusive consumer
-  groups are not forwarded yet: operations on them through a public broker
-  get error `400` with an explanation. Use a public owner for those, or
-  connect to the owner directly.
+- Everything a client does on a partition is forwarded: confirmed and
+  fire-and-forget publishes, delayed publishes, queue subscriptions, acks and
+  nacks, stream publishes (each durability tier confirms as it would on the
+  owner), stream subscriptions with durable cursors, start positions and
+  filters, cursor commits, and exclusive consumer groups. For a consumer
+  group the public broker settles one member id per client session and sends
+  it to every owner, and the owners' assignment changes reach the client.
 - When the owner is lost after a request was sent, the client gets error
   `504`: the outcome is unknown and clients do not replay it. When nothing was
   sent (owner unreachable, a forwarding limit, ownership moving), the client
   gets the retryable `503`.
-- With no live public broker, private-owned partitions show no endpoints and
-  each broker logs a warning once a minute.
+- When the link to an owner breaks, the public broker resumes its session
+  there for up to its own `reconnect_grace_ms`. A resumed session keeps its
+  subscriptions, and deliveries held by the client stay settleable. If the
+  owner no longer has the session, its subscriptions close with `OwnerMoved`
+  and client supervisors resubscribe.
+- A client that reconnects to the same public broker within its reconnect
+  grace resumes its session, forwarded subscriptions included. Reconcile
+  policies apply to forwarded subscriptions as to local ones: `restore`
+  resubscribes them on the owner.
+- When a public broker restarts or dies, its clients reconnect (through the
+  load balancer) and resubscribe. An owner releases the old sessions at once
+  when the public broker's process closed its connections, and after its own
+  reconnect grace when the machine or network failed, then redelivers what
+  they held.
+- With no live public broker, private-owned partitions show no endpoints,
+  each broker logs a warning once a minute, and the dashboard shows it on the
+  Cluster page and in its attention list.
 
 Mark brokers private only after every broker runs a version that understands
 the `fibril/visibility` label. An older broker would still hand out a private
@@ -476,7 +493,11 @@ They are shared by the cluster and adjustable live from the settings page.
 | `routing.upstream_idle_close_ms` | `30000` | An upstream session with no subscription and no pending request closes after this long. |
 
 Forwarded traffic shows in `/metrics` as the `fibril_forward_*` families on
-public brokers and `fibril_forwarded_sessions` on owners.
+public brokers, with `fibril_forward_upstream_resumes_total` counting resumed
+and lost upstream sessions, and `fibril_forwarded_sessions` on owners. The
+Cluster page shows each public broker's upstream sessions and each owner's
+forwarded sessions, and the connections view marks a forwarded session as
+"via node P for user U".
 
 ## Linux Memory Policy
 
