@@ -973,3 +973,240 @@ async fn subscribe_error_reply_does_not_hang() {
         );
     }
 }
+
+/// Who the late-owner mock's topology names as the owner of `jobs` partition 0.
+#[derive(Clone, Copy)]
+enum MockOwner {
+    /// Not in the topology yet, the way a just-declared queue can be missing
+    /// from the client's cache.
+    Unknown,
+    /// The mock itself.
+    Itself,
+    /// Another endpoint, as after a failover.
+    At(SocketAddr),
+}
+
+/// A mock owner for `jobs` partition 0 whose topology answer follows `owner`.
+/// Like the broker, it refuses a second subscribe to the same partition on one
+/// connection while the first is live. Deliveries on the first subscription
+/// follow `deliver`: each bump sends payloads up to the new count.
+async fn spawn_late_owner_mock(
+    owner: Arc<std::sync::Mutex<MockOwner>>,
+    subscribes: Arc<AtomicUsize>,
+    deliver: tokio::sync::watch::Receiver<u8>,
+) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((sock, _)) = listener.accept().await {
+            let owner = owner.clone();
+            let subscribes = subscribes.clone();
+            let mut deliver = deliver.clone();
+            tokio::spawn(async move {
+                let mut framed = Framed::new(sock, ProtoCodec);
+                let Some(Ok(hello)) = framed.next().await else {
+                    return;
+                };
+                let hello_ok = HelloOk {
+                    protocol_version: PROTOCOL_V1,
+                    owner_id: Uuid::nil(),
+                    client_id: Uuid::nil(),
+                    resume_token: Uuid::nil(),
+                    resume_outcome: ResumeOutcome::New,
+                    server_name: "mock".into(),
+                    compliance: COMPLIANCE_STRING.into(),
+                };
+                if framed
+                    .send(try_encode(Op::HelloOk, hello.request_id, &hello_ok).unwrap())
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                let mut live: Option<Subscribe> = None;
+                let mut sent = 0u8;
+                loop {
+                    tokio::select! {
+                        next = framed.next() => {
+                            let Some(Ok(frame)) = next else { return; };
+                            let reply = if frame.opcode == Op::Subscribe as u16 {
+                                let sub: Subscribe = try_decode(&frame).unwrap();
+                                subscribes.fetch_add(1, Ordering::SeqCst);
+                                if live.is_some() {
+                                    fibril_wire::helper::error_frame(
+                                        frame.request_id,
+                                        fibril_wire::ERR_CONFLICT,
+                                        "already subscribed",
+                                    )
+                                    .unwrap()
+                                } else {
+                                    let ok = SubscribeOk {
+                                        sub_id: 1,
+                                        topic: sub.topic.clone(),
+                                        group: sub.group.clone(),
+                                        partition: sub.partition,
+                                        prefetch: sub.prefetch,
+                                        consumer_group: None,
+                                        consumer_target: None,
+                                        member_id: None,
+                                    };
+                                    live = Some(sub);
+                                    try_encode(Op::SubscribeOk, frame.request_id, &ok).unwrap()
+                                }
+                            } else if frame.opcode == Op::Topology as u16 {
+                                let current = *owner.lock().unwrap();
+                                let owner_addr = match current {
+                                    MockOwner::Unknown => None,
+                                    MockOwner::Itself => Some(addr),
+                                    MockOwner::At(other) => Some(other),
+                                };
+                                let queues = owner_addr
+                                    .map(|owner_addr| QueueTopologyEntry {
+                                        topic: "jobs".into(),
+                                        partition: Partition::new(0),
+                                        group: None,
+                                        owner_endpoints: vec![
+                                            AdvertisedAddress::parse(&owner_addr.to_string())
+                                                .expect("valid test owner endpoint"),
+                                        ],
+                                        partitioning_version: 0,
+                                        partition_count: 1,
+                                    })
+                                    .into_iter()
+                                    .collect();
+                                let topology = TopologyOk {
+                                    generation: 1,
+                                    queues,
+                                    streams: vec![],
+                                };
+                                try_encode(Op::TopologyOk, frame.request_id, &topology).unwrap()
+                            } else {
+                                continue; // acks, pings
+                            };
+                            if framed.send(reply).await.is_err() {
+                                return;
+                            }
+                        }
+                        changed = deliver.changed() => {
+                            if changed.is_err() {
+                                return;
+                            }
+                            let target = *deliver.borrow_and_update();
+                            let Some(sub) = live.as_ref() else { continue; };
+                            while sent < target {
+                                sent += 1;
+                                let msg = Deliver {
+                                    sub_id: 1,
+                                    topic: sub.topic.clone(),
+                                    group: sub.group.clone(),
+                                    partition: sub.partition,
+                                    offset: sent as u64,
+                                    delivery_tag: DeliveryTag { epoch: sent as u64 },
+                                    published: 0,
+                                    publish_received: 0,
+                                    content_type: None,
+                                    headers: HashMap::new(),
+                                    payload: vec![sent],
+                                };
+                                if framed.send(wire::encode_deliver(0, &msg).unwrap()).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
+async fn next_payload(sub: &mut fibril_client::Subscription) -> Vec<u8> {
+    tokio::time::timeout(std::time::Duration::from_secs(5), sub.recv())
+        .await
+        .expect("delivery must not stall")
+        .delivery()
+        .expect("subscription should yield a message")
+        .payload
+}
+
+/// A subscription made before the client's topology cache knows the queue goes
+/// through the bootstrap connection. When the cache later learns that the owner
+/// is that same endpoint, the leg has not moved: it must keep delivering and
+/// must not be re-subscribed, which the broker would refuse while the original
+/// subscription is still live.
+#[tokio::test]
+async fn subscription_keeps_delivering_when_cache_learns_its_owner() {
+    let owner = Arc::new(std::sync::Mutex::new(MockOwner::Unknown));
+    let subscribes = Arc::new(AtomicUsize::new(0));
+    let (deliver, deliver_rx) = tokio::sync::watch::channel(0u8);
+    let mock = spawn_late_owner_mock(owner.clone(), subscribes.clone(), deliver_rx).await;
+
+    let client = Client::connect(mock, ClientOptions::new()).await.unwrap();
+    let mut sub = client
+        .subscribe("jobs")
+        .unwrap()
+        .prefetch(4)
+        .sub()
+        .await
+        .unwrap();
+
+    deliver.send(1).unwrap();
+    assert_eq!(next_payload(&mut sub).await, vec![1]);
+
+    // The owner appears in the topology, at the endpoint the leg already uses.
+    // Wait out a few of the supervisor's owner checks.
+    *owner.lock().unwrap() = MockOwner::Itself;
+    tokio::time::sleep(std::time::Duration::from_millis(3_500)).await;
+
+    // More than the prefetch, so a leg nobody reads would also block the
+    // connection reader.
+    deliver.send(12).unwrap();
+    for expected in 2..=12u8 {
+        assert_eq!(next_payload(&mut sub).await, vec![expected]);
+    }
+    assert_eq!(
+        subscribes.load(Ordering::SeqCst),
+        1,
+        "a leg already bound to the owner must not be re-subscribed"
+    );
+}
+
+/// When the topology names a new owner that is not taking subscribes yet, the
+/// old leg can still be delivering. The supervisor keeps forwarding it while it
+/// retries the new owner, so those deliveries are not stranded.
+#[tokio::test]
+async fn moved_subscription_keeps_old_leg_flowing_while_resubscribing() {
+    let new_owner = spawn_configurable_mock(MockConfig {
+        reject_subscribes: Some(Arc::new(AtomicUsize::new(usize::MAX))),
+        reject_with: Some((fibril_wire::ERR_UNAVAILABLE, Op::Error)),
+        ..Default::default()
+    })
+    .await;
+    let owner = Arc::new(std::sync::Mutex::new(MockOwner::Itself));
+    let subscribes = Arc::new(AtomicUsize::new(0));
+    let (deliver, deliver_rx) = tokio::sync::watch::channel(0u8);
+    let old_owner = spawn_late_owner_mock(owner.clone(), subscribes, deliver_rx).await;
+
+    let client = Client::connect(old_owner, ClientOptions::new())
+        .await
+        .unwrap();
+    let mut sub = client
+        .subscribe("jobs")
+        .unwrap()
+        .prefetch(4)
+        .sub()
+        .await
+        .unwrap();
+    deliver.send(1).unwrap();
+    assert_eq!(next_payload(&mut sub).await, vec![1]);
+
+    // The owner moves, and the new one keeps answering "unavailable".
+    *owner.lock().unwrap() = MockOwner::At(new_owner);
+    tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+
+    deliver.send(12).unwrap();
+    for expected in 2..=12u8 {
+        assert_eq!(next_payload(&mut sub).await, vec![expected]);
+    }
+}

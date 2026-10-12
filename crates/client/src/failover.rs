@@ -228,6 +228,7 @@ fn supervise_forward<R, M, F>(
 {
     let mut part_rx = part.rx;
     let mut part_reason = part.reason;
+    let mut part_endpoint = part.endpoint;
     tokio::spawn(async move {
         let check = Duration::from_millis(SUBSCRIPTION_OWNER_CHECK_MS);
         let owner_of = |client: &Client, req: &R| {
@@ -244,10 +245,19 @@ fn supervise_forward<R, M, F>(
             // failover (owner moves to a new node) does NOT close this stream -
             // we detect it by watching the topology owner instead, and migrate
             // once the controller commits the new owner.
-            let bound_owner = owner_of(&client, &req);
+            //
+            // The bound endpoint comes from the subscribe itself. A leg routed
+            // through the bootstrap fallback before the cache knew the owner is
+            // bound to the bootstrap endpoint, and the owner showing up in the
+            // cache later is not a move. Treating it as one would re-subscribe on
+            // the same connection, which the broker refuses because the leg is
+            // still there.
+            let bound_owner = part_endpoint.clone().or_else(|| owner_of(&client, &req));
 
-            // Forward until the stream ends, the consumer leaves, or the owner moves.
-            let migrate = loop {
+            // Forward until the stream ends, the consumer leaves, or the owner
+            // moves. `true` means the leg closed, `false` that it is still open
+            // but its owner moved.
+            let leg_closed = loop {
                 tokio::select! {
                     msg = part_rx.recv() => match msg {
                         Some(msg) => {
@@ -269,7 +279,7 @@ fn supervise_forward<R, M, F>(
                         let current = owner_of(&client, &req);
                         if current.is_some() && current != bound_owner {
                             tracing::debug!(?bound_owner, ?current, "subscription owner moved, migrating");
-                            break true;
+                            break false;
                         }
                         // The owner endpoint is unchanged, but its connection may
                         // have dropped (an owner restart-in-place: a bounce faster
@@ -293,9 +303,6 @@ fn supervise_forward<R, M, F>(
                     }
                 }
             };
-            if !migrate {
-                return;
-            }
             if tx.is_closed() || client.shared.user_shutdown.load(Ordering::Acquire) {
                 stamp_reason(&user_reason, CloseReason::Unsubscribed);
                 return;
@@ -321,6 +328,11 @@ fn supervise_forward<R, M, F>(
                 _ => {}
             }
 
+            // A leg whose owner moved can still be delivering. Keep forwarding
+            // it until the re-subscribe lands, so those deliveries reach the
+            // consumer and a full leg channel never stalls its connection reader.
+            let mut old_leg = (!leg_closed).then_some(part_rx);
+
             // Re-resolve and re-subscribe to the new owner, backing off until it
             // comes up, the consumer leaves, or the topic is gone.
             let mut backoff_ms = PUBLISH_RETRY_INITIAL_BACKOFF_MS;
@@ -337,14 +349,22 @@ fn supervise_forward<R, M, F>(
                         return;
                     }
                 }
-                match resubscribe(client.clone(), req.clone()).await {
+                let attempt = resubscribe(client.clone(), req.clone());
+                let Some(result) = forward_until(&mut old_leg, &tx, attempt).await else {
+                    return; // consumer dropped the subscription
+                };
+                match result {
                     Ok(new_leg) => {
                         part_rx = new_leg.rx;
                         part_reason = new_leg.reason;
+                        part_endpoint = new_leg.endpoint;
                         break;
                     }
                     Err(err) if err.is_retryable() => {
-                        tokio::time::sleep(publish_retry_nap(backoff_ms)).await;
+                        let nap = tokio::time::sleep(publish_retry_nap(backoff_ms));
+                        if forward_until(&mut old_leg, &tx, nap).await.is_none() {
+                            return;
+                        }
                         backoff_ms = (backoff_ms * 2).min(PUBLISH_RETRY_MAX_BACKOFF_MS);
                     }
                     Err(err) => {
@@ -363,6 +383,32 @@ fn supervise_forward<R, M, F>(
             }
         }
     });
+}
+
+/// Drive `work` to completion while forwarding whatever `old_leg` still
+/// delivers, dropping the leg once it closes. `None` when the consumer is gone.
+async fn forward_until<M, F: std::future::Future>(
+    old_leg: &mut Option<mpsc::Receiver<M>>,
+    tx: &mpsc::Sender<M>,
+    work: F,
+) -> Option<F::Output> {
+    tokio::pin!(work);
+    loop {
+        let Some(leg) = old_leg.as_mut() else {
+            return Some(work.await);
+        };
+        tokio::select! {
+            out = &mut work => return Some(out),
+            msg = leg.recv() => match msg {
+                Some(msg) => {
+                    if tx.send(msg).await.is_err() {
+                        return None;
+                    }
+                }
+                None => *old_leg = None,
+            },
+        }
+    }
 }
 
 /// Supervised forward for a manual-ack partition stream.

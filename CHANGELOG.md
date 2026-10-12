@@ -910,6 +910,20 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   node then takes its stream role again, and a follower copies the stream
   from its owner.
 
+- A Rust client subscription made before the client's topology cache knew the
+  queue could stop delivering a partition for good. Once the cache learned
+  the owner, the failover supervisor took the owner's appearance for a move,
+  stopped reading the live subscription and kept re-subscribing on the same
+  connection, which the broker refused because the first subscription was
+  still there. Messages leased to that subscription were never seen again
+  and their redeliveries went the same way, and a full delivery channel
+  could stall the whole connection until its heartbeat timed out. It showed
+  up after a live partition grow, where the source partition kept its
+  messages ready but undelivered. The supervisor now compares the owner
+  with the endpoint the subscription actually went through, and while it
+  re-subscribes after a real move it keeps forwarding what the old
+  subscription still delivers.
+
 - A session that resumed on a new connection while its old connection still
   looked alive kept sending deliveries down the old socket until that
   connection timed out, and when it finally ended it cleaned up the session

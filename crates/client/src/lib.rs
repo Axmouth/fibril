@@ -623,6 +623,11 @@ fn stamp_reason(slot: &ReasonSlot, reason: CloseReason) {
 pub(crate) struct PartRx<M> {
     pub(crate) rx: mpsc::Receiver<M>,
     pub(crate) reason: ReasonSlot,
+    /// The endpoint the leg was subscribed through, when known. The failover
+    /// supervisor compares the topology owner against this, so a leg that went
+    /// through the bootstrap fallback before the cache knew the owner is not
+    /// mistaken for one bound to a different owner.
+    pub(crate) endpoint: Option<String>,
 }
 
 /// Manual-acknowledgement subscription.
@@ -2105,12 +2110,15 @@ async fn subscribe_partition_manual(
 ) -> FibrilResult<PartRx<InflightMessage>> {
     let mut state = PublishRetryState::new(client.shared.opts.publish_timeout_ms);
     loop {
-        let engine = client
+        let (endpoint, engine) = client
             .shared
-            .engine_for(&req.topic, req.partition, req.group.as_deref())
+            .routed_engine_for(&req.topic, req.partition, req.group.as_deref())
             .await?;
         match engine.subscribe(req.clone()).await {
-            Ok(rx) => return Ok(rx),
+            Ok(mut rx) => {
+                rx.endpoint = Some(endpoint);
+                return Ok(rx);
+            }
             Err(err) => {
                 let what = format!("subscribing {}/{}", req.topic, req.partition);
                 client
@@ -2129,12 +2137,15 @@ async fn subscribe_partition_auto(
 ) -> FibrilResult<PartRx<Message>> {
     let mut state = PublishRetryState::new(client.shared.opts.publish_timeout_ms);
     loop {
-        let engine = client
+        let (endpoint, engine) = client
             .shared
-            .engine_for(&req.topic, req.partition, req.group.as_deref())
+            .routed_engine_for(&req.topic, req.partition, req.group.as_deref())
             .await?;
         match engine.subscribe_auto_ack(req.clone()).await {
-            Ok(rx) => return Ok(rx),
+            Ok(mut rx) => {
+                rx.endpoint = Some(endpoint);
+                return Ok(rx);
+            }
             Err(err) => {
                 let what = format!("subscribing {}/{}", req.topic, req.partition);
                 client
@@ -2153,12 +2164,15 @@ async fn subscribe_stream_partition_manual(
 ) -> FibrilResult<PartRx<InflightMessage>> {
     let mut state = PublishRetryState::new(client.shared.opts.publish_timeout_ms);
     loop {
-        let engine = client
+        let (endpoint, engine) = client
             .shared
-            .engine_for(&req.topic, req.partition, None)
+            .routed_engine_for(&req.topic, req.partition, None)
             .await?;
         match engine.subscribe_stream(req.clone()).await {
-            Ok(rx) => return Ok(rx),
+            Ok(mut rx) => {
+                rx.endpoint = Some(endpoint);
+                return Ok(rx);
+            }
             Err(err) => {
                 let what = format!("subscribing stream {}/{}", req.topic, req.partition);
                 client
@@ -2177,12 +2191,15 @@ async fn subscribe_stream_partition_auto(
 ) -> FibrilResult<PartRx<Message>> {
     let mut state = PublishRetryState::new(client.shared.opts.publish_timeout_ms);
     loop {
-        let engine = client
+        let (endpoint, engine) = client
             .shared
-            .engine_for(&req.topic, req.partition, None)
+            .routed_engine_for(&req.topic, req.partition, None)
             .await?;
         match engine.subscribe_stream_auto_ack(req.clone()).await {
-            Ok(rx) => return Ok(rx),
+            Ok(mut rx) => {
+                rx.endpoint = Some(endpoint);
+                return Ok(rx);
+            }
             Err(err) => {
                 let what = format!("subscribing stream {}/{}", req.topic, req.partition);
                 client
@@ -2793,6 +2810,7 @@ fn fan_in_legs<M: Send + 'static>(mut legs: Vec<PartRx<M>>, prefetch: u32) -> Pa
     PartRx {
         rx,
         reason: merged_reason,
+        endpoint: None,
     }
 }
 
@@ -3206,14 +3224,27 @@ impl ClientShared {
         partition: Partition,
         group: Option<&str>,
     ) -> FibrilResult<Arc<EngineHandle>> {
-        if let Some(owner) = self.topology.load().lookup(topic, partition, group) {
-            return self
-                .engine_slot(owner.endpoint.clone())
-                .await?
-                .engine_for_operation()
-                .await;
-        }
-        self.engine_for_operation().await
+        Ok(self.routed_engine_for(topic, partition, group).await?.1)
+    }
+
+    /// [`Self::engine_for`] plus the endpoint it routed to: the cached owner, or
+    /// the bootstrap endpoint on a cache miss.
+    async fn routed_engine_for(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+    ) -> FibrilResult<(String, Arc<EngineHandle>)> {
+        let endpoint = match self.topology.load().lookup(topic, partition, group) {
+            Some(owner) => owner.endpoint,
+            None => self.bootstrap[0].clone(),
+        };
+        let engine = self
+            .engine_slot(endpoint.clone())
+            .await?
+            .engine_for_operation()
+            .await?;
+        Ok((endpoint, engine))
     }
 
     /// Refresh the whole topology cache from any reachable node, throttled by
@@ -5273,6 +5304,7 @@ impl EngineHandle {
         Ok(PartRx {
             rx: chans.manual,
             reason: chans.reason,
+            endpoint: None,
         })
         // TODO: use oneshot channel to wait for when the packet has left(better errors timing)?
     }
@@ -5287,6 +5319,7 @@ impl EngineHandle {
         Ok(PartRx {
             rx: chans.auto,
             reason: chans.reason,
+            endpoint: None,
         })
         // TODO: use oneshot channel to wait for when the packet has left(better errors timing)?
     }
@@ -5304,6 +5337,7 @@ impl EngineHandle {
         Ok(PartRx {
             rx: chans.manual,
             reason: chans.reason,
+            endpoint: None,
         })
     }
 
@@ -5320,6 +5354,7 @@ impl EngineHandle {
         Ok(PartRx {
             rx: chans.auto,
             reason: chans.reason,
+            endpoint: None,
         })
     }
 }
