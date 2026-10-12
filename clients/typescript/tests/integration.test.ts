@@ -1358,6 +1358,244 @@ test("subscription picks up a partition added by a live grow", async () => {
   }
 });
 
+/**
+ * A fake owner of "jobs" partition 0 whose topology answer names `ownerOf()`
+ * (or nothing, like a cache that has not learned a just-declared queue). Like
+ * the broker, it refuses a second subscribe to the partition on a connection
+ * while the first is live. `deliverUpTo(n)` sends payloads up to n on the live
+ * subscription.
+ */
+async function startLateOwnerBroker(ownerOf: (self: string) => string | null): Promise<{
+  broker: FakeBroker;
+  addr: string;
+  subscribes: () => number;
+  deliverUpTo: (n: number) => void;
+}> {
+  const broker = new FakeBroker();
+  await broker.start();
+  const addr = `127.0.0.1:${broker.port}`;
+  let subscribes = 0;
+  let sent = 0;
+  let live: Socket | null = null;
+  broker.onFrame = (f, s) => {
+    if (f.opcode === Op.Hello) {
+      broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+    } else if (f.opcode === Op.Topology) {
+      const owner = ownerOf(addr);
+      const queues =
+        owner === null
+          ? []
+          : [
+              {
+                topic: "jobs",
+                partition: 0,
+                group: null,
+                owner_endpoints: [adv(owner)],
+                partitioning_version: 0n,
+                partition_count: 1,
+              },
+            ];
+      broker.send(s, buildFrame(Op.TopologyOk, f.requestId, { generation: 1n, queues }));
+    } else if (f.opcode === Op.Subscribe) {
+      subscribes += 1;
+      if (live !== null) {
+        broker.send(
+          s,
+          buildFrame(Op.Error, f.requestId, { code: 409, message: "already subscribed" }),
+        );
+        return;
+      }
+      live = s;
+      broker.send(
+        s,
+        buildFrame(Op.SubscribeOk, f.requestId, {
+          sub_id: 1n,
+          topic: "jobs",
+          group: null,
+          partition: 0,
+          prefetch: 4,
+        }),
+      );
+    }
+  };
+  const deliverUpTo = (n: number): void => {
+    while (live !== null && sent < n) {
+      sent += 1;
+      broker.send(
+        live,
+        buildFrame(Op.Deliver, 0n, {
+          sub_id: 1n,
+          topic: "jobs",
+          group: null,
+          partition: 0,
+          offset: BigInt(sent),
+          delivery_tag: { epoch: BigInt(sent) },
+          published: 1n,
+          publish_received: 2n,
+          content_type: null,
+          headers: {},
+          payload: new Uint8Array([sent]),
+        }),
+      );
+    }
+  };
+  return { broker, addr, subscribes: () => subscribes, deliverUpTo };
+}
+
+function within<T>(p: Promise<T>, label: string, ms = 5_000): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`timeout: ${label}`)), ms)),
+  ]);
+}
+
+// Mirrors the Rust client's subscription_keeps_delivering_when_cache_learns_its_owner.
+// A subscribe made before the cache knows the queue goes through the bootstrap
+// connection. The owner showing up later at that same endpoint is not a move,
+// so the leg keeps delivering and is not re-subscribed.
+test("a subscription keeps delivering when the cache learns its owner", async () => {
+  let known = false;
+  const mock = await startLateOwnerBroker((self) => (known ? self : null));
+  let client: Client | undefined;
+  try {
+    client = await Client.connect(
+      mock.addr,
+      new ClientOptions({ subscriptionSuperviseIntervalMs: 25, topologyRefreshCooldownMs: 1 }),
+    );
+    const sub = await client.subscribe("jobs").prefetch(4).subAutoAck();
+
+    mock.deliverUpTo(1);
+    assert.deepEqual([...(await within(sub.recv(), "first"))!.payload], [1]);
+
+    // The owner appears at the endpoint the leg already uses. Wait out a few
+    // owner checks.
+    known = true;
+    await new Promise((r) => setTimeout(r, 300));
+
+    // More than the prefetch, so an unread leg would also back up.
+    mock.deliverUpTo(12);
+    for (let expected = 2; expected <= 12; expected++) {
+      const msg = await within(sub.recv(), `delivery ${expected}`);
+      assert.deepEqual([...msg!.payload], [expected]);
+    }
+    assert.equal(mock.subscribes(), 1, "a leg already bound to its owner must not re-subscribe");
+
+    sub.close();
+  } finally {
+    await client?.shutdown();
+    await mock.broker.stop();
+  }
+});
+
+// Mirrors the Rust client's moved_subscription_keeps_old_leg_flowing_while_resubscribing.
+// When the owner moves to a node that is not taking subscribes yet, the old
+// leg can still deliver, and those deliveries must reach the consumer while
+// the supervisor retries the new owner.
+test("a moved subscription keeps the old leg flowing while it re-subscribes", async () => {
+  const newOwner = new FakeBroker();
+  await newOwner.start();
+  let newOwnerSubscribes = 0;
+  newOwner.onFrame = (f, s) => {
+    if (f.opcode === Op.Hello) {
+      newOwner.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+    } else if (f.opcode === Op.Subscribe) {
+      newOwnerSubscribes += 1;
+      newOwner.send(s, buildFrame(Op.Error, f.requestId, { code: 503, message: "unavailable" }));
+    }
+  };
+  let moved = false;
+  const mock = await startLateOwnerBroker((self) =>
+    moved ? `127.0.0.1:${newOwner.port}` : self,
+  );
+  let client: Client | undefined;
+  try {
+    client = await Client.connect(
+      mock.addr,
+      new ClientOptions({ subscriptionSuperviseIntervalMs: 25, topologyRefreshCooldownMs: 1 }),
+    );
+    const sub = await client.subscribe("jobs").prefetch(4).subAutoAck();
+    mock.deliverUpTo(1);
+    assert.deepEqual([...(await within(sub.recv(), "first"))!.payload], [1]);
+
+    // The owner moves, and the new one keeps answering "unavailable".
+    moved = true;
+    const deadline = Date.now() + 2_000;
+    while (newOwnerSubscribes === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    assert.ok(newOwnerSubscribes > 0, "the supervisor should try the new owner");
+
+    mock.deliverUpTo(12);
+    for (let expected = 2; expected <= 12; expected++) {
+      const msg = await within(sub.recv(), `delivery ${expected}`);
+      assert.deepEqual([...msg!.payload], [expected]);
+    }
+
+    sub.close();
+  } finally {
+    await client?.shutdown();
+    await mock.broker.stop();
+    await newOwner.stop();
+  }
+});
+
+// Mirrors the Rust client's stale_topology_fetch_does_not_regress_the_cache. A
+// broker that just restarted can answer from an older snapshot, and applying
+// it would make a live queue look deleted.
+test("a stale topology fetch does not regress the cache", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  let client: Client | undefined;
+  try {
+    const addr = `127.0.0.1:${broker.port}`;
+    let stale = false;
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      } else if (f.opcode === Op.Topology) {
+        const topology: TopologyOkMsg = stale
+          ? {
+              generation: 1n,
+              queues: [
+                {
+                  topic: "other",
+                  partition: 0,
+                  group: null,
+                  owner_endpoints: [adv(addr)],
+                  partitioning_version: 0n,
+                  partition_count: 1,
+                },
+              ],
+            }
+          : {
+              generation: 2n,
+              queues: Array.from({ length: 4 }, (_, p) => ({
+                topic: "jobs",
+                partition: p,
+                group: null,
+                owner_endpoints: [adv(addr)],
+                partitioning_version: 0n,
+                partition_count: 4,
+              })),
+            };
+        broker.send(s, buildFrame(Op.TopologyOk, f.requestId, topology));
+      }
+    };
+
+    client = await Client.connect(addr, new ClientOptions());
+    assert.equal((await client.fetchTopology()).generation, 2n);
+    stale = true;
+    assert.equal((await client.fetchTopology()).generation, 1n);
+
+    assert.equal(client._topology().generation, 2n);
+    assert.equal(client._topology().partitioning("jobs", null)?.count, 4);
+    assert.equal(client._isTopicMissing("jobs", null), false);
+  } finally {
+    await client?.shutdown();
+    await broker.stop();
+  }
+});
+
 // Mirrors the Rust client's stream_subscribe_sends_durable_filtered_request:
 // the stream builder must carry durable name, start position, header filters,
 // prefetch, and ack mode onto the SubscribeStream request.

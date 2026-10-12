@@ -375,7 +375,13 @@ class PartitionSupervisor<R> {
   #engine: Engine;
   #partQueue: BoundedQueue<R>;
   #stopped = false;
-  #boundOwner: string | null;
+  // The endpoint the current leg subscribed through. A leg routed through the
+  // bootstrap connection before the cache knew the owner is bound to the
+  // bootstrap endpoint, so the owner showing up there later is not a move.
+  #boundOwner: string;
+  // The re-subscribe in flight, shared by the stream-closed path and the
+  // owner-move path so only one runs at a time.
+  #resubscribing: Promise<boolean> | null = null;
   #timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
@@ -388,7 +394,7 @@ class PartitionSupervisor<R> {
   ) {
     this.#engine = first.engine;
     this.#partQueue = first.queue;
-    this.#boundOwner = this.#ownerNow();
+    this.#boundOwner = first.endpoint;
     // The merged queue is shared, so this partition closing must not end the others.
     // Notify the fan-in so it can close the merged queue once all have stopped.
     void this.#run().finally(onStopped);
@@ -407,8 +413,10 @@ class PartitionSupervisor<R> {
   }
 
   // Periodically detect a graceful owner move (ownership changed but the old
-  // connection stayed up, so the stream did not close). Closing the stream forces
-  // a re-subscribe to the new owner. Unref'd so it never keeps the process alive.
+  // connection stayed up, so the stream did not close) and re-subscribe to the
+  // new owner. The old leg keeps forwarding until the new one is in place, so
+  // what it still delivers reaches the consumer. Unref'd so it never keeps the
+  // process alive.
   #startOwnerCheck(): void {
     let checking = false;
     this.#timer = setInterval(
@@ -423,9 +431,8 @@ class PartitionSupervisor<R> {
           try {
             await this.client._refreshTopologyThrottled();
             const current = this.#ownerNow();
-            if (current !== null && current !== this.#boundOwner) {
-              this.#boundOwner = current;
-              this.#partQueue.close();
+            if (current !== null && current !== this.#boundOwner && !this.#resubscribing) {
+              void this.#migrate();
             }
           } finally {
             checking = false;
@@ -446,21 +453,25 @@ class PartitionSupervisor<R> {
 
   async #run(): Promise<void> {
     for (;;) {
-      // Forward the current owner's stream into the merged queue.
+      // Forward the current leg into the merged queue. A migration that lands
+      // meanwhile swaps in a new leg and closes this one.
+      const engine = this.#engine;
+      const queue = this.#partQueue;
       for (;;) {
-        const raw = await this.#partQueue.recv();
+        const raw = await queue.recv();
         if (raw === null) break;
         try {
-          await this.merged.send({ engine: this.#engine, raw });
+          await this.merged.send({ engine, raw });
         } catch {
           this.#stopped = true; // merged closed: the consumer is gone
           break;
         }
       }
+      if (!this.#stopped && queue !== this.#partQueue) continue; // replaced by a migration
       // A typed close that ends the subscription (topic deleted, server error,
       // or a recreate the user opted out of) stops the supervisor and carries
       // the reason to the consumer instead of re-subscribing.
-      const closeErr = this.#partQueue.closeError();
+      const closeErr = queue.closeError();
       const terminal =
         closeErr instanceof SubscriptionClosedError &&
         isTerminalClose(closeErr.code, this.client._autoResubscribe());
@@ -474,11 +485,23 @@ class PartitionSupervisor<R> {
         if (terminal) this.merged.close(closeErr);
         return;
       }
-      if (!(await this.#resubscribeWithBackoff())) {
+      if (!(await this.#migrate())) {
         this.#clearTimer();
         return;
       }
     }
+  }
+
+  // Re-subscribe, joining one already in flight. On success the new leg
+  // replaces the old one, which is closed. On a permanent failure the
+  // supervisor stops.
+  #migrate(): Promise<boolean> {
+    this.#resubscribing ??= this.#resubscribeWithBackoff().then((ok) => {
+      this.#resubscribing = null;
+      if (!ok) this.stop();
+      return ok;
+    });
+    return this.#resubscribing;
   }
 
   async #resubscribeWithBackoff(): Promise<boolean> {
@@ -496,9 +519,11 @@ class PartitionSupervisor<R> {
           next.queue.close();
           return false;
         }
+        const old = this.#partQueue;
         this.#engine = next.engine;
         this.#partQueue = next.queue;
-        this.#boundOwner = this.#ownerNow();
+        this.#boundOwner = next.endpoint;
+        old.close();
         return true;
       } catch (err) {
         if (retryAdvice(err) === "retry") {

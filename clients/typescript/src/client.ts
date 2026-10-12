@@ -49,6 +49,12 @@ import type {
 export interface SubscribeHandle<R> {
   engine: Engine;
   queue: BoundedQueue<R>;
+  /**
+   * The endpoint the subscribe went through: the cached owner, or the
+   * bootstrap endpoint on a cache miss. The supervisor compares the topology
+   * owner against this to tell a real owner move from the cache catching up.
+   */
+  endpoint: string;
 }
 
 function normalizeGroup(group: string | null): string | null {
@@ -1473,9 +1479,14 @@ provide one with withTlsClientCert(certPath, keyPath)`,
       } catch (error) { lastError = error; }
     }
     if (!topology) throw lastError;
-    this.#topology.replace(topology);
+    // Never regress to an older view, the same rule a push follows. A broker
+    // that just restarted can answer from a snapshot that predates queues
+    // declared since, and applying it would make them look deleted.
+    if (topology.generation >= this.#topology.generation) {
+      this.#topology.replace(topology);
+      prunePoolToTopology(this.#topology, this.#pool);
+    }
     this.#topology.lastRefreshMs = Date.now();
-    prunePoolToTopology(this.#topology, this.#pool);
     refreshCatalogue(topology, this.#catalogue);
     return topology;
   }
@@ -1548,8 +1559,17 @@ provide one with withTlsClientCert(certPath, keyPath)`,
    * filled by redirects and by fetchTopology, never on this hot path.
    */
   async _engineFor(topic: string, partition: number, group: string | null): Promise<Engine> {
-    const owner = this.#topology.lookup(topic, partition, group);
-    return this.#engineAt(owner?.endpoint ?? this.#bootstrapEndpoint);
+    return (await this.#routedEngineFor(topic, partition, group)).engine;
+  }
+
+  /** _engineFor plus the endpoint it routed to. */
+  async #routedEngineFor(
+    topic: string,
+    partition: number,
+    group: string | null,
+  ): Promise<{ endpoint: string; engine: Engine }> {
+    const endpoint = this.#topology.lookup(topic, partition, group)?.endpoint ?? this.#bootstrapEndpoint;
+    return { endpoint, engine: await this.#engineAt(endpoint) };
   }
 
   async #engineAt(endpoint: string): Promise<Engine> {
@@ -1616,7 +1636,11 @@ provide one with withTlsClientCert(certPath, keyPath)`,
   async _subscribeManualOnce(req: SubscribeMsg): Promise<SubscribeHandle<InternalInflight>> {
     const reply = deferred<SubscribeResult<InternalInflight>>();
     const fullReq = this.#withCohortMember(req);
-    const engine = await this._engineFor(fullReq.topic, fullReq.partition ?? 0, fullReq.group);
+    const { endpoint, engine } = await this.#routedEngineFor(
+      fullReq.topic,
+      fullReq.partition ?? 0,
+      fullReq.group,
+    );
     await engine.submit({
       type: "subscribe",
       req: fullReq,
@@ -1625,14 +1649,18 @@ provide one with withTlsClientCert(certPath, keyPath)`,
     });
     const result = await reply.promise;
     this.#captureCohortMember(fullReq, result.memberId);
-    return { engine, queue: result.queue };
+    return { engine, queue: result.queue, endpoint };
   }
 
   /** @internal Auto-ack counterpart of _subscribeManualOnce. */
   async _subscribeAutoOnce(req: SubscribeMsg): Promise<SubscribeHandle<InternalDelivered>> {
     const reply = deferred<SubscribeResult<InternalDelivered>>();
     const fullReq = this.#withCohortMember(req);
-    const engine = await this._engineFor(fullReq.topic, fullReq.partition ?? 0, fullReq.group);
+    const { endpoint, engine } = await this.#routedEngineFor(
+      fullReq.topic,
+      fullReq.partition ?? 0,
+      fullReq.group,
+    );
     await engine.submit({
       type: "subscribeAutoAck",
       req: fullReq,
@@ -1641,7 +1669,7 @@ provide one with withTlsClientCert(certPath, keyPath)`,
     });
     const result = await reply.promise;
     this.#captureCohortMember(fullReq, result.memberId);
-    return { engine, queue: result.queue };
+    return { engine, queue: result.queue, endpoint };
   }
 
   // Stamp the current cohort member id onto an exclusive subscribe so every
@@ -1697,10 +1725,10 @@ provide one with withTlsClientCert(certPath, keyPath)`,
     req: SubscribeStream,
   ): Promise<SubscribeHandle<InternalInflight>> {
     const reply = deferred<SubscribeResult<InternalInflight>>();
-    const engine = await this._engineFor(req.topic, req.partition, null);
+    const { endpoint, engine } = await this.#routedEngineFor(req.topic, req.partition, null);
     await engine.submit({ type: "subscribeStream", req, reply });
     const result = await reply.promise;
-    return { engine, queue: result.queue };
+    return { engine, queue: result.queue, endpoint };
   }
 
   /** @internal Auto-ack counterpart of _subscribeStreamManualOnce. */
@@ -1708,10 +1736,10 @@ provide one with withTlsClientCert(certPath, keyPath)`,
     req: SubscribeStream,
   ): Promise<SubscribeHandle<InternalDelivered>> {
     const reply = deferred<SubscribeResult<InternalDelivered>>();
-    const engine = await this._engineFor(req.topic, req.partition, null);
+    const { endpoint, engine } = await this.#routedEngineFor(req.topic, req.partition, null);
     await engine.submit({ type: "subscribeStreamAutoAck", req, reply });
     const result = await reply.promise;
-    return { engine, queue: result.queue };
+    return { engine, queue: result.queue, endpoint };
   }
 
   /**
