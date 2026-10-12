@@ -9,10 +9,11 @@
 //! A second scenario covers more of the client surface through the public
 //! broker: an exclusive consumer group and a restart of the public broker
 //! itself, after which the owner redelivers what the old session held. A
-//! third, ignored for now, grows a queue owned by a private broker while the
-//! client publishes and consumes. A fourth declares replicated Plexus streams
-//! through the public broker, checks that every node stores them as streams,
-//! and publishes to and reads each one through the public broker.
+//! third runs the same with a live grow of a queue owned by a private broker
+//! while the client publishes and consumes. A fourth declares replicated
+//! Plexus streams through the public broker, checks that every node stores
+//! them as streams, and publishes to and reads each one through the public
+//! broker.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -525,12 +526,11 @@ async fn exclusive_group_and_a_public_restart_through_the_gateway() {
 }
 
 /// A live grow of a privately owned queue while the client publishes and
-/// consumes through the public broker. Ignored: after the grow, deliveries
-/// of messages that land on the source partition can stop for good. That
-/// also happens when the source partition is owned by the public broker
-/// itself, so with no forwarding involved, and needs its own fix.
+/// consumes through the public broker. The queue is subscribed right after it
+/// is declared, often before the client's topology cache knows it, so the
+/// subscription starts on the bootstrap route and must keep delivering once
+/// the cache learns the owner.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "post-grow deliveries on the source partition can stall, with or without forwarding"]
 async fn repartition_while_forwarding() {
     run_surface_test("grow", true).await;
 }
