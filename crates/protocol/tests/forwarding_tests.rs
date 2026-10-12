@@ -930,6 +930,7 @@ fn marker(request_id: u64, hop_count: u8) -> Frame {
             client_id: Uuid::new_v4(),
             client_conn_id: Uuid::new_v4(),
             client_addr: Some("203.0.113.5:4000".into()),
+            release_on_close: false,
         },
     )
     .unwrap()

@@ -1749,7 +1749,9 @@ async fn install_stream_subscription(
         }
     });
 
-    logical.state.lock().await.stream_subs.insert(
+    // A second subscribe to the same partition replaces the first. The old
+    // tasks stop so they no longer deliver under the old id.
+    let replaced = logical.state.lock().await.stream_subs.insert(
         (sub.topic.clone(), sub.partition),
         StreamSubState {
             durable_name: sub.durable_name,
@@ -1758,6 +1760,9 @@ async fn install_stream_subscription(
             tasks: vec![driver, delivery],
         },
     );
+    if let Some(old) = replaced {
+        teardown_stream_sub(old).await;
+    }
 
     Ok(SubscribeOk {
         sub_id,
@@ -3300,6 +3305,9 @@ where
     // Idle expiry also releases the node's session permit and buffered record.
     let mut recovery_cursor = None;
     let mut recovery_cursor_expires = tokio::time::Instant::now();
+    // The peer ended the connection in order (EOF) rather than the link
+    // failing. Only a forwarded session that asked for it acts on this.
+    let mut peer_closed_cleanly = false;
     loop {
         let loop_event = tokio::select! {
             _ = tokio::time::sleep_until(recovery_cursor_expires), if recovery_cursor.is_some() => {
@@ -3344,6 +3352,7 @@ where
                     },
                     None => {
                         tracing::info!("[reader] Disconnected from tcp socket");
+                        peer_closed_cleanly = true;
                         LoopEvent::Disconnect
                     },
                 }
@@ -3567,7 +3576,11 @@ where
         match frame.opcode {
             // -------- AUTH ---------------------------------------------------
             x if x == Op::Auth as u16 => {
-                if logical.state.lock().await.authenticated {
+                // Authentication is per transport. A resumed session was
+                // authenticated on an earlier connection and may skip AUTH,
+                // but a client that sends it again on the new connection
+                // (every SDK does) is checked again rather than refused.
+                if authenticated_principal.is_some() {
                     frame_tx_high_prio
                         .send(try_encode(
                             Op::AuthErr,
@@ -5471,13 +5484,25 @@ where
             acting_user = %marker.acting_user,
             client_id = %marker.client_id,
             conn_id = %conn_id,
+            released = peer_closed_cleanly && marker.release_on_close,
             "forwarded session closed"
         );
     }
-    let reconnect_grace_ms = connection_settings
-        .runtime_snapshot()
-        .reconnect_grace_ms
-        .unwrap_or_default();
+    // A gateway that closes its upstream in order is done with the session,
+    // so the owner releases it now instead of holding it for a resume that
+    // will never come. A broken link keeps the grace.
+    let release_now = peer_closed_cleanly
+        && forwarded_identity
+            .as_ref()
+            .is_some_and(|marker| marker.release_on_close);
+    let reconnect_grace_ms = if release_now {
+        0
+    } else {
+        connection_settings
+            .runtime_snapshot()
+            .reconnect_grace_ms
+            .unwrap_or_default()
+    };
     let entered_grace = reconnect_grace_ms > 0 && logical.mark_dormant(transport_generation);
 
     if entered_grace {

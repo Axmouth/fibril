@@ -3831,32 +3831,61 @@ mod recovery_transfer_tests {
     }
 }
 
+/// `FFS2` flag bit for [`crate::ForwardedSession::release_on_close`].
+const FORWARDED_SESSION_RELEASE_ON_CLOSE: u8 = 1;
+
 pub fn encode_forwarded_session(
     request_id: u64,
     session: &crate::ForwardedSession,
 ) -> WireResult<Frame> {
-    let mut out = payload_builder(b"FFS1");
+    // FFS1 is the body every forwarding owner decodes. FFS2 adds a flags
+    // byte and is used only when a flag is set, so a session without flags
+    // stays readable by owners that predate it.
+    let flags = u8::from(session.release_on_close) * FORWARDED_SESSION_RELEASE_ON_CLOSE;
+    let mut out = payload_builder(if flags == 0 { b"FFS1" } else { b"FFS2" });
     put_str(&mut out, &session.origin_node)?;
     out.put_u8(session.hop_count);
     put_str(&mut out, &session.acting_user)?;
     put_uuid(&mut out, session.client_id);
     put_uuid(&mut out, session.client_conn_id);
     put_optional_str(&mut out, session.client_addr.as_deref())?;
+    if flags != 0 {
+        out.put_u8(flags);
+    }
     Ok(frame(Op::ForwardedSession, request_id, out.freeze()))
 }
 
 pub fn decode_forwarded_session(frame: &Frame) -> WireResult<crate::ForwardedSession> {
     expect_op(frame, Op::ForwardedSession)?;
     let mut reader = Reader::new(&frame.payload);
-    reader.expect_magic(b"FFS1", "forwarded session")?;
-    let session = crate::ForwardedSession {
+    let with_flags = match reader.take(4)? {
+        b"FFS1" => false,
+        b"FFS2" => true,
+        _ => {
+            return Err(WireError::InvalidMagic {
+                context: "forwarded session",
+            });
+        }
+    };
+    let mut session = crate::ForwardedSession {
         origin_node: reader.str()?.to_owned(),
         hop_count: reader.u8()?,
         acting_user: reader.str()?.to_owned(),
         client_id: reader.uuid()?,
         client_conn_id: reader.uuid()?,
         client_addr: reader.optional_str()?.map(ToOwned::to_owned),
+        release_on_close: false,
     };
+    if with_flags {
+        let flags = reader.u8()?;
+        if flags & !FORWARDED_SESSION_RELEASE_ON_CLOSE != 0 {
+            return Err(WireError::UnknownTag {
+                context: "forwarded session flags",
+                value: flags,
+            });
+        }
+        session.release_on_close = flags & FORWARDED_SESSION_RELEASE_ON_CLOSE != 0;
+    }
     reader.finish()?;
     Ok(session)
 }
@@ -3923,6 +3952,7 @@ mod forwarding_wire_tests {
             client_id: Uuid::from_bytes([7; 16]),
             client_conn_id: Uuid::from_bytes([9; 16]),
             client_addr: Some("10.0.0.5:51000".into()),
+            release_on_close: false,
         }
     }
 
@@ -3935,6 +3965,10 @@ mod forwarding_wire_tests {
                 acting_user: String::new(),
                 ..session()
             },
+            crate::ForwardedSession {
+                release_on_close: true,
+                ..session()
+            },
         ] {
             let encoded = encode_forwarded_session(3, &value).unwrap();
             assert_eq!(encoded.opcode, Op::ForwardedSession as u16);
@@ -3945,6 +3979,25 @@ mod forwarding_wire_tests {
                 assert!(decode_forwarded_session(&short).is_err());
             }
         }
+        // Without flags the body stays FFS1, which owners before forwarding
+        // version 2 decode. A flag switches to FFS2.
+        let plain = encode_forwarded_session(3, &session()).unwrap();
+        assert_eq!(&plain.payload[..4], b"FFS1");
+        let flagged = encode_forwarded_session(
+            3,
+            &crate::ForwardedSession {
+                release_on_close: true,
+                ..session()
+            },
+        )
+        .unwrap();
+        assert_eq!(&flagged.payload[..4], b"FFS2");
+        assert_eq!(flagged.payload.len(), plain.payload.len() + 1);
+        let mut unknown_flag = flagged.clone();
+        let mut body = flagged.payload.to_vec();
+        *body.last_mut().unwrap() = 0x80;
+        unknown_flag.payload = body.into();
+        assert!(decode_forwarded_session(&unknown_flag).is_err());
         let ok = crate::ForwardedSessionOk {
             forwarding_version: crate::FORWARDING_PROTOCOL_VERSION,
         };

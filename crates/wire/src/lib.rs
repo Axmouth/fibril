@@ -1439,8 +1439,9 @@ pub struct RecoveryTransfer {
 pub const MAX_RECOVERY_TRANSFER_FRAME_BYTES: usize = 34 * 1024 * 1024;
 
 /// Version of the forwarding contract an owner answers in
-/// [`ForwardedSessionOk`].
-pub const FORWARDING_PROTOCOL_VERSION: u16 = 1;
+/// [`ForwardedSessionOk`]. Version 2 honors
+/// [`ForwardedSession::release_on_close`].
+pub const FORWARDING_PROTOCOL_VERSION: u16 = 2;
 
 /// Forwarding is one hop: a public broker forwards to the owner and the owner
 /// never forwards again. A session marked with any other hop count is refused.
@@ -1462,6 +1463,13 @@ pub struct ForwardedSession {
     pub client_id: Uuid,
     pub client_conn_id: Uuid,
     pub client_addr: Option<String>,
+    /// When the gateway closes this connection in order (a clean EOF), the
+    /// owner ends the session at once instead of keeping it for its
+    /// reconnect grace. A link that breaks any other way keeps the grace, so
+    /// the gateway can still resume. Owners before forwarding version 2 do
+    /// not know it, so the gateway sends it only in the `FFS2` body and falls
+    /// back to `FFS1` when an owner refuses that.
+    pub release_on_close: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

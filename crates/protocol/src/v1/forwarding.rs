@@ -1135,6 +1135,7 @@ async fn open_upstream(
                 client_id: identity.client_id,
                 client_conn_id: identity.conn_id,
                 client_addr: identity.client_addr.clone(),
+                release_on_close: false,
             },
         )
         .map_err(|err| err.to_string())?;
