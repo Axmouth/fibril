@@ -105,7 +105,7 @@ What the experiments also showed:
 | Early replication | Runtime setting `replication.early_replication`, off by default, history-bound assignments only. Ships written records to followers before owner fsync. Confirm and visibility still use durable progress. |
 | Live writer settings | Keratin `e333bce`. Revision-checked changes to default durability, batch limits and fsync timers, adopted after a persistence barrier, reset on reopen. |
 | Periodic sync | None for queues. With only `AfterFlush` traffic the writer never schedules an interval fsync, because a commit needs a pending fsync waiter. Streams' ephemeral tier syncs every 5 ms from a broker task. |
-| Latched heal | Keratin `87e24ff`. A latched unbound log journals a cut to its last successful sync. Logs bound to a replicated history skip the cut. |
+| Latched heal | Keratin `87e24ff` and `9ddf850`. A latched log records a cut to its last successful sync in `latched-cut.pending`, and the next open carries it out first, for bound and unbound logs alike. |
 | Live seal | The writer flushes, fsyncs and waits for in-flight fsyncs before advancing the epoch, so written records on a live replica are counted. |
 | Dirty reopen | `sync_recovered_tail` fsyncs records found in the page cache before publishing the frontier. |
 
@@ -354,8 +354,9 @@ queues.
   because a live seal syncs before counting. Recovery still requires E-W+1
   seals, which intersects every written set of W copies.
 - **Recovery sealing.** Only durable records count, and that stays. The written
-  mode depends on the live seal syncing first, which it does today. A replica
-  that cannot sync (latched) must seal at its durable end or be ineligible.
+  mode depends on the live seal syncing first, which it does today. A latched
+  replica cannot seal until it reopens, and the reopen cuts it back to its
+  durable end first, so its seal never counts unsynced records.
 - **Owner restart after power loss.** This is the new hazard. An owner that lost
   its unsynced suffix can come back with a shorter log than its followers hold.
   If it resumed as owner it would write new records at offsets the followers
@@ -376,18 +377,18 @@ queues.
 
 ## 6. Storage failure
 
-The latched-fsync heal journals a cut back to the last successful sync on
-unbound logs. Linux reports a writeback error once and may drop the dirty pages,
-so anything past the durable end is suspect. For a solo written queue that cut
-drops confirmed records. That matches the mode's promise only if the promise
-says so, which is why the warning in section 1 names storage failure as well as
-power loss.
+The latched-fsync heal records a cut back to the last successful sync, and the
+next open carries it out before anything reads the tail, for every log. Linux
+reports a writeback error once and may drop the dirty pages, so anything past
+the durable end is suspect. For a written queue that cut can drop confirmed
+records. That matches the mode's promise only if the promise says so, which is
+why the warning in section 1 names storage failure as well as power loss.
 
-Bound logs (clustered queues with an accepted history) skip the cut and rely on
-coordinated recovery. For a written queue, that means:
+In a cluster this means:
 
 - a latched owner stops confirming, and the queue fails over,
-- its suffix past the durable end must not be trusted as recovery evidence,
+- its reopen cuts its suffix past the durable end before it can seal, so that
+  suffix never counts as recovery evidence,
 - surviving written copies on followers carry the confirmed records.
 
 Followers latch the same way and fall out of the written set until replaced or
@@ -531,7 +532,8 @@ Follow the [optimization log](/development/optimization-log/) protocol:
    confusion, or must the cut bump an incarnation that clients see?
 7. Which queue events keep `AfterFsync` in a written queue: DLQ moves, delayed
    retry promotion, lease expiry?
-8. How should a latched bound log seal: at its durable end, or not at all?
+8. Settled by the latched heal: a latched log cannot seal, and its reopen cuts
+   back to its durable end before it can.
 9. Should a cluster runtime default for new queues exist at all, or only the
    declare field?
 10. Should the stream ephemeral tier move from `AfterWrite` to `AfterFlush` so
