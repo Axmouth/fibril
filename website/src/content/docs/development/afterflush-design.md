@@ -1,5 +1,5 @@
 ---
-title: Written-durability queues (AfterFlush)
+title: Buffered queues (AfterFlush)
 description: Proposed opt-in queue mode that confirms and delivers once the required copies are written to the OS, with periodic background sync.
 ---
 
@@ -119,10 +119,10 @@ each wait for either.
 | --- | --- | --- | --- |
 | durable | durable | `durable` | Current behavior and the default. |
 | durable | written | `speculative` | Separate roadmap item. Same shape as the stream speculative tier. |
-| written | written | `written` | **Proposed here.** |
+| written | written | `buffered` | **Proposed here.** |
 | written | durable | none | Rejected. Delivery lags a weaker confirm, which is the stall the first probe hit, with no benefit to anyone. |
 
-**Recommendation.** In a `written` queue, a confirm means the owner and the
+**Recommendation.** In a `buffered` queue, a confirm means the owner and the
 required followers have each written the record to the OS, and a delivery is
 released at that same boundary. Delivering before the required copies exist
 would make a delivered message weaker than a confirmed one, and after failover
@@ -140,7 +140,7 @@ Alternatives considered:
 W is the configured write threshold, owner included. "Written set" means the W
 copies that acknowledged a confirm.
 
-| Event | Durable queue | Written queue |
+| Event | Durable queue | Buffered queue |
 | --- | --- | --- |
 | Owner process crash, OS stays up | Survives | Survives. Page cache is kept and the dirty reopen syncs the recovered tail. |
 | Follower process crash | Survives | Survives, same reason. |
@@ -154,7 +154,7 @@ all replicas sharing one disk, as in the local benchmarks above.
 
 ### Surfacing it
 
-- Name the mode `written` in declare APIs, the dashboard and docs, with the
+- Name the mode `buffered` in declare APIs, the dashboard and docs, with the
   Keratin name AfterFlush in development notes only. `durable` stays the
   default. `ephemeral` is the wrong word, since stream ephemeral confirms at
   staging and is owner-only.
@@ -163,7 +163,7 @@ all replicas sharing one disk, as in the local benchmarks above.
   would carry the queue's mode rather than news about the message. Report the
   mode in declare replies, queue info and the dashboard instead. A header can be
   added later if consumers ask to tell which deliveries were already durable.
-- The user-facing warning, adapted from the experiment notes: "Written queues
+- The user-facing warning, adapted from the experiment notes: "Buffered queues
   confirm and deliver without waiting for fsync on the required nodes. Confirmed
   messages can be lost after power loss or storage failure on every required
   node at once. Background sync usually shortens that window, but slow I/O or
@@ -177,14 +177,14 @@ all replicas sharing one disk, as in the local benchmarks above.
 | System | Closest equivalent |
 | --- | --- |
 | Fibril streams | `ephemeral` confirms at staging, owner-only, 5 ms sync. `speculative` delivers early but confirms at fsync. |
-| Kafka | `acks=all` without forced flush. Durability comes from replicas in separate failure domains. Same shape as `written` with W equal to the in-sync set. |
+| Kafka | `acks=all` without forced flush. Durability comes from replicas in separate failure domains. Same shape as `buffered` with W equal to the in-sync set. |
 | NATS JetStream | Acknowledges after a buffered write and syncs on a timer, with an always-sync option. The optimization log tracks NATS timed-sync and always-sync as distinct profiles. |
 | RabbitMQ quorum queues | Confirms after fsync on a majority. Closest to `majority_durable`. |
 
 ## 2. Configuration
 
 **Recommendation.** A per-queue `durability` field in queue declaration, values
-`durable` (default) and `written`, stored with the rest of the declaration in
+`durable` (default) and `buffered`, stored with the rest of the declaration in
 the `fibril/queue_declaration/...` Raft attribute. It is a contract with the
 publisher, so it belongs to queue state, in line with
 [configuration policy](/development/config-policy/).
@@ -206,10 +206,11 @@ Alternatives considered:
   policy gates. Rejected as the primary control, because a node-local or
   cluster-wide swap cannot coherently change what a publisher was promised,
   and different queues need different trades.
-- Reuse `replica_accepted`. It already means "weaker than fsync" in the docs,
-  but it is resolved per assignment, has no solo form, and does nothing today.
-  Better to define the persistence boundary explicitly and then either retire
-  `replica_accepted` or map it onto `written` (open question).
+- Reuse `replica_accepted` as the only control. It already means "weaker than
+  fsync" in the docs, but it is resolved per assignment, has no solo form, and
+  behaves like `replica_durable` today, so redefining it would silently weaken
+  existing configs. The per-queue mode is the primary control, and the new
+  `replica_buffered:N` policy is its cluster form.
 
 ### Changing mode on an existing queue
 
@@ -243,13 +244,13 @@ process fences.
 - A queue log carries its mode in config. Publish and settle appends use it.
   Audit the paths that pass `keratin_cfg_event.default_durability` or hard-code
   `AfterFsync` (release, nack, DLQ commit, leased appends) and decide each one.
-  A stronger request on a written queue is always allowed and simply forces an
+  A stronger request on a buffered queue is always allowed and simply forces an
   earlier sync.
 - Delivery reads need a written-visible selected read, as `a2e7745` did: serve
   from the tail cache, fall back to an exact raw read of each selected offset on
   a miss, keep CRC, offset, type and header checks. It must be rebuilt on the
   current `read_selected_with_limits` gap-skipping code and selected only for
-  written queues, never through a process-wide `OnceLock` or environment flag.
+  buffered queues, never through a process-wide `OnceLock` or environment flag.
   The selection bound and the read source must use the same frontier (audit
   item S2).
 - `queue_replication_next_offset` refuses unless the log is fully durable. For
@@ -259,23 +260,23 @@ process fences.
 
 ### Broker and wire
 
-- Followers of a written queue append with `AfterFlush` and report both
+- Followers of a buffered queue append with `AfterFlush` and report both
   `written_next` and `durable_next`. `QueuePushProgress` gains the written field.
   No durable field ever carries written progress.
 - `QueueDependencies` keeps two ceilings per queue: written visibility and
   durable visibility. `await_dependency` and the delivery gate pick the one
   matching the queue mode. Retention, checkpoints and diagnostics use durable.
-- A written queue always uses the written replication source, whatever
+- A buffered queue always uses the written replication source, whatever
   `replication.early_replication` says. With a durable-only source it cannot
   make progress, as the first probe showed. Early replication stays a separate
   switch for durable queues.
-- Solo written queues have no ceiling, as today, because apply follows the
+- Solo buffered queues have no ceiling, as today, because apply follows the
   flush.
 
 ### Acks and settles
 
 Acks are fire-and-forget on the wire. The broker applies a settle after its
-append completes, so in a written queue a settle is applied once written.
+append completes, so in a buffered queue a settle is applied once written.
 
 After power loss on the written set, two things can happen to the unsynced
 suffix. The message survives but its ack is lost, so it is redelivered, a normal
@@ -344,10 +345,10 @@ queues.
 - **Followers.** Append with `AfterFlush`, report written and durable progress
   separately, run the same background sync.
 - **Policies.** `replica_durable:N` and `majority_durable` keep their node
-  counts. On a written queue the count applies to written copies. The policy
+  counts. On a buffered queue the count applies to written copies. The policy
   name should read naturally, so the admin view shows both, for example
   "written on 2 of 3".
-- **Early replication.** Written queues always use the written source.
+- **Early replication.** Buffered queues always use the written source.
   `replication.early_replication` keeps its current meaning for durable queues.
 - **Failover candidates.** New owners come from placement and source selection
   picks the sealed witness with the longest history. Neither needs to change,
@@ -360,14 +361,14 @@ queues.
 - **Owner restart after power loss.** This is the new hazard. An owner that lost
   its unsynced suffix can come back with a shorter log than its followers hold.
   If it resumed as owner it would write new records at offsets the followers
-  already hold with different bytes. A written queue must treat a dirty
+  already hold with different bytes. A buffered queue must treat a dirty
   restart whose log is shorter than reported follower progress as a recovery
   event: fence, seal and select the longest history. Early replication has the
   same open item for old-owner restart.
 
 ### What a client observes after owner loss
 
-| Owner loss | Followers | Durable queue | Written queue |
+| Owner loss | Followers | Durable queue | Buffered queue |
 | --- | --- | --- | --- |
 | Process crash | Running | Confirmed messages kept | Confirmed messages kept |
 | Machine down | Running | Kept | Kept, the live seal syncs written copies |
@@ -380,7 +381,7 @@ queues.
 The latched-fsync heal records a cut back to the last successful sync, and the
 next open carries it out before anything reads the tail, for every log. Linux
 reports a writeback error once and may drop the dirty pages, so anything past
-the durable end is suspect. For a written queue that cut can drop confirmed
+the durable end is suspect. For a buffered queue that cut can drop confirmed
 records. That matches the mode's promise only if the promise says so, which is
 why the warning in section 1 names storage failure as well as power loss.
 
@@ -398,7 +399,7 @@ repaired. A persistently failing follower must not silently lower W.
 
 Under durable queues, applied state is always durable, so a checkpoint can
 capture applied state and publish a snapshot without syncing the log. Under a
-written queue that is no longer true. `write_exact_queue_checkpoint` captures,
+buffered queue that is no longer true. `write_exact_queue_checkpoint` captures,
 writes the snapshot, then truncates. A crash after snapshot publication could
 leave a recovery-authoritative snapshot that refers to records that never
 reached disk.
@@ -451,7 +452,7 @@ What to measure on the rebuilt mode:
 - Tail cache hit rate for written delivery reads, and raw fallback reads.
 - Dirty and Writeback from `/proc/meminfo`, and durable lag per log.
 - A `perf` profile at 10k/s in both modes.
-- Whether a small linger for written queues restores grouping without giving
+- Whether a small linger for buffered queues restores grouping without giving
   back the median.
 
 ## 9. Acceptance test plan
@@ -507,7 +508,7 @@ Follow the [optimization log](/development/optimization-log/) protocol:
    checkpoint publication. Follower resume from the durable frontier.
 3. **Broker.** Declare field, fixed at first declare. Written progress on the
    wire, two ceilings, mode-aware confirm and delivery, written source for
-   written queues. Admin and dashboard show mode, written and durable progress,
+   buffered queues. Admin and dashboard show mode, written and durable progress,
    and durable lag. Runtime setting for cadence.
 4. **Failure acceptance.** Section 9 correctness cases, including owner restart
    after power loss. Docs for the mode, warning text and consumer guidance.
@@ -521,16 +522,16 @@ Follow the [optimization log](/development/optimization-log/) protocol:
 
 Decided:
 
-1. Name: `written`, in the API, the declare field and the dashboard. AfterFlush
+1. Name: `buffered`, in the API, the declare field and the dashboard. AfterFlush
    stays the Keratin name in development notes.
-2. Solo queues may use `written`. The declare reply and the docs warn that
+2. Solo queues may use `buffered`. The declare reply and the docs warn that
    one power loss or storage failure can lose recent confirmed messages.
-3. `replica_accepted` is redefined as written acknowledgement on N nodes. It
-   becomes the cluster policy form of the mode: a `written` queue's assignment
-   uses `replica_accepted:N`, confirming once N copies are written, and a
-   `durable` queue keeps `replica_durable:N`. Existing assignments that name
-   `replica_accepted` today behave like `replica_durable`, so they need a
-   migration or a fenced transition before the new meaning applies to them.
+3. The cluster policy form is a new `replica_buffered:N`: a buffered queue's
+   assignment confirms once N copies are buffered, and a durable queue keeps
+   `replica_durable:N`. `replica_accepted` is not redefined, since existing
+   configs that name it behave like `replica_durable` today and would silently
+   weaken. It stays an alias for `replica_durable`, logs a deprecation warning,
+   and is removed in a later release.
 4. Background sync defaults to 100 ms and may be turned off with 0, which
    leaves syncs to the operating system and removes any bound on the unsynced
    window. The settings page and docs say so plainly.
@@ -540,7 +541,7 @@ Decided:
    sessions as `ResumedAfterRestart`, which the clients treat as a new
    incarnation, so held deliveries settle to `StaleDelivery` and redeliver.
    Reused offsets after a cut therefore cannot misroute a settle. An
-   in-process reopen of a written queue's log must drop that queue's tag
+   in-process reopen of a buffered queue's log must drop that queue's tag
    records first, as ownership transitions already do.
 6. Settled by the latched heal: a latched log cannot seal, and its reopen cuts
    back to its durable end before it can.
@@ -549,13 +550,10 @@ Still open:
 
 1. Should Fibril reserve `speculative` for the queue form of early delivery so
    the queue and stream tier names line up?
-2. Should written queues carry a per-delivery header after all?
-3. Which queue events keep `AfterFsync` in a written queue: DLQ moves, delayed
+2. Should buffered queues carry a per-delivery header after all?
+3. Which queue events keep `AfterFsync` in a buffered queue: DLQ moves, delayed
    retry promotion, lease expiry?
 4. Should a cluster runtime default for new queues exist at all, or only the
    declare field?
 5. Should the stream ephemeral tier move from `AfterWrite` to `AfterFlush` so
    its documented process-crash promise holds?
-6. How existing `replica_accepted` assignments move to the new meaning:
-   rewrite them to `replica_durable` at upgrade, or keep them durable until an
-   explicit fenced transition.

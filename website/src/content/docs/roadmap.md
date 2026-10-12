@@ -243,7 +243,7 @@ when reducing repeated reads or changing comparison scheduling.
   including ambiguous client outcomes, ordinary delivery gates and old-owner restart.
   An opt-in queue mode that confirms and delivers once the required copies are
   written to the OS builds on the same written source. See the
-  [written-durability queue design](/development/afterflush-design/).
+  [buffered queue design](/development/afterflush-design/).
 - Add OpenTelemetry export.
 
 ## Frontend maintainability

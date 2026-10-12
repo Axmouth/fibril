@@ -200,7 +200,7 @@ export const sidebar = [
             slug: "development/replication-design",
           },
           {
-            label: "Written-durability queues",
+            label: "Buffered queues",
             slug: "development/afterflush-design",
           },
           {
