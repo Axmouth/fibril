@@ -128,9 +128,9 @@ drain-complete, bounded by `coordination.ganglion.repartition_adoption_timeout_m
   time (by which point the generation may have advanced past what clients acked,
   leaving the gate unsatisfiable until the timeout). A marker with no
   `adoption_generation` predates this fencing and is treated as ungated.
-- **A consumer leg is bound to the endpoint it subscribed through.** The Rust
-  client's subscription supervisor re-subscribes a partition when the topology
-  names a different owner than the one its leg is on. It compares against the
+- **A consumer leg is bound to the endpoint it subscribed through.** The Rust,
+  TypeScript and Python subscription supervisors re-subscribe a partition when
+  the topology names a different owner than the one its leg is on. It compares against the
   endpoint the subscribe actually used, not the cached owner at subscribe time.
   A queue declared moments earlier can be missing from the cache, so the
   subscribe goes through the bootstrap connection, and the owner showing up in
@@ -138,9 +138,11 @@ drain-complete, bounded by `coordination.ganglion.repartition_adoption_timeout_m
   would be refused, since the broker allows one subscription per partition per
   connection and the first is still live. When a real move happens, the
   supervisor keeps forwarding the old leg until the new subscribe lands, so
-  deliveries already sent on it are not stranded.
+  deliveries already sent on it are not stranded. The Go and C# supervisors do
+  not watch the topology owner. They re-attach only after a leg's stream
+  closes, so they have no owner comparison to get wrong.
 - **A topology fetch never moves the cache back.** A broker that just restarted
   can answer from a snapshot older than what the client already holds, missing
-  queues declared since. The Rust client keeps the newer view when a fetch
+  queues declared since. Every client keeps the newer view when a fetch
   returns a lower generation, as it already does for pushes, so a lagging answer
   cannot make a live queue look deleted to a re-subscribing supervisor.
