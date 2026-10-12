@@ -240,6 +240,9 @@ when reducing repeated reads or changing comparison scheduling.
   buffering and recovery rules for tentative suffixes. Validate [owner write/fsync
   failures after follower persistence](/development/recovery-continuation/#early-replication-under-owner-io-failure),
   including ambiguous client outcomes, ordinary delivery gates and old-owner restart.
+  An opt-in queue mode that confirms and delivers once the required copies are
+  written to the OS builds on the same written source. See the
+  [written-durability queue design](/development/afterflush-design/).
 - Add OpenTelemetry export.
 
 ## Frontend maintainability

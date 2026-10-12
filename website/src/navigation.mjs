@@ -200,6 +200,10 @@ export const sidebar = [
             slug: "development/replication-design",
           },
           {
+            label: "Written-durability queues",
+            slug: "development/afterflush-design",
+          },
+          {
             label: "Recovery quarantine internals",
             slug: "development/recovery-internals",
           },
