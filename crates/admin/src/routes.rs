@@ -834,9 +834,16 @@ pub async fn topology(
                     .cmp(&(b["topic"].as_str(), b["partition"].as_u64()))
             });
 
+            // Private brokers with no live public broker: clients get no
+            // route to partitions those brokers own.
+            let no_live_public_broker = server
+                .gateway_gap
+                .as_ref()
+                .is_some_and(|provider| provider());
             serde_json::json!({
                 "node_id": coordination.node_id(),
                 "generation": snapshot.generation,
+                "no_live_public_broker": no_live_public_broker,
                 "nodes": nodes,
                 "assignments": assignments,
                 "stream_assignments": stream_assignments,

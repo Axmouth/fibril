@@ -80,6 +80,12 @@ pub const DRAINING_LABEL: &str = "fibril/draining";
 /// it.
 pub const VISIBILITY_LABEL: &str = "fibril/visibility";
 pub const PRIVATE_VISIBILITY: &str = "private";
+/// Advisory label carrying how many upstream sessions a public broker holds
+/// open to private owners while forwarding for its clients. Absent when zero.
+pub const UPSTREAM_SESSIONS_LABEL: &str = "fibril/upstream_sessions";
+/// Advisory label carrying how many forwarded sessions an owner serves for
+/// public brokers. Absent when zero.
+pub const FORWARDED_SESSIONS_LABEL: &str = "fibril/forwarded_sessions";
 /// Advisory label carrying the node's raft id, so observability can correlate
 /// broker node ids with consensus membership.
 pub const RAFT_ID_LABEL: &str = "fibril/raft-id";
@@ -2913,7 +2919,8 @@ impl GanglionCoordination {
 
     /// Registered nodes' runtime facts from the advisory heartbeat labels,
     /// as loose JSON ready for the topology payload. Nodes that never
-    /// carried the version label are absent.
+    /// carried the version label are absent. Visibility is "public" or
+    /// "private", and the session counts read 0 when their label is absent.
     pub fn node_runtime_meta(&self) -> HashMap<String, serde_json::Value> {
         self.node
             .committed_snapshot()
@@ -2939,6 +2946,20 @@ impl GanglionCoordination {
                 {
                     meta["cert_not_after_unix"] = expiry.into();
                 }
+                let visibility = if gateway::node_is_private(node) {
+                    PRIVATE_VISIBILITY
+                } else {
+                    "public"
+                };
+                meta["visibility"] = visibility.into();
+                let count = |label: &str| {
+                    node.labels
+                        .get(label)
+                        .and_then(|raw| raw.parse::<u64>().ok())
+                        .unwrap_or(0)
+                };
+                meta["upstream_sessions"] = count(UPSTREAM_SESSIONS_LABEL).into();
+                meta["forwarded_sessions"] = count(FORWARDED_SESSIONS_LABEL).into();
                 Some((node.node_id.clone(), meta))
             })
             .collect()
@@ -7115,5 +7136,62 @@ mod tests {
             .shutdown()
             .await
             .expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn runtime_meta_carries_visibility_and_forwarding_counts() {
+        let router = InProcessRouter::new();
+        let node = RaftMetadataNode::start(1, default_raft_config().unwrap(), &router)
+            .await
+            .unwrap();
+        node.initialize(BTreeMap::from([(
+            1,
+            ganglion_openraft::openraft::BasicNode::new("one"),
+        )]))
+        .await
+        .unwrap();
+        node.wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .unwrap();
+        let provider = GanglionCoordination::new("public-a", node);
+        let mut state = ganglion_core::CoordinationSnapshot {
+            generation: 1,
+            ..Default::default()
+        };
+        let mut private = ganglion_core::NodeInfo::new("private-p", "10.0.0.9:9876", None);
+        private.labels.insert(VERSION_LABEL.into(), "0.5.0".into());
+        private
+            .labels
+            .insert(VISIBILITY_LABEL.into(), PRIVATE_VISIBILITY.into());
+        private
+            .labels
+            .insert(FORWARDED_SESSIONS_LABEL.into(), "2".into());
+        state.nodes.insert("private-p".into(), private);
+        let mut public = ganglion_core::NodeInfo::new("public-a", "10.0.0.1:9876", None);
+        public.labels.insert(VERSION_LABEL.into(), "0.5.0".into());
+        public
+            .labels
+            .insert(UPSTREAM_SESSIONS_LABEL.into(), "3".into());
+        state.nodes.insert("public-a".into(), public);
+        let mut idle = ganglion_core::NodeInfo::new("public-b", "10.0.0.2:9876", None);
+        idle.labels.insert(VERSION_LABEL.into(), "0.5.0".into());
+        state.nodes.insert("public-b".into(), idle);
+        provider
+            .consensus_node()
+            .write_snapshot(state)
+            .await
+            .unwrap();
+
+        let meta = provider.node_runtime_meta();
+        assert_eq!(meta["private-p"]["visibility"], "private");
+        assert_eq!(meta["private-p"]["forwarded_sessions"], 2);
+        assert_eq!(meta["private-p"]["upstream_sessions"], 0);
+        assert_eq!(meta["public-a"]["visibility"], "public");
+        assert_eq!(meta["public-a"]["upstream_sessions"], 3);
+        assert_eq!(meta["public-a"]["forwarded_sessions"], 0);
+        // An absent label reads as zero, so idle brokers need not send it.
+        assert_eq!(meta["public-b"]["visibility"], "public");
+        assert_eq!(meta["public-b"]["upstream_sessions"], 0);
+        provider.consensus_node().shutdown().await.unwrap();
     }
 }

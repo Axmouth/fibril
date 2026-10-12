@@ -170,6 +170,11 @@ pub type NodeRatesProvider =
 pub type NodeMetaProvider =
     dyn Fn() -> std::collections::HashMap<String, serde_json::Value> + Send + Sync;
 
+/// Returns true while the cluster has a private broker but no live public
+/// broker to forward for it. Clients then get empty owner endpoints for
+/// partitions owned by private brokers.
+pub type GatewayGapProvider = dyn Fn() -> bool + Send + Sync;
+
 /// Coordinated queue declare for cluster mode: records the partitioning
 /// with coordination FIRST - the returned count is authoritative (an
 /// already-declared queue's count wins, a conflicting request errors) and
@@ -358,6 +363,9 @@ pub struct AdminServer {
     pub declare_stream_coordinator: Option<Arc<StreamDeclareCoordinator>>,
     /// Optional per-node runtime facts for the topology payload.
     pub node_meta: Option<Arc<NodeMetaProvider>>,
+    /// Optional check for private brokers without a live public broker.
+    /// Feeds the topology payload and an attention item.
+    pub gateway_gap: Option<Arc<GatewayGapProvider>>,
     /// True only under real cluster coordination (ganglion). The standalone
     /// single-node coordination view (wired for the topology page and broker
     /// switcher) must NOT trip cluster-only restrictions like the queue-delete
@@ -421,6 +429,7 @@ impl AdminServer {
             declare_queue_coordinator: None,
             declare_stream_coordinator: None,
             node_meta: None,
+            gateway_gap: None,
             cluster_mode: false,
         }
     }
@@ -479,6 +488,12 @@ impl AdminServer {
     /// Attach the per-node runtime facts provider.
     pub fn with_node_meta(mut self, provider: Arc<NodeMetaProvider>) -> Self {
         self.node_meta = Some(provider);
+        self
+    }
+
+    /// Attach the check for private brokers without a live public broker.
+    pub fn with_gateway_gap(mut self, provider: Arc<GatewayGapProvider>) -> Self {
+        self.gateway_gap = Some(provider);
         self
     }
 
@@ -2214,6 +2229,89 @@ mod tests {
         let node = &body["coordination"]["nodes"][0];
         assert_eq!(node["rate_pub"], 12500);
         assert_eq!(node["rate_dlv"], 900);
+    }
+
+    #[tokio::test]
+    async fn topology_and_attention_report_private_brokers_without_a_gateway() {
+        use fibril_broker::coordination::{CoordinationSnapshot, NodeInfo, StaticCoordination};
+
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert(
+            "private-p".to_string(),
+            NodeInfo {
+                node_id: "private-p".to_string(),
+                broker_addr: "10.0.0.9:9000".to_string(),
+                admin_addr: Some("10.0.0.9:8080".to_string()),
+            },
+        );
+        let snapshot = CoordinationSnapshot {
+            nodes,
+            assignments: std::collections::HashMap::new(),
+            stream_assignments: std::collections::HashMap::new(),
+            generation: 1,
+        };
+        let gap = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let server = Arc::new(
+            Arc::try_unwrap(server)
+                .ok()
+                .expect("sole owner")
+                .with_coordination(Arc::new(StaticCoordination::new("private-p", snapshot)))
+                .with_node_meta(Arc::new(|| {
+                    std::iter::once((
+                        "private-p".to_string(),
+                        json!({
+                            "version": "0.5.0",
+                            "visibility": "private",
+                            "upstream_sessions": 0,
+                            "forwarded_sessions": 2,
+                        }),
+                    ))
+                    .collect()
+                }))
+                .with_gateway_gap({
+                    let gap = gap.clone();
+                    Arc::new(move || gap.load(std::sync::atomic::Ordering::Relaxed))
+                }),
+        );
+        let get = |uri: &'static str| {
+            let server = server.clone();
+            async move {
+                let response = AdminServer::router(server)
+                    .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                response_json(response).await
+            }
+        };
+
+        let topology = get("/admin/api/topology").await;
+        assert_eq!(topology["coordination"]["no_live_public_broker"], true);
+        let runtime = &topology["coordination"]["nodes"][0]["runtime"];
+        assert_eq!(runtime["visibility"], "private");
+        assert_eq!(runtime["forwarded_sessions"], 2);
+        let attention = get("/admin/api/attention").await;
+        let item = attention["items"]
+            .as_array()
+            .expect("items array")
+            .iter()
+            .find(|item| item["kind"] == "no_live_public_broker")
+            .expect("a no_live_public_broker item");
+        assert_eq!(item["severity"], "critical");
+        assert_eq!(item["action_href"], "/admin/topology");
+
+        gap.store(false, std::sync::atomic::Ordering::Relaxed);
+        let topology = get("/admin/api/topology").await;
+        assert_eq!(topology["coordination"]["no_live_public_broker"], false);
+        let attention = get("/admin/api/attention").await;
+        assert!(
+            !attention["items"]
+                .as_array()
+                .expect("items array")
+                .iter()
+                .any(|item| item["kind"] == "no_live_public_broker")
+        );
     }
 
     #[tokio::test]

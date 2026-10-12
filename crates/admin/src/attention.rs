@@ -162,6 +162,25 @@ fn draining_items(server: &AdminServer) -> Vec<AttentionItem> {
     }]
 }
 
+/// Private brokers with no live public broker to forward for them. Clients
+/// get empty owner endpoints for the partitions those brokers own, so that
+/// traffic stops until a public broker is live.
+fn gateway_items(server: &AdminServer) -> Vec<AttentionItem> {
+    let Some(provider) = &server.gateway_gap else {
+        return Vec::new();
+    };
+    if !provider() {
+        return Vec::new();
+    }
+    vec![AttentionItem {
+        severity: "critical",
+        kind: "no_live_public_broker",
+        subject: "private brokers".to_string(),
+        headline: "No public broker is live to forward for the private brokers - clients get no route to partitions they own until one is up".to_string(),
+        action_href: "/admin/topology",
+    }]
+}
+
 /// Replication followers that are behind and not advancing (derived across
 /// watcher passes): data safety eroding quietly.
 fn follower_stall_items(server: &AdminServer) -> Vec<AttentionItem> {
@@ -350,6 +369,7 @@ pub(crate) async fn attention_payload(server: &AdminServer) -> AttentionResponse
     items.extend(queue_state_items(server).await);
     items.extend(disk_items(server));
     items.extend(draining_items(server));
+    items.extend(gateway_items(server));
     items.extend(follower_stall_items(server));
     items.extend(backlog_growth_items(server));
     items.sort_by_key(|item| severity_rank(item.severity));

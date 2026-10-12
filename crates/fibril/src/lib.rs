@@ -1122,10 +1122,30 @@ pub struct HeartbeatRuntimeInfo {
     pub cert_not_after: Option<Arc<dyn Fn() -> Option<i64> + Send + Sync>>,
 }
 
+/// Add the forwarding session counts, (upstream, forwarded), to heartbeat
+/// labels. Each rides only while non-zero, so clusters without private
+/// brokers carry no extra labels.
+fn insert_forwarding_labels(labels: &mut BTreeMap<String, String>, forwarding: (u64, u64)) {
+    let (upstream, forwarded) = forwarding;
+    if upstream > 0 {
+        labels.insert(
+            fibril_coordination_ganglion::UPSTREAM_SESSIONS_LABEL.to_string(),
+            upstream.to_string(),
+        );
+    }
+    if forwarded > 0 {
+        labels.insert(
+            fibril_coordination_ganglion::FORWARDED_SESSIONS_LABEL.to_string(),
+            forwarded.to_string(),
+        );
+    }
+}
+
 /// Build advisory heartbeat labels from local broker state. `topology_adoption`,
 /// when present, contributes the node's lowest acked topology generation so the
 /// repartition controller can fence a cutover on cluster-wide client adoption.
 /// `rates` is this node's (published/s, delivered/s) since its previous beat.
+/// `forwarding` is (open upstream sessions, forwarded sessions served).
 pub fn broker_heartbeat_labels(
     broker: &Broker<StromaEngine>,
     topology_adoption: Option<&TopologyAdoptionTracker>,
@@ -1134,6 +1154,7 @@ pub fn broker_heartbeat_labels(
     draining: bool,
     raft_node_id: u64,
     rates: (u64, u64),
+    forwarding: (u64, u64),
     runtime_info: &HeartbeatRuntimeInfo,
 ) -> BTreeMap<String, String> {
     let mut labels = BTreeMap::new();
@@ -1173,6 +1194,7 @@ pub fn broker_heartbeat_labels(
             "1".to_string(),
         );
     }
+    insert_forwarding_labels(&mut labels, forwarding);
 
     // A private broker carries the visibility label and no client list, so no
     // topology answer or redirect ever names it.
@@ -1265,6 +1287,7 @@ pub fn spawn_ganglion_broker_tasks(
     peer_tls: Option<fibril_tls::TlsConnector>,
     draining: Arc<std::sync::atomic::AtomicBool>,
     broker_stats: Arc<fibril_metrics::BrokerStats>,
+    forward_stats: Arc<fibril_metrics::ForwardStats>,
     runtime_info: HeartbeatRuntimeInfo,
 ) -> GanglionBrokerTaskHandles {
     let mut resolver_cfg = fibril_protocol::v1::replication::ProtocolOwnerPeerResolverConfig::new(
@@ -1339,6 +1362,10 @@ pub fn spawn_ganglion_broker_tasks(
                 draining.load(std::sync::atomic::Ordering::Relaxed),
                 heartbeat_raft_id,
                 rates,
+                (
+                    forward_stats.upstream_sessions(),
+                    forward_stats.forwarded_sessions(),
+                ),
                 &runtime_info,
             )
         },
@@ -2190,6 +2217,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
             peer_tls,
             draining.clone(),
             metrics.broker(),
+            metrics.forward(),
             heartbeat_runtime.clone(),
         )),
         // The ganglion-requires-secret check above makes this unreachable,
@@ -2547,6 +2575,10 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
                 .with_node_meta({
                     let source = parts.coordination.clone();
                     Arc::new(move || source.node_runtime_meta())
+                })
+                .with_gateway_gap({
+                    let source = parts.coordination.clone();
+                    Arc::new(move || source.private_nodes_without_gateway())
                 })
                 // Admin declares take the same coordinated two-step as
                 // client declares, so the controller places every
@@ -3075,6 +3107,28 @@ impl DeclareCoordinator for CoordinationDeclareCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forwarding_labels_ride_only_while_non_zero() {
+        let mut labels = BTreeMap::new();
+        insert_forwarding_labels(&mut labels, (0, 0));
+        assert!(labels.is_empty());
+
+        insert_forwarding_labels(&mut labels, (3, 0));
+        assert_eq!(
+            labels.get(fibril_coordination_ganglion::UPSTREAM_SESSIONS_LABEL),
+            Some(&"3".to_string())
+        );
+        assert!(!labels.contains_key(fibril_coordination_ganglion::FORWARDED_SESSIONS_LABEL));
+
+        let mut labels = BTreeMap::new();
+        insert_forwarding_labels(&mut labels, (0, 2));
+        assert_eq!(
+            labels.get(fibril_coordination_ganglion::FORWARDED_SESSIONS_LABEL),
+            Some(&"2".to_string())
+        );
+        assert!(!labels.contains_key(fibril_coordination_ganglion::UPSTREAM_SESSIONS_LABEL));
+    }
 
     #[test]
     fn heartbeat_rate_tracker_reports_deltas_per_second() {
