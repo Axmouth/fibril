@@ -528,8 +528,14 @@ Follow the [optimization log](/development/optimization-log/) protocol:
    acknowledgement on N nodes?
 4. Default background sync interval, and whether operators may turn it off.
 5. Should written queues carry a per-delivery header after all?
-6. Does the delivery identity survive a solo cut without offset reuse
-   confusion, or must the cut bump an incarnation that clients see?
+6. Settled: delivery tags come from a per-process counter, map to an offset
+   only inside the broker, and settle only on the subscription that holds
+   them (crates/broker/src/broker.rs, `records_by_tags`). A restart resumes
+   sessions as `ResumedAfterRestart`, which the clients treat as a new
+   incarnation, so held deliveries settle to `StaleDelivery` and redeliver.
+   Reused offsets after a cut therefore cannot misroute a settle. An
+   in-process reopen of a written queue's log must drop that queue's tag
+   records first, as ownership transitions already do.
 7. Which queue events keep `AfterFsync` in a written queue: DLQ moves, delayed
    retry promotion, lease expiry?
 8. Settled by the latched heal: a latched log cannot seal, and its reopen cuts
