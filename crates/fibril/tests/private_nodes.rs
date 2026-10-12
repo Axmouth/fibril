@@ -10,15 +10,17 @@
 //! broker: an exclusive consumer group and a restart of the public broker
 //! itself, after which the owner redelivers what the old session held. A
 //! third, ignored for now, grows a queue owned by a private broker while the
-//! client publishes and consumes. Streams through a gateway are covered against a real owner
-//! in crates/protocol/tests/forwarding_tests.rs.
+//! client publishes and consumes. A fourth declares replicated Plexus streams
+//! through the public broker, checks that every node stores them as streams,
+//! and publishes to and reads each one through the public broker.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use fibril_client::{
-    Client, ClientOptions, FibrilError, NewMessage, QueueConfig, SubEvent, Subscription,
+    Client, ClientOptions, FibrilError, NewMessage, QueueConfig, StreamConfig, SubEvent,
+    Subscription,
 };
 
 use tokio::process::{Child, Command};
@@ -781,6 +783,164 @@ async fn run_surface_scenario(
         for endpoint in &entry.owner_endpoints {
             assert_eq!(endpoint.target(), public);
         }
+    }
+    client.shutdown().await;
+}
+
+/// Engine kind marker of every stroma partition under `data_dir`, by path.
+fn partition_kinds(data_dir: &Path) -> Vec<(PathBuf, String)> {
+    fn walk(path: &Path, out: &mut Vec<(PathBuf, String)>) {
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.file_name().is_some_and(|name| name == "kind")
+                && path.ancestors().any(|dir| dir.ends_with("partitions"))
+            {
+                let kind = std::fs::read_to_string(&path).unwrap_or_default();
+                out.push((path, kind.trim().to_string()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(data_dir, &mut out);
+    out
+}
+
+/// Owner of each assigned stream partition 0, by topic.
+async fn stream_owners(admin: &str) -> HashMap<String, String> {
+    let Some(topology) = admin_topology(admin).await else {
+        return HashMap::new();
+    };
+    topology["coordination"]["stream_assignments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|a| a["partition"].as_u64() == Some(0))
+        .map(|a| {
+            (
+                a["topic"].as_str().unwrap_or_default().to_string(),
+                a["owner"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// Plexus streams declared through the public broker stay streams on every
+/// node, whichever node owns them, and a client publishes to and reads them
+/// through the public broker. Only streams are declared here, so every
+/// partition on disk must be a stream partition.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn streams_through_the_gateway() {
+    let _permit = common::BOOT_PERMITS.acquire_many(3).await.unwrap();
+    let root = common::temp_root("fibril-private-nodes", "streams");
+    let raft: [String; 3] = std::array::from_fn(|_| common::free_loopback_addr().to_string());
+    let mut nodes = vec![
+        spawn_node(&root, 1, true, &raft),
+        spawn_node(&root, 2, true, &raft),
+        spawn_node(&root, 3, false, &raft),
+    ];
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(240),
+        run_stream_scenario(&root, &mut nodes),
+    )
+    .await;
+    if !matches!(result, Ok(())) {
+        for node in &nodes {
+            let log = std::fs::read_to_string(&node.log).unwrap_or_default();
+            let tail: Vec<&str> = log.lines().rev().take(60).collect();
+            eprintln!("---- {} log tail ----", node.name);
+            for line in tail.into_iter().rev() {
+                eprintln!("{line}");
+            }
+        }
+        panic!("scenario failed or timed out: {result:?}");
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+async fn run_stream_scenario(root: &Path, nodes: &mut [Node]) {
+    let public = nodes[2].broker.clone();
+    let public_admin = nodes[2].admin.clone();
+    wait_until(
+        "three registered brokers",
+        Duration::from_secs(60),
+        || async {
+            admin_topology(&public_admin).await.is_some_and(|t| {
+                t["coordination"]["nodes"]
+                    .as_array()
+                    .is_some_and(|nodes| nodes.len() == 3)
+            })
+        },
+    )
+    .await;
+    let client = ClientOptions::new()
+        .auth("fibril", "fibril")
+        .publish_timeout_ms(30_000)
+        .connect(&public)
+        .await
+        .expect("connect to the public broker");
+
+    let streams: Vec<String> = (0..6).map(|i| format!("private.pulse.{i}")).collect();
+    for topic in &streams {
+        let mut declared = false;
+        for _ in 0..50 {
+            match client
+                .declare_plexus(StreamConfig::new(topic).unwrap().partitions(1))
+                .await
+            {
+                Ok(()) => {
+                    declared = true;
+                    break;
+                }
+                Err(err) => {
+                    eprintln!("declare stream {topic}: {err}");
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                }
+            }
+        }
+        assert!(declared, "could not declare stream {topic}");
+    }
+    wait_until(
+        "an owner for every stream",
+        Duration::from_secs(60),
+        || async {
+            let owners = stream_owners(&public_admin).await;
+            streams.iter().all(|topic| owners.contains_key(topic))
+        },
+    )
+    .await;
+    // Give the assignment watchers and catalogue sync a few ticks to act on
+    // the placements before looking at the disk.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let owners = stream_owners(&public_admin).await;
+    eprintln!("stream owners: {owners:?}");
+    for id in 1..=3 {
+        for (path, kind) in partition_kinds(&root.join(format!("data-{id}"))) {
+            assert_eq!(kind, "stream", "node-{id} holds a {kind} partition at {path:?}");
+        }
+    }
+
+    for topic in &streams {
+        let mut sub = client
+            .stream(topic)
+            .unwrap()
+            .from_earliest()
+            .sub()
+            .await
+            .expect("stream subscribe through the public broker");
+        let mut want = BTreeSet::new();
+        for i in 0..3 {
+            let payload = format!("{topic}/{i}");
+            publish_until_confirmed(&client, topic, &payload).await;
+            want.insert(payload);
+        }
+        consume_until(&mut sub, &want, Duration::from_secs(60)).await;
+        eprintln!("{topic}: published and read back through the public broker");
     }
     client.shutdown().await;
 }

@@ -739,10 +739,10 @@ forwarder, upstream sessions), `crates/coordination-ganglion/src/gateway.rs`
   every publish the client saw confirmed is delivered, and a one-way loss of
   the owner's answers, where the publish in flight answers `504`.
 - Streams through a gateway are covered against a real owner in the protocol
-  tests, not in the multi-process test. Declaring a stream in that three node
-  cluster leaves the stream's owner with a queue partition for the same topic,
-  and the owner then refuses the stream as a kind mismatch. It happens at
-  declare time, before any forwarding, and is not diagnosed yet.
+  tests, and in a fourth multi-process scenario that declares replicated
+  streams through the public broker, checks that every node stores them as
+  streams, and publishes and reads each one through the public broker,
+  whichever broker owns it.
 - Client classification tests for `504` exist in all five SDKs, and the Rust
   client has a mock broker test that a `504` publish is never replayed.
 - No `clients/wire_vectors.json` entry for `ForwardedSession`: SDK conformance
