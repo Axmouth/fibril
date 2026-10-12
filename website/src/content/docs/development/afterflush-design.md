@@ -517,18 +517,24 @@ Follow the [optimization log](/development/optimization-log/) protocol:
 6. **Transitions.** Fenced mode changes on existing queues, with per-replica
    applied status.
 
-## Open questions
+## Decisions and open questions
 
-1. Name: `written` or something else (`flushed`, `relaxed`)? Should Fibril
-   reserve `speculative` for the queue form of early delivery so the queue and
-   stream tier names line up?
-2. Should a solo queue be allowed to use `written`, given that one power loss
-   can lose confirmed messages?
-3. What happens to `replica_accepted`: retire it, or redefine it as written
-   acknowledgement on N nodes?
-4. Default background sync interval, and whether operators may turn it off.
-5. Should written queues carry a per-delivery header after all?
-6. Settled: delivery tags come from a per-process counter, map to an offset
+Decided:
+
+1. Name: `written`, in the API, the declare field and the dashboard. AfterFlush
+   stays the Keratin name in development notes.
+2. Solo queues may use `written`. The declare reply and the docs warn that
+   one power loss or storage failure can lose recent confirmed messages.
+3. `replica_accepted` is redefined as written acknowledgement on N nodes. It
+   becomes the cluster policy form of the mode: a `written` queue's assignment
+   uses `replica_accepted:N`, confirming once N copies are written, and a
+   `durable` queue keeps `replica_durable:N`. Existing assignments that name
+   `replica_accepted` today behave like `replica_durable`, so they need a
+   migration or a fenced transition before the new meaning applies to them.
+4. Background sync defaults to 100 ms and may be turned off with 0, which
+   leaves syncs to the operating system and removes any bound on the unsynced
+   window. The settings page and docs say so plainly.
+5. Settled: delivery tags come from a per-process counter, map to an offset
    only inside the broker, and settle only on the subscription that holds
    them (crates/broker/src/broker.rs, `records_by_tags`). A restart resumes
    sessions as `ResumedAfterRestart`, which the clients treat as a new
@@ -536,11 +542,20 @@ Follow the [optimization log](/development/optimization-log/) protocol:
    Reused offsets after a cut therefore cannot misroute a settle. An
    in-process reopen of a written queue's log must drop that queue's tag
    records first, as ownership transitions already do.
-7. Which queue events keep `AfterFsync` in a written queue: DLQ moves, delayed
-   retry promotion, lease expiry?
-8. Settled by the latched heal: a latched log cannot seal, and its reopen cuts
+6. Settled by the latched heal: a latched log cannot seal, and its reopen cuts
    back to its durable end before it can.
-9. Should a cluster runtime default for new queues exist at all, or only the
+
+Still open:
+
+1. Should Fibril reserve `speculative` for the queue form of early delivery so
+   the queue and stream tier names line up?
+2. Should written queues carry a per-delivery header after all?
+3. Which queue events keep `AfterFsync` in a written queue: DLQ moves, delayed
+   retry promotion, lease expiry?
+4. Should a cluster runtime default for new queues exist at all, or only the
    declare field?
-10. Should the stream ephemeral tier move from `AfterWrite` to `AfterFlush` so
-    its documented process-crash promise holds?
+5. Should the stream ephemeral tier move from `AfterWrite` to `AfterFlush` so
+   its documented process-crash promise holds?
+6. How existing `replica_accepted` assignments move to the new meaning:
+   rewrite them to `replica_durable` at upgrade, or keep them durable until an
+   explicit fenced transition.
