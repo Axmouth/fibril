@@ -44,9 +44,7 @@ use fibril_protocol::v1::handler::{
 };
 use fibril_protocol::v1::helper::{try_decode, try_encode};
 use fibril_broker::auth_store::NODE_PRINCIPAL;
-use fibril_protocol::v1::forwarding::{
-    Forwarder, ForwardingConfig, PartitionRoute, RoutingLimits,
-};
+use fibril_protocol::v1::forwarding::{Forwarder, ForwardingConfig, PartitionRoute, RoutingLimits};
 use fibril_protocol::v1::replication::{
     CoordinationProtocolOwnerPeerResolver, ProtocolOwnerPeerAuth, ProtocolOwnerPeerResolverConfig,
 };
@@ -2303,9 +2301,8 @@ impl ClientTopologySource for ForwardingTopology {
     }
 
     fn node_peer_address(&self, node_id: &str) -> Option<String> {
-        (node_id == "p-owner").then(|| {
-            SocketAddr::new(turmoil::lookup("p-owner"), PRIVATE_OWNER_PORT).to_string()
-        })
+        (node_id == "p-owner")
+            .then(|| SocketAddr::new(turmoil::lookup("p-owner"), PRIVATE_OWNER_PORT).to_string())
     }
 }
 
@@ -2526,7 +2523,10 @@ async fn run_gateway_client(
             }
             x if x == Op::Error as u16 => {
                 let err: fibril_protocol::v1::ErrorMsg = try_decode(&frame).unwrap();
-                if current.as_ref().is_some_and(|(id, _)| *id == frame.request_id) {
+                if current
+                    .as_ref()
+                    .is_some_and(|(id, _)| *id == frame.request_id)
+                {
                     // 503: nothing applied. 504: maybe applied. Both retry
                     // the same payload, so the only effect is a duplicate.
                     assert!(

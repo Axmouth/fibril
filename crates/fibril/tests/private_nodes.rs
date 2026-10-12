@@ -5,6 +5,13 @@
 //! confirms, consumes and acks through it, and keeps going when the private
 //! owner is killed mid-test and its partitions move to the other private
 //! broker (and, when placement allows, to the public broker itself).
+//!
+//! A second scenario covers more of the client surface through the public
+//! broker: an exclusive consumer group and a restart of the public broker
+//! itself, after which the owner redelivers what the old session held. A
+//! third, ignored for now, grows a queue owned by a private broker while the
+//! client publishes and consumes. Streams through a gateway are covered against a real owner
+//! in crates/protocol/tests/forwarding_tests.rs.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -102,9 +109,25 @@ mode = "majority_durable"
 fn spawn_node(root: &Path, id: u64, private: bool, raft: &[String; 3]) -> Node {
     let broker = common::free_loopback_addr().to_string();
     let admin = common::free_loopback_addr().to_string();
+    spawn_node_on(root, id, private, raft, broker, admin)
+}
+
+/// Start node `id` on fixed addresses, also to restart it in place.
+fn spawn_node_on(
+    root: &Path,
+    id: u64,
+    private: bool,
+    raft: &[String; 3],
+    broker: String,
+    admin: String,
+) -> Node {
     let config = node_config(root, id, private, &broker, &admin, raft);
     let log = root.join(format!("node-{id}.log"));
-    let out = std::fs::File::create(&log).unwrap();
+    let out = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+        .unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_fibril-server"))
         .env("FIBRIL_CONFIG", &config)
         .env("FIBRIL_CLUSTER_SECRET", SECRET)
@@ -175,10 +198,19 @@ where
 /// `504` means the outcome is unknown, so the test publishes the payload
 /// again and tolerates the duplicate, which is what an application would do.
 async fn publish_until_confirmed(client: &Client, topic: &str, payload: &str) {
+    publish_message_until_confirmed(client, topic, NewMessage::text(payload), payload).await;
+}
+
+async fn publish_message_until_confirmed(
+    client: &Client,
+    topic: &str,
+    message: NewMessage,
+    payload: &str,
+) {
     let publisher = client.publisher(topic).unwrap();
     let deadline = Instant::now() + Duration::from_secs(90);
     loop {
-        match publisher.publish_confirmed(NewMessage::text(payload)).await {
+        match publisher.publish_confirmed(message.clone()).await {
             Ok(_) => return,
             Err(err) => {
                 assert!(
@@ -438,4 +470,317 @@ async fn consume_until(sub: &mut Subscription, want: &BTreeSet<String>, budget: 
             Err(_) => eprintln!("no delivery for 10s, still waiting"),
         }
     }
+}
+
+const PRIVATE_NODES: [&str; 2] = ["node-1", "node-2"];
+
+/// Wait until one of `topics` has a private owner, and return it.
+async fn topic_with_private_owner<F, Fut>(what: &str, topics: &[String], owners: F) -> String
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = HashMap<String, String>>,
+{
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let owners = owners().await;
+        if let Some(topic) = topics.iter().find(|topic| {
+            owners
+                .get(*topic)
+                .is_some_and(|owner| PRIVATE_NODES.contains(&owner.as_str()))
+        }) {
+            return topic.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no {what} with a private owner: {owners:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn declare_queues(client: &Client, topics: &[String]) {
+    for topic in topics {
+        let mut declared = false;
+        for _ in 0..50 {
+            match client.declare_queue(QueueConfig::new(topic).unwrap()).await {
+                Ok(()) => {
+                    declared = true;
+                    break;
+                }
+                Err(err) => {
+                    eprintln!("declare {topic}: {err}");
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                }
+            }
+        }
+        assert!(declared, "could not declare {topic}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn exclusive_group_and_a_public_restart_through_the_gateway() {
+    run_surface_test("surface", false).await;
+}
+
+/// A live grow of a privately owned queue while the client publishes and
+/// consumes through the public broker. Ignored: after the grow, deliveries
+/// of messages that land on the source partition can stop for good. That
+/// also happens when the source partition is owned by the public broker
+/// itself, so with no forwarding involved, and needs its own fix.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "post-grow deliveries on the source partition can stall, with or without forwarding"]
+async fn repartition_while_forwarding() {
+    run_surface_test("grow", true).await;
+}
+
+async fn run_surface_test(tag: &str, with_repartition: bool) {
+    let _permit = common::BOOT_PERMITS.acquire_many(3).await.unwrap();
+    let root = common::temp_root("fibril-private-nodes", tag);
+    let raft: [String; 3] = std::array::from_fn(|_| common::free_loopback_addr().to_string());
+    // The public broker is node 3, so restarting it never restarts the
+    // node that bootstraps the raft group.
+    let mut nodes = vec![
+        spawn_node(&root, 1, true, &raft),
+        spawn_node(&root, 2, true, &raft),
+        spawn_node(&root, 3, false, &raft),
+    ];
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(420),
+        run_surface_scenario(&root, &raft, &mut nodes, with_repartition),
+    )
+    .await;
+    if !matches!(result, Ok(())) {
+        for node in &nodes {
+            let log = std::fs::read_to_string(&node.log).unwrap_or_default();
+            let tail: Vec<&str> = log.lines().rev().take(60).collect();
+            eprintln!("---- {} log tail ----", node.name);
+            for line in tail.into_iter().rev() {
+                eprintln!("{line}");
+            }
+        }
+        panic!("scenario failed or timed out: {result:?}");
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+async fn run_surface_scenario(
+    root: &Path,
+    raft: &[String; 3],
+    nodes: &mut Vec<Node>,
+    with_repartition: bool,
+) {
+    let public = nodes[2].broker.clone();
+    let public_admin = nodes[2].admin.clone();
+    wait_until(
+        "three registered brokers",
+        Duration::from_secs(60),
+        || async {
+            admin_topology(&public_admin).await.is_some_and(|t| {
+                t["coordination"]["nodes"]
+                    .as_array()
+                    .is_some_and(|nodes| nodes.len() == 3)
+            })
+        },
+    )
+    .await;
+    let client = ClientOptions::new()
+        .auth("fibril", "fibril")
+        .publish_timeout_ms(30_000)
+        .connect(&public)
+        .await
+        .expect("connect to the public broker");
+
+    // ---- Exclusive consumer group --------------------------------------
+    let cohorts: Vec<String> = (0..8).map(|i| format!("private.cohort.{i}")).collect();
+    declare_queues(&client, &cohorts).await;
+    let cohort = topic_with_private_owner("queue", &cohorts, || async {
+        assignments(&public_admin)
+            .await
+            .into_iter()
+            .map(|(topic, (owner, _))| (topic, owner))
+            .collect()
+    })
+    .await;
+    let mut group = client
+        .subscribe(&cohort)
+        .unwrap()
+        .exclusive()
+        .prefetch(4)
+        .sub()
+        .await
+        .expect("exclusive group subscribe through the public broker");
+    let mut want = BTreeSet::new();
+    for i in 0..5 {
+        let payload = format!("{cohort}/{i}");
+        publish_until_confirmed(&client, &cohort, &payload).await;
+        want.insert(payload);
+    }
+    consume_until(&mut group, &want, Duration::from_secs(60)).await;
+    eprintln!("exclusive group consumes through the public broker");
+
+    // ---- Repartition while forwarding ----------------------------------
+    let grows: Vec<String> = (0..8).map(|i| format!("private.grow.{i}")).collect();
+    declare_queues(&client, &grows).await;
+    let grow = topic_with_private_owner("queue", &grows, || async {
+        assignments(&public_admin)
+            .await
+            .into_iter()
+            .map(|(topic, (owner, _))| (topic, owner))
+            .collect()
+    })
+    .await;
+    if with_repartition {
+        // A consumer settles deliveries as they come while the test publishes,
+        // as an application would.
+        let sub = client
+            .subscribe(&grow)
+            .unwrap()
+            .prefetch(8)
+            .sub()
+            .await
+            .expect("subscribe the queue to grow");
+        let received = std::sync::Arc::new(std::sync::Mutex::new(BTreeSet::new()));
+        let consumer = tokio::spawn({
+            let received = received.clone();
+            let mut sub = sub;
+            async move {
+                loop {
+                    match sub.recv().await {
+                        SubEvent::Delivery(msg) => {
+                            received
+                                .lock()
+                                .unwrap()
+                                .insert(String::from_utf8(msg.payload.clone()).unwrap());
+                            let _ = msg.complete().await;
+                        }
+                        SubEvent::Closed(reason) => {
+                            panic!("subscription closed for good: {reason:?}")
+                        }
+                    }
+                }
+            }
+        });
+        let mut want = BTreeSet::new();
+        for i in 0..30 {
+            if i == 10 {
+                let response = reqwest::Client::new()
+                    .post(format!("http://{public_admin}/admin/api/repartition"))
+                    .basic_auth("fibril", Some("fibril"))
+                    .json(&serde_json::json!({ "topic": grow, "partition_count": 3 }))
+                    .send()
+                    .await
+                    .expect("repartition request");
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                assert!(status.is_success(), "repartition failed: {status} {body}");
+                eprintln!("grew {grow} to 3 partitions while forwarding");
+                // The client learns the new partitioning from a topology push or
+                // a fetch before it publishes again.
+                wait_until(
+                    "the client to see three partitions",
+                    Duration::from_secs(60),
+                    || async {
+                        let _ = client.fetch_topology().await;
+                        client
+                            .catalogue()
+                            .queues
+                            .iter()
+                            .any(|queue| queue.topic == grow && queue.partition_count == 3)
+                    },
+                )
+                .await;
+            }
+            let payload = format!("{grow}/{i}");
+            publish_until_confirmed(&client, &grow, &payload).await;
+            want.insert(payload);
+        }
+        // Every confirmed publish is delivered across the grow, the new
+        // partitions included.
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            let missing: Vec<String> = {
+                let received = received.lock().unwrap();
+                want.difference(&received).cloned().collect()
+            };
+            if missing.is_empty() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "confirmed publishes never delivered across the repartition: {missing:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        consumer.abort();
+        eprintln!("all messages delivered across the repartition");
+    }
+
+    // ---- Public broker restart -----------------------------------------
+    let others: Vec<String> = grows
+        .iter()
+        .filter(|topic| **topic != grow)
+        .cloned()
+        .collect();
+    let restart = topic_with_private_owner("queue", &others, || async {
+        assignments(&public_admin)
+            .await
+            .into_iter()
+            .map(|(topic, (owner, _))| (topic, owner))
+            .collect()
+    })
+    .await;
+    let mut sub = client
+        .subscribe(&restart)
+        .unwrap()
+        .prefetch(8)
+        .sub()
+        .await
+        .expect("subscribe before the restart");
+    publish_until_confirmed(&client, &restart, "held").await;
+    let held = loop {
+        match tokio::time::timeout(Duration::from_secs(30), sub.recv()).await {
+            Ok(SubEvent::Delivery(msg)) if msg.payload == b"held" => break msg,
+            Ok(SubEvent::Delivery(msg)) => {
+                let _ = msg.complete().await;
+            }
+            Ok(SubEvent::Closed(reason)) => panic!("subscription closed: {reason:?}"),
+            Err(_) => panic!("the held message never arrived"),
+        }
+    };
+    let public_node = nodes.pop().expect("public node");
+    let (broker, admin) = (public_node.broker.clone(), public_node.admin.clone());
+    let mut public_node = public_node;
+    public_node
+        .child
+        .take()
+        .unwrap()
+        .kill()
+        .await
+        .expect("kill the public broker");
+    drop(public_node);
+    eprintln!("killed the public broker");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    nodes.push(spawn_node_on(root, 3, false, raft, broker, admin));
+    // The held delivery cannot settle into a session that is gone.
+    drop(held);
+
+    // The client reconnects through the same address, its supervisor
+    // resubscribes, and the owner redelivers what the old session held.
+    let mut want = BTreeSet::from(["held".to_string()]);
+    for i in 0..5 {
+        let payload = format!("{restart}/after-restart-{i}");
+        publish_until_confirmed(&client, &restart, &payload).await;
+        want.insert(payload);
+    }
+    consume_until(&mut sub, &want, Duration::from_secs(120)).await;
+    eprintln!("the held message redelivered and new ones arrived after the restart");
+
+    let topology = client.fetch_topology().await.expect("topology");
+    for entry in &topology.queues {
+        for endpoint in &entry.owner_endpoints {
+            assert_eq!(endpoint.target(), public);
+        }
+    }
+    client.shutdown().await;
 }
