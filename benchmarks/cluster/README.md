@@ -1,0 +1,105 @@
+# Cluster benchmarks
+
+Runs Fibril on fresh local brokers, a standalone broker or a three-node
+Ganglion cluster, and measures queue throughput, latency, CPU, syscalls and
+context switches per message. The workload is the shared comparison client in
+`benchmarks/comparison`, run once per queue against that queue's owner. Every
+run validates message counts and settlement, so a fast but lossy run fails.
+
+These are the tools behind the reference matrix in `BENCHMARKING.md` and the
+experiments in the [optimization log](../../website/src/content/docs/development/optimization-log.md).
+
+## Setup
+
+Linux with Python 3 and `findmnt`. Build the broker and the client:
+
+```sh
+cargo build --release --bin fibril-server
+(cd benchmarks/comparison && cargo build --release)
+```
+
+Use a dedicated filesystem for `--storage`, ideally the drive you care about,
+with several GB free. On consumer NVMe, turn off autonomous power state
+transitions or slow syncs after idle gaps will dominate latency:
+
+```sh
+echo 0 | sudo tee /sys/class/nvme/nvme0/power/pm_qos_latency_tolerance_us
+```
+
+Pass `--nvme nvme0` to `matrix.py` and it refuses to run while that is not 0.
+
+## Run a suite
+
+```sh
+benchmarks/cluster/matrix.py reference --storage /mnt/nvme/fibril-bench --tag main --nvme nvme0
+benchmarks/cluster/report.py main-reference
+```
+
+Results go to `benchmarks/cluster/results/<tag>-<suite>-<shape>-<arm>-<run>`.
+A rerun skips cases that passed and keeps failed attempts beside the new run.
+Flags `matrix.py` does not know go to every `bench.py` run, so
+`--linger-us 0` or `--broker-cpusets '0-3;4-7;8-11'` turn a suite into an
+experiment.
+
+| Suite | What it compares |
+| --- | --- |
+| `reference` | The reference matrix on the shipped defaults: standalone and three-node saturation, 10k/s, 100/s and bursts, plus `replica_durable:3` and buffered standalone |
+| `modes` | Durable against buffered queues, ABBA, at 100/s, bursts, 10k/s and saturation |
+| `lowrate` | 100/s and 200/100 bursts, three runs per mode, for latency |
+| `early` | Early replication off against on, durable queues |
+| `cadence` | Background sync interval for buffered queues |
+| `manyq` | Eight queues at 2k/s each, owners spread over the nodes |
+
+Single runs use `bench.py` directly. `bench.py --help` lists every flag.
+
+```sh
+benchmarks/cluster/bench.py --output results/one --storage /mnt/nvme/fibril-bench \
+  --rate 10000 --durability buffered
+```
+
+## Reading results
+
+`summary.json` in each run directory carries a label (nodes, policy, queue
+mode, queues, payload, rate, client credit and any non-default setting) and:
+
+- `delivered_per_sec` and `latency_ms`, intended send time to delivery, per queue
+- `cpu_seconds_per_million`, broker CPU summed over every node
+- `switches_per_message`, voluntary and involuntary context switches over every
+  node, the best single sign of handoff cost between threads
+- `write_syscalls_per_message`, `staged_batches_per_message`, `fsync_jobs_per_message`
+
+Low-rate latency moves more between runs than throughput, so compare it over
+several ABBA runs. Brokers and client share one machine and localhost, so
+there are no network round trips, and nodes sharing one disk compete for
+fsync. Quote numbers with their label.
+
+## Profiling
+
+`bench.py --perf` records one broker while the workload runs: `flat`
+samples, `fp` call stacks, or `switches` for context switches with stacks.
+`--perf-role follower` picks a follower instead of the owner. Only one broker
+per run, because perf's per-user locked memory rarely covers more.
+
+Allow unprivileged profiling and kernel symbols until the next reboot:
+
+```sh
+sudo sysctl -w kernel.perf_event_paranoid=1 kernel.kptr_restrict=0
+```
+
+Call stacks need frame pointers and line tables. Build a separate binary so
+the timed one stays untouched:
+
+```sh
+CARGO_TARGET_DIR=target-profile CARGO_PROFILE_RELEASE_DEBUG=line-tables-only \
+  RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release --bin fibril-server
+```
+
+Then point `--bin-dir` at `target-profile/release` and read the recording
+with the scripts in `profile/`:
+
+| Script | Shows |
+| --- | --- |
+| `subsystems.py` | Inclusive CPU share per broker subsystem |
+| `syscalls.py` | CPU share per system call |
+| `switches.py` | Where threads went to sleep, for `--perf switches` |
+| `frames.py` | The innermost Fibril, Stroma, Keratin or Ganglion frame, optionally only under one hot symbol |

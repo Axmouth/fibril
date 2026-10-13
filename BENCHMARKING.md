@@ -52,7 +52,8 @@ numbers appear with their labels.
 ### Reference matrix
 
 Rerun these on the reference box when a release or a hot-path change could
-move them. 13 October 2026, current main, 1 KiB, one confirmed client
+move them, with `benchmarks/cluster/matrix.py reference` (see
+[`benchmarks/cluster/README.md`](benchmarks/cluster/README.md)). 13 October 2026, current main, 1 KiB, one confirmed client
 connection (32k confirm window, 2000 prefetch), brokers and client on one
 machine, every node on one NVMe ext4 partition, APST tolerance 0.
 

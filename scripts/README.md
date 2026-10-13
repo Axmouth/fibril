@@ -15,6 +15,7 @@ documented in depth (recipes, metric glossary, ceilings) in
 | `bench-results-table.sh` | Renders a Markdown table from one or more `*.results.txt` files. | result files as args |
 | `bench-e2e-c.sh` | End-to-end: publish N, drain, report throughput. `FIREHOSE=1` drops reader latency tracking to isolate broker delivery. | `MESSAGES`, `CLIENTS`, `SIZE`, `FIREHOSE`, `CONFIRMED` |
 | `bench-stream.sh` | Plexus stream steady-state (stream counterpart of `bench-steady-c.sh`). | `DURABILITY` (tier), `RATE_PER_SEC`, `PARTITIONS`, `DATA_DIR` (device to measure) |
+| `../benchmarks/cluster/matrix.py` | Local standalone and three-node cluster suites with throughput, latency, CPU, syscalls and context switches per message. Runs the reference matrix in `BENCHMARKING.md`. | suite name, `--storage`, `--tag`, see `benchmarks/cluster/README.md` |
 | `fsync-probe.py` | Raw `fdatasync`/`fsync` cost on a device: in-place vs extending vs preallocated. | `--extend`, `--fallocate`, `--gap-ms`, `--path` |
 
 Also see `../clients/bench-plexus-fanout.sh` (Plexus fan-out with one OS process
