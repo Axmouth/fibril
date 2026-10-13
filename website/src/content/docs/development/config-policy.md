@@ -38,14 +38,19 @@ Runtime defaults affect behavior but can reasonably change while the broker is a
 
 Examples:
 
-- default inflight lease duration
-- expiry polling defaults
-- idle queue cleanup timeout
-- idle queue cleanup sweep interval
-- publisher idle expiry
-- future queue declaration defaults
+- default inflight lease duration and expiry polling (`delivery`)
+- idle queue cleanup timeout, sweep interval and publisher idle expiry
+  (`idle_queue_cleanup`)
+- reconnect grace, drain handoff wait and message size limits (`connection`)
+- replication timeouts, in-sync replica minimum, eager failover and agreed
+  checkpoints (`replication`)
+- default partition count for new queues (`partitioning`)
+- stream cursor commit batching and idle stream eviction (`stream`)
+- the soft partitions-per-consumer target for exclusive groups
+  (`consumer_groups`)
+- forwarding limits for private partition owners (`routing`)
 
-These are candidates for persisted global state. The admin UI can edit them, and the broker can apply them without restart where the implementation supports it.
+These live in persisted global state. The admin UI can edit them, and the broker can apply them without restart where the implementation supports it.
 
 Some persisted runtime settings are not broker defaults. For example, the
 current global dead-letter queue target is owned by storage-level state because
@@ -115,23 +120,70 @@ Do not make every environment variable an invisible override for persisted state
 
 Persisted global state lives in the Stroma global store, a versioned key-value store on its own log, separate from queue logs. Runtime settings are one versioned document in it, updated with an expected-version check. In cluster mode the coordination cluster settings document is the authority and each node keeps a local copy.
 
-Useful properties:
+Properties the store has:
 
-- append-only changes
-- snapshot and replay like queue state
-- explicit versioning
-- audit-friendly history for admin changes
-- atomic updates for related settings
+- Changes are appended to the global store log, and the store rebuilds its
+  current values by replaying that log on open. It takes no snapshots and does
+  not compact.
+- Every key carries an explicit version, and admin updates check the expected
+  version.
+- The whole runtime settings document is written at once, so related settings
+  change together.
 
-Runtime settings should be grouped where atomic updates matter. For example, idle queue cleanup settings are related and should be updated together:
+Planned or partial:
 
-```txt
-idle_queue_cleanup = {
-  enabled = true
-  evict_after_ms = 600000
-  sweep_interval_ms = 60000
-  publisher_idle_timeout_ms = 600000
-}
+- Readable change history. Old versions stay in the log, but nothing reads them
+  back. The admin activity feed records settings changes in memory only and
+  resets on restart. The durable trail is the broker log.
+- Snapshots or compaction of the global store log.
+
+Runtime settings are grouped into sections where atomic updates matter. The
+document has these sections, shown here with a few of their fields at their
+first-boot values. The full list and meanings are in
+[configuration](/configuration/), where each one can be seeded under
+`[runtime_seed.<section>]`.
+
+```toml
+[delivery]
+inflight_ttl_ms = 30000
+expiry_poll_min_ms = 15000
+
+[idle_queue_cleanup]
+enabled = false
+evict_after_ms = 600000
+sweep_interval_ms = 60000
+# publisher_idle_timeout_ms is unset by default, so publishers on an open
+# connection never expire.
+
+[connection]
+# The startup seed fills these two on first boot.
+reconnect_grace_ms = 5000
+resume_session_restart_ttl_ms = 60000
+# drain_handoff_timeout_ms is unset by default, which waits up to 30000 ms.
+
+[replication]
+confirm_timeout_ms = 5000
+min_in_sync_replicas = 1
+eager_failover = false
+eager_failover_grace_ms = 1000
+agreed_checkpoint_interval_ms = 0
+
+[partitioning]
+default_partition_count = 1
+
+[stream]
+cursor_commit_window_us = 100
+cursor_commit_max_batch = 1024
+idle_evict_enabled = false
+
+[consumer_groups]
+# default_target_per_consumer is unset by default, which disables the signal.
+
+[routing]
+max_upstream_sessions = 4096
+max_upstream_sessions_per_owner = 1024
+forward_timeout_ms = 30000
+upstream_idle_close_ms = 30000
 ```
 
 ## Naming Direction
