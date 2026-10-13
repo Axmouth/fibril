@@ -939,6 +939,7 @@ pub fn spawn(
                         match outcome {
                             Ok(()) => {
                                 initial_failures.remove(&resource);
+                                broker.notify_history_admitted();
                             }
                             Err(e) => {
                                 let previous = initial_failures.get(&resource);

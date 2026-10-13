@@ -4949,20 +4949,23 @@ impl Broker<StromaEngine> {
             previous = initial;
 
             loop {
-                tokio::select! {
+                // An admission can unblock an owner declaration that failed
+                // earlier, so it reruns the pass even on an unchanged snapshot.
+                let admitted = tokio::select! {
                     changed = watch.changed() => {
                         if changed.is_err() {
                             tracing::debug!("assignment watcher exiting because coordination watch closed");
                             break;
                         }
+                        false
                     }
-                    _ = broker.history_admitted.notified() => {}
+                    _ = broker.history_admitted.notified() => true,
                     _ = tokio::time::sleep(Duration::from_secs(1)),
-                        if !broker.pending_follower_admissions.is_empty() => {}
-                }
+                        if !broker.pending_follower_admissions.is_empty() => false,
+                };
 
                 let next = watch.borrow_and_update().clone();
-                if next == previous && broker.pending_follower_admissions.is_empty() {
+                if next == previous && broker.pending_follower_admissions.is_empty() && !admitted {
                     continue;
                 }
 
@@ -5009,20 +5012,23 @@ impl Broker<StromaEngine> {
             previous = initial;
 
             loop {
-                tokio::select! {
+                // An admission can unblock an owner declaration that failed
+                // earlier, so it reruns the pass even on an unchanged snapshot.
+                let admitted = tokio::select! {
                     changed = watch.changed() => {
                         if changed.is_err() {
                             tracing::debug!("assignment watcher exiting because coordination watch closed");
                             break;
                         }
+                        false
                     }
-                    _ = broker.history_admitted.notified() => {}
+                    _ = broker.history_admitted.notified() => true,
                     _ = tokio::time::sleep(Duration::from_secs(1)),
-                        if !broker.pending_follower_admissions.is_empty() => {}
-                }
+                        if !broker.pending_follower_admissions.is_empty() => false,
+                };
 
                 let next = watch.borrow_and_update().clone();
-                if next == previous && broker.pending_follower_admissions.is_empty() {
+                if next == previous && broker.pending_follower_admissions.is_empty() && !admitted {
                     continue;
                 }
 

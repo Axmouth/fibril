@@ -1925,7 +1925,6 @@ impl GanglionCoordination {
         declaration: fibril_broker::queue_engine::QueueDeclaration,
     ) -> Result<(QueuePartitioning, fibril_broker::queue_engine::QueueDurability), DeclareQueueError>
     {
-        let meta = declaration.meta;
         if group.is_none() && self.stream_config(topic).is_some() {
             return Err(DeclareQueueError::Coordination(
                 OpenraftAdapterError::Storage(format!(
@@ -1933,9 +1932,33 @@ impl GanglionCoordination {
                 )),
             ));
         }
+        // Refuse a count conflict before the declaration changes anything.
+        let existing = self.queue_partitioning(topic, group);
+        if let Some(existing) = existing.filter(|p| p.partition_count != partition_count.max(1)) {
+            return Err(DeclareQueueError::PartitionCountConflict {
+                topic: topic.to_string(),
+                group: group.map(str::to_string),
+                existing: existing.partition_count,
+                requested: partition_count.max(1),
+            });
+        }
+        let mode = self.store_queue_declaration(topic, group, declaration).await?;
         let partitioning = self
             .declare_queue_partitioning(topic, group, partition_count)
             .await?;
+        Ok((partitioning, mode))
+    }
+
+    /// Owners open a queue once its partitions are catalogued, so the
+    /// declaration, mode included, has to commit first. A declare that fails
+    /// after this still leaves the mode fixed.
+    async fn store_queue_declaration(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+        declaration: fibril_broker::queue_engine::QueueDeclaration,
+    ) -> Result<fibril_broker::queue_engine::QueueDurability, DeclareQueueError> {
+        let meta = declaration.meta;
         let key = queue_declaration_key(topic, group);
         for _ in 0..8 {
             let current = self.cluster_attribute(&key);
@@ -1947,12 +1970,18 @@ impl GanglionCoordination {
                 })?,
                 None => Default::default(),
             };
-            match (&current, declaration.durability) {
-                (None, requested) => {
+            // A queue catalogued without a declaration predates modes and
+            // has always been durable.
+            let legacy = current.is_none() && self.queue_partitioning(topic, group).is_some();
+            if legacy {
+                stored.durability = Some(fibril_broker::queue_engine::QueueDurability::Durable);
+            }
+            match (current.is_some() || legacy, declaration.durability) {
+                (false, requested) => {
                     stored.durability =
                         Some(requested.unwrap_or_else(|| self.default_queue_durability()));
                 }
-                (Some(_), Some(requested)) if requested != stored.mode() => {
+                (true, Some(requested)) if requested != stored.mode() => {
                     return Err(DeclareQueueError::DurabilityConflict {
                         topic: topic.to_string(),
                         group: group.map(str::to_string),
@@ -1960,7 +1989,7 @@ impl GanglionCoordination {
                         requested,
                     });
                 }
-                (Some(_), _) => {}
+                (true, _) => {}
             }
             let merged = &mut stored.meta;
             if meta.dlq_policy.is_some() {
@@ -1977,7 +2006,7 @@ impl GanglionCoordination {
             })?;
             let mode = stored.mode();
             if current.as_ref() == Some(&value) {
-                return Ok((partitioning, mode));
+                return Ok(mode);
             }
             match self
                 .forward_command(MetadataRaftCommand::CompareAndSetAttribute {
@@ -1987,7 +2016,7 @@ impl GanglionCoordination {
                 })
                 .await
             {
-                Ok(_) => return Ok((partitioning, mode)),
+                Ok(_) => return Ok(mode),
                 Err(OpenraftAdapterError::AttributeMismatch { .. }) => continue,
                 Err(error) => return Err(DeclareQueueError::Coordination(error)),
             }
@@ -4678,6 +4707,62 @@ mod tests {
             queue_declaration_key("a/b", None),
             queue_declaration_key("a", Some("b"))
         );
+        provider.node.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn queue_mode_is_fixed_before_partitions_and_legacy_queues_stay_durable() {
+        use fibril_broker::{
+            broker::QueueOwnership,
+            queue_engine::{QueueDeclaration, QueueDurability},
+        };
+        let router = InProcessRouter::new();
+        let config = default_raft_config().expect("config");
+        let raft_node = RaftMetadataNode::start(1, config, &router)
+            .await
+            .expect("raft node");
+        let mut members = BTreeMap::new();
+        members.insert(1u64, ganglion_openraft::openraft::BasicNode::new("n1"));
+        raft_node.initialize(members).await.expect("initialize");
+        raft_node
+            .wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .expect("election");
+        let provider = GanglionCoordination::new("broker-a", raft_node);
+        let buffered = || QueueDeclaration::new(Default::default(), Some(QueueDurability::Buffered));
+
+        let (_, mode) = provider
+            .declare_queue_declared("clicks", None, 1, buffered())
+            .await
+            .unwrap();
+        assert_eq!(mode, QueueDurability::Buffered);
+        assert_eq!(
+            provider.queue_declaration("clicks", None).unwrap().map(|d| d.mode()),
+            Some(QueueDurability::Buffered)
+        );
+
+        // A count conflict leaves no declaration behind.
+        provider.declare_queue_partitioning("sized", None, 2).await.unwrap();
+        assert!(matches!(
+            provider.declare_queue_declared("sized", None, 3, buffered()).await,
+            Err(DeclareQueueError::PartitionCountConflict { .. })
+        ));
+        assert_eq!(provider.queue_declaration("sized", None).unwrap(), None);
+
+        // Partitions without a declaration come from before modes existed.
+        provider.declare_queue_partitioning("legacy", None, 1).await.unwrap();
+        assert!(matches!(
+            provider.declare_queue_declared("legacy", None, 1, buffered()).await,
+            Err(DeclareQueueError::DurabilityConflict {
+                existing: QueueDurability::Durable,
+                ..
+            })
+        ));
+        let (_, mode) = provider
+            .declare_queue_declared("legacy", None, 1, Default::default())
+            .await
+            .unwrap();
+        assert_eq!(mode, QueueDurability::Durable);
         provider.node.shutdown().await.unwrap();
     }
 
