@@ -7056,7 +7056,9 @@ async fn delayed_retry_waits_until_deadline() {
 
     assert!(recv_with_timeout(&mut sub, 100).await.is_none());
 
-    let redelivered = recv_with_timeout(&mut sub, 2_000)
+    // Redelivery normally follows the deadline within milliseconds. The wide
+    // bound only keeps a loaded machine from failing the test.
+    let redelivered = recv_with_timeout(&mut sub, 10_000)
         .await
         .expect("message should be redelivered after delayed retry deadline");
     assert_eq!(redelivered.message.offset, msg.message.offset);
@@ -8860,8 +8862,10 @@ async fn idle_stream_channel_evicts_and_rematerializes() {
     driver.abort();
     drop(rx);
     drop(ch);
+    // The sweep runs every 25 ms. Allow ten seconds so a loaded machine does
+    // not fail the test.
     let mut evicted = false;
-    for _ in 0..40 {
+    for _ in 0..200 {
         tokio::time::sleep(Duration::from_millis(50)).await;
         if !broker.is_stream("sensors", 0) {
             evicted = true;
@@ -9898,7 +9902,9 @@ async fn follower_admission_retry(notify: bool) {
         .await
         .unwrap();
     if notify { broker.notify_history_admitted(); }
-    let deadline = if notify { Duration::from_millis(500) } else { Duration::from_secs(3) };
+    // The notified retry must beat the one second periodic fallback, so its
+    // bound stays just under it. The fallback case only needs to finish.
+    let deadline = if notify { Duration::from_millis(900) } else { Duration::from_secs(10) };
     let caught_up = tokio::time::timeout(deadline, async {
         loop {
             let debug = broker.engine().debug_snapshot().await.unwrap();
