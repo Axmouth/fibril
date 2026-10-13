@@ -53,6 +53,106 @@ across distinct nodes before reusing a node. On small clusters this gives the mo
 balanced and failure-tolerant layout (a single node loss takes out the fewest of
 a queue's partitions) rather than packing partitions onto one broker.
 
+## Failover placement prefers live copies
+
+When an owner is gone or draining, `choose_failover_owner` picks the
+replacement from the live, non-draining followers of the committed assignment.
+The ranking comes from each follower's advisory applied-tail heartbeat label
+(`applied/<topic>/<partition>[/<group>]`):
+
+- A follower with a label beats one without.
+- A queue ranks by its log position.
+- A stream ranks by its record tail first and its cursor-event tail second.
+  Producer confirms count records, so a record gap can lose confirmed data,
+  while an event gap only rewinds cursors and causes redelivery.
+- Ties go to the follower that owns the fewest partitions, counting picks made
+  earlier in the same pass, then to the smallest node id.
+
+Only when no live follower remains does the planner's ordinary pick stand. For
+a recovery, the proposed replica set keeps only nodes that already hold a copy,
+as long as they still meet the old write requirement. A fresh node would put a
+full history copy on the critical path, so normal placement adds it after
+activation. When too few copy holders survive, a fresh node joins right away,
+because promotion never lowers the write requirement on liveness alone.
+
+Labels can be stale, so the pick is a hint. Recovery still proves the history
+before the new owner serves. The user-facing rules are in
+[choosing the new owner](/reliability/failure-modes/#choosing-the-new-owner).
+
+## Startup grace holds owners after a leader change
+
+A controller that just won leadership moves no owner until every node registered
+in the committed snapshot has a fresh heartbeat, or until
+`coordination.ganglion.controller_startup_grace_ms` (default 30000) passes. It
+still fills empty follower slots and places new partitions. This stops a
+whole-cluster restart from moving partitions away from a node that is still
+booting. The grace restarts on every leadership win, and expired-heartbeat
+warnings wait for it too, since labels go stale while the whole cluster is down.
+The admin topology lists the nodes still awaited in
+`consensus.controller.startup_grace_waiting_for`. See
+[whole-cluster restart](/reliability/failure-modes/#whole-cluster-restart).
+
+## Owner-only resources wait for their owner
+
+A resource without an accepted (enrolled) history whose write requirement is one
+copy has only its owner known to hold every confirmed write. This covers
+owner-only `speculative` and `durable` streams and legacy queues. Promotion keeps
+such an assignment on the missing owner instead of serving from a copy that may
+lack confirmed data. `ephemeral` streams make no durability promise, so they
+still move on liveness alone.
+
+The controller lists these holds, and pending recoveries the automatic driver
+will never finish (streams and legacy queues), as
+`consensus.controller.attention`. Two guarded operator overrides resolve them:
+
+- `fibrilctl admin recovery withdraw` removes a pending recovery that has no
+  recorded plan. It is refused for queues with an accepted history, because
+  their replicas may already be sealed for the request.
+- `fibrilctl admin recovery accept-owner-loss --confirm-data-loss` records an
+  acceptance bound to the exact owner and epoch. The next move spends it, and it
+  is cleared if the owner serves again or the assignment changes. It is refused
+  for accepted histories and while a recovery is pending.
+
+Details and refusal rules are in
+[a recovery or held owner needs an operator](/reliability/failure-modes/#a-recovery-or-held-owner-needs-an-operator).
+
+## Eager failover and controller wakeups
+
+By default a peer leaves placement when its broker heartbeat expires. Eager
+failover is an opt-in runtime setting (`replication.eager_failover`, off by
+default) that lets the active controller exclude a peer after repeated explicit
+Raft connection failures that span `replication.eager_failover_grace_ms`
+(default 1000, range 0 to 60000). A grace of zero also turns on idle Raft
+connection monitoring on the active controller. Exclusion only starts the normal
+placement and recovery path. See [eager failover](/reliability/replication/#eager-failover).
+
+The controller loop wakes on committed snapshot changes, on transport failure
+reports while eager failover is on, on its tick, and on Ganglion's
+`watch_leader`. The leader wake matters when the killed node also led Raft: the
+new leader acts on failures it saw while electing instead of sleeping up to a
+full tick. See the
+[controller wake note](/development/engineering-notes/#controller-wake-on-leadership).
+
+## Restarted followers rejoin as learners
+
+A follower process restart on a queue with W >= 2, while the owner keeps
+running, requests no recovery. The accepted history marks the follower
+suspended, and it rejoins through learner admission while the queue keeps
+serving. Owner restarts, stream replica restarts and W = 1 queues still go
+through recovery. See
+[restarted queue followers](/reliability/recovery-sealing/#restarted-queue-followers).
+
+## Process identity is published once per start
+
+Each broker carries its process identity in the `fibril/history-process`
+heartbeat label. Label-only node updates are version-silent in Ganglion: they
+neither bump the snapshot generation nor wake watchers, so heartbeats stay cheap.
+A restarted process's new identity could therefore stay invisible to watched
+snapshots until some unrelated write. Histories built from such a stale view
+would suspend the replica with nothing to re-admit it. So the first registration
+of each process also writes the `fibril/node-process/<node>` attribute, which
+bumps the generation and publishes a snapshot that carries the new label.
+
 ## Load data is never authority
 
 Two load signals are kept separate and advisory:
