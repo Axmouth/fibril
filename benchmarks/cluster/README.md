@@ -38,8 +38,8 @@ benchmarks/cluster/report.py main-reference
 Results go to `benchmarks/cluster/results/<tag>-<suite>-<shape>-<arm>-<run>`.
 A rerun skips cases that passed and keeps failed attempts beside the new run.
 Flags `matrix.py` does not know go to every `bench.py` run, so
-`--linger-us 0` or `--broker-cpusets '0-3;4-7;8-11'` turn a suite into an
-experiment.
+`--linger-us 0`, `--broker-cpusets '0-3;4-7;8-11'` or
+`--node-env KERATIN_EXPERIMENT_SOMETHING=1` turn a suite into an experiment.
 
 | Suite | What it compares |
 | --- | --- |
@@ -48,6 +48,8 @@ experiment.
 | `lowrate` | 100/s and 200/100 bursts, three runs per mode, for latency |
 | `early` | Early replication off against on, durable queues |
 | `cadence` | Background sync interval for buffered queues |
+| `cpu` | Durable and buffered at 100/s, 10k/s and saturation, for CPU and wakeup work |
+| `peak` | Saturation only, four runs per mode |
 | `manyq` | Eight queues at 2k/s each, owners spread over the nodes |
 
 Single runs use `bench.py` directly. `bench.py --help` lists every flag.
@@ -66,10 +68,15 @@ mode, queues, payload, rate, client credit and any non-default setting) and:
 - `cpu_seconds_per_million`, broker CPU summed over every node
 - `switches_per_message`, voluntary and involuntary context switches over every
   node, the best single sign of handoff cost between threads
+- `sleeps_per_message_by_thread`, voluntary switches per thread name: Tokio
+  workers and each log's `keratin-writer`, `keratin-fsync` and `keratin-notify`
 - `write_syscalls_per_message`, `staged_batches_per_message`, `fsync_jobs_per_message`
 
 Low-rate latency moves more between runs than throughput, so compare it over
-several ABBA runs. Brokers and client share one machine and localhost, so
+several ABBA runs. Long sessions on one consumer drive drift: durable
+saturation measured 126-130k msg/s on a rested drive and about 98k after many
+hours of runs. Interleave the arms you compare, and rest or trim the drive
+before reference numbers. Brokers and client share one machine and localhost, so
 there are no network round trips, and nodes sharing one disk compete for
 fsync. Quote numbers with their label.
 

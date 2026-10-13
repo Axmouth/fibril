@@ -62,6 +62,11 @@ SUITES = {
     # Background sync interval for buffered queues.
     "cadence": [("smooth10000", ("buffered-sync" + ms, ["--durability", "buffered", "--sync-interval-ms", ms]), str(i))
                 for i, ms in enumerate(["50", "100", "250", "1000", "1000", "250", "100", "50"])],
+    # Durable and buffered at the rates that matter for wakeup and CPU work.
+    "cpu": repeat(["smooth100", "smooth10000", "saturation"], DURABLE, 2)
+    + repeat(["smooth100", "smooth10000", "saturation"], BUFFERED, 2),
+    # Peak throughput, durable and buffered, four runs each.
+    "peak": repeat(["saturation"], DURABLE, 4) + repeat(["saturation"], BUFFERED, 4),
     # Eight queues at 2k/s each, owners spread over the nodes.
     "manyq": [(shape, (name + "-q8", flags + ["--queues", "8"]), run) for shape, (name, flags), run
               in abba("smooth2000", DURABLE, BUFFERED)],

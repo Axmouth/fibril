@@ -216,6 +216,7 @@ def run(args):
         for i in range(copies):
             node_data[i].mkdir(parents=True)
             node_env = dict(env, KERATIN_DRAIN_COUNTERS_PATH=str(case / f"node-{i}-counters.json"))
+            node_env.update(item.split("=", 1) for item in args.node_env)
             if args.preallocate_bytes is not None:
                 node_env["FIBRIL_KERATIN_SEGMENT_PREALLOCATE_BYTES"] = str(args.preallocate_bytes)
             config = case / f"node-{i}.toml"
@@ -350,6 +351,7 @@ def summarize(args, case, results, before, after, samples):
                   "confirm_window": args.confirm_window, "prefetch": args.prefetch,
                   "early_replication": bool(args.early_replication), "linger_us": args.linger_us,
                   "sync_interval_ms": args.sync_interval_ms, "unconfirmed": args.unconfirmed,
+                  "node_env": args.node_env,
                   "broker_cpusets": args.broker_cpusets},
         "issued": issued,
         "delivered_per_sec": sum(r.get("observed_delivery_per_sec") or 0 for r in results),
@@ -400,6 +402,8 @@ def main():
     parser.add_argument("--perf", choices=["flat", "fp", "switches"],
                         help="Record one broker with perf: flat samples, frame-pointer stacks or context switches")
     parser.add_argument("--perf-role", choices=["owner", "follower"], default="owner")
+    parser.add_argument("--node-env", action="append", default=[], metavar="KEY=VALUE",
+                        help="Environment for every broker, for experiment switches. Repeatable")
     parser.add_argument("--rust-log", default="warn")
     parser.add_argument("--keep-data", action="store_true", help="Keep broker data after the run")
     args = parser.parse_args()
