@@ -96,15 +96,18 @@ What the experiments also showed:
 | `KDurability::AfterFlush` | Landed in Keratin `3de5c7b`. One flush per staged group, no fsync, durable frontier unchanged. A failed write latches the log. |
 | Written frontier | Keratin `120ab87`. `written_next` and `watch_written_next`, never below `durable_next`. A latched log moves it back to the durable end at once (`0d36a67`). |
 | Written reads | `scan_written_with_byte_budget` (Keratin `0d36a67`) reads up to the written frontier from the tail cache, or from the segment files on a miss. `scan_for_replication` still falls back to a durable-only scan on a miss. |
-| Buffered declaration | Stroma `set_queue_buffered` (Keratin `a80288f`), per partition, held in memory like `set_stream_writes_synced`. Not yet called by the broker. |
+| Buffered declaration | The mode lives in the cluster queue declaration (`QueueDeclaration` in `crates/broker/src/queue_engine.rs`), fixed at first declare. Each node mirrors it into Stroma's `set_queue_buffered`, stored as a `buffered` partition marker (Keratin `4bebb9a`), when it opens the queue as owner or follower. Standalone brokers set it on first declare. |
 | Queue delivery reads | `read_selected` in `stroma/core/src/stroma/combined.rs` reads at the written frontier for buffered queues and at the durable frontier otherwise. Dead-letter payload fetches follow the same rule. |
 | Queue apply | `append_combined` applies events only after the append completes at the requested durability, so under `AfterFlush` apply follows the flush. |
 | Queue append durability | Durable queues: the log config default, `AfterFsync`. Buffered queues: `AfterFlush` for publishes, acks, nacks, releases, discards and dead-letter markers. Legacy helpers that hard-code `AfterFsync` keep it. |
-| Follower apply | Fibril requests `AfterFsync` for follower appends (`queue_apply_batch` in `crates/broker/src/replication.rs`). Followers report `DurableProgress::Queue { next }` through `QueuePushProgress`. |
-| Confirm gate | `await_dependency` waits for owner completion and `nodes - 1` followers with durable progress past the publish. |
-| Delivery gate | `refresh_visibility_ceiling` sets the replica-durable ceiling from follower progress. Solo queues have no ceiling because apply already implies durable. |
-| `replica_accepted` | Parsed and resolved, but the `acknowledgement` field is not read at runtime, so it behaves exactly like `replica_durable`. |
-| Early replication | Runtime setting `replication.early_replication`, off by default, history-bound assignments only. Ships written records to followers before owner fsync. Confirm and visibility still use durable progress. |
+| Follower apply | Push-path followers of a buffered queue append with `AfterFlush` and report written and durable positions (`QueuePushProgress` frame `FQP2`). The pull path reports one position, so it still appends with `AfterFsync`. |
+| Confirm gate | `await_dependency` waits for owner completion and `nodes - 1` followers past the publish, counting written positions when the publish was admitted buffered (`QueuePublishCommit::buffered`). |
+| Delivery gate | `refresh_visibility_ceiling` and the publish observer compute the ceiling from written positions on a buffered queue and durable ones otherwise. Solo queues have no ceiling because apply follows the append. |
+| `replica_accepted` | Deprecated. Config maps it to `replica_durable` with a warning. |
+| `replica_buffered:N` | Cluster config mode. Assignments get `replica_durable:N`, and new queues declared without a mode are buffered. Admin shows a buffered queue's policy as `replica_buffered`. |
+| Early replication | Runtime setting `replication.early_replication`, off by default, history-bound assignments only. Ships written records to followers before owner fsync. Always on for buffered queues with a history-bound assignment. |
+| Background sync cadence | Runtime setting `storage.background_sync_interval_ms`, applied to open queue logs and to logs opened later (Keratin `9c81d3a`). |
+| Seal fence | An epoch advance syncs every written record first, also when no append waits (Keratin `9c81d3a`). Before that a seal of a follower holding unsynced buffered records refused. |
 | Live writer settings | Keratin `e333bce`. Revision-checked changes to default durability, batch limits and fsync timers, adopted after a persistence barrier, reset on reopen. |
 | Periodic sync | Keratin `c397294`. Every log syncs written records in the background, 100 ms by default, 0 turns it off. Logs that expect every write synced warn if a background sync ever covers an unsynced write (`faf39b0`). Streams' ephemeral tier still syncs every 5 ms from a broker task. |
 | Checkpoints | Keratin `a80288f`. The local checkpoint, the agreed checkpoint pin and the learner export sync the log up to the captured boundary before the snapshot becomes recovery authority. |
@@ -267,18 +270,26 @@ process fences.
 
 ### Broker and wire
 
-- Followers of a buffered queue append with `AfterFlush` and report both
-  `written_next` and `durable_next`. `QueuePushProgress` gains the written field.
-  No durable field ever carries written progress.
-- `QueueDependencies` keeps two ceilings per queue: written visibility and
-  durable visibility. `await_dependency` and the delivery gate pick the one
-  matching the queue mode. Retention, checkpoints and diagnostics use durable.
-- A buffered queue always uses the written replication source, whatever
-  `replication.early_replication` says. With a durable-only source it cannot
-  make progress, as the first probe showed. Early replication stays a separate
-  switch for durable queues.
-- Solo buffered queues have no ceiling, as today, because apply follows the
+- Push-path followers of a buffered queue append with `AfterFlush` and report
+  both positions. `QueuePushProgress` carries the written position in a new
+  `FQP2` frame, sent only when it is ahead, so durable queues keep the `FQP1`
+  frame older brokers read. No durable field ever carries written progress.
+  An idle follower's keepalive rereads its durable frontier, which moves with
+  the background sync.
+- The pull path reports a single position, so it keeps appending with
+  `AfterFsync`. It only runs as the fallback for catch-up and checkpoints.
+- A queue never changes mode in this phase, so `QueueDependencies` keeps one
+  folded frontier, computed from written positions for a buffered queue and
+  durable ones otherwise. Retention keeps using durable positions.
+- A buffered queue with a history-bound assignment always uses the written
+  replication source. Without that binding it replicates from the durable
+  source, one background sync behind. Written-source reads that miss the tail
+  cache still fall back to durable-only file reads, a performance item.
+- Solo buffered queues have no ceiling, as before, because apply follows the
   flush.
+- Declares carry the mode as one trailing byte, only when set, and a reply
+  that answers such a declare uses `FDK2` with the mode and warnings. Older
+  brokers refuse a declare naming a mode instead of making a durable queue.
 
 ### Acks and settles
 
@@ -515,10 +526,11 @@ Follow the [optimization log](/development/optimization-log/) protocol:
 2. **Stroma (done).** Per-queue buffered declaration. Written-visible selected
    reads on the current read path. Settle and control-event durability audit.
    Sync before checkpoint publication. Follower resume syncs first.
-3. **Broker.** Declare field, fixed at first declare. Written progress on the
-   wire, two ceilings, mode-aware confirm and delivery, written source for
-   buffered queues. Admin and dashboard show mode, written and durable progress,
-   and durable lag. Runtime setting for cadence.
+3. **Broker (done).** Declare field, fixed at first declare. Written progress
+   on the wire, mode-aware confirm and delivery, written source for buffered
+   queues. Admin shows the mode and the queues page each partition's unsynced
+   records. Runtime setting for cadence. The Rust client has
+   `QueueConfig::buffered()`. The other SDKs follow.
 4. **Failure acceptance.** Section 9 correctness cases, including owner restart
    after power loss. Docs for the mode, warning text and consumer guidance.
    Ship as an experimental opt-in.
@@ -564,12 +576,20 @@ Decided:
    therefore lose a dead-lettered message on power loss, as any buffered
    publish can.
 
+8. Where the mode lives: in the cluster queue declaration, mirrored into
+   each node's storage when it owns or follows the queue. Ganglion's
+   assignment policy enum is unchanged, so no Raft format change. The
+   assignment's `replica_durable:N` count applies to written copies on a
+   buffered queue.
+9. `replica_buffered:N` as the cluster setting means `replica_durable:N`
+   copies with buffered as the default for new queues, which also settles
+   whether a cluster default for new queues exists. A declare naming a mode
+   wins.
+
 Still open:
 
 1. Should Fibril reserve `speculative` for the queue form of early delivery so
    the queue and stream tier names line up?
 2. Should buffered queues carry a per-delivery header after all?
-3. Should a cluster runtime default for new queues exist at all, or only the
-   declare field?
-4. Should the stream ephemeral tier move from `AfterWrite` to `AfterFlush` so
+3. Should the stream ephemeral tier move from `AfterWrite` to `AfterFlush` so
    its documented process-crash promise holds?

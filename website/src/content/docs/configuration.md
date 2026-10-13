@@ -292,8 +292,13 @@ owner-only. A value of one keeps a durable stream available across a single node
 loss; zero makes durable streams owner-only (durable on disk, not HA). See
 [Plexus streams](/concepts/plexus-streams/).
 `coordination.ganglion.assignment_durability` is the default durability
-policy for new assignments (`local_durable`, `replica_accepted`, `replica_durable`,
-or `majority_durable`).
+policy for new assignments (`local_durable`, `replica_durable`,
+`replica_buffered` or `majority_durable`). `replica_buffered` keeps the node
+count of `replica_durable` and makes new queues buffered unless their declare
+names a mode. A buffered queue confirms once the required nodes have written a
+message to the OS, before fsync, so power loss on all of them at once can lose
+recent confirmed messages. `replica_accepted` is deprecated, logs a warning and
+behaves as `replica_durable`, as it always has.
 
 `recovery.on_mismatch` controls what happens when recovery finds a damaged queue
 log: `quarantine` (default) isolates the partition, `refuse` reports not ready,
@@ -498,6 +503,13 @@ and lost upstream sessions, and `fibril_forwarded_sessions` on owners. The
 Cluster page shows each public broker's upstream sessions and each owner's
 forwarded sessions, and the connections view marks a forwarded session as
 "via node P for user U".
+
+The `storage` runtime setting sets how often queue logs sync records they have
+written but not synced. Only buffered queues leave such records.
+
+| Runtime setting | Default | Meaning |
+| --- | --- | --- |
+| `storage.background_sync_interval_ms` | `100` | Target interval between syncs of a queue log's unsynced records. Slow disks can stretch it. `0` turns it off and leaves syncing to the operating system, with no limit on how long a confirmed buffered message stays unsynced. Applies to open queue logs at once. |
 
 ## Linux Memory Policy
 
