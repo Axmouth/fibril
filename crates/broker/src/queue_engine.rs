@@ -382,6 +382,18 @@ pub trait QueueEngine {
 /// substrate, not the delivery model. The broker-side stream actor drives this.
 #[async_trait]
 pub trait StreamStore: Send + Sync {
+    /// Mark a stream whose every write waits for a sync, so storage can warn
+    /// if a background sync ever has to cover its writes. Engines without
+    /// that check ignore it.
+    async fn set_stream_writes_synced(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _synced: bool,
+    ) -> Result<(), StromaError> {
+        Ok(())
+    }
+
     async fn create_stream(
         &self,
         tp: &str,
@@ -509,6 +521,15 @@ impl StreamStore for StromaEngine {
         retention: Option<RetentionConfig>,
     ) -> Result<(), StromaError> {
         self.inner.create_stream(tp, part, retention).await
+    }
+
+    async fn set_stream_writes_synced(
+        &self,
+        tp: &str,
+        part: u32,
+        synced: bool,
+    ) -> Result<(), StromaError> {
+        self.inner.set_stream_writes_synced(tp, part, synced).await
     }
 
     async fn append_stream_record(

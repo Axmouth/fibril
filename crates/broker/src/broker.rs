@@ -1986,6 +1986,14 @@ impl<
             Err(err) => return Err(err),
         };
         let opened = Arc::new(opened);
+        // Only the durable tier waits for a sync on every write. The express
+        // tiers rely on background syncs, so storage must not warn for them.
+        if let Err(err) = engine
+            .set_stream_writes_synced(tp, part, durability == StreamDurability::Durable)
+            .await
+        {
+            tracing::warn!(topic = tp, partition = part, "could not mark stream sync expectation: {err}");
+        }
         self.fence_opened_stream_owner(&key).await?;
         Ok(self.streams.entry(key).or_insert(opened).value().clone())
     }

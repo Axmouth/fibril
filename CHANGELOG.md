@@ -596,6 +596,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Changed
 
+- Durable-tier streams tell storage that every write waits for a sync when
+  they open, so Keratin warns if a background sync ever has to cover their
+  writes. Durable queues get the same check from Stroma. The warning points at
+  a write path that skipped its sync and never changes sync behavior.
+
 - A newly elected metadata leader runs its controller pass as soon as it
   wins, instead of waiting for the next tick (2 s by default). With eager
   failover this acts on the peer failures seen during the election right
