@@ -350,8 +350,8 @@
       <label class="checkbox-label">
         <input id="replication.early_replication" data-runtime-setting type="checkbox">
         <span>
-          <span class="settings-label">Early replication (experimental)</span>
-          <span class="settings-help">Owners send new records to followers before their own disk sync, which can lower replicated publish latency. Publish confirms still wait for the owner's disk. If the owner's disk fails, followers can keep records that were never confirmed. Applies on the next replication read.</span>
+          <span class="settings-label">Early replication</span>
+          <span class="settings-help">Owners send new records to followers before their own disk sync, which lowers replicated publish latency. On by default. Publish confirms still wait for the owner's disk. If the owner's disk fails, followers can keep records that were never confirmed. Applies on the next replication read.</span>
           <span id="seed.replication.early_replication" class="settings-help"></span>
         </span>
       </label>

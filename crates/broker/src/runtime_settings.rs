@@ -286,9 +286,9 @@ pub struct DeliveryRuntimeSettings {
 pub struct ReplicationRuntimeSettings {
     /// Opt-in controller suspicion from repeated explicit Raft transport errors.
     pub eager_failover: bool,
-    /// Experimental. Owners of history-bound queues send written records to
-    /// followers before their own fsync. Confirms still wait for owner
-    /// durability.
+    /// Owners of history-bound queues send written records to followers
+    /// before their own fsync, so follower writes overlap the owner's. Confirms
+    /// still wait for owner durability. On by default.
     pub early_replication: bool,
     /// Background agreed checkpoints; zero disables new attempts.
     pub agreed_checkpoint_interval_ms: u64,
@@ -363,7 +363,7 @@ impl Default for ReplicationRuntimeSettings {
     fn default() -> Self {
         Self {
             eager_failover: false,
-            early_replication: false,
+            early_replication: true,
             agreed_checkpoint_interval_ms: 0,
             agreed_checkpoint_max_events: 0,
             agreed_checkpoint_max_bytes: 0,

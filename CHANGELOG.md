@@ -12,6 +12,20 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Breaking changes
 
+- Clusters default to `majority_durable` assignment durability instead of
+  `local_durable`. A confirmed publish then waits for a majority of copies to
+  sync, so a queue survives losing one node of three without losing confirmed
+  messages or availability. On a two-node cluster a majority is both nodes, so
+  confirms pause while either is down. Set
+  `coordination.ganglion.assignment_durability = "local_durable"` to keep the
+  previous behavior. Standalone brokers are unchanged.
+
+- Early replication (`replication.early_replication`) is on by default and no
+  longer experimental. Owners send written records to followers before their
+  own fsync, and confirms still wait for the owner's own sync. The setting is
+  stored with the cluster, so an existing cluster that saved it keeps its
+  value. Turn it on from the settings page.
+
 - Early replication is the `replication.early_replication` runtime setting,
   off by default, shared by the cluster and adjustable live from the settings
   page. The `early-replication-experiment` build feature, the

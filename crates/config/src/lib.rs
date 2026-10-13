@@ -1441,7 +1441,7 @@ pub struct GanglionAssignmentDurabilitySection {
 impl Default for GanglionAssignmentDurabilitySection {
     fn default() -> Self {
         Self {
-            mode: GanglionAssignmentDurabilityMode::LocalDurable,
+            mode: GanglionAssignmentDurabilityMode::MajorityDurable,
             nodes: None,
         }
     }
@@ -1485,7 +1485,7 @@ pub enum GanglionAssignmentDurabilityMode {
 
 impl Default for GanglionAssignmentDurabilityMode {
     fn default() -> Self {
-        Self::LocalDurable
+        Self::MajorityDurable
     }
 }
 
@@ -1854,7 +1854,7 @@ pub struct ConsumerGroupSettings {
 #[serde(default)]
 pub struct ReplicationSettings {
     pub eager_failover: bool,
-    /// Experimental. See the runtime setting of the same name.
+    /// See the runtime setting of the same name. On by default.
     pub early_replication: bool,
     pub agreed_checkpoint_interval_ms: u64,
     /// Start earlier after this many events beyond the agreed cut; 0 disables.
@@ -1939,7 +1939,7 @@ impl Default for ReplicationSettings {
     fn default() -> Self {
         Self {
             eager_failover: false,
-            early_replication: false,
+            early_replication: true,
             agreed_checkpoint_interval_ms: 0,
             agreed_checkpoint_max_events: 0,
             agreed_checkpoint_max_bytes: 0,
@@ -2466,7 +2466,7 @@ mod tests {
         assert_eq!(
             config.coordination.ganglion.assignment_durability,
             GanglionAssignmentDurabilitySection {
-                mode: GanglionAssignmentDurabilityMode::LocalDurable,
+                mode: GanglionAssignmentDurabilityMode::MajorityDurable,
                 nodes: None,
             }
         );

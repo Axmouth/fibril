@@ -23,10 +23,13 @@ election and failure detection. Fibril 4426dbe and Ganglion d45e682.
 
 Early replication and three follower batching experiments were switched by Cargo
 features and per-process environment variables, so normal builds lacked them and
-nodes could disagree. They are cluster runtime settings, off by default and
-listed as experimental on the Settings page: `replication.early_replication`,
-`replication.stream_apply_fixed_deadline`, `replication.stream_apply_open_batch`
-and `replication.stream_initial_credit_bytes`. Targeted queue routing is always
+nodes could disagree. They are cluster runtime settings. Early replication
+(`replication.early_replication`) has been on by default since October 2026,
+see [owner I/O failure](/development/recovery-continuation/#early-replication-under-owner-io-failure).
+The batching experiments stay off by default and listed as experimental on the
+Settings page: `replication.stream_apply_fixed_deadline`,
+`replication.stream_apply_open_batch` and
+`replication.stream_initial_credit_bytes`. Targeted queue routing is always
 on. Fibril ec17a7c. Measurements for each are in the
 [optimization log](/development/optimization-log/#experiment-record).
 

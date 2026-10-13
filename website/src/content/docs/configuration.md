@@ -198,7 +198,7 @@ These fields are read on process start.
 | `coordination.ganglion.stream_replication_factor` | none | none | `1` |
 | `coordination.ganglion.repartition_adoption_timeout_ms` | none | none | `30000` |
 | `coordination.ganglion.controller_startup_grace_ms` | none | none | `30000` |
-| `coordination.ganglion.assignment_durability` | `FIBRIL_COORDINATION_ASSIGNMENT_DURABILITY` | none | `local_durable` |
+| `coordination.ganglion.assignment_durability` | `FIBRIL_COORDINATION_ASSIGNMENT_DURABILITY` | none | `majority_durable` |
 | `recovery.on_mismatch` | `FIBRIL_RECOVERY_ON_MISMATCH` | none | `quarantine` |
 
 Changing these generally requires restarting the server.
@@ -292,8 +292,11 @@ owner-only. A value of one keeps a durable stream available across a single node
 loss; zero makes durable streams owner-only (durable on disk, not HA). See
 [Plexus streams](/concepts/plexus-streams/).
 `coordination.ganglion.assignment_durability` is the default durability
-policy for new assignments (`local_durable`, `replica_durable`,
-`replica_buffered` or `majority_durable`). `replica_buffered` keeps the node
+policy for new assignments (`majority_durable`, the default, `local_durable`,
+`replica_durable` or `replica_buffered`). `majority_durable` keeps every
+confirmed message on a majority of copies, so a queue survives losing one
+machine of three. On a two-node cluster a majority is both nodes, so confirms
+pause while either is down. `local_durable` waits only for the owner. `replica_buffered` keeps the node
 count of `replica_durable` and makes new queues buffered unless their declare
 names a mode. A buffered queue confirms once the required nodes have written a
 message to the OS, before fsync, so power loss on all of them at once can lose
@@ -606,7 +609,7 @@ These settings apply to the experimental cluster replication path.
 | `runtime_seed.replication.agreed_checkpoint_max_events` | `0` | Start an enabled checkpoint earlier after this many events beyond its agreed cut; 0 disables the event trigger. |
 | `runtime_seed.replication.agreed_checkpoint_max_bytes` | `0` | Start earlier after approximately this many local append content bytes since observing the last certificate; 0 disables. The counter resets on reopen and excludes record framing; the periodic interval remains the fallback. |
 | `runtime_seed.replication.eager_failover` | `false` | Opt-in explicit peer-connection failure detection on the active metadata controller. Recovery proof is still required; see [eager failover](/reliability/replication/#eager-failover). |
-| `runtime_seed.replication.early_replication` | `false` | Experimental. Owners of history-bound queues send written records to followers before their own fsync. Publish confirms still wait for owner durability. Adjustable live from the settings page; see [owner I/O failure](/development/recovery-continuation/#early-replication-under-owner-io-failure). |
+| `runtime_seed.replication.early_replication` | `true` | Owners of history-bound queues send written records to followers before their own fsync. Publish confirms still wait for owner durability. Adjustable live from the settings page; see [owner I/O failure](/development/recovery-continuation/#early-replication-under-owner-io-failure). |
 | `runtime_seed.replication.eager_failover_grace_ms` | `1000` | Failed-reconnect grace, 0–60000 ms. Zero enables idle-disconnect monitoring and immediate reconnect verification on the active controller. Positive values require failed contact across the interval; heartbeat expiry handles silent failures. |
 | `runtime_seed.replication.caught_up_poll_ms` | `1000` | Caught-up pull interval and streaming owner long-poll timeout. Streaming reads wake when new work arrives, without waiting for the timeout. |
 | `runtime_seed.replication.retry_poll_ms` | `100` | Follower retry interval after a partial pull or transient replication error. |

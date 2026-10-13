@@ -65,11 +65,11 @@ is set per cluster through `coordination.ganglion.assignment_durability` (see
 <table>
   <thead><tr><th>Mode</th><th>A confirmed publish returns once…</th></tr></thead>
   <tbody>
-    <tr><td><code>local_durable</code></td><td>the owner has durably written the append (the default, same as a single node)</td></tr>
+    <tr><td><code>local_durable</code></td><td>the owner has durably written the append (same as a single node)</td></tr>
     <tr><td><code>replica_durable</code></td><td>N assigned nodes (including the owner) have durably written the append</td></tr>
     <tr><td><code>replica_buffered</code></td><td>for a buffered queue, N assigned nodes (including the owner) have written the append to the OS, before fsync. New queues are buffered unless their declare names a mode. See <a href="/reliability/buffered-queues/">buffered queues</a></td></tr>
     <tr><td><code>replica_accepted</code></td><td>deprecated, same as <code>replica_durable</code></td></tr>
-    <tr><td><code>majority_durable</code></td><td>a durable majority of the assigned replica set has the append</td></tr>
+    <tr><td><code>majority_durable</code></td><td>a durable majority of the assigned replica set has the append (the default)</td></tr>
   </tbody>
 </table>
 

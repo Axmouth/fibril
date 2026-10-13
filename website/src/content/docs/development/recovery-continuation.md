@@ -194,6 +194,26 @@ This fixture requests the controller's recovery transition explicitly and stops
 the broker gracefully. It does not measure failure detection or model whole-node
 power loss. Abrupt process exit remains covered separately by the native screen.
 
+### On by default
+
+Early replication became the default in October 2026. The evidence:
+
+- The whole workspace, the fault-injection suite and the deterministic
+  simulation suite pass with it on, so every cluster, failover and recovery test
+  runs with it.
+- Buffered queues always use it, so their owner kill, owner power loss and
+  whole-cluster power loss tests exercise followers that hold records the owner
+  never synced. Recovery keeps the longest surviving history and the restarted
+  owner cuts its log back.
+- Lost replication responses replay by offset as without it, and metadata quorum
+  loss blocks every ownership change in either mode.
+- A follower with a persistent storage fault latches its own log. Under
+  `majority_durable` the other follower still completes confirms.
+
+On three nodes sharing one NVMe disk, 1 KiB durable messages, turning it on
+raised saturation from 111-114k to 125-130k messages per second and lowered
+burst and 10k/s medians, for 10-20% more broker CPU per message at 10k/s.
+
 Before adoption, verify retry cursors,
 recovery source selection and divergent unconfirmed suffixes. Add index, manifest,
 rollover and directory-sync failures. Owner relinquishment, unhealthy successors,

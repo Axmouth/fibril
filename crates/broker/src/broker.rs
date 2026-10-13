@@ -471,7 +471,7 @@ impl Default for BrokerConfig {
             replication_read_timeout_slack_ms: 10_000,
             replication_owner_connect_timeout_ms: 5_000,
             replication_stream_enabled: true,
-            replication_early: false,
+            replication_early: true,
             replication_stream_apply_linger_us: 2_000,
             replication_stream_apply_max_merge_bytes: 16 * 1024 * 1024,
             replication_stream_buffer_batches: FOLLOWER_STREAM_BUFFER_BATCHES,
