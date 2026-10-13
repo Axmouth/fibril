@@ -94,17 +94,20 @@ What the experiments also showed:
 | Piece | State on main |
 | --- | --- |
 | `KDurability::AfterFlush` | Landed in Keratin `3de5c7b`. One flush per staged group, no fsync, durable frontier unchanged. A failed write latches the log. |
-| Written reads | `scan_for_replication` serves written records from the tail cache and falls back to a durable-only scan on a miss (`keratin-log/src/reader.rs`). No public written frontier accessor, `flushed_through` is private. |
-| Queue delivery reads | `read_selected` in `stroma/core/src/stroma/combined.rs` is durable-fenced on both cache and disk paths. |
-| Queue apply | `append_combined` applies events only after the append completes at the requested durability, so under `AfterFlush` apply would follow the flush. |
-| Queue append durability | Derived from the log config default (`queue_event_log_config`), which is `AfterFsync`. Some paths pass the event log default explicitly (release, nack, DLQ commit) and a few hard-code `AfterFsync`. |
+| Written frontier | Keratin `120ab87`. `written_next` and `watch_written_next`, never below `durable_next`. A latched log moves it back to the durable end at once (`0d36a67`). |
+| Written reads | `scan_written_with_byte_budget` (Keratin `0d36a67`) reads up to the written frontier from the tail cache, or from the segment files on a miss. `scan_for_replication` still falls back to a durable-only scan on a miss. |
+| Buffered declaration | Stroma `set_queue_buffered` (Keratin `a80288f`), per partition, held in memory like `set_stream_writes_synced`. Not yet called by the broker. |
+| Queue delivery reads | `read_selected` in `stroma/core/src/stroma/combined.rs` reads at the written frontier for buffered queues and at the durable frontier otherwise. Dead-letter payload fetches follow the same rule. |
+| Queue apply | `append_combined` applies events only after the append completes at the requested durability, so under `AfterFlush` apply follows the flush. |
+| Queue append durability | Durable queues: the log config default, `AfterFsync`. Buffered queues: `AfterFlush` for publishes, acks, nacks, releases, discards and dead-letter markers. Legacy helpers that hard-code `AfterFsync` keep it. |
 | Follower apply | Fibril requests `AfterFsync` for follower appends (`queue_apply_batch` in `crates/broker/src/replication.rs`). Followers report `DurableProgress::Queue { next }` through `QueuePushProgress`. |
 | Confirm gate | `await_dependency` waits for owner completion and `nodes - 1` followers with durable progress past the publish. |
 | Delivery gate | `refresh_visibility_ceiling` sets the replica-durable ceiling from follower progress. Solo queues have no ceiling because apply already implies durable. |
 | `replica_accepted` | Parsed and resolved, but the `acknowledgement` field is not read at runtime, so it behaves exactly like `replica_durable`. |
 | Early replication | Runtime setting `replication.early_replication`, off by default, history-bound assignments only. Ships written records to followers before owner fsync. Confirm and visibility still use durable progress. |
 | Live writer settings | Keratin `e333bce`. Revision-checked changes to default durability, batch limits and fsync timers, adopted after a persistence barrier, reset on reopen. |
-| Periodic sync | None for queues. With only `AfterFlush` traffic the writer never schedules an interval fsync, because a commit needs a pending fsync waiter. Streams' ephemeral tier syncs every 5 ms from a broker task. |
+| Periodic sync | Keratin `c397294`. Every log syncs written records in the background, 100 ms by default, 0 turns it off. Logs that expect every write synced warn if a background sync ever covers an unsynced write (`faf39b0`). Streams' ephemeral tier still syncs every 5 ms from a broker task. |
+| Checkpoints | Keratin `a80288f`. The local checkpoint, the agreed checkpoint pin and the learner export sync the log up to the captured boundary before the snapshot becomes recovery authority. |
 | Latched heal | Keratin `87e24ff` and `9ddf850`. A latched log records a cut to its last successful sync in `latched-cut.pending`, and the next open carries it out first, for bound and unbound logs alike. |
 | Live seal | The writer flushes, fsyncs and waits for in-flight fsyncs before advancing the epoch, so written records on a live replica are counted. |
 | Dirty reopen | `sync_recovered_tail` fsyncs records found in the page cache before publishing the frontier. |
@@ -238,22 +241,29 @@ process fences.
 
 ### Stroma
 
-- A queue log carries its mode in config. Publish and settle appends use it.
-  Audit the paths that pass `keratin_cfg_event.default_durability` or hard-code
-  `AfterFsync` (release, nack, DLQ commit, leased appends) and decide each one.
-  A stronger request on a buffered queue is always allowed and simply forces an
-  earlier sync.
-- Delivery reads need a written-visible selected read, as `a2e7745` did: serve
-  from the tail cache, fall back to an exact raw read of each selected offset on
-  a miss, keep CRC, offset, type and header checks. It must be rebuilt on the
-  current `read_selected_with_limits` gap-skipping code and selected only for
-  buffered queues, never through a process-wide `OnceLock` or environment flag.
-  The selection bound and the read source must use the same frontier (audit
-  item S2).
-- `queue_replication_next_offset` refuses unless the log is fully durable. For
-  written followers it should resume from the durable frontier and let the
-  owner resend the written suffix, which the `AfterFlush` overlap check already
-  verifies byte for byte.
+- The mode is a per-partition declaration, `set_queue_buffered`, which the
+  broker sets from the queue declaration, as it does for stream tiers. Stroma
+  keeps it in memory, so a reopen before the broker declares it again runs
+  the queue as durable, which is slower but never weaker. Queues on the
+  two-log layout are refused.
+- Owner writes of a buffered queue use at most `AfterFlush`: publishes, acks,
+  nacks, releases, discards and dead-letter markers. Paths that request
+  `AfterFsync` explicitly keep it, since a stronger request only forces an
+  earlier sync. See the decisions below for why settles need no fsync.
+- Delivery reads go through the gap-skipping `read_selected_with_limits` with
+  a flag that picks the frontier. Buffered queues read with Keratin's
+  `scan_written_with_byte_budget`, which serves the tail cache and falls back
+  to the segment files below the written frontier, with the usual CRC, offset,
+  type and header checks. The flag comes from the declaration, never from a
+  process-wide `OnceLock` or environment variable. Since a buffered queue
+  applies a record once written, its selection and its read both use the
+  written frontier (audit item S2).
+- Turning the mode off pauses owner operations, waits for those in flight,
+  syncs the log and only then clears the flag, so no delivery selects a record
+  that its read can no longer see.
+- `queue_replication_next_offset` syncs a follower log that holds unsynced
+  records before answering. The answer stays durable progress, and the owner
+  does not need to resend a written suffix.
 
 ### Broker and wire
 
@@ -401,11 +411,13 @@ writes the snapshot, then truncates. A crash after snapshot publication could
 leave a recovery-authoritative snapshot that refers to records that never
 reached disk.
 
-**Recommendation.** Before a snapshot becomes recovery authority, sync the log
-up to the captured boundary and check that `durable_next` covers it. The agreed
-checkpoint pin already syncs before capture. The local periodic checkpoint needs
-the same step. Cover owner and follower capture, concurrent appends, role
-changes, cancellation and a failed sync.
+**Decision.** Before a snapshot becomes recovery authority, sync the log up to
+the captured boundary and check that `durable_next` covers it. The local
+periodic checkpoint, the agreed checkpoint pin and the owner checkpoint exported
+to learners all do this after capture. The pin also syncs before capture, but
+a buffered write can land between that sync and the capture. The check costs
+nothing when the log is already durable that far. Still to cover in phase 4:
+concurrent appends, role changes, cancellation and a failed sync.
 
 Retention:
 
@@ -497,12 +509,12 @@ Follow the [optimization log](/development/optimization-log/) protocol:
 
 ## 10. Phased plan
 
-1. **Keratin.** Public written frontier and watch. Writer background sync with
-   `background_sync_interval_ms`, status and failure latch. Tests for idle,
-   cancellation, merge with `AfterFsync`, and failed sync.
-2. **Stroma.** Per-queue mode in log config. Written-visible selected reads on
-   the current read path. Settle and control-event durability audit. Sync before
-   checkpoint publication. Follower resume from the durable frontier.
+1. **Keratin (done).** Public written frontier and watch. Writer background
+   sync with `background_sync_interval`, status and failure latch. Tests for
+   idle, cancellation, merge with `AfterFsync`, and failed sync.
+2. **Stroma (done).** Per-queue buffered declaration. Written-visible selected
+   reads on the current read path. Settle and control-event durability audit.
+   Sync before checkpoint publication. Follower resume syncs first.
 3. **Broker.** Declare field, fixed at first declare. Written progress on the
    wire, two ceilings, mode-aware confirm and delivery, written source for
    buffered queues. Admin and dashboard show mode, written and durable progress,
@@ -543,14 +555,21 @@ Decided:
 6. Settled by the latched heal: a latched log cannot seal, and its reopen cuts
    back to its durable end before it can.
 
+7. Every owner write of a buffered queue completes at `AfterFlush`,
+   settles and lease expiry included. A cut back to the last sync always
+   leaves a prefix of the log, so a lost settle moves the queue back to an
+   earlier consistent state and the message is delivered again, which fits
+   at-least-once. A dead-letter copy lands in the target queue under the
+   target's own mode. A durable source with a buffered dead-letter queue can
+   therefore lose a dead-lettered message on power loss, as any buffered
+   publish can.
+
 Still open:
 
 1. Should Fibril reserve `speculative` for the queue form of early delivery so
    the queue and stream tier names line up?
 2. Should buffered queues carry a per-delivery header after all?
-3. Which queue events keep `AfterFsync` in a buffered queue: DLQ moves, delayed
-   retry promotion, lease expiry?
-4. Should a cluster runtime default for new queues exist at all, or only the
+3. Should a cluster runtime default for new queues exist at all, or only the
    declare field?
-5. Should the stream ephemeral tier move from `AfterWrite` to `AfterFlush` so
+4. Should the stream ephemeral tier move from `AfterWrite` to `AfterFlush` so
    its documented process-crash promise holds?
