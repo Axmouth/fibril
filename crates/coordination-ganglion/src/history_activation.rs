@@ -320,8 +320,8 @@ impl GanglionCoordination {
             u64::from(session.partition.id()),
             session.group.clone(),
         );
-        let snapshot = self.node.committed_snapshot();
-        let accepted = accepted_history(&snapshot, &resource)?;
+        let accepted = self.cached_accepted_history(&resource);
+        let accepted = accepted.as_ref().as_ref().map_err(Clone::clone)?;
         if accepted.owner.as_str()
             != if owner_is_receiver {
                 session.receiver.as_str()
@@ -344,6 +344,54 @@ impl GanglionCoordination {
             );
         }
         Ok(())
+    }
+}
+
+type CachedHistory = (
+    Option<ganglion_openraft::openraft::LogId<u64>>,
+    std::sync::Arc<Result<fibril_broker::history_replication::AcceptedHistory, String>>,
+);
+
+/// Accepted histories by resource, each tagged with the committed log id it
+/// was built from. Replication checks the history on every read and progress
+/// report, and building it parses several metadata documents.
+#[derive(Default)]
+pub(crate) struct AcceptedHistoryCache(
+    std::sync::Mutex<std::collections::HashMap<ganglion_core::ResourceIdentity, CachedHistory>>,
+);
+
+/// Bounds the cache when resources come and go.
+const ACCEPTED_HISTORY_CACHE_LIMIT: usize = 4096;
+
+impl GanglionCoordination {
+    /// `accepted_history` for the current committed state. Every committed
+    /// change moves the log id, so a cached entry is used only while the
+    /// state it was built from is still the current one.
+    pub(crate) fn cached_accepted_history(
+        &self,
+        resource: &ganglion_core::ResourceIdentity,
+    ) -> std::sync::Arc<Result<fibril_broker::history_replication::AcceptedHistory, String>> {
+        let applied = self.node.read_committed_at(|applied, _| applied);
+        let cache = &self.accepted_histories.0;
+        let hit = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(resource)
+            .filter(|(at, _)| *at == applied)
+            .map(|(_, history)| history.clone());
+        if let Some(history) = hit {
+            return history;
+        }
+        let (applied, snapshot) = self
+            .node
+            .read_committed_at(|applied, snapshot| (applied, snapshot.clone()));
+        let history = std::sync::Arc::new(accepted_history(&snapshot, resource));
+        let mut cache = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cache.len() >= ACCEPTED_HISTORY_CACHE_LIMIT {
+            cache.clear();
+        }
+        cache.insert(resource.clone(), (applied, history.clone()));
+        history
     }
 }
 

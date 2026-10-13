@@ -1203,6 +1203,7 @@ pub struct GanglionCoordination {
     // Mode for queues first declared without one. Buffered when the cluster
     // assignment durability is `replica_buffered`.
     default_queue_buffered: std::sync::atomic::AtomicBool,
+    accepted_histories: history_activation::AcceptedHistoryCache,
 }
 
 impl std::fmt::Debug for GanglionCoordination {
@@ -1281,6 +1282,7 @@ impl GanglionCoordination {
                 ControllerConfig::default().liveness_ttl.as_millis() as u64,
             ),
             default_queue_buffered: std::sync::atomic::AtomicBool::new(false),
+            accepted_histories: Default::default(),
         }
     }
 
@@ -4707,6 +4709,33 @@ mod tests {
             queue_declaration_key("a/b", None),
             queue_declaration_key("a", Some("b"))
         );
+        provider.node.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn accepted_history_cache_follows_every_committed_write() {
+        let router = InProcessRouter::new();
+        let config = default_raft_config().expect("config");
+        let raft_node = RaftMetadataNode::start(1, config, &router)
+            .await
+            .expect("raft node");
+        let mut members = BTreeMap::new();
+        members.insert(1u64, ganglion_openraft::openraft::BasicNode::new("n1"));
+        raft_node.initialize(members).await.expect("initialize");
+        raft_node
+            .wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .expect("election");
+        let provider = GanglionCoordination::new("broker-a", raft_node);
+        let resource = ganglion_core::ResourceIdentity::new(QUEUE_NAMESPACE, "q", 0, None::<String>);
+
+        let first = provider.cached_accepted_history(&resource);
+        assert!(first.is_err(), "no history is enrolled yet");
+        assert!(std::sync::Arc::ptr_eq(&first, &provider.cached_accepted_history(&resource)));
+        provider.node.set_attribute("unrelated", "1").await.unwrap();
+        let rebuilt = provider.cached_accepted_history(&resource);
+        assert!(!std::sync::Arc::ptr_eq(&first, &rebuilt));
+        assert_eq!(*first, *rebuilt);
         provider.node.shutdown().await.unwrap();
     }
 
