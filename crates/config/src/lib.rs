@@ -65,7 +65,7 @@ pub enum ConfigError {
         source: std::num::ParseIntError,
     },
     #[error(
-        "unknown assignment durability `{value}` (local_durable|replica_accepted|replica_durable|majority_durable)"
+        "unknown assignment durability `{value}` (local_durable|replica_durable|replica_buffered|majority_durable)"
     )]
     UnknownAssignmentDurability { value: String },
     #[error("unknown recovery on_mismatch `{value}` (quarantine|refuse|ignore)")]
@@ -1002,7 +1002,8 @@ impl ServerConfig {
         let durability = &self.coordination.ganglion.assignment_durability;
         match durability.mode {
             GanglionAssignmentDurabilityMode::ReplicaAccepted
-            | GanglionAssignmentDurabilityMode::ReplicaDurable => {
+            | GanglionAssignmentDurabilityMode::ReplicaDurable
+            | GanglionAssignmentDurabilityMode::ReplicaBuffered => {
                 if durability.nodes.unwrap_or_default() == 0 {
                     return Err(ConfigError::validation(
                         "coordination.ganglion.assignment_durability.nodes must be at least 1 for replica durability",
@@ -1473,8 +1474,12 @@ impl std::str::FromStr for GanglionAssignmentDurabilitySection {
 #[serde(rename_all = "snake_case")]
 pub enum GanglionAssignmentDurabilityMode {
     LocalDurable,
+    /// Deprecated alias for `ReplicaDurable`, which it has always behaved as.
     ReplicaAccepted,
     ReplicaDurable,
+    /// N copies, owner included, and new queues buffered unless their declare
+    /// names a mode: a confirm waits for N written copies instead of N synced.
+    ReplicaBuffered,
     MajorityDurable,
 }
 
@@ -1492,6 +1497,7 @@ impl std::str::FromStr for GanglionAssignmentDurabilityMode {
             "local_durable" | "local" => Ok(Self::LocalDurable),
             "replica_accepted" => Ok(Self::ReplicaAccepted),
             "replica_durable" => Ok(Self::ReplicaDurable),
+            "replica_buffered" => Ok(Self::ReplicaBuffered),
             "majority_durable" | "majority" => Ok(Self::MajorityDurable),
             other => Err(ConfigError::UnknownAssignmentDurability {
                 value: other.to_string(),

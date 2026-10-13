@@ -32,8 +32,9 @@ use fibril_broker::{
     },
     queue_engine::{
         DLQDiscardPolicyWire, DeclareMeta, GlobalDLQ, Message, MessageContentType, MessageHeaders,
-        OwnerReplicationRead, QueueStateCheckpoint, QueueEngine,
-        RetentionConfig, StreamStore, StromaEngine, StromaError, StromaEvent,
+        LocalDeclareError, OwnerReplicationRead, QueueDeclaration, QueueDurability,
+        QueueStateCheckpoint, RetentionConfig, StreamStore, StromaEngine,
+        StromaError, StromaEvent, declare_local_queue_partition,
     },
     stream::{
         StreamChannel, StreamDurability as BrokerStreamDurability, StreamFilter, StreamRecord,
@@ -267,13 +268,14 @@ impl TopologyAdoptionTracker {
 /// (standalone) means declare is local-only. Queues and streams live in
 /// separate partitioning namespaces, so each has its own method.
 pub trait DeclareCoordinator: Send + Sync {
+    /// Returns the effective partition count and the queue's durability mode.
     fn declare_partitioning<'a>(
         &'a self,
         topic: &'a str,
         group: Option<&'a str>,
         partition_count: u32,
-        meta: DeclareMeta,
-    ) -> futures::future::BoxFuture<'a, Result<u32, String>>;
+        declaration: QueueDeclaration,
+    ) -> futures::future::BoxFuture<'a, Result<(u32, QueueDurability), String>>;
 
     /// Record a stream's full config (partitioning + durability tier + retention)
     /// and catalogue its partitions (streams have no group). The config rides
@@ -374,6 +376,29 @@ async fn to_declare_meta(declare: &DeclareQueue) -> Result<DeclareMeta, String> 
         dlq_max_retries: declare.dlq_max_retries,
         default_message_ttl_ms: declare.default_message_ttl_ms,
     })
+}
+
+fn broker_queue_durability(mode: fibril_wire::QueueDurability) -> QueueDurability {
+    match mode {
+        fibril_wire::QueueDurability::Durable => QueueDurability::Durable,
+        fibril_wire::QueueDurability::Buffered => QueueDurability::Buffered,
+    }
+}
+
+fn wire_queue_durability(mode: QueueDurability) -> fibril_wire::QueueDurability {
+    match mode {
+        QueueDurability::Durable => fibril_wire::QueueDurability::Durable,
+        QueueDurability::Buffered => fibril_wire::QueueDurability::Buffered,
+    }
+}
+
+/// Warning for a declare reply about a buffered queue's loss window.
+fn buffered_queue_warning(standalone: bool) -> String {
+    if standalone {
+        "buffered queue on a single node: confirmed messages are written to the OS but not yet synced, so one power loss or storage failure can lose recent confirmed messages".into()
+    } else {
+        "buffered queue: confirmed messages are written to the OS on every required node but not yet synced, so power loss or storage failure on all of them at once can lose recent confirmed messages".into()
+    }
 }
 
 async fn send_error_response(
@@ -907,6 +932,38 @@ impl queue_push::OwnerPushSource for BrokerOwnerPushSource {
             self.broker.record_replication_session_progress(
                 session,
                 DurableProgress::Queue { next: durable_next },
+            );
+        }
+    }
+
+    fn record_written_progress(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        reporter: &str,
+        durable_next: u64,
+        written_next: u64,
+    ) {
+        if crate::v1::history_replication::check_resource(
+            &self.broker,
+            self.history.as_ref(),
+            topic,
+            partition,
+            group,
+            true,
+        )
+        .is_err()
+            || crate::v1::history_replication::check_reporter(self.history.as_ref(), Some(reporter))
+                .is_err()
+        {
+            return;
+        }
+        if let Some(session) = &self.progress {
+            self.broker.record_replication_session_written_progress(
+                session,
+                DurableProgress::Queue { next: durable_next },
+                Some(written_next),
             );
         }
     }
@@ -4257,6 +4314,7 @@ where
                     let _ = control
                         .send(queue_push::OwnerPushControl::Progress {
                             durable_next: progress.durable_next,
+                            written_next: progress.written_next,
                             credit_add_bytes: progress.credit_add_bytes,
                         })
                         .await;
@@ -4818,22 +4876,27 @@ where
                     .partition_count
                     .unwrap_or_else(|| broker.config_snapshot().default_partition_count)
                     .max(1);
+                let requested_mode = declare.durability.map(broker_queue_durability);
 
                 // Record partitioning metadata first (cluster mode): the
                 // returned count is authoritative — an already-declared queue's
                 // count wins, and a conflicting request errors. Standalone uses
                 // the requested count directly.
+                let mut mode = QueueDurability::Durable;
                 let partition_count = if let Some(coordinator) = &declare_coordinator {
                     match coordinator
                         .declare_partitioning(
                             &declare.topic,
                             declare.group.as_deref(),
                             requested,
-                            meta.clone(),
+                            QueueDeclaration::new(meta.clone(), requested_mode),
                         )
                         .await
                     {
-                        Ok(count) => count,
+                        Ok((count, declared)) => {
+                            mode = declared;
+                            count
+                        }
                         Err(message) => {
                             let _ = send_error_response(
                                 &frame_tx_high_prio,
@@ -4854,22 +4917,26 @@ where
                 let mut failure: Option<(u16, String)> = None;
                 if declare_coordinator.is_none() {
                     for partition in 0..partition_count {
-                        match broker
-                            .engine()
-                            .declare_queue(
-                                &declare.topic,
-                                partition,
-                                declare.group.as_deref(),
-                                meta.clone(),
-                            )
-                            .await
+                        match declare_local_queue_partition(
+                            &broker.engine(),
+                            &declare.topic,
+                            partition,
+                            declare.group.as_deref(),
+                            meta.clone(),
+                            requested_mode,
+                        )
+                        .await
                         {
-                            Ok(()) => {}
-                            Err(err @ StromaError::InvalidArgument(_)) => {
+                            Ok(declared) => mode = declared,
+                            Err(LocalDeclareError::DurabilityConflict(message)) => {
+                                failure = Some((ERR_CONFLICT, message));
+                                break;
+                            }
+                            Err(LocalDeclareError::Storage(err @ StromaError::InvalidArgument(_))) => {
                                 failure = Some((400, err.to_string()));
                                 break;
                             }
-                            Err(err) => {
+                            Err(LocalDeclareError::Storage(err)) => {
                                 let trace =
                                     format!("{:08x}", uuid::Uuid::now_v7().as_u128() as u32);
                                 tracing::error!("Declare queue failed [trace {trace}]: {err}");
@@ -4898,6 +4965,16 @@ where
                         &DeclareQueueOk {
                             status: "stored".into(),
                             partition_count,
+                            // Only a declare that named a mode gets the
+                            // extended reply, which older clients cannot read.
+                            durability: requested_mode.map(|_| wire_queue_durability(mode)),
+                            warnings: if requested_mode.is_some()
+                                && mode == QueueDurability::Buffered
+                            {
+                                vec![buffered_queue_warning(declare_coordinator.is_none())]
+                            } else {
+                                Vec::new()
+                            },
                         },
                     )?)
                     .await?;

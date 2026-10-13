@@ -34,7 +34,7 @@ use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_protocol::v1::{
     Ack, AdvertisedAddress, ContentType, DeclarePlexus, DeclarePlexusOk, DeclareQueue,
     DeclareQueueOk, Deliver, ERR_CONFLICT, ERR_INVALID, ERR_TOO_LARGE, ErrorMsg, HEADER_SPECULATIVE, Hello,
-    HelloOk, Nack, Op, PROTOCOL_V1, Publish, PublishDelayed, QueueDlqPolicy, QueueTopologyEntry,
+    HelloOk, Nack, Op, PROTOCOL_V1, Publish, PublishDelayed, QueueDlqPolicy, QueueDurability, QueueTopologyEntry,
     ReasonCode, ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult,
     QueueCheckpointExport, QueueCheckpointExportOk, QueueReplicationRead, ReconcileSubscription,
     ReplicationCheckpointRequired, ReplicationEventRead, ReplicationEventRecord, ResumeIdentity, ResumeOutcome, StreamDurability, StreamRetention,
@@ -5072,6 +5072,7 @@ async fn declare_fans_out_partitions_standalone() {
                     dlq_max_retries: None,
                     partition_count: Some(3),
                     default_message_ttl_ms: None,
+                    durability: None,
                 },
             )
             .unwrap(),
@@ -5096,6 +5097,7 @@ async fn declare_fans_out_partitions_standalone() {
                     dlq_max_retries: None,
                     partition_count: None,
                     default_message_ttl_ms: None,
+                    durability: None,
                 },
             )
             .unwrap(),
@@ -5105,6 +5107,76 @@ async fn declare_fans_out_partitions_standalone() {
     let frame = recv_frame(&mut framed).await;
     let ok: DeclareQueueOk = try_decode(&frame).unwrap();
     assert_eq!(ok.partition_count, 1);
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+}
+
+/// The first declare of a queue sets its durability mode. A declare that
+/// names a mode gets it back with any warning, and a later declare naming
+/// another mode is a conflict.
+#[tokio::test]
+async fn declare_sets_and_fixes_the_durability_mode_standalone() {
+    let (mut framed, server_task, _dir) = open_protocol_connection().await;
+    handshake(&mut framed).await;
+    let declare = |request_id: u64, topic: &str, durability: Option<QueueDurability>| {
+        try_encode(
+            Op::DeclareQueue,
+            request_id,
+            &DeclareQueue {
+                topic: topic.into(),
+                group: None,
+                dlq_policy: None,
+                dlq_max_retries: None,
+                partition_count: Some(2),
+                default_message_ttl_ms: None,
+                durability,
+            },
+        )
+        .unwrap()
+    };
+
+    framed
+        .send(declare(2, "fast", Some(QueueDurability::Buffered)))
+        .await
+        .unwrap();
+    let frame = recv_frame(&mut framed).await;
+    assert_eq!(frame.opcode, Op::DeclareQueueOk as u16);
+    let ok: DeclareQueueOk = try_decode(&frame).unwrap();
+    assert_eq!(ok.durability, Some(QueueDurability::Buffered));
+    assert_eq!(ok.warnings.len(), 1, "{:?}", ok.warnings);
+
+    // Omitting the mode keeps it, and the reply stays in the old format.
+    framed.send(declare(3, "fast", None)).await.unwrap();
+    let frame = recv_frame(&mut framed).await;
+    assert_eq!(&frame.payload[..4], b"FDK1");
+
+    for (request_id, topic, mode) in [
+        (4, "fast", QueueDurability::Durable),
+        // A queue first declared without a mode is durable.
+        (6, "plain", QueueDurability::Buffered),
+    ] {
+        if topic == "plain" {
+            framed.send(declare(5, topic, None)).await.unwrap();
+            let frame = recv_frame(&mut framed).await;
+            assert_eq!(frame.opcode, Op::DeclareQueueOk as u16);
+        }
+        framed.send(declare(request_id, topic, Some(mode))).await.unwrap();
+        let frame = recv_frame(&mut framed).await;
+        assert_eq!(frame.opcode, Op::Error as u16, "{topic}");
+        let err: ErrorMsg = try_decode(&frame).unwrap();
+        assert_eq!(err.code, ERR_CONFLICT, "{topic}: {}", err.message);
+    }
+
+    // Naming the mode it already has is fine.
+    framed
+        .send(declare(7, "plain", Some(QueueDurability::Durable)))
+        .await
+        .unwrap();
+    let frame = recv_frame(&mut framed).await;
+    let ok: DeclareQueueOk = try_decode(&frame).unwrap();
+    assert_eq!(ok.durability, Some(QueueDurability::Durable));
+    assert!(ok.warnings.is_empty());
 
     drop(framed);
     server_task.await.unwrap().unwrap();
@@ -5121,10 +5193,15 @@ async fn declare_uses_coordinator_effective_count() {
             _topic: &'a str,
             _group: Option<&'a str>,
             _partition_count: u32,
-            _meta: fibril_broker::queue_engine::DeclareMeta,
-        ) -> futures::future::BoxFuture<'a, Result<u32, String>> {
+            _meta: fibril_broker::queue_engine::QueueDeclaration,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<(u32, fibril_broker::queue_engine::QueueDurability), String>,
+        > {
             let effective = self.0;
-            Box::pin(async move { Ok(effective) })
+            Box::pin(async move {
+                Ok((effective, fibril_broker::queue_engine::QueueDurability::Durable))
+            })
         }
 
         fn declare_stream<'a>(
@@ -5182,6 +5259,7 @@ async fn declare_uses_coordinator_effective_count() {
                     dlq_max_retries: None,
                     partition_count: Some(3),
                     default_message_ttl_ms: None,
+                    durability: None,
                 },
             )
             .unwrap(),
@@ -5710,6 +5788,7 @@ async fn exhausted_message_routes_to_global_dlq_over_tcp() {
                     dlq_max_retries: Some(0),
                     partition_count: None,
                     default_message_ttl_ms: None,
+                    durability: None,
                 },
             )
             .unwrap(),
@@ -6518,6 +6597,7 @@ async fn declaring_a_queue_then_plexus_same_topic_is_rejected() {
                     dlq_max_retries: None,
                     partition_count: Some(1),
                     default_message_ttl_ms: None,
+                    durability: None,
                 },
             )
             .unwrap(),
@@ -6608,6 +6688,7 @@ async fn multi_partition_queue_blocks_plexus_no_mixed_partitions() {
                     dlq_max_retries: None,
                     partition_count: Some(3),
                     default_message_ttl_ms: None,
+                    durability: None,
                 },
             )
             .unwrap(),

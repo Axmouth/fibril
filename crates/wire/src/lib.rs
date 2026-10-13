@@ -452,6 +452,19 @@ pub enum QueueDlqPolicy {
     },
 }
 
+/// When a queue confirms and delivers a record. Fixed when the queue is first
+/// declared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueDurability {
+    /// After the record is synced to disk on every required copy.
+    Durable,
+    /// After the record is written to the OS on every required copy, before
+    /// it is synced. Faster, but power loss or a failed sync on every
+    /// required copy at once can lose recent confirmed messages.
+    Buffered,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeclareQueue {
     pub topic: String,
@@ -468,6 +481,11 @@ pub struct DeclareQueue {
     /// expiration (that is a separate idle-delete setting).
     #[serde(default)]
     pub default_message_ttl_ms: Option<u64>,
+    /// Durability mode. Only the first declare of a queue sets it. `None`
+    /// keeps the current mode, or uses the cluster default for a new queue.
+    /// A later declare naming another mode fails with 409.
+    #[serde(default)]
+    pub durability: Option<QueueDurability>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -476,6 +494,13 @@ pub struct DeclareQueueOk {
     /// Effective partition count of the declared queue.
     #[serde(default)]
     pub partition_count: u32,
+    /// Durability mode in effect. `None` from brokers that predate the field.
+    #[serde(default)]
+    pub durability: Option<QueueDurability>,
+    /// Things the declarer should know, such as the loss window of a buffered
+    /// queue.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// Per-channel durability tier for a Plexus stream. Governs how a publish is
@@ -961,6 +986,9 @@ pub struct QueuePushStart {
 pub struct QueuePushProgress {
     /// Exclusive end of the follower's durable queue log.
     pub durable_next: u64,
+    /// Exclusive end of the follower's queue log written to the OS. Above
+    /// `durable_next` only on a buffered queue.
+    pub written_next: u64,
     pub credit_add_bytes: u64,
 }
 

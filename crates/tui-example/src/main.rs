@@ -1039,6 +1039,7 @@ async fn discover(args: &Args, vis: &mpsc::Sender<VisualEvent>) -> anyhow::Resul
             dlq_max_retries: None,
             partition_count: Some(args.partitions.max(1)),
             default_message_ttl_ms: None,
+            durability: None,
         },
     )?)
     .await?;

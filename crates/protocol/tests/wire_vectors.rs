@@ -377,6 +377,7 @@ fn wire_encoders_match_shared_vectors() {
                 dlq_max_retries: Some(3),
                 partition_count: Some(4),
                 default_message_ttl_ms: Some(30000),
+                durability: None,
             },
         )
         .unwrap()
@@ -395,6 +396,7 @@ fn wire_encoders_match_shared_vectors() {
                 dlq_max_retries: None,
                 partition_count: None,
                 default_message_ttl_ms: None,
+                durability: None,
             },
         )
         .unwrap()
@@ -409,6 +411,8 @@ fn wire_encoders_match_shared_vectors() {
             &DeclareQueueOk {
                 status: "created".into(),
                 partition_count: 4,
+                durability: None,
+                warnings: Vec::new(),
             },
         )
         .unwrap()

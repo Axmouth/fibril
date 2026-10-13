@@ -1606,6 +1606,16 @@ pub trait Coordination: std::fmt::Debug + Send + Sync {
     fn snapshot(&self) -> CoordinationSnapshot;
     fn watch(&self) -> CoordinationStream;
 
+    /// A queue's declared durability mode, for display. `None` when the
+    /// provider keeps no declarations or the queue has none.
+    fn queue_durability(
+        &self,
+        _topic: &str,
+        _group: Option<&str>,
+    ) -> Option<crate::queue_engine::QueueDurability> {
+        None
+    }
+
     fn assignment_for(
         &self,
         topic: &str,

@@ -28,7 +28,7 @@ use crate::coordination::{
     plan_local_assignment_transitions, plan_local_stream_transitions,
 };
 use crate::queue_engine::{
-    DeclareMeta, DestroyOutcome, EmptyQueueRemoval, EvictOutcome, QueueEngine,
+    DestroyOutcome, QueueDeclaration, QueueDurability, EmptyQueueRemoval, EvictOutcome, QueueEngine,
     QueuePromotionOutcome, StreamPromotionOutcome, StreamStore, StromaEngine,
 };
 use crate::stream::{StreamChannel, StreamDurability};
@@ -544,7 +544,7 @@ pub trait QueueOwnership: std::fmt::Debug + Send + Sync {
         &self,
         _topic: &str,
         _group: Option<&str>,
-    ) -> Result<Option<DeclareMeta>, String> {
+    ) -> Result<Option<QueueDeclaration>, String> {
         Ok(None)
     }
 }
@@ -919,6 +919,16 @@ pub(crate) struct QueueKey {
     pub(crate) tp: Topic,
     pub(crate) part: Partition,
     pub(crate) group: Option<Group>,
+}
+
+impl QueueKey {
+    pub(crate) fn new(topic: &str, part: Partition, group: Option<&str>) -> Self {
+        Self {
+            tp: topic.to_string(),
+            part,
+            group: group.map(str::to_string),
+        }
+    }
 }
 
 /// Tag -> delivery record (so we can validate settle)
@@ -1657,7 +1667,7 @@ pub struct Broker<
     /// Local retirement precedes assignment-watch propagation. Reject stale
     /// reconnects until a fresh assignment explicitly brings the partition back.
     retired_queues: DashMap<QueueKey, ()>,
-    applied_declarations: DashMap<QueueKey, DeclareMeta>,
+    applied_declarations: DashMap<QueueKey, QueueDeclaration>,
     /// Opt-in exclusive consumer-group routing: maps cohort membership to the
     /// per-partition delivery gate. Absent cohorts leave delivery competing.
     exclusive_groups: Mutex<ExclusiveGroupRouter>,
@@ -2236,8 +2246,9 @@ impl<
         });
     }
 
-    /// Recompute the replica-durable visibility ceiling for a queue from its
-    /// cached assignment and follower durable progress, and store it on the
+    /// Recompute the replica visibility ceiling for a queue from its cached
+    /// assignment and follower progress (written progress for a buffered
+    /// queue, durable otherwise), and store it on the
     /// queue loop state for the delivery gate. The committed watermark is the
     /// (nodes-1)-th largest follower prefix covering both payload and enqueue
     /// dependencies (the owner is already durable locally). Local-durable queues (nodes <= 1) are left ungated. No-op when
@@ -2257,6 +2268,9 @@ impl<
             return;
         }
         let required_followers = requirement.nodes - 1;
+        let buffered = self
+            .engine
+            .queue_is_buffered(&key.tp, key.part.id(), key.group.as_deref());
 
         // The same follower must cover payload and enqueue. Exact successful
         // publication boundaries, plus a conservative recovered-backlog seed,
@@ -2270,7 +2284,7 @@ impl<
                     .dependencies
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                dependencies.visibility(&assignment, &followers, required_followers)
+                dependencies.visibility(&assignment, &followers, required_followers, buffered)
             })
             .unwrap_or(0);
         qs.set_visibility_ceiling(Some(watermark));
@@ -2552,7 +2566,7 @@ impl<
     }
 
     async fn apply_owned_queue_declaration(&self, key: &QueueKey) -> Result<(), BrokerError> {
-        if let Some(meta) = self
+        if let Some(declaration) = self
             .ownership
             .queue_declaration(&key.tp, key.group.as_deref())
             .map_err(BrokerError::Unknown)?
@@ -2560,16 +2574,55 @@ impl<
             if self
                 .applied_declarations
                 .get(key)
-                .is_none_or(|applied| *applied != meta)
+                .is_none_or(|applied| *applied != declaration)
             {
                 self.ensure_queue_owner(&key.tp, key.part, key.group.as_deref())?;
                 self.engine
-                    .declare_queue(&key.tp, key.part.id(), key.group.as_deref(), meta.clone())
+                    .declare_queue(
+                        &key.tp,
+                        key.part.id(),
+                        key.group.as_deref(),
+                        declaration.meta.clone(),
+                    )
                     .await?;
-                self.applied_declarations.insert(key.clone(), meta);
+                self.apply_queue_mode(key, declaration.mode()).await?;
+                self.applied_declarations.insert(key.clone(), declaration);
             }
         }
         Ok(())
+    }
+
+    /// Make the local queue log follow a declared mode. Owners and followers
+    /// both call this, so each node decides from its own storage which
+    /// frontier a queue confirms, delivers and replicates at.
+    pub(crate) async fn apply_queue_mode(
+        &self,
+        key: &QueueKey,
+        mode: QueueDurability,
+    ) -> Result<(), BrokerError> {
+        let buffered = mode == QueueDurability::Buffered;
+        let group = key.group.as_deref();
+        if self.engine.queue_is_buffered(&key.tp, key.part.id(), group) != buffered {
+            self.engine
+                .set_queue_buffered(&key.tp, key.part.id(), group, buffered)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Apply the declared mode of a queue this node follows. A missing or
+    /// unreadable declaration leaves the queue durable, which is never weaker.
+    pub(crate) async fn apply_followed_queue_mode(&self, key: &QueueKey) {
+        let mode = match self.ownership.queue_declaration(&key.tp, key.group.as_deref()) {
+            Ok(declaration) => declaration.map(|d| d.mode()).unwrap_or_default(),
+            Err(error) => {
+                tracing::warn!(topic = %key.tp, partition = key.part.id(), "cannot read queue declaration: {error}");
+                return;
+            }
+        };
+        if let Err(error) = self.apply_queue_mode(key, mode).await {
+            tracing::warn!(topic = %key.tp, partition = key.part.id(), mode = mode.as_str(), "cannot apply queue mode on follower: {error}");
+        }
     }
 
     pub fn is_shutting_down(&self) -> bool { self.shutdown_publishers.is_cancelled() }
@@ -2842,6 +2895,7 @@ impl<
                                             &assignment,
                                             &followers,
                                             requirement.nodes - 1,
+                                            commit.buffered,
                                         ),
                                     ));
                                 }
@@ -5005,11 +5059,11 @@ impl Broker<StromaEngine> {
             .filter(|a| a.is_owned_by(node_id))
         {
             let queue = &assignment.queue;
-            let meta = match self
+            let declaration = match self
                 .ownership
                 .queue_declaration(&queue.topic, queue.group.as_deref())
             {
-                Ok(Some(meta)) => meta,
+                Ok(Some(declaration)) => declaration,
                 Ok(None) => continue,
                 Err(error) => {
                     tracing::error!(topic = %queue.topic, "cannot read queue declaration: {error}");
@@ -5024,7 +5078,7 @@ impl Broker<StromaEngine> {
             if self
                 .applied_declarations
                 .get(&key)
-                .is_some_and(|applied| *applied == meta)
+                .is_some_and(|applied| *applied == declaration)
             {
                 continue;
             }

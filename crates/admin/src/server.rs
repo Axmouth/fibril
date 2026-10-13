@@ -185,8 +185,11 @@ pub type QueueDeclareCoordinator = dyn Fn(
         String,
         Option<String>,
         u32,
-        fibril_broker::queue_engine::DeclareMeta,
-    ) -> futures::future::BoxFuture<'static, Result<u32, String>>
+        fibril_broker::queue_engine::QueueDeclaration,
+    ) -> futures::future::BoxFuture<
+        'static,
+        Result<(u32, fibril_broker::queue_engine::QueueDurability), String>,
+    >
     + Send
     + Sync;
 
@@ -2128,7 +2131,9 @@ mod tests {
             .ok()
             .expect("sole owner")
             .with_declare_queue_coordinator(Arc::new(|_topic, _group, requested, _meta| {
-                Box::pin(async move { Ok(requested + 2) })
+                Box::pin(async move {
+                    Ok((requested + 2, fibril_broker::queue_engine::QueueDurability::Durable))
+                })
             }))
             .with_declare_stream_coordinator(Arc::new(|_topic, _count, _tier, _retention| {
                 Box::pin(async move { Err("stream partition count conflict".to_string()) })

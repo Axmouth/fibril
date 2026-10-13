@@ -646,8 +646,10 @@ pub enum ReplicationResourceKind {
 /// Outcome of [`Broker::apply_queue_push_batch`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueuePushApply {
-    /// Applied durably. `next` is the advanced durable queue log cursor.
-    Applied { next: Offset },
+    /// Applied. `next` is the advanced queue log cursor, written to the OS.
+    /// `durable_next` is how far the log is synced, which trails `next` only
+    /// on a buffered queue.
+    Applied { next: Offset, durable_next: Offset },
     /// A checkpoint is required (offset gap / epoch fence). The push caller
     /// falls back to the pull + checkpoint path, then pushes again.
     CheckpointRequired,
@@ -682,6 +684,11 @@ pub trait BrokerQueuePushApply: Send + Sync {
         &'a self,
         records: OwnerReplicationRead<StromaEvent>,
     ) -> BoxFuture<'a, Result<QueuePushApply, BrokerError>>;
+    /// Current durable end of the follower queue log when it can trail what
+    /// was applied, as on a buffered queue. `None` otherwise.
+    fn queue_durable_next(&self) -> BoxFuture<'_, Option<Offset>> {
+        Box::pin(async { None })
+    }
 }
 
 // ---------------- Follower replication worker types ----------------
@@ -712,6 +719,11 @@ impl BrokerQueuePushApply for WorkerQueuePushApply {
         frames: BoxStream<'a, Result<OwnerReplicationRead<StromaEvent>, BrokerError>>,
     ) -> BoxFuture<'a, Result<QueuePushApply, BrokerError>> {
         Box::pin(async move {
+            let written = self.broker.engine.queue_is_buffered(
+                &self.topic,
+                self.partition.id(),
+                self.group.as_deref(),
+            );
             // Frames without records advance the cursor without an append, so
             // only frames that carry records produce an apply outcome.
             let mut progress: Vec<(OwnerBatchProgress, bool)> = Vec::new();
@@ -722,7 +734,7 @@ impl BrokerQueuePushApply for WorkerQueuePushApply {
                         let p = owner_read_batch_progress("queue", &read)?.ok_or_else(|| {
                             BrokerError::InvalidArgument("open batch requires queue history".into())
                         })?;
-                        let batch = queue_apply_batch(read);
+                        let batch = queue_apply_batch(read, written);
                         progress.push((p, batch.is_some()));
                         Ok(batch)
                     };
@@ -760,7 +772,11 @@ impl BrokerQueuePushApply for WorkerQueuePushApply {
             }
             let next = final_next.ok_or_else(|| BrokerError::InvalidArgument("empty open batch".into()))?;
             self.advance_worker(next).await;
-            Ok(QueuePushApply::Applied { next })
+            let durable_next = self
+                .broker
+                .queue_follower_durable_next(&self.topic, self.partition, self.group.as_deref(), next, written)
+                .await?;
+            Ok(QueuePushApply::Applied { next, durable_next })
         })
     }
     fn apply_queue_push<'a>(
@@ -772,10 +788,28 @@ impl BrokerQueuePushApply for WorkerQueuePushApply {
                 .broker
                 .apply_queue_push_batch(&self.topic, self.partition, self.group.as_deref(), records)
                 .await?;
-            if let QueuePushApply::Applied { next } = outcome {
+            if let QueuePushApply::Applied { next, .. } = outcome {
                 self.advance_worker(next).await;
             }
             Ok(outcome)
+        })
+    }
+    fn queue_durable_next(&self) -> BoxFuture<'_, Option<Offset>> {
+        Box::pin(async move {
+            let group = self.group.as_deref();
+            if !self
+                .broker
+                .engine
+                .queue_is_buffered(&self.topic, self.partition.id(), group)
+            {
+                return None;
+            }
+            self.broker
+                .engine
+                .queue_log_sync_status(&self.topic, self.partition.id(), group)
+                .await
+                .ok()
+                .map(|status| status.event_log.durable_next)
         })
     }
 }
@@ -1581,19 +1615,26 @@ pub(crate) fn owner_stream_records_empty(records: &BrokerOwnerStreamRecords) -> 
     owner_read_empty(&records.messages) && owner_read_empty(&records.events)
 }
 
-/// Durable follower batch for the records of one owner queue read, or `None`
-/// when there is nothing to append.
-fn queue_apply_batch(read: OwnerReplicationRead<StromaEvent>) -> Option<ReplicatedEventBatch> {
+/// Follower batch for the records of one owner queue read, or `None` when
+/// there is nothing to append. `written` appends without waiting for fsync,
+/// for a buffered queue on a path that reports written and durable progress
+/// separately. Otherwise followers apply durably, so the position they report
+/// is honest durable progress for the confirm policies.
+fn queue_apply_batch(
+    read: OwnerReplicationRead<StromaEvent>,
+    written: bool,
+) -> Option<ReplicatedEventBatch> {
     match read {
         OwnerReplicationRead::Batch(batch) if !batch.records.is_empty() => {
             Some(ReplicatedEventBatch {
                 epoch: batch.epoch,
                 first_offset: batch.records[0].0,
                 events: batch.records.into_iter().map(|(_, event)| event).collect(),
-                // Followers apply durably so their reported pull offsets
-                // are honest DURABLE progress for owner confirm policies
-                // (replica_durable/majority_durable).
-                durability: Some(KDurability::AfterFsync),
+                durability: Some(if written {
+                    KDurability::AfterFlush
+                } else {
+                    KDurability::AfterFsync
+                }),
             })
         }
         _ => None,
@@ -1837,8 +1878,25 @@ impl DurableProgress {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FollowerProgress {
     pub(crate) progress: DurableProgress,
+    /// Exclusive end of the records the follower has written to the OS in
+    /// its queue log, synced or not. `None` when it matches the durable
+    /// position, as on every durable queue. Only buffered queues confirm and
+    /// deliver on it. Retention and checkpoints keep using `progress`.
+    pub(crate) written: Option<Offset>,
     pub(crate) last_report: std::time::Instant,
     session: u64,
+}
+
+impl FollowerProgress {
+    /// Queue log position that confirms and delivers a record: the written
+    /// position for a buffered queue, the durable one otherwise.
+    fn queue_reached(&self, buffered: bool) -> Option<Offset> {
+        let durable = self.progress.queue_next()?;
+        Some(match (buffered, self.written) {
+            (true, Some(written)) => written.max(durable),
+            _ => durable,
+        })
+    }
 }
 
 /// Completed publication boundaries in the single queue log. A boundary is
@@ -1871,8 +1929,8 @@ impl QueueDependencies {
 
     /// Last completed boundary this follower covers. Never the follower
     /// position itself, which may sit inside a publish batch.
-    fn covered_next(&self, progress: &FollowerProgress) -> Offset {
-        let Some(next) = progress.progress.queue_next() else {
+    fn covered_next(&self, progress: &FollowerProgress, buffered: bool) -> Offset {
+        let Some(next) = progress.queue_reached(buffered) else {
             return self.committed;
         };
         let covered_count = self.boundaries.partition_point(|boundary| *boundary <= next);
@@ -1883,11 +1941,14 @@ impl QueueDependencies {
         covered.min(next).max(self.committed)
     }
 
+    /// `buffered` counts written follower copies instead of durable ones. A
+    /// queue keeps one mode for life, so the folded frontier never mixes them.
     pub(crate) fn visibility(
         &mut self,
         assignment: &PartitionAssignment,
         followers: &std::collections::HashMap<String, FollowerProgress>,
         required_followers: usize,
+        buffered: bool,
     ) -> Offset {
         let mut nexts: Vec<_> = assignment
             .followers
@@ -1896,7 +1957,7 @@ impl QueueDependencies {
             .map(|node| {
                 followers
                     .get(node)
-                    .map(|p| self.covered_next(p))
+                    .map(|p| self.covered_next(p, buffered))
                     .unwrap_or(self.committed)
             })
             .collect();
@@ -2113,9 +2174,13 @@ impl ReplicationConfirmGate {
                     followers.get(*follower).is_some_and(|follower| {
                         match (dependency, follower.progress) {
                             // A queue record needs the whole publication that
-                            // carried it in the follower's copy of the log.
-                            (Some(d), DurableProgress::Queue { next }) => {
-                                next > offset && next >= d.next
+                            // carried it in the follower's copy of the log,
+                            // written for a buffered publication, synced
+                            // otherwise.
+                            (Some(d), DurableProgress::Queue { .. }) => {
+                                follower
+                                    .queue_reached(d.buffered)
+                                    .is_some_and(|next| next > offset && next >= d.next)
                             }
                             // A stream record needs the record log only.
                             (None, DurableProgress::Stream { message_next, .. }) => {
@@ -2426,13 +2491,21 @@ mod replication_byte_limit_tests {
 // ---------------- impl Broker<StromaEngine>: replication engine methods ----------------
 
 impl Broker<StromaEngine> {
+    /// Whether the owner ships written records before its own fsync. On for
+    /// every buffered queue, which cannot confirm before followers write, and
+    /// for durable queues when `replication.early_replication` is set. Only
+    /// history-bound assignments fence the history the way this needs. A
+    /// buffered queue without that binding still replicates from the durable
+    /// source, one background sync behind.
     fn early_replication_enabled(
         &self,
         topic: &str,
         partition: Partition,
         group: Option<&str>,
     ) -> bool {
-        self.config_snapshot().replication_early && self
+        (self.config_snapshot().replication_early
+            || self.engine.queue_is_buffered(topic, partition.id(), group))
+            && self
             .assignment_cache
             .get(&QueueKey {
                 tp: topic.into(),
@@ -2729,6 +2802,8 @@ impl Broker<StromaEngine> {
         self.engine
             .become_queue_follower(topic, partition.id(), group)
             .await?;
+        self.apply_followed_queue_mode(&QueueKey::new(topic, partition, group))
+            .await;
         Ok(())
     }
 
@@ -2758,6 +2833,8 @@ impl Broker<StromaEngine> {
         self.engine
             .become_queue_follower_with_epoch(topic, partition.id(), group, epoch)
             .await?;
+        self.apply_followed_queue_mode(&QueueKey::new(topic, partition, group))
+            .await;
         Ok(())
     }
 
@@ -2782,16 +2859,25 @@ impl Broker<StromaEngine> {
         group: Option<&str>,
         read: OwnerReplicationRead<StromaEvent>,
     ) -> Result<BrokerQueueFollowerApply, BrokerError> {
-        Self::apply_follower_queue_records_using_engine(&self.engine, topic, partition, group, read)
-            .await
+        Self::apply_follower_queue_records_using_engine(
+            &self.engine,
+            topic,
+            partition,
+            group,
+            read,
+            false,
+        )
+        .await
     }
 
+    /// `written` appends without waiting for fsync. See `queue_apply_batch`.
     async fn apply_follower_queue_records_using_engine(
         engine: &StromaEngine,
         topic: &str,
         partition: Partition,
         group: Option<&str>,
         read: OwnerReplicationRead<StromaEvent>,
+        written: bool,
     ) -> Result<BrokerQueueFollowerApply, BrokerError> {
         if let Some(required) = checkpoint_required(&read) {
             tracing::debug!(
@@ -2805,7 +2891,7 @@ impl Broker<StromaEngine> {
             );
             return Ok(BrokerQueueFollowerApply::CheckpointRequired(required));
         }
-        let outcome = match queue_apply_batch(read) {
+        let outcome = match queue_apply_batch(read, written) {
             Some(batch) => Some(
                 engine
                     .apply_replicated_queue_batch(topic, partition.id(), group, batch)
@@ -2946,10 +3032,22 @@ impl Broker<StromaEngine> {
             return Ok(QueuePushApply::CheckpointRequired);
         };
 
+        // The push path reports written and durable progress separately, so
+        // a buffered queue's follower can skip the per-batch fsync here.
+        let written = self
+            .engine
+            .queue_is_buffered(topic, partition.id(), group);
         let apply = {
             let _follower_apply_timer = self.replication_timing.follower_apply.timer();
-            self.apply_follower_queue_records(topic, partition, group, read)
-                .await?
+            Self::apply_follower_queue_records_using_engine(
+                &self.engine,
+                topic,
+                partition,
+                group,
+                read,
+                written,
+            )
+            .await?
         };
 
         let outcome = match apply {
@@ -2960,9 +3058,34 @@ impl Broker<StromaEngine> {
         };
 
         match replicated_append_progress_after_apply("queue", &progress, outcome.as_ref())? {
-            ReplicatedAppendProgress::Advanced(next) => Ok(QueuePushApply::Applied { next }),
+            ReplicatedAppendProgress::Advanced(next) => {
+                let durable_next = self
+                    .queue_follower_durable_next(topic, partition, group, next, written)
+                    .await?;
+                Ok(QueuePushApply::Applied { next, durable_next })
+            }
             ReplicatedAppendProgress::CheckpointRequired(_) => Ok(QueuePushApply::CheckpointRequired),
         }
+    }
+
+    /// How far a follower's queue log is synced after an apply that reached
+    /// `next`. Without `written` the apply synced, so that is `next` itself.
+    pub(crate) async fn queue_follower_durable_next(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        next: Offset,
+        written: bool,
+    ) -> Result<Offset, BrokerError> {
+        if !written {
+            return Ok(next);
+        }
+        let status = self
+            .engine
+            .queue_log_sync_status(topic, partition.id(), group)
+            .await?;
+        Ok(status.event_log.durable_next.min(next))
     }
 
     pub async fn promote_replication_follower_if_caught_up(
@@ -3144,7 +3267,7 @@ impl Broker<StromaEngine> {
 
             let Some(read_progress) = owner_read_batch_progress("queue", &read)? else {
                 let apply = Self::apply_follower_queue_records_using_engine(
-                    engine, topic, partition, group, read,
+                    engine, topic, partition, group, read, false,
                 )
                 .await?;
                 return match apply {
@@ -3167,8 +3290,11 @@ impl Broker<StromaEngine> {
 
             let apply = {
                 let _follower_apply_timer = self.replication_timing.follower_apply.timer();
-                Self::apply_follower_queue_records_using_engine(engine, topic, partition, group, read)
-                    .await?
+                // The pull path reports one position, so it applies durably.
+                Self::apply_follower_queue_records_using_engine(
+                    engine, topic, partition, group, read, false,
+                )
+                .await?
             };
             let outcome = match apply {
                 BrokerQueueFollowerApply::Applied(outcome) => outcome,
@@ -4278,6 +4404,7 @@ impl<
             follower.to_string(),
             FollowerProgress {
                 progress: DurableProgress::zero(kind),
+                written: None,
                 last_report: Instant::now(),
                 session: id,
             },
@@ -4299,6 +4426,17 @@ impl<
         &self,
         session: &ReplicationProgressSession,
         progress: DurableProgress,
+    ) {
+        self.record_replication_session_written_progress(session, progress, None)
+    }
+
+    /// Like `record_replication_session_progress`, with the follower's written
+    /// queue log position when it is ahead of the durable one.
+    pub fn record_replication_session_written_progress(
+        &self,
+        session: &ReplicationProgressSession,
+        progress: DurableProgress,
+        written: Option<Offset>,
     ) {
         if progress.kind() != session.kind {
             tracing::warn!(
@@ -4333,6 +4471,7 @@ impl<
             // taking a maximum could combine progress from before and after
             // a reset.
             p.progress = progress;
+            p.written = written;
             p.last_report = Instant::now();
         }
         drop(assignment_guard);
@@ -4373,6 +4512,7 @@ impl<
                 .entry(follower_node_id.to_string())
                 .or_insert(FollowerProgress {
                     progress: DurableProgress::zero(progress.kind()),
+                    written: None,
                     last_report: std::time::Instant::now(),
                     session: 0,
                 });
@@ -4387,6 +4527,7 @@ impl<
                 return;
             }
             entry.progress = progress;
+            entry.written = None;
             entry.last_report = std::time::Instant::now();
         }
         self.replication_timing.record_follower_progress_report();
@@ -4567,6 +4708,7 @@ mod queue_dependency_tests {
     fn progress(next: u64) -> FollowerProgress {
         FollowerProgress {
             progress: DurableProgress::Queue { next },
+            written: None,
             last_report: Instant::now(),
             session: 0,
         }
@@ -4577,12 +4719,13 @@ mod queue_dependency_tests {
                 message_next,
                 event_next,
             },
+            written: None,
             last_report: Instant::now(),
             session: 0,
         }
     }
     fn commit(next: u64) -> stroma_core::QueuePublishCommit {
-        stroma_core::QueuePublishCommit { next, epoch: 1 }
+        stroma_core::QueuePublishCommit { next, epoch: 1, buffered: false }
     }
     fn queue(next: u64) -> DurableProgress {
         DurableProgress::Queue { next }
@@ -4722,8 +4865,8 @@ mod queue_dependency_tests {
             ("b".into(), progress(10)),
             ("c".into(), progress(10)),
         ]);
-        assert_eq!(deps.visibility(&assignment, &followers, 2), 0);
-        assert_eq!(deps.visibility(&assignment, &followers, 1), 1);
+        assert_eq!(deps.visibility(&assignment, &followers, 2, false), 0);
+        assert_eq!(deps.visibility(&assignment, &followers, 1, false), 1);
         Arc::make_mut(assignment.history.as_mut().unwrap()).suspended_replicas.remove("c");
         broker.cache_queue_assignment(&assignment);
         broker.record_replication_session_progress(&old, DurableProgress::Queue { next: 10 });
@@ -4752,19 +4895,19 @@ mod queue_dependency_tests {
         ]);
         // b holds the first batch and part of the second, so visibility stops
         // at the first boundary instead of the follower position.
-        assert_eq!(deps.visibility(&a, &followers, 1), 2);
+        assert_eq!(deps.visibility(&a, &followers, 1, false), 2);
         assert_eq!(deps.boundaries.len(), 1);
         followers.insert("b".into(), progress(4));
-        assert_eq!(deps.visibility(&a, &followers, 1), 4);
+        assert_eq!(deps.visibility(&a, &followers, 1, false), 4);
         assert!(deps.boundaries.is_empty());
         deps.record(commit(6));
         followers.insert("b".into(), progress(0));
         assert_eq!(
-            deps.visibility(&a, &followers, 1),
+            deps.visibility(&a, &followers, 1, false),
             4,
             "previously proved prefix survives a reconnect"
         );
-        assert_eq!(deps.covered_next(&progress(5)), 4);
+        assert_eq!(deps.covered_next(&progress(5), false), 4);
     }
 
     #[test]
@@ -4785,7 +4928,7 @@ mod queue_dependency_tests {
         let mut seen = Vec::new();
         for next in 0..=13 {
             let followers = std::collections::HashMap::from([("b".into(), progress(next))]);
-            let visible = deps.visibility(&a, &followers, 1);
+            let visible = deps.visibility(&a, &followers, 1, false);
             assert!([0, 3, 7, 12].contains(&visible), "{next} exposed {visible}");
             assert!(visible <= next.max(seen.last().copied().unwrap_or(0)));
             seen.push(visible);
@@ -4804,7 +4947,7 @@ mod queue_dependency_tests {
         let mut deps = QueueDependencies::default();
         deps.record(commit(2));
         let followers = std::collections::HashMap::from([("b".into(), stream_progress(9, 9))]);
-        assert_eq!(deps.visibility(&a, &followers, 1), 0);
+        assert_eq!(deps.visibility(&a, &followers, 1, false), 0);
     }
 
     #[test]
@@ -4816,9 +4959,9 @@ mod queue_dependency_tests {
         assert!(deps.boundaries.len() <= 4096);
         // The dropped early boundaries fold into the retained later ones, so a
         // follower at an early boundary proves nothing, conservatively.
-        assert_eq!(deps.covered_next(&progress(1)), 0);
-        assert_eq!(deps.covered_next(&progress(200_000)), 200_000);
-        assert_eq!(deps.covered_next(&progress(199_999)), 199_998);
+        assert_eq!(deps.covered_next(&progress(1), false), 0);
+        assert_eq!(deps.covered_next(&progress(200_000), false), 200_000);
+        assert_eq!(deps.covered_next(&progress(199_999), false), 199_998);
     }
 
     #[tokio::test]

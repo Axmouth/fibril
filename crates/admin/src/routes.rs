@@ -107,6 +107,9 @@ pub struct CreateQueueRequest {
     /// Optional per-queue default message TTL (ms): messages without their own
     /// TTL drop after this age. Not queue expiration.
     pub default_message_ttl_ms: Option<u64>,
+    /// `durable` or `buffered`. Only the first declare sets it. Absent uses
+    /// the cluster default for a new queue.
+    pub durability: Option<fibril_broker::queue_engine::QueueDurability>,
 }
 
 #[derive(Deserialize)]
@@ -457,19 +460,21 @@ pub(crate) async fn check_auth(
     check_admin_auth(headers, &server.config.auth, &server.sessions).await
 }
 
-fn durability_policy_json(policy: ReplicationDurabilityPolicy) -> serde_json::Value {
+/// A buffered queue counts written copies instead of synced ones, so its
+/// policy shows as the `_buffered` form with the same node count.
+fn durability_policy_json(policy: ReplicationDurabilityPolicy, buffered: bool) -> serde_json::Value {
+    let suffix = if buffered { "buffered" } else { "durable" };
     match policy {
         ReplicationDurabilityPolicy::LocalDurable => {
-            serde_json::json!({ "mode": "local_durable" })
+            serde_json::json!({ "mode": format!("local_{suffix}") })
         }
-        ReplicationDurabilityPolicy::ReplicaAccepted { nodes } => {
-            serde_json::json!({ "mode": "replica_accepted", "nodes": nodes })
-        }
-        ReplicationDurabilityPolicy::ReplicaDurable { nodes } => {
-            serde_json::json!({ "mode": "replica_durable", "nodes": nodes })
+        // Deprecated alias that has always behaved as replica_durable.
+        ReplicationDurabilityPolicy::ReplicaAccepted { nodes }
+        | ReplicationDurabilityPolicy::ReplicaDurable { nodes } => {
+            serde_json::json!({ "mode": format!("replica_{suffix}"), "nodes": nodes })
         }
         ReplicationDurabilityPolicy::MajorityDurable => {
-            serde_json::json!({ "mode": "majority_durable" })
+            serde_json::json!({ "mode": format!("majority_{suffix}") })
         }
     }
 }
@@ -800,6 +805,9 @@ pub async fn topology(
                 .assignments
                 .values()
                 .map(|assignment| {
+                    let mode = coordination
+                        .queue_durability(&assignment.queue.topic, assignment.queue.group.as_deref())
+                        .unwrap_or_default();
                     serde_json::json!({
                         "topic": assignment.queue.topic,
                         "partition": assignment.queue.partition,
@@ -807,7 +815,11 @@ pub async fn topology(
                         "owner": assignment.owner,
                         "followers": assignment.followers,
                         "epoch": assignment.epoch,
-                        "durability": durability_policy_json(assignment.durability),
+                        "queue_durability": mode,
+                        "durability": durability_policy_json(
+                            assignment.durability,
+                            mode == fibril_broker::queue_engine::QueueDurability::Buffered,
+                        ),
                     })
                 })
                 .collect();
@@ -1731,17 +1743,24 @@ pub async fn create_queue(
     // Cluster mode records the partitioning with coordination first - the
     // returned count is authoritative and the controller places every
     // partition. Standalone materializes the requested count directly.
+    let mut mode = fibril_broker::queue_engine::QueueDurability::Durable;
     let partition_count = match &server.declare_queue_coordinator {
         Some(coordinator) => {
             match coordinator(
                 request.topic.clone(),
                 group.clone(),
                 partition_count,
-                meta.clone(),
+                fibril_broker::queue_engine::QueueDeclaration::new(
+                    meta.clone(),
+                    request.durability,
+                ),
             )
             .await
             {
-                Ok(count) => count,
+                Ok((count, declared)) => {
+                    mode = declared;
+                    count
+                }
                 Err(message) => {
                     return Ok(admin_error(
                         StatusCode::CONFLICT,
@@ -1755,20 +1774,30 @@ pub async fn create_queue(
     };
     if server.declare_queue_coordinator.is_none() {
         for partition in 0..partition_count {
-            match server
-                .storage
-                .declare_queue(&request.topic, partition, group.as_deref(), meta.clone())
-                .await
+            match fibril_broker::queue_engine::declare_local_queue_partition(
+                server.storage.as_ref(),
+                &request.topic,
+                partition,
+                group.as_deref(),
+                meta.clone(),
+                request.durability,
+            )
+            .await
             {
-                Ok(()) => {}
-                Err(err @ StromaError::InvalidArgument(_)) => {
+                Ok(declared) => mode = declared,
+                Err(fibril_broker::queue_engine::LocalDeclareError::DurabilityConflict(message)) => {
+                    return Ok(admin_error(StatusCode::CONFLICT, "declare_conflict", message));
+                }
+                Err(fibril_broker::queue_engine::LocalDeclareError::Storage(
+                    err @ StromaError::InvalidArgument(_),
+                )) => {
                     return Ok(admin_error(
                         StatusCode::BAD_REQUEST,
                         "invalid_queue",
                         err.to_string(),
                     ));
                 }
-                Err(err) => {
+                Err(fibril_broker::queue_engine::LocalDeclareError::Storage(err)) => {
                     tracing::error!("create queue failed: {err}");
                     return Ok(admin_error(
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -1791,6 +1820,7 @@ pub async fn create_queue(
         Json(serde_json::json!({
             "status": "created",
             "partition_count": partition_count,
+            "durability": mode,
         })),
     )
         .into_response())

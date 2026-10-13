@@ -76,6 +76,7 @@ mod tls;
 pub use tls::TlsClientOptions;
 use tls::establish_stream;
 
+pub use fibril_wire::QueueDurability;
 pub use fibril_wire::ReconcilePolicy;
 // Shared header namespace constants (single source of truth in the protocol crate)
 // so the client guard and broker rejection cannot drift.
@@ -1256,6 +1257,7 @@ pub struct QueueConfig {
     dlq_max_retries: Option<u32>,
     partition_count: Option<u32>,
     default_message_ttl_ms: Option<u64>,
+    durability: Option<QueueDurability>,
 }
 
 impl QueueConfig {
@@ -1268,7 +1270,28 @@ impl QueueConfig {
             dlq_max_retries: None,
             partition_count: None,
             default_message_ttl_ms: None,
+            durability: None,
         })
+    }
+
+    /// Confirm and deliver once each required copy has written a message to
+    /// the OS, before it is synced to disk. Lower latency, but power loss or a
+    /// storage failure on every required node at once can lose recent
+    /// confirmed messages. Only the first declare of a queue sets its mode,
+    /// and a later declare naming another mode fails. Brokers that predate
+    /// buffered queues refuse the declare.
+    pub fn buffered(mut self) -> Self {
+        self.durability = Some(QueueDurability::Buffered);
+        self
+    }
+
+    /// Confirm and deliver only once each required copy has synced a message
+    /// to disk. The default for new queues unless the cluster is configured
+    /// with `replica_buffered`. Naming it fails the declare when the queue
+    /// already exists as buffered.
+    pub fn durable(mut self) -> Self {
+        self.durability = Some(QueueDurability::Durable);
+        self
     }
 
     /// Declare behavior for a grouped queue namespace.
@@ -1350,6 +1373,7 @@ impl QueueConfig {
             dlq_max_retries: self.dlq_max_retries,
             partition_count: self.partition_count,
             default_message_ttl_ms: self.default_message_ttl_ms,
+            durability: self.durability,
         }
     }
 }
@@ -4817,13 +4841,16 @@ where
                             }
                         }
                         x if x == Op::DeclareQueueOk as u16 => {
-                            let _ok: DeclareQueueOk = match decode_protocol(&frame) {
+                            let ok: DeclareQueueOk = match decode_protocol(&frame) {
                                 Ok(ok) => ok,
                                 Err(err) => {
                                     fatal_error = Some(err);
                                     break;
                                 }
                             };
+                            for warning in &ok.warnings {
+                                tracing::warn!("queue declare: {warning}");
+                            }
 
                             match waiters.remove(&frame.request_id) {
                                 Some(Waiter::DeclareQueue(tx)) => {

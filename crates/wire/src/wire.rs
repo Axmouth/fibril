@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::{
     Ack, AdvertisedAddress, AssignmentChanged, Auth, ContentType, DeclarePlexus, DeclarePlexusOk,
     DeclareQueue, DeclareQueueOk, Deliver, DeliveryTag, ErrorMsg, GoingAway, Hello, HelloOk, Nack,
-    Op, PROTOCOL_V1, Partition, Publish, PublishDelayed, PublishOk, QueueDlqPolicy,
+    Op, PROTOCOL_V1, Partition, Publish, PublishDelayed, PublishOk, QueueDlqPolicy, QueueDurability,
     QueueTopologyEntry, ReasonCode, ReconcileAction, ReconcileClient, ReconcilePolicy,
     ReconcileResult, ReconcileServer, ReconcileSubscription, ReconcileSubscriptionResult, Redirect,
     QueuePushEnd, QueuePushProgress, QueuePushReset, QueuePushStart, QueueReplicationRead,
@@ -371,7 +371,20 @@ pub fn encode_declare_queue(request_id: u64, declare: &DeclareQueue) -> WireResu
     put_optional_u32(&mut out, declare.partition_count);
     // Trailing so a peer that omits it still decodes (read as None).
     put_optional_u64(&mut out, declare.default_message_ttl_ms);
+    // Trailing and only when set, so a declare without a mode stays readable
+    // by brokers that predate it, and one with a mode fails there instead of
+    // silently making a durable queue.
+    if let Some(durability) = declare.durability {
+        out.put_u8(queue_durability_tag(durability));
+    }
     Ok(frame(Op::DeclareQueue, request_id, out.freeze()))
+}
+
+fn queue_durability_tag(durability: QueueDurability) -> u8 {
+    match durability {
+        QueueDurability::Durable => 0,
+        QueueDurability::Buffered => 1,
+    }
 }
 
 pub fn decode_declare_queue(frame: &Frame) -> WireResult<DeclareQueue> {
@@ -389,26 +402,67 @@ pub fn decode_declare_queue(frame: &Frame) -> WireResult<DeclareQueue> {
         } else {
             None
         },
+        durability: if reader.remaining() > 0 {
+            Some(reader.queue_durability()?)
+        } else {
+            None
+        },
     };
     reader.finish()?;
     Ok(declare)
 }
 
+/// `FDK1` carries the status and partition count. `FDK2` adds the mode and
+/// warnings. Brokers send it only to a declare that named a mode, so clients
+/// that predate it never see it.
 pub fn encode_declare_queue_ok(request_id: u64, ok: &DeclareQueueOk) -> WireResult<Frame> {
-    let mut out = payload_builder(b"FDK1");
+    let extended = ok.durability.is_some() || !ok.warnings.is_empty();
+    let mut out = payload_builder(if extended { b"FDK2" } else { b"FDK1" });
     put_str(&mut out, &ok.status)?;
     out.put_u32(ok.partition_count);
+    if extended {
+        match ok.durability {
+            Some(durability) => {
+                out.put_u8(1);
+                out.put_u8(queue_durability_tag(durability));
+            }
+            None => out.put_u8(0),
+        }
+        put_len(&mut out, ok.warnings.len(), "declare warnings")?;
+        for warning in &ok.warnings {
+            put_str(&mut out, warning)?;
+        }
+    }
     Ok(frame(Op::DeclareQueueOk, request_id, out.freeze()))
 }
 
 pub fn decode_declare_queue_ok(frame: &Frame) -> WireResult<DeclareQueueOk> {
     expect_op(frame, Op::DeclareQueueOk)?;
+    let extended = frame.payload.starts_with(b"FDK2");
     let mut reader = Reader::new(&frame.payload);
-    reader.expect_magic(b"FDK1", "declare queue ok")?;
-    let ok = DeclareQueueOk {
+    reader.expect_magic(if extended { b"FDK2" } else { b"FDK1" }, "declare queue ok")?;
+    let mut ok = DeclareQueueOk {
         status: reader.str()?.to_owned(),
         partition_count: reader.u32()?,
+        durability: None,
+        warnings: Vec::new(),
     };
+    if extended {
+        ok.durability = if reader.bool()? {
+            Some(reader.queue_durability()?)
+        } else {
+            None
+        };
+        let count = reader.u32()? as usize;
+        // Each warning takes at least its length prefix.
+        if count > reader.remaining() / 4 {
+            return Err(WireError::UnexpectedEof);
+        }
+        ok.warnings.reserve(count);
+        for _ in 0..count {
+            ok.warnings.push(reader.str()?.to_owned());
+        }
+    }
     reader.finish()?;
     Ok(ok)
 }
@@ -1033,26 +1087,44 @@ pub fn decode_queue_push_batch(frame: &Frame) -> WireResult<QueueReplicationRead
     Ok(batch)
 }
 
+/// `FQP1` carries durable progress only. `FQP2` adds the written position and
+/// is sent only when it is ahead, so a durable queue's progress still reads on
+/// brokers that predate buffered queues.
 pub fn encode_queue_push_progress(
     stream_id: u64,
     progress: &QueuePushProgress,
 ) -> WireResult<Frame> {
-    let mut out = payload_builder(b"FQP1");
+    let written = progress.written_next > progress.durable_next;
+    let mut out = payload_builder(if written { b"FQP2" } else { b"FQP1" });
     out.put_u64(progress.durable_next);
     out.put_u64(progress.credit_add_bytes);
+    if written {
+        out.put_u64(progress.written_next);
+    }
     Ok(frame(Op::QueuePushProgress, stream_id, out.freeze()))
 }
 
 pub fn decode_queue_push_progress(frame: &Frame) -> WireResult<QueuePushProgress> {
     expect_op(frame, Op::QueuePushProgress)?;
+    let written = frame.payload.starts_with(b"FQP2");
     let mut reader = Reader::new(&frame.payload);
-    reader.expect_magic(b"FQP1", "queue push progress")?;
-    let progress = QueuePushProgress {
-        durable_next: reader.u64()?,
-        credit_add_bytes: reader.u64()?,
-    };
+    if written {
+        reader.expect_magic(b"FQP2", "queue push progress")?;
+    } else {
+        reader.expect_magic(b"FQP1", "queue push progress")?;
+    }
+    let durable_next = reader.u64()?;
+    let credit_add_bytes = reader.u64()?;
+    let written_next = if written { reader.u64()? } else { durable_next };
     reader.finish()?;
-    Ok(progress)
+    if written_next < durable_next {
+        return Err(WireError::InvalidRecordSequence("queue push progress"));
+    }
+    Ok(QueuePushProgress {
+        durable_next,
+        written_next,
+        credit_add_bytes,
+    })
 }
 
 pub fn encode_queue_push_reset(stream_id: u64, reset: &QueuePushReset) -> WireResult<Frame> {
@@ -1980,6 +2052,17 @@ impl<'a> Reader<'a> {
         self.take(len)
     }
 
+    fn queue_durability(&mut self) -> WireResult<QueueDurability> {
+        match self.u8()? {
+            0 => Ok(QueueDurability::Durable),
+            1 => Ok(QueueDurability::Buffered),
+            value => Err(WireError::UnknownTag {
+                context: "queue durability",
+                value,
+            }),
+        }
+    }
+
     fn stream_durability(&mut self) -> WireResult<StreamDurability> {
         let value = self.u8()?;
         StreamDurability::from_u8(value).ok_or(WireError::UnknownTag {
@@ -2836,8 +2919,9 @@ mod tests {
 
     #[test]
     fn queue_push_progress_roundtrips() {
-        let progress = QueuePushProgress {
+        let mut progress = QueuePushProgress {
             durable_next: 250,
+            written_next: 250,
             credit_add_bytes: 4 * 1024 * 1024,
         };
         let frame = encode_queue_push_progress(900, &progress).unwrap();
@@ -2845,6 +2929,22 @@ mod tests {
         assert_eq!(&frame.payload[..4], b"FQP1");
         assert_eq!(frame.payload.len(), 4 + 16);
         assert_eq!(decode_queue_push_progress(&frame).unwrap(), progress);
+
+        // A buffered follower ahead of its sync sends the written position.
+        progress.written_next = 300;
+        let frame = encode_queue_push_progress(900, &progress).unwrap();
+        assert_eq!(&frame.payload[..4], b"FQP2");
+        assert_eq!(frame.payload.len(), 4 + 24);
+        assert_eq!(decode_queue_push_progress(&frame).unwrap(), progress);
+
+        // Written below durable is malformed.
+        let mut bad = frame.payload.to_vec();
+        bad[20..28].copy_from_slice(&100u64.to_be_bytes());
+        let bad = Frame {
+            payload: bad.into(),
+            ..frame
+        };
+        assert!(decode_queue_push_progress(&bad).is_err());
     }
 
     #[test]

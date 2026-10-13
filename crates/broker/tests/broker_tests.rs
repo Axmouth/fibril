@@ -8998,8 +8998,12 @@ impl fibril_broker::broker::QueueOwnership for DeclaredOwnership {
     fn owns_queue(&self, _: &str, _: Partition, _: Option<&str>) -> bool {
         self.owns.load(Ordering::SeqCst)
     }
-    fn queue_declaration(&self, _: &str, _: Option<&str>) -> Result<Option<DeclareMeta>, String> {
-        Ok(Some(self.meta.lock().unwrap().clone()))
+    fn queue_declaration(
+        &self,
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<Option<fibril_broker::queue_engine::QueueDeclaration>, String> {
+        Ok(Some(self.meta.lock().unwrap().clone().into()))
     }
 }
 
@@ -9389,7 +9393,7 @@ async fn queue_dependency_boundary(prefix: u64) {
         .apply_queue_push_batch(topic, Partition::new(0), None, records)
         .await
         .unwrap();
-    let fibril_broker::replication::QueuePushApply::Applied { next } = outcome else {
+    let fibril_broker::replication::QueuePushApply::Applied { next, .. } = outcome else {
         panic!("expected durable apply")
     };
     assert_eq!(next, prefix + 1);
@@ -9436,7 +9440,7 @@ async fn queue_dependency_boundary(prefix: u64) {
         .apply_queue_push_batch(topic, Partition::new(0), None, suffix)
         .await
         .unwrap();
-    let fibril_broker::replication::QueuePushApply::Applied { next } = outcome else {
+    let fibril_broker::replication::QueuePushApply::Applied { next, .. } = outcome else {
         panic!("expected durable suffix")
     };
     assert_eq!(next, dependency.next);
@@ -9495,7 +9499,7 @@ async fn replication_progress_sessions_fence_reset_reconnect_and_assignment() {
     let first = broker
         .begin_replication_progress_session(topic, part, None, ReplicationResourceKind::Queue, "b", 1)
         .unwrap();
-    let dep = stroma_core::QueuePublishCommit { next: 4, epoch: 1 };
+    let dep = stroma_core::QueuePublishCommit { next: 4, epoch: 1, buffered: false };
     // A later report after a reset replaces the earlier position instead of
     // keeping its maximum.
     broker.record_replication_session_progress(&first, DurableProgress::Queue { next: 8 });
@@ -9550,7 +9554,7 @@ async fn replication_progress_sessions_fence_reset_reconnect_and_assignment() {
             .is_none()
     );
     broker.record_replication_session_progress(&second, DurableProgress::Queue { next: 99 });
-    let dep = stroma_core::QueuePublishCommit { next: 4, epoch: 2 };
+    let dep = stroma_core::QueuePublishCommit { next: 4, epoch: 2, buffered: false };
     let wait = broker.await_queue_replication_confirm(topic, part, None, 3, dep);
     tokio::pin!(wait);
     assert!(

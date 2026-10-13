@@ -29,6 +29,31 @@ pub struct RuntimeSettings {
     pub stream: StreamRuntimeSettings,
     #[serde(default)]
     pub routing: RoutingRuntimeSettings,
+    #[serde(default)]
+    pub storage: StorageRuntimeSettings,
+}
+
+/// Longest background sync interval accepted, one hour.
+pub const MAX_BACKGROUND_SYNC_INTERVAL_MS: u64 = 3_600_000;
+
+/// Storage runtime settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct StorageRuntimeSettings {
+    /// How often a queue log syncs records it has written but not synced
+    /// yet. Only buffered queues and replicas that skipped a sync leave such
+    /// records, so durable queues are unaffected. A target, not a bound on
+    /// how long records stay unsynced. `0` turns it off and leaves syncing
+    /// to the operating system, with no bound at all.
+    pub background_sync_interval_ms: u64,
+}
+
+impl Default for StorageRuntimeSettings {
+    fn default() -> Self {
+        Self {
+            background_sync_interval_ms: 100,
+        }
+    }
 }
 
 /// Limits for forwarding client operations to private partition owners. Only
@@ -203,6 +228,11 @@ impl RuntimeSettings {
             self.connection.max_message_bytes,
         )
         .map_err(RuntimeSettingsError::Invalid)?;
+        if self.storage.background_sync_interval_ms > MAX_BACKGROUND_SYNC_INTERVAL_MS {
+            return Err(RuntimeSettingsError::Invalid(format!(
+                "storage.background_sync_interval_ms must be at most {MAX_BACKGROUND_SYNC_INTERVAL_MS}"
+            )));
+        }
         let routing = &self.routing;
         if routing.max_upstream_sessions == 0
             || routing.max_upstream_sessions_per_owner == 0
@@ -236,6 +266,7 @@ impl Default for RuntimeSettings {
             consumer_groups: ConsumerGroupRuntimeSettings::default(),
             stream: StreamRuntimeSettings::default(),
             routing: RoutingRuntimeSettings::default(),
+            storage: StorageRuntimeSettings::default(),
         }
     }
 }
@@ -922,6 +953,7 @@ mod tests {
             consumer_groups: ConsumerGroupRuntimeSettings::default(),
             stream: StreamRuntimeSettings::default(),
             routing: RoutingRuntimeSettings::default(),
+            storage: StorageRuntimeSettings::default(),
         };
 
         let decoded = decode_snapshot(GlobalValue {
@@ -965,6 +997,7 @@ mod tests {
             consumer_groups: ConsumerGroupRuntimeSettings::default(),
             stream: StreamRuntimeSettings::default(),
             routing: RoutingRuntimeSettings::default(),
+            storage: StorageRuntimeSettings::default(),
         };
 
         let config = BrokerConfig::from_runtime_settings(&settings);

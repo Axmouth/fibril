@@ -371,6 +371,16 @@ function render(bundle) {
           return `<span class="${policyChipClass(kind)}">dlq ${escapeHtml(kind)}</span>`
             + (state.dlq_max_retries != null ? ` <span class="chip-plain">retry ${escapeHtml(String(state.dlq_max_retries))}</span>` : "");
         };
+        // Buffered queues confirm before fsync. Show it, and how many
+        // written records each partition still has to sync.
+        const bufferedChip = parts.some(p => p.buffered)
+          ? ' <span class="chip-warn" title="Confirms and delivers once written to the OS on the required nodes, before fsync">buffered</span>'
+          : "";
+        const unsyncedChip = (item) => {
+          const lag = num(item.log_sync?.durable_lag_records);
+          if (!item.buffered) return '<span class="v-dim">—</span>';
+          return `<span class="${lag > 0 ? "chip-warn" : "chip-plain"}" title="Records written but not synced yet. Last sync ${escapeHtml(String(num(item.log_sync?.since_last_sync_ms)))} ms ago">unsynced ${escapeHtml(fmtCompact(lag))}</span>`;
+        };
         const aggReady = sumState("ready_count");
         const aggSubs = num(act?.active_subscribers);
         const subsClass = aggSubs > 0 ? "v-ok" : (aggReady > 0 ? "v-warn" : "v-dim");
@@ -387,7 +397,7 @@ function render(bundle) {
             <td class="text-right ${num(act?.active_publishers) > 0 ? "v-active" : "v-dim"}">${num(act?.active_publishers)}</td>
             <td class="text-right ${subsClass}">${aggSubs}</td>
             <td class="text-right v-dim">—</td>
-            <td>${dlqChips(dlqItem?.state)}</td>
+            <td>${dlqChips(dlqItem?.state)}${bufferedChip}</td>
             <td class="queue-actions"><a class="queue-messages-link" href="/admin/queue?${new URLSearchParams({ topic, ...(parts[0]?.group ? { group: parts[0].group } : {}) })}">Detail</a> <button type="button" class="queue-delete-btn" ${dataAttrs} data-partitions="${parts.length}">Delete</button></td>
           </tr>`;
         const childRows = parts.map(item => {
@@ -403,7 +413,7 @@ function render(bundle) {
             <td class="text-right v-dim">—</td>
             <td class="text-right v-dim">—</td>
             <td class="text-right">${formatQueueStateValue(item, item.state.settled_until)}</td>
-            <td class="v-dim">—</td>
+            <td>${unsyncedChip(item)}</td>
             <td><a class="queue-messages-link" href="${inspectHref(item)}" title="Inspect messages">Inspect</a></td>
           </tr>`;
         }).join("");

@@ -33,9 +33,12 @@ pub const PUSH_END_CHECKPOINT_REQUIRED: u16 = 2;
 /// push sender.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnerPushControl {
-    /// Follower reported durable progress and refilled the send budget.
+    /// Follower reported progress and refilled the send budget.
+    /// `written_next` is never below `durable_next`, and equal to it on a
+    /// durable queue.
     Progress {
         durable_next: u64,
+        written_next: u64,
         credit_add_bytes: u64,
     },
     /// Follower asked to rewind the push cursor (gap or post-checkpoint).
@@ -77,6 +80,21 @@ pub trait OwnerPushSource: Send + Sync + 'static {
         reporter: &str,
         durable_next: u64,
     );
+
+    /// Record progress of a follower whose queue log is written past what it
+    /// has synced, as on a buffered queue. Sources that only track durable
+    /// progress record that.
+    fn record_written_progress(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        reporter: &str,
+        durable_next: u64,
+        _written_next: u64,
+    ) {
+        self.record_progress(topic, partition, group, reporter, durable_next);
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -224,11 +242,23 @@ fn apply_control<S: OwnerPushSource>(
     match control {
         OwnerPushControl::Progress {
             durable_next,
+            written_next,
             credit_add_bytes,
         } => {
             credit.replenish(credit_add_bytes);
             if let Some(reporter) = reporter {
-                source.record_progress(topic, partition, group, reporter, durable_next);
+                if written_next > durable_next {
+                    source.record_written_progress(
+                        topic,
+                        partition,
+                        group,
+                        reporter,
+                        durable_next,
+                        written_next,
+                    );
+                } else {
+                    source.record_progress(topic, partition, group, reporter, durable_next);
+                }
             }
             true
         }
@@ -386,10 +416,13 @@ pub async fn run_owner_queue_push<S: OwnerPushSource>(
 /// encodes these to `QueuePushProgress` / `QueuePushReset` frames.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FollowerPushControl {
-    /// Durable progress plus a credit refill (combined). Sent per applied batch
-    /// so progress is prompt (confirm latency) and the budget stays topped up.
+    /// Progress plus a credit refill (combined). Sent per applied batch so
+    /// progress is prompt (confirm latency) and the budget stays topped up.
+    /// `written_next` trails nothing and `durable_next` trails it only on a
+    /// buffered queue, whose follower skips the per-batch fsync.
     Progress {
         durable_next: u64,
+        written_next: u64,
         credit_add_bytes: u64,
     },
     /// Rewind the owner push cursor (the follower handled a checkpoint).
@@ -398,9 +431,10 @@ pub enum FollowerPushControl {
 
 /// Outcome of durably applying one pushed batch.
 pub enum FollowerApplyOutcome {
-    /// Applied durably; here is the new durable log end and the bytes applied
-    /// (the credit to return).
-    Applied { durable_next: u64, bytes: u64 },
+    /// Applied; here is the new log end (`written_next`), how far the log is
+    /// synced (`durable_next`, equal unless the queue is buffered) and the
+    /// bytes applied (the credit to return).
+    Applied { durable_next: u64, written_next: u64, bytes: u64 },
     /// The batch needs a checkpoint (offset gap / epoch fence). The push stops
     /// so the worker can fall back to the proven pull+checkpoint path, then
     /// push again from the post-checkpoint cursor.
@@ -431,6 +465,13 @@ pub trait FollowerPushSink: Send + Sync + 'static {
         FollowerApplyOutcome::Error("open follower batches unsupported".into())
     }
     async fn apply(&self, batch: QueueReplicationReadOk) -> FollowerApplyOutcome;
+
+    /// Current durable end of the follower log, for keepalives on a buffered
+    /// queue whose background sync moves it without any apply. `None` keeps
+    /// the last reported value.
+    async fn durable_next(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// Input is polled by storage after each frame is staged, keeping one recovery
@@ -510,6 +551,7 @@ pub async fn run_follower_push_applier<S: FollowerPushSink>(
     // grow, i.e. peak memory vs fsync-amortization. Pairs with apply_linger.
 
     let mut next = from;
+    let mut durable = from;
     let mut carry: Option<QueueReplicationReadOk> = None;
     let mut drain_continuation = false;
     loop {
@@ -540,10 +582,14 @@ pub async fn run_follower_push_applier<S: FollowerPushSink>(
                     Ok(Some(batch)) => batch,
                     Ok(None) => return ApplierExit::ReaderClosed,
                     Err(()) => {
-                        // Caught-up keepalive: refresh durable progress, no credit.
+                        // Caught-up keepalive: refresh progress, no credit.
+                        if let Some(synced) = sink.durable_next().await {
+                            durable = synced.max(durable).min(next);
+                        }
                         if control_tx
                             .send(FollowerPushControl::Progress {
-                                durable_next: next,
+                                durable_next: durable,
+                                written_next: next,
                                 credit_add_bytes: 0,
                             })
                             .await
@@ -631,9 +677,11 @@ pub async fn run_follower_push_applier<S: FollowerPushSink>(
         match outcome {
             FollowerApplyOutcome::Applied {
                 durable_next,
+                written_next,
                 bytes,
             } => {
-                next = durable_next;
+                next = written_next;
+                durable = durable_next.min(written_next);
                 // Snapshot readiness immediately after successful application.
                 // Waiting for progress-channel capacity must not turn a later
                 // arrival into proof of backlog at the completion boundary.
@@ -650,7 +698,8 @@ pub async fn run_follower_push_applier<S: FollowerPushSink>(
                 }
                 if control_tx
                     .send(FollowerPushControl::Progress {
-                        durable_next,
+                        durable_next: durable,
+                        written_next,
                         credit_add_bytes: bytes,
                     })
                     .await
@@ -853,7 +902,7 @@ mod tests {
         // Refill + progress: 3 more batches flow.
         control_tx
             .send(OwnerPushControl::Progress {
-                durable_next: 2,
+                durable_next: 2, written_next: 2,
                 credit_add_bytes: 3 * REC_BYTES,
             })
             .await
@@ -901,7 +950,7 @@ mod tests {
             .unwrap();
         control_tx
             .send(OwnerPushControl::Progress {
-                durable_next: 0,
+                durable_next: 0, written_next: 0,
                 credit_add_bytes: REC_BYTES,
             })
             .await
@@ -937,7 +986,7 @@ mod tests {
         for offset in 2..6 {
             control_tx
                 .send(OwnerPushControl::Progress {
-                    durable_next: offset,
+                    durable_next: offset, written_next: offset,
                     credit_add_bytes: REC_BYTES,
                 })
                 .await
@@ -987,7 +1036,7 @@ mod tests {
         });
         control_tx
             .send(OwnerPushControl::Progress {
-                durable_next: 2,
+                durable_next: 2, written_next: 2,
                 credit_add_bytes: 200,
             })
             .await
@@ -1034,7 +1083,7 @@ mod tests {
         for count in 1..=3 {
             control_tx
                 .send(OwnerPushControl::Progress {
-                    durable_next: 0,
+                    durable_next: 0, written_next: 0,
                     credit_add_bytes: 0,
                 })
                 .await
@@ -1050,7 +1099,7 @@ mod tests {
         );
         control_tx
             .send(OwnerPushControl::Progress {
-                durable_next: 1,
+                durable_next: 1, written_next: 1,
                 credit_add_bytes: REC_BYTES,
             })
             .await
@@ -1067,7 +1116,7 @@ mod tests {
         assert_eq!(recv_offsets(&mut frame_rx, 1).await, vec![4]);
         control_tx
             .send(OwnerPushControl::Progress {
-                durable_next: 5,
+                durable_next: 5, written_next: 5,
                 credit_add_bytes: REC_BYTES,
             })
             .await
@@ -1136,7 +1185,7 @@ mod tests {
                 self.staged.send(next).unwrap();
             }
             self.sync.notified().await;
-            FollowerApplyOutcome::Applied { durable_next: next, bytes }
+            FollowerApplyOutcome::Applied { durable_next: next, written_next: next, bytes }
         }
     }
 
@@ -1164,13 +1213,13 @@ mod tests {
         assert!(controls.try_recv().is_err(), "cutoff alone must not report durability");
         sync.notify_one();
         assert_eq!(controls.recv().await, Some(FollowerPushControl::Progress {
-            durable_next: 2, credit_add_bytes: 2 * REC_BYTES,
+            durable_next: 2, written_next: 2, credit_add_bytes: 2 * REC_BYTES,
         }));
         assert_eq!(stages.recv().await, Some(3));
         drop(tx);
         sync.notify_one();
         assert_eq!(controls.recv().await, Some(FollowerPushControl::Progress {
-            durable_next: 3, credit_add_bytes: REC_BYTES,
+            durable_next: 3, written_next: 3, credit_add_bytes: REC_BYTES,
         }));
         assert_eq!(task.await.unwrap(), ApplierExit::ReaderClosed);
     }
@@ -1197,7 +1246,7 @@ mod tests {
         assert!(controls.try_recv().is_err());
         sync.notify_one();
         assert_eq!(controls.recv().await, Some(FollowerPushControl::Progress {
-            durable_next: 2, credit_add_bytes: 2 * REC_BYTES,
+            durable_next: 2, written_next: 2, credit_add_bytes: 2 * REC_BYTES,
         }));
         drop(tx);
         assert_eq!(task.await.unwrap(), ApplierExit::ReaderClosed);
@@ -1247,7 +1296,7 @@ mod tests {
             self.closed.send((next, tokio::time::Instant::now())).unwrap();
             self.sync.notified().await;
             if self.fail { return FollowerApplyOutcome::Error("sync failed".into()); }
-            FollowerApplyOutcome::Applied { durable_next: next, bytes }
+            FollowerApplyOutcome::Applied { durable_next: next, written_next: next, bytes }
         }
     }
 
@@ -1271,13 +1320,13 @@ mod tests {
         let completed_at = tokio::time::Instant::now();
         sync.notify_one();
         assert_eq!(controls.recv().await, Some(FollowerPushControl::Progress {
-            durable_next: 1, credit_add_bytes: REC_BYTES,
+            durable_next: 1, written_next: 1, credit_add_bytes: REC_BYTES,
         }));
         assert_eq!(closures.recv().await, Some((3, completed_at)), "queued continuation must close without waiting");
         assert!(controls.try_recv().is_err(), "staging and closure are not durable progress");
         sync.notify_one();
         assert_eq!(controls.recv().await, Some(FollowerPushControl::Progress {
-            durable_next: 3, credit_add_bytes: 2 * REC_BYTES,
+            durable_next: 3, written_next: 3, credit_add_bytes: 2 * REC_BYTES,
         }));
         let idle_start = tokio::time::Instant::now();
         tx.send(batch_from(3, 1)).await.unwrap();
@@ -1375,7 +1424,7 @@ mod tests {
                 .send((requested_offset, next_offset, tokio::time::Instant::now()))
                 .unwrap();
             FollowerApplyOutcome::Applied {
-                durable_next: next_offset,
+                durable_next: next_offset, written_next: next_offset,
                 bytes,
             }
         }
@@ -1433,7 +1482,7 @@ mod tests {
         assert_eq!(
             controls.recv().await.unwrap(),
             FollowerPushControl::Progress {
-                durable_next: 3,
+                durable_next: 3, written_next: 3,
                 credit_add_bytes: 3 * REC_BYTES,
             }
         );
@@ -1518,7 +1567,7 @@ mod tests {
         let sink = Arc::new(MockSink {
             outcomes: Mutex::new(
                 [FollowerApplyOutcome::Applied {
-                    durable_next: 5,
+                    durable_next: 5, written_next: 5,
                     bytes: 5 * REC_BYTES,
                 }]
                 .into(),
@@ -1542,7 +1591,7 @@ mod tests {
         assert_eq!(
             control_rx.recv().await.unwrap(),
             FollowerPushControl::Progress {
-                durable_next: 5,
+                durable_next: 5, written_next: 5,
                 credit_add_bytes: 5 * REC_BYTES,
             },
             "two contiguous frames coalesce into one progress + combined credit"
@@ -1572,11 +1621,11 @@ mod tests {
             outcomes: Mutex::new(
                 [
                     FollowerApplyOutcome::Applied {
-                        durable_next: 2,
+                        durable_next: 2, written_next: 2,
                         bytes: 2 * REC_BYTES,
                     },
                     FollowerApplyOutcome::Applied {
-                        durable_next: 5,
+                        durable_next: 5, written_next: 5,
                         bytes: 3 * REC_BYTES,
                     },
                 ]
@@ -1643,11 +1692,11 @@ mod tests {
             outcomes: Mutex::new(
                 [
                     FollowerApplyOutcome::Applied {
-                        durable_next: 2,
+                        durable_next: 2, written_next: 2,
                         bytes: 2 * REC_BYTES,
                     },
                     FollowerApplyOutcome::Applied {
-                        durable_next: 11,
+                        durable_next: 11, written_next: 11,
                         bytes: REC_BYTES,
                     },
                 ]
@@ -1671,14 +1720,14 @@ mod tests {
         assert_eq!(
             control_rx.recv().await.unwrap(),
             FollowerPushControl::Progress {
-                durable_next: 2,
+                durable_next: 2, written_next: 2,
                 credit_add_bytes: 2 * REC_BYTES,
             }
         );
         assert_eq!(
             control_rx.recv().await.unwrap(),
             FollowerPushControl::Progress {
-                durable_next: 11,
+                durable_next: 11, written_next: 11,
                 credit_add_bytes: REC_BYTES,
             }
         );
@@ -1742,7 +1791,7 @@ mod tests {
         assert_eq!(
             ctrl,
             FollowerPushControl::Progress {
-                durable_next: 5,
+                durable_next: 5, written_next: 5,
                 credit_add_bytes: 0,
             },
             "idle keepalive reports the current cursor with zero credit"
@@ -1756,7 +1805,7 @@ mod tests {
         let sink = Arc::new(MockSink {
             outcomes: Mutex::new(
                 [FollowerApplyOutcome::Applied {
-                    durable_next: 100,
+                    durable_next: 100, written_next: 100,
                     bytes: 2 * REC_BYTES,
                 }]
                 .into(),
@@ -1781,7 +1830,7 @@ mod tests {
                 .unwrap()
                 .unwrap(),
             FollowerPushControl::Progress {
-                durable_next: 100,
+                durable_next: 100, written_next: 100,
                 credit_add_bytes: 2 * REC_BYTES,
             }
         );
@@ -1792,7 +1841,7 @@ mod tests {
                 .unwrap()
                 .unwrap(),
             FollowerPushControl::Progress {
-                durable_next: 100,
+                durable_next: 100, written_next: 100,
                 credit_add_bytes: 0,
             }
         );

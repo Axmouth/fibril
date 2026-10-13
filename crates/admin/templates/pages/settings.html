@@ -549,6 +549,27 @@
       </div>
     </section>
 
+    <section class="settings-section">
+      <div class="settings-section-heading">
+        <h5>Storage</h5>
+        <p>How queue logs on every broker sync to disk. Applies to open queue logs right away and to logs opened later.</p>
+      </div>
+      <div class="settings-grid settings-grid-two">
+      <label class="settings-field">
+        <span class="settings-label">Background sync interval</span>
+        <span class="settings-help">How often a queue log syncs records it has written but not synced yet. Only buffered queues leave such records, so durable queues are not affected. A target, not a limit: slow disks can stretch it. 0 turns it off and leaves syncing to the operating system, with no limit on how long a confirmed buffered message stays unsynced. Default 100 milliseconds.</span>
+        <span class="settings-duration">
+          <input id="storage.background_sync_interval_ms" data-runtime-setting type="number" min="0" step="any">
+          <select class="duration-unit" id="storage.background_sync_interval_ms.unit" data-for="storage.background_sync_interval_ms">
+            <option value="ms">milliseconds</option>
+            <option value="s">seconds</option>
+          </select>
+        </span>
+      <span id="seed.storage.background_sync_interval_ms" class="settings-help"></span>
+      </label>
+      </div>
+    </section>
+
     <div class="settings-actions">
       <button class="btn btn-primary" type="submit">Save runtime settings</button>
       <button class="btn" type="button" id="reload-settings">Reload</button>

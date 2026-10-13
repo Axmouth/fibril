@@ -148,6 +148,7 @@ pub fn runtime_seed_from_config(config: &ServerConfig) -> RuntimeSettings {
         // uses the defaults.
         stream: StreamRuntimeSettings::default(),
         routing: Default::default(),
+        storage: Default::default(),
     }
 }
 
@@ -812,6 +813,9 @@ pub async fn open_tcp_ganglion_parts(
             ));
             coordination
                 .set_gateway_liveness_ttl(Duration::from_millis(section.liveness_ttl_ms));
+            coordination.set_default_queue_durability(default_queue_durability_from_config(
+                &section.assignment_durability,
+            ));
             let (controller_task, controller_status) = coordination.spawn_controller(
                 Arc::new(DeterministicPartitionPlacement),
                 fibril_coordination_ganglion::ControllerConfig {
@@ -874,10 +878,24 @@ fn assignment_durability_from_config(
             Ok(ReplicationDurabilityPolicy::LocalDurable)
         }
         GanglionAssignmentDurabilityMode::ReplicaAccepted => {
-            Ok(ReplicationDurabilityPolicy::ReplicaAccepted {
+            tracing::warn!(
+                "assignment durability `replica_accepted` is deprecated and behaves as `replica_durable`; use `replica_durable`, or `replica_buffered` to confirm before fsync"
+            );
+            Ok(ReplicationDurabilityPolicy::ReplicaDurable {
                 nodes: section.nodes.ok_or(
                     AssignmentDurabilityConfigError::MissingReplicaNodes {
                         mode: "replica_accepted",
+                    },
+                )?,
+            })
+        }
+        // The copy count is the same as replica_durable. The buffered part is
+        // each queue's declared mode, see `default_queue_durability_from_config`.
+        GanglionAssignmentDurabilityMode::ReplicaBuffered => {
+            Ok(ReplicationDurabilityPolicy::ReplicaDurable {
+                nodes: section.nodes.ok_or(
+                    AssignmentDurabilityConfigError::MissingReplicaNodes {
+                        mode: "replica_buffered",
                     },
                 )?,
             })
@@ -894,6 +912,18 @@ fn assignment_durability_from_config(
         GanglionAssignmentDurabilityMode::MajorityDurable => {
             Ok(ReplicationDurabilityPolicy::MajorityDurable)
         }
+    }
+}
+
+/// Mode for queues first declared without one.
+fn default_queue_durability_from_config(
+    section: &GanglionAssignmentDurabilitySection,
+) -> fibril_broker::queue_engine::QueueDurability {
+    match section.mode {
+        GanglionAssignmentDurabilityMode::ReplicaBuffered => {
+            fibril_broker::queue_engine::QueueDurability::Buffered
+        }
+        _ => fibril_broker::queue_engine::QueueDurability::Durable,
     }
 }
 
@@ -1688,8 +1718,8 @@ pub fn declare_coordinator_for_ganglion(parts: &TcpGanglionParts) -> Arc<dyn Dec
         declare: Arc::new(move |topic, group, count, meta| {
             let coordination = coordination.clone();
             Box::pin(async move {
-                let partitioning = coordination
-                    .declare_queue(&topic, group.as_deref(), count, meta)
+                let (partitioning, mode) = coordination
+                    .declare_queue_declared(&topic, group.as_deref(), count, meta)
                     .await
                     .map_err(|error| error.to_string())?;
                 for partition in 0..partitioning.partition_count {
@@ -1703,7 +1733,7 @@ pub fn declare_coordinator_for_ganglion(parts: &TcpGanglionParts) -> Arc<dyn Dec
                         .await
                         .map_err(|error| error.to_string())?;
                 }
-                Ok(partitioning.partition_count)
+                Ok((partitioning.partition_count, mode))
             })
         }),
         declare_stream: Arc::new(
@@ -2286,12 +2316,21 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         let mut runtime_updates = runtime_settings.subscribe();
         let runtime_settings = Arc::downgrade(&runtime_settings);
         tokio::spawn(async move {
+            let mut applied_sync_interval = None;
             // Install the latest subscribed snapshot first, including updates
             // that raced startup. Mark seen before installation so a newer
             // update arriving during installation remains pending.
             loop {
                 let snapshot = runtime_updates.borrow_and_update().clone();
                 broker.update_config(BrokerConfig::from_runtime_settings(&snapshot.settings));
+                let sync_interval = snapshot.settings.storage.background_sync_interval_ms;
+                if applied_sync_interval != Some(sync_interval) {
+                    broker
+                        .engine()
+                        .set_queue_background_sync_default(Duration::from_millis(sync_interval))
+                        .await;
+                    applied_sync_interval = Some(sync_interval);
+                }
                 connection_settings.update_runtime(ProtocolConnectionRuntimeSettings {
                     publisher_cache_idle_timeout_ms: snapshot
                         .settings
@@ -2588,8 +2627,8 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
                     Arc::new(move |topic, group, count, meta| {
                         let coordination = source.clone();
                         Box::pin(async move {
-                            let partitioning = coordination
-                                .declare_queue(&topic, group.as_deref(), count, meta)
+                            let (partitioning, mode) = coordination
+                                .declare_queue_declared(&topic, group.as_deref(), count, meta)
                                 .await
                                 .map_err(|error| error.to_string())?;
                             for partition in 0..partitioning.partition_count {
@@ -2603,7 +2642,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
                                     .await
                                     .map_err(|error| error.to_string())?;
                             }
-                            Ok(partitioning.partition_count)
+                            Ok((partitioning.partition_count, mode))
                         })
                     })
                 })
@@ -3052,12 +3091,24 @@ impl ClientTopologySource for CoordinationTopologySource {
 /// Boxed future returned by the declare bridge.
 pub type DeclareFut = futures::future::BoxFuture<'static, Result<u32, String>>;
 
+/// Boxed future returned by the queue declare bridge: the effective partition
+/// count and the queue's durability mode.
+pub type QueueDeclareFut = futures::future::BoxFuture<
+    'static,
+    Result<(u32, fibril_broker::queue_engine::QueueDurability), String>,
+>;
+
 /// Bridges queue-declare partitioning writes to the coordination provider. The
 /// boxed-future closure captures the provider, avoiding naming its generic type
 /// and keeping coordination-ganglion free of a protocol dependency.
 pub struct CoordinationDeclareCoordinator {
     pub declare: Arc<
-        dyn Fn(String, Option<String>, u32, fibril_broker::queue_engine::DeclareMeta) -> DeclareFut
+        dyn Fn(
+                String,
+                Option<String>,
+                u32,
+                fibril_broker::queue_engine::QueueDeclaration,
+            ) -> QueueDeclareFut
             + Send
             + Sync,
     >,
@@ -3072,8 +3123,11 @@ impl DeclareCoordinator for CoordinationDeclareCoordinator {
         topic: &'a str,
         group: Option<&'a str>,
         partition_count: u32,
-        meta: fibril_broker::queue_engine::DeclareMeta,
-    ) -> futures::future::BoxFuture<'a, Result<u32, String>> {
+        meta: fibril_broker::queue_engine::QueueDeclaration,
+    ) -> futures::future::BoxFuture<
+        'a,
+        Result<(u32, fibril_broker::queue_engine::QueueDurability), String>,
+    > {
         (self.declare)(
             topic.to_string(),
             group.map(str::to_string),
@@ -3396,11 +3450,12 @@ mod tests {
             .expect("leader");
 
         let declare = declare_coordinator_for_ganglion(&parts);
-        let count = declare
+        let (count, mode) = declare
             .declare_partitioning("jobs", None, 2, Default::default())
             .await
             .expect("declare partitioning");
         assert_eq!(count, 2);
+        assert_eq!(mode, fibril_broker::queue_engine::QueueDurability::Durable);
 
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {

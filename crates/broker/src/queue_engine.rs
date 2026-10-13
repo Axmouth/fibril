@@ -22,7 +22,7 @@ pub use stroma_core::{
     MessageHeaders, MessageInspectionPage, MessageInspectionStatus, OwnerReplicationBatch,
     OwnerReplicationRead, PartitionKind, PreparedQueueRecovery,
     QueueCheckpointBase, QueueCheckpointPin, QueueCheckpointTarget, QueueCheckpointContents,
-    QueueCheckpointCapsule, QueueCheckpointBuildLimits,
+    QueueCheckpointCapsule, QueueCheckpointBuildLimits, QueueLogSyncStatus,
     PreparedStorageHistory, PutOutcome, QuarantineInfo, QueueInspectionState,
     QueueDemotionOutcome, QueuePromotionOutcome, QueuePublishCommit, QueueRecoveryStage,
     QueueRecoveryStageReceipt, QueueRecoveryStageSpec, QueueStateCheckpoint,
@@ -32,6 +32,108 @@ pub use stroma_core::{
     StorageHistoryBinding, Stroma, StromaError, StromaEvent, StromaKeratinConfig,
 };
 use tokio::sync::Notify;
+
+/// When a queue confirms and delivers a record. Fixed when the queue is first
+/// declared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueDurability {
+    /// After the record is synced to disk on every required copy.
+    #[default]
+    Durable,
+    /// After the record is written to the OS on every required copy, before
+    /// it is synced. Power loss or a failed sync on every required copy at
+    /// once can lose recent confirmed records.
+    Buffered,
+}
+
+impl QueueDurability {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Durable => "durable",
+            Self::Buffered => "buffered",
+        }
+    }
+}
+
+/// Queue settings as the cluster stores them: the Stroma declaration plus the
+/// queue's durability mode. The mode sits beside the flattened declaration,
+/// so documents written before it existed still read, as durable queues.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct QueueDeclaration {
+    #[serde(flatten)]
+    pub meta: DeclareMeta,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durability: Option<QueueDurability>,
+}
+
+impl From<DeclareMeta> for QueueDeclaration {
+    fn from(meta: DeclareMeta) -> Self {
+        Self::new(meta, None)
+    }
+}
+
+impl QueueDeclaration {
+    pub fn new(meta: DeclareMeta, durability: Option<QueueDurability>) -> Self {
+        Self { meta, durability }
+    }
+
+    /// The stored mode. A declaration without one is durable.
+    pub fn mode(&self) -> QueueDurability {
+        self.durability.unwrap_or_default()
+    }
+}
+
+/// Why a local queue declare failed.
+#[derive(Debug, thiserror::Error)]
+pub enum LocalDeclareError {
+    /// The request names a durability mode other than the queue's own.
+    #[error("{0}")]
+    DurabilityConflict(String),
+    #[error(transparent)]
+    Storage(#[from] StromaError),
+}
+
+/// Declare one queue partition on a broker without coordination. The first
+/// declare, while the partition log is still empty, sets the durability mode
+/// from `durability`, or durable when it is absent. A later declare naming
+/// another mode fails before anything is written. Returns the mode in effect.
+pub async fn declare_local_queue_partition<E: QueueEngine + Send + Sync + ?Sized>(
+    engine: &E,
+    tp: &str,
+    part: u32,
+    group: Option<&str>,
+    meta: DeclareMeta,
+    durability: Option<QueueDurability>,
+) -> Result<QueueDurability, LocalDeclareError> {
+    let fresh = engine.current_next_offset(tp, part, group).await? == 0;
+    let current = if engine.queue_is_buffered(tp, part, group) {
+        QueueDurability::Buffered
+    } else {
+        QueueDurability::Durable
+    };
+    if let Some(requested) = durability
+        && !fresh
+        && requested != current
+    {
+        return Err(LocalDeclareError::DurabilityConflict(format!(
+            "queue `{tp}` partition {part} is already declared {} (requested {}); the durability mode is fixed when a queue is first declared",
+            current.as_str(),
+            requested.as_str()
+        )));
+    }
+    engine.declare_queue(tp, part, group, meta).await?;
+    if !fresh {
+        return Ok(current);
+    }
+    let mode = durability.unwrap_or_default();
+    if mode != current {
+        engine
+            .set_queue_buffered(tp, part, group, mode == QueueDurability::Buffered)
+            .await?;
+    }
+    Ok(mode)
+}
 
 pub struct Deliverable {
     pub published: u64,
@@ -271,6 +373,28 @@ pub trait QueueEngine {
         group: Option<&str>,
         meta: DeclareMeta,
     ) -> Result<(), StromaError>;
+
+    /// Store whether a queue partition is buffered. Engines without buffered
+    /// queues refuse to turn it on.
+    async fn set_queue_buffered(
+        &self,
+        tp: &str,
+        part: u32,
+        _group: Option<&str>,
+        buffered: bool,
+    ) -> Result<(), StromaError> {
+        if buffered {
+            return Err(StromaError::InvalidArgument(format!(
+                "{tp}/{part}: this engine has no buffered queues"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Whether a queue partition is buffered. Known once its log has opened.
+    fn queue_is_buffered(&self, _tp: &str, _part: u32, _group: Option<&str>) -> bool {
+        false
+    }
 
     async fn materialize(
         &self,
@@ -1146,6 +1270,37 @@ impl StromaEngine {
             .await
     }
 
+    /// Written and durable frontiers and background sync state of the logs
+    /// behind a queue partition.
+    pub async fn queue_log_sync_status(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<QueueLogSyncStatus, StromaError> {
+        self.inner.queue_log_sync_status(tp, part, group).await
+    }
+
+    /// Background sync interval for every queue log, open now or later. Zero
+    /// turns it off. Logs that fail to change are logged and keep theirs.
+    pub async fn set_queue_background_sync_default(&self, interval: std::time::Duration) {
+        self.inner.set_queue_background_sync_default(interval).await
+    }
+
+    /// Change the background sync interval of the logs behind a queue
+    /// partition. Zero turns it off.
+    pub async fn set_queue_background_sync_interval(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        interval: std::time::Duration,
+    ) -> Result<(), StromaError> {
+        self.inner
+            .set_queue_background_sync_interval(tp, part, group, interval)
+            .await
+    }
+
     pub async fn become_queue_follower(
         &self,
         tp: &str,
@@ -1781,6 +1936,20 @@ impl QueueEngine for StromaEngine {
         meta: DeclareMeta,
     ) -> Result<(), StromaError> {
         self.inner.declare(tp, part, group, meta).await
+    }
+
+    async fn set_queue_buffered(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        buffered: bool,
+    ) -> Result<(), StromaError> {
+        self.inner.set_queue_buffered(tp, part, group, buffered).await
+    }
+
+    fn queue_is_buffered(&self, tp: &str, part: u32, group: Option<&str>) -> bool {
+        self.inner.queue_is_buffered(tp, part, group)
     }
 
     async fn materialize(

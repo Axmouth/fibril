@@ -488,7 +488,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        AssignmentChanged, Auth, DeclareQueue, DeclareQueueOk, Hello, HelloOk, QueueDlqPolicy,
+        AssignmentChanged, Auth, DeclareQueue, DeclareQueueOk, Hello, HelloOk, QueueDlqPolicy, QueueDurability,
         QueueTopologyEntry, ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult,
         ReconcileServer, ReconcileSubscription, ReconcileSubscriptionResult, Redirect,
         QueuePushProgress, QueueReplicationRead, QueueReplicationReadOk,
@@ -618,6 +618,7 @@ mod tests {
             dlq_max_retries: Some(7),
             partition_count: Some(3),
             default_message_ttl_ms: None,
+            durability: None,
         };
         let frame = try_encode(Op::DeclareQueue, 5, &declare).unwrap();
         let got = try_decode::<DeclareQueue>(&frame).unwrap();
@@ -625,15 +626,45 @@ mod tests {
         assert_eq!(got.group, declare.group);
         assert_eq!(got.dlq_max_retries, declare.dlq_max_retries);
         assert_eq!(got.partition_count, declare.partition_count);
+        assert_eq!(got.durability, None);
+        let plain_len = frame.payload.len();
+
+        // A mode adds one trailing byte, so a declare without one is unchanged.
+        for durability in [QueueDurability::Durable, QueueDurability::Buffered] {
+            let declare = DeclareQueue {
+                durability: Some(durability),
+                default_message_ttl_ms: Some(5),
+                ..declare.clone()
+            };
+            let frame = try_encode(Op::DeclareQueue, 5, &declare).unwrap();
+            assert_eq!(frame.payload.len(), plain_len + 8 + 1);
+            let got = try_decode::<DeclareQueue>(&frame).unwrap();
+            assert_eq!(got.durability, Some(durability));
+            assert_eq!(got.default_message_ttl_ms, Some(5));
+        }
 
         let ok = DeclareQueueOk {
             status: "created".into(),
             partition_count: 3,
+            durability: None,
+            warnings: Vec::new(),
         };
         let frame = try_encode(Op::DeclareQueueOk, 6, &ok).unwrap();
+        assert_eq!(&frame.payload[..4], b"FDK1");
         let got = try_decode::<DeclareQueueOk>(&frame).unwrap();
         assert_eq!(got.status, ok.status);
         assert_eq!(got.partition_count, ok.partition_count);
+
+        let ok = DeclareQueueOk {
+            durability: Some(QueueDurability::Buffered),
+            warnings: vec!["recent messages can be lost".into()],
+            ..ok
+        };
+        let frame = try_encode(Op::DeclareQueueOk, 6, &ok).unwrap();
+        assert_eq!(&frame.payload[..4], b"FDK2");
+        let got = try_decode::<DeclareQueueOk>(&frame).unwrap();
+        assert_eq!(got.durability, ok.durability);
+        assert_eq!(got.warnings, ok.warnings);
 
         let member_id = Uuid::new_v4();
         let subscribe = Subscribe {
@@ -922,6 +953,7 @@ mod tests {
     fn queue_push_progress_encodes_through_the_helper() {
         let msg = QueuePushProgress {
             durable_next: 9,
+            written_next: 9,
             credit_add_bytes: 100,
         };
         let frame = try_encode(Op::QueuePushProgress, 16, &msg).unwrap();

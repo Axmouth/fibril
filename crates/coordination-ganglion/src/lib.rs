@@ -532,6 +532,14 @@ pub enum DeclareQueueError {
         existing: u32,
         requested: u32,
     },
+    /// The queue already exists with a different durability mode. The mode
+    /// is fixed when the queue is first declared.
+    DurabilityConflict {
+        topic: String,
+        group: Option<String>,
+        existing: fibril_broker::queue_engine::QueueDurability,
+        requested: fibril_broker::queue_engine::QueueDurability,
+    },
     /// A coordination/consensus error (not-leader, storage, repeated CAS loss).
     Coordination(OpenraftAdapterError),
 }
@@ -551,6 +559,21 @@ impl std::fmt::Display for DeclareQueueError {
                     .as_deref()
                     .map(|g| format!("/{g}"))
                     .unwrap_or_default()
+            ),
+            Self::DurabilityConflict {
+                topic,
+                group,
+                existing,
+                requested,
+            } => write!(
+                f,
+                "queue `{topic}`{} is already declared {} (requested {}); the durability mode is fixed when a queue is first declared",
+                group
+                    .as_deref()
+                    .map(|g| format!("/{g}"))
+                    .unwrap_or_default(),
+                existing.as_str(),
+                requested.as_str()
             ),
             Self::Coordination(error) => write!(f, "{error}"),
         }
@@ -1177,6 +1200,9 @@ pub struct GanglionCoordination {
     // Heartbeat age past which a public broker stops being a gateway. Set
     // from the controller's liveness TTL at startup.
     gateway_liveness_ttl_ms: std::sync::atomic::AtomicU64,
+    // Mode for queues first declared without one. Buffered when the cluster
+    // assignment durability is `replica_buffered`.
+    default_queue_buffered: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for GanglionCoordination {
@@ -1254,6 +1280,26 @@ impl GanglionCoordination {
             gateway_liveness_ttl_ms: std::sync::atomic::AtomicU64::new(
                 ControllerConfig::default().liveness_ttl.as_millis() as u64,
             ),
+            default_queue_buffered: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Mode for queues first declared without one. Existing queues keep theirs.
+    pub fn set_default_queue_durability(&self, mode: fibril_broker::queue_engine::QueueDurability) {
+        self.default_queue_buffered.store(
+            mode == fibril_broker::queue_engine::QueueDurability::Buffered,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    fn default_queue_durability(&self) -> fibril_broker::queue_engine::QueueDurability {
+        if self
+            .default_queue_buffered
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            fibril_broker::queue_engine::QueueDurability::Buffered
+        } else {
+            fibril_broker::queue_engine::QueueDurability::Durable
         }
     }
 
@@ -1856,13 +1902,30 @@ impl GanglionCoordination {
     /// Store queue settings before cataloguing its partitions. Only assigned
     /// owners append Declare events; the receiving broker never creates a log.
     /// Like storage declaration, omitted settings preserve their previous values.
+    /// The durability mode is set by the first declare, from the request or
+    /// the cluster default, and a later declare naming another mode fails.
     pub async fn declare_queue(
         &self,
         topic: &str,
         group: Option<&str>,
         partition_count: u32,
-        meta: fibril_broker::queue_engine::DeclareMeta,
+        declaration: fibril_broker::queue_engine::QueueDeclaration,
     ) -> Result<QueuePartitioning, DeclareQueueError> {
+        self.declare_queue_declared(topic, group, partition_count, declaration)
+            .await
+            .map(|(partitioning, _)| partitioning)
+    }
+
+    /// `declare_queue`, also returning the queue's durability mode in effect.
+    pub async fn declare_queue_declared(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+        partition_count: u32,
+        declaration: fibril_broker::queue_engine::QueueDeclaration,
+    ) -> Result<(QueuePartitioning, fibril_broker::queue_engine::QueueDurability), DeclareQueueError>
+    {
+        let meta = declaration.meta;
         if group.is_none() && self.stream_config(topic).is_some() {
             return Err(DeclareQueueError::Coordination(
                 OpenraftAdapterError::Storage(format!(
@@ -1876,7 +1939,7 @@ impl GanglionCoordination {
         let key = queue_declaration_key(topic, group);
         for _ in 0..8 {
             let current = self.cluster_attribute(&key);
-            let mut merged: fibril_broker::queue_engine::DeclareMeta = match &current {
+            let mut stored: fibril_broker::queue_engine::QueueDeclaration = match &current {
                 Some(raw) => serde_json::from_str(raw).map_err(|error| {
                     DeclareQueueError::Coordination(OpenraftAdapterError::Storage(format!(
                         "queue `{topic}`/{group:?} declaration is corrupt: {error}"
@@ -1884,6 +1947,22 @@ impl GanglionCoordination {
                 })?,
                 None => Default::default(),
             };
+            match (&current, declaration.durability) {
+                (None, requested) => {
+                    stored.durability =
+                        Some(requested.unwrap_or_else(|| self.default_queue_durability()));
+                }
+                (Some(_), Some(requested)) if requested != stored.mode() => {
+                    return Err(DeclareQueueError::DurabilityConflict {
+                        topic: topic.to_string(),
+                        group: group.map(str::to_string),
+                        existing: stored.mode(),
+                        requested,
+                    });
+                }
+                (Some(_), _) => {}
+            }
+            let merged = &mut stored.meta;
             if meta.dlq_policy.is_some() {
                 merged.dlq_policy = meta.dlq_policy.clone();
             }
@@ -1893,11 +1972,12 @@ impl GanglionCoordination {
             if meta.default_message_ttl_ms.is_some() {
                 merged.default_message_ttl_ms = meta.default_message_ttl_ms;
             }
-            let value = serde_json::to_string(&merged).map_err(|error| {
+            let value = serde_json::to_string(&stored).map_err(|error| {
                 DeclareQueueError::Coordination(OpenraftAdapterError::Storage(error.to_string()))
             })?;
+            let mode = stored.mode();
             if current.as_ref() == Some(&value) {
-                return Ok(partitioning);
+                return Ok((partitioning, mode));
             }
             match self
                 .forward_command(MetadataRaftCommand::CompareAndSetAttribute {
@@ -1907,7 +1987,7 @@ impl GanglionCoordination {
                 })
                 .await
             {
-                Ok(_) => return Ok(partitioning),
+                Ok(_) => return Ok((partitioning, mode)),
                 Err(OpenraftAdapterError::AttributeMismatch { .. }) => continue,
                 Err(error) => return Err(DeclareQueueError::Coordination(error)),
             }
@@ -3680,7 +3760,7 @@ impl fibril_broker::broker::QueueOwnership for GanglionCoordination {
         &self,
         topic: &str,
         group: Option<&str>,
-    ) -> Result<Option<fibril_broker::queue_engine::DeclareMeta>, String> {
+    ) -> Result<Option<fibril_broker::queue_engine::QueueDeclaration>, String> {
         let key = queue_declaration_key(topic, group);
         let raw = self
             .node
@@ -3777,6 +3857,18 @@ fn committed_topic_has_queue_state(
 impl Coordination for GanglionCoordination {
     fn node_id(&self) -> &str {
         &self.node_id
+    }
+
+    fn queue_durability(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+    ) -> Option<fibril_broker::queue_engine::QueueDurability> {
+        use fibril_broker::broker::QueueOwnership;
+        self.queue_declaration(topic, group)
+            .ok()
+            .flatten()
+            .map(|declaration| declaration.mode())
     }
 
     fn snapshot(&self) -> CoordinationSnapshot {
@@ -4526,13 +4618,14 @@ mod tests {
             default_message_ttl_ms: Some(12345),
         };
         provider
-            .declare_queue("orders", Some("workers"), 2, meta.clone())
+            .declare_queue("orders", Some("workers"), 2, meta.clone().into())
             .await
             .unwrap();
         assert_eq!(
             provider
                 .queue_declaration("orders", Some("workers"))
-                .unwrap(),
+                .unwrap()
+                .map(|declaration| declaration.meta),
             Some(meta.clone())
         );
         assert_eq!(provider.queue_declaration("orders", None).unwrap(), None);
@@ -4541,7 +4634,7 @@ mod tests {
             ..Default::default()
         };
         provider
-            .declare_queue("orders", Some("workers"), 2, update)
+            .declare_queue("orders", Some("workers"), 2, update.into())
             .await
             .unwrap();
         let expected = DeclareMeta {
@@ -4555,7 +4648,8 @@ mod tests {
         assert_eq!(
             provider
                 .queue_declaration("orders", Some("workers"))
-                .unwrap(),
+                .unwrap()
+                .map(|declaration| declaration.meta),
             Some(expected.clone())
         );
         assert!(
@@ -4568,6 +4662,7 @@ mod tests {
                         default_message_ttl_ms: Some(1),
                         ..Default::default()
                     }
+                    .into()
                 )
                 .await
                 .is_err()
@@ -4575,7 +4670,8 @@ mod tests {
         assert_eq!(
             provider
                 .queue_declaration("orders", Some("workers"))
-                .unwrap(),
+                .unwrap()
+                .map(|declaration| declaration.meta),
             Some(expected)
         );
         assert_ne!(
@@ -4756,7 +4852,7 @@ mod tests {
             dlq_max_retries: Some(17), default_message_ttl_ms: Some(12345), ..Default::default()
         };
         let declared = standby
-            .declare_queue("orders", None, 3, meta.clone())
+            .declare_queue("orders", None, 3, meta.clone().into())
             .await
             .expect("standby declare should forward to leader");
         assert_eq!(declared.partition_count, 3);
@@ -4766,7 +4862,7 @@ mod tests {
             tokio::time::timeout(timeout, async {
                 loop {
                     if provider.queue_partitioning("orders", None) == Some(declared.clone())
-                        && provider.queue_declaration("orders", None).unwrap() == Some(meta.clone()) {
+                        && provider.queue_declaration("orders", None).unwrap().map(|d| d.meta) == Some(meta.clone()) {
                         break;
                     }
                     watch.changed().await.expect("watch open");

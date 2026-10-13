@@ -1484,11 +1484,13 @@ async fn run_follower_queue_push_with_history<S: FollowerPushSink>(
             let frame = match control {
                 FollowerPushControl::Progress {
                     durable_next,
+                    written_next,
                     credit_add_bytes,
                 } => wire::encode_queue_push_progress(
                     push_id,
                     &QueuePushProgress {
                         durable_next,
+                        written_next,
                         credit_add_bytes,
                     },
                 ),
@@ -1557,8 +1559,9 @@ struct QueuePushSink {
 
 fn queue_push_outcome(outcome: Result<QueuePushApply, BrokerError>, bytes: u64) -> FollowerApplyOutcome {
     match outcome {
-        Ok(QueuePushApply::Applied { next }) => FollowerApplyOutcome::Applied {
-            durable_next: next,
+        Ok(QueuePushApply::Applied { next, durable_next }) => FollowerApplyOutcome::Applied {
+            durable_next,
+            written_next: next,
             bytes,
         },
         Ok(QueuePushApply::CheckpointRequired) => FollowerApplyOutcome::CheckpointRequired,
@@ -1589,6 +1592,9 @@ impl FollowerPushSink for QueuePushSink {
             Err(err) => return FollowerApplyOutcome::Error(err.to_string()),
         };
         queue_push_outcome(self.apply.apply_queue_push(records).await, bytes)
+    }
+    async fn durable_next(&self) -> Option<u64> {
+        self.apply.queue_durable_next().await
     }
 }
 
@@ -1666,6 +1672,7 @@ mod push_transport_tests {
             self.applied.lock().unwrap().push((next_offset, bytes));
             FollowerApplyOutcome::Applied {
                 durable_next: next_offset,
+                written_next: next_offset,
                 bytes,
             }
         }
