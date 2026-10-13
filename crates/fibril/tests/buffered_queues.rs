@@ -37,6 +37,11 @@ impl Drop for Node {
 fn spawn_node(root: &Path, id: u64, raft: &[String; 3]) -> Node {
     let broker = common::free_loopback_addr().to_string();
     let admin = common::free_loopback_addr().to_string();
+    spawn_node_on(root, id, raft, broker, admin)
+}
+
+/// Start node `id` on fixed addresses, also to restart it in place.
+fn spawn_node_on(root: &Path, id: u64, raft: &[String; 3], broker: String, admin: String) -> Node {
     let toml = format!(
         r#"[server]
 data_dir = "{data}"
@@ -200,19 +205,9 @@ async fn buffered_queue_confirms_before_fsync_and_survives_an_owner_kill() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-async fn run_scenario(nodes: &mut [Node]) {
-    let admin = nodes[0].admin.clone();
-    wait_until("three registered brokers", Duration::from_secs(60), || async {
-        admin_get(&admin, "/admin/api/topology").await.is_some_and(|t| {
-            t["coordination"]["nodes"]
-                .as_array()
-                .is_some_and(|nodes| nodes.len() == 3)
-        })
-    })
-    .await;
-
-    // Background sync off, so only the writes themselves could sync.
-    let current = admin_get(&admin, "/admin/api/runtime-settings").await.unwrap();
+/// Turn background sync off, so only the writes themselves could sync.
+async fn disable_background_sync(admin: &str) {
+    let current = admin_get(admin, "/admin/api/runtime-settings").await.unwrap();
     let mut settings = current["settings"].clone();
     settings["storage"]["background_sync_interval_ms"] = 0.into();
     let response = reqwest::Client::new()
@@ -227,6 +222,43 @@ async fn run_scenario(nodes: &mut [Node]) {
         .unwrap();
     let status = response.status();
     assert!(status.is_success(), "{status} {}", response.text().await.unwrap_or_default());
+}
+
+async fn wait_for_cluster(admin: &str) {
+    wait_until("three registered brokers", Duration::from_secs(60), || async {
+        admin_get(admin, "/admin/api/topology").await.is_some_and(|t| {
+            t["coordination"]["nodes"]
+                .as_array()
+                .is_some_and(|nodes| nodes.len() == 3)
+        })
+    })
+    .await;
+}
+
+/// Run `scenario` and print node log tails when it fails or times out.
+async fn run_with_logs<F>(nodes: &mut Vec<Node>, scenario: F)
+where
+    F: AsyncFnOnce(&mut Vec<Node>),
+{
+    let result = tokio::time::timeout(Duration::from_secs(240), scenario(nodes)).await;
+    if result.is_err() {
+        for node in nodes.iter() {
+            let log = std::fs::read_to_string(&node.log).unwrap_or_default();
+            let tail: Vec<&str> = log.lines().rev().take(80).collect();
+            eprintln!("---- {} log tail ----", node.name);
+            for line in tail.into_iter().rev() {
+                eprintln!("{line}");
+            }
+        }
+        panic!("scenario timed out");
+    }
+}
+
+async fn run_scenario(nodes: &mut [Node]) {
+    let admin = nodes[0].admin.clone();
+    wait_for_cluster(&admin).await;
+
+    disable_background_sync(&admin).await;
 
     let client = ClientOptions::new()
         .auth("fibril", "fibril")
@@ -330,5 +362,263 @@ async fn run_scenario(nodes: &mut [Node]) {
             Ok(SubEvent::Closed(reason)) => panic!("subscription closed: {reason:?}"),
             Err(_) => eprintln!("no delivery for 10s, still waiting"),
         }
+    }
+}
+
+/// Receive and ack until every payload in `want` has arrived.
+async fn consume_all(client: &Client, topic: &str, want: &BTreeSet<String>) {
+    let mut sub = client.subscribe(topic).unwrap().prefetch(16).sub().await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let mut received = BTreeSet::new();
+    while !want.is_subset(&received) {
+        assert!(
+            Instant::now() < deadline,
+            "lost confirmed messages: {:?}",
+            want.difference(&received).collect::<Vec<_>>()
+        );
+        match tokio::time::timeout(Duration::from_secs(10), sub.recv()).await {
+            Ok(SubEvent::Delivery(msg)) => {
+                received.insert(String::from_utf8(msg.payload.clone()).unwrap());
+                let _ = msg.complete().await;
+            }
+            Ok(SubEvent::Closed(reason)) => panic!("subscription closed: {reason:?}"),
+            Err(_) => eprintln!("no delivery for 10s, still waiting"),
+        }
+    }
+}
+
+/// The directory of the queue log behind `topic` under a node's data dir.
+#[cfg(feature = "io-fault-injection")]
+fn queue_log_root(data: &Path, topic: &str) -> PathBuf {
+    fn walk(dir: &Path, topic: &str, found: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            if path.join("segments").is_dir()
+                && path.components().any(|c| c.as_os_str() == topic)
+            {
+                found.push(path);
+            } else {
+                walk(&path, topic, found);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(data, topic, &mut found);
+    assert_eq!(found.len(), 1, "queue logs for {topic}: {found:?}");
+    found.pop().unwrap()
+}
+
+/// The owner of a buffered queue loses power: its process dies and the
+/// records it wrote but never synced are gone. The followers hold written
+/// copies of every confirmed message, so none may be lost, whether the owner
+/// comes back before the cluster notices or after its queue moved.
+#[cfg(feature = "io-fault-injection")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn owner_power_loss_with_a_quick_restart_loses_no_confirmed_message() {
+    owner_power_loss(true).await;
+}
+
+#[cfg(feature = "io-fault-injection")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn owner_power_loss_after_failover_loses_no_confirmed_message() {
+    owner_power_loss(false).await;
+}
+
+#[cfg(feature = "io-fault-injection")]
+async fn owner_power_loss(quick: bool) {
+    let _permit = common::BOOT_PERMITS.acquire_many(3).await.unwrap();
+    let root = common::temp_root("fibril-buffered-power", if quick { "quick" } else { "late" });
+    let raft: [String; 3] = std::array::from_fn(|_| common::free_loopback_addr().to_string());
+    let mut nodes: Vec<Node> = (1..=3).map(|id| spawn_node(&root, id, &raft)).collect();
+    let scenario_root = root.clone();
+    run_with_logs(&mut nodes, async move |nodes: &mut Vec<Node>| {
+        let root = scenario_root;
+        let admin = nodes[0].admin.clone();
+        wait_for_cluster(&admin).await;
+        disable_background_sync(&admin).await;
+        let client = ClientOptions::new()
+            .auth("fibril", "fibril")
+            .publish_timeout_ms(30_000)
+            .connect(&nodes[0].broker)
+            .await
+            .unwrap();
+        declare(&client, QueueConfig::new("orders").unwrap()).await.unwrap();
+        wait_until("orders assigned with two followers", Duration::from_secs(60), || async {
+            assignment(&admin, "orders").await.is_some_and(|a| {
+                a["followers"].as_array().is_some_and(|f| f.len() == 2)
+            })
+        })
+        .await;
+        let owner = assignment(&admin, "orders").await.unwrap()["owner"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let index = nodes.iter().position(|n| n.name == owner).unwrap();
+        let owner_admin = nodes[index].admin.clone();
+
+        let mut confirmed = BTreeSet::new();
+        let mut durable_end = None;
+        for round in 0..20 {
+            for i in 0..10 {
+                let payload = format!("before-{round}-{i}");
+                publish_confirmed(&client, "orders", &payload).await;
+                confirmed.insert(payload);
+            }
+            let debug = owner_queue_debug(&owner_admin, "orders").await.unwrap();
+            let sync = &debug["log_sync"];
+            if sync["durable_lag_records"].as_u64().unwrap_or(0) > 0 {
+                durable_end = sync["durable_next"].as_u64();
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        let durable_end = durable_end.expect("the owner never held unsynced confirmed records");
+        drop(client);
+
+        // Power loss: the process dies and its unsynced writes are gone.
+        let id = index as u64 + 1;
+        let (broker, node_admin) = (nodes[index].broker.clone(), nodes[index].admin.clone());
+        nodes[index].child.as_mut().unwrap().kill().await.unwrap();
+        nodes[index].child = None;
+        let log_root = queue_log_root(&root.join(format!("data-{id}")), "orders");
+        keratin_log::io_fault_injection::lose_unsynced_on_next_open(&log_root, durable_end)
+            .unwrap();
+        eprintln!("{owner} lost power, cut to {durable_end} with {} confirmed", confirmed.len());
+
+        let survivor = (index + 1) % 3;
+        let survivor_admin = nodes[survivor].admin.clone();
+        if !quick {
+            wait_until("a new owner for orders", Duration::from_secs(60), || async {
+                assignment(&survivor_admin, "orders")
+                    .await
+                    .is_some_and(|a| a["owner"] != owner.as_str())
+            })
+            .await;
+        }
+        nodes[index] = spawn_node_on(&root, id, &raft, broker, node_admin);
+
+        let client = ClientOptions::new()
+            .auth("fibril", "fibril")
+            .publish_timeout_ms(30_000)
+            .connect(&nodes[survivor].broker)
+            .await
+            .unwrap();
+        for i in 0..10 {
+            let payload = format!("after-{i}");
+            publish_confirmed(&client, "orders", &payload).await;
+            confirmed.insert(payload);
+        }
+        consume_all(&client, "orders", &confirmed).await;
+    })
+    .await;
+    if std::env::var_os("KEEP_TEST_DATA").is_none() {
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// Every node holding a buffered queue loses power at once. Each copy drops
+/// what it never synced, so recent confirmed messages may be gone, which the
+/// mode allows. The queue must recover from the longest surviving history
+/// and keep serving, and every message it still delivers must be one that was
+/// published.
+#[cfg(feature = "io-fault-injection")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn whole_cluster_power_loss_recovers_the_longest_surviving_history() {
+    let _permit = common::BOOT_PERMITS.acquire_many(3).await.unwrap();
+    let root = common::temp_root("fibril-buffered-power", "all");
+    let raft: [String; 3] = std::array::from_fn(|_| common::free_loopback_addr().to_string());
+    let mut nodes: Vec<Node> = (1..=3).map(|id| spawn_node(&root, id, &raft)).collect();
+    let scenario_root = root.clone();
+    run_with_logs(&mut nodes, async move |nodes: &mut Vec<Node>| {
+        let root = scenario_root;
+        let admin = nodes[0].admin.clone();
+        wait_for_cluster(&admin).await;
+        disable_background_sync(&admin).await;
+        let client = ClientOptions::new()
+            .auth("fibril", "fibril")
+            .publish_timeout_ms(30_000)
+            .connect(&nodes[0].broker)
+            .await
+            .unwrap();
+        declare(&client, QueueConfig::new("orders").unwrap()).await.unwrap();
+        wait_until("orders assigned with two followers", Duration::from_secs(60), || async {
+            assignment(&admin, "orders").await.is_some_and(|a| {
+                a["followers"].as_array().is_some_and(|f| f.len() == 2)
+            })
+        })
+        .await;
+        let mut published = BTreeSet::new();
+        for i in 0..40 {
+            let payload = format!("before-{i}");
+            publish_confirmed(&client, "orders", &payload).await;
+            published.insert(payload);
+        }
+        drop(client);
+
+        // Read every copy's durable end, then cut every copy back to it.
+        let mut cuts = Vec::new();
+        for node in nodes.iter() {
+            let debug = owner_queue_debug(&node.admin, "orders").await.unwrap();
+            cuts.push(debug["log_sync"]["durable_next"].as_u64().unwrap());
+        }
+        let mut addresses = Vec::new();
+        for node in nodes.iter_mut() {
+            node.child.as_mut().unwrap().kill().await.unwrap();
+            node.child = None;
+            addresses.push((node.broker.clone(), node.admin.clone()));
+        }
+        for (index, cut) in cuts.iter().enumerate() {
+            let log_root = queue_log_root(&root.join(format!("data-{}", index + 1)), "orders");
+            keratin_log::io_fault_injection::lose_unsynced_on_next_open(&log_root, *cut).unwrap();
+        }
+        eprintln!("every node lost power, cut to {cuts:?}");
+        for (index, (broker, admin)) in addresses.into_iter().enumerate() {
+            nodes[index] = spawn_node_on(&root, index as u64 + 1, &raft, broker, admin);
+        }
+        wait_for_cluster(&nodes[0].admin).await;
+
+        let client = ClientOptions::new()
+            .auth("fibril", "fibril")
+            .publish_timeout_ms(30_000)
+            .connect(&nodes[0].broker)
+            .await
+            .unwrap();
+        let mut after = BTreeSet::new();
+        for i in 0..10 {
+            let payload = format!("after-{i}");
+            publish_confirmed(&client, "orders", &payload).await;
+            after.insert(payload);
+        }
+        // Everything published after recovery arrives, and nothing that was
+        // never published does.
+        let mut sub = client.subscribe("orders").unwrap().prefetch(16).sub().await.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(90);
+        let mut received = BTreeSet::new();
+        while !after.is_subset(&received) {
+            assert!(Instant::now() < deadline, "missing {:?}", after.difference(&received).collect::<Vec<_>>());
+            match tokio::time::timeout(Duration::from_secs(10), sub.recv()).await {
+                Ok(SubEvent::Delivery(msg)) => {
+                    let payload = String::from_utf8(msg.payload.clone()).unwrap();
+                    assert!(
+                        published.contains(&payload) || after.contains(&payload),
+                        "delivered a message nobody published: {payload}"
+                    );
+                    received.insert(payload);
+                    let _ = msg.complete().await;
+                }
+                Ok(SubEvent::Closed(reason)) => panic!("subscription closed: {reason:?}"),
+                Err(_) => eprintln!("no delivery for 10s, still waiting"),
+            }
+        }
+        let survived = received.intersection(&published).count();
+        eprintln!("{survived} of {} messages from before the power loss survived", published.len());
+    })
+    .await;
+    if std::env::var_os("KEEP_TEST_DATA").is_none() {
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
