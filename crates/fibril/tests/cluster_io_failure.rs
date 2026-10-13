@@ -68,15 +68,27 @@ async fn admitted_cluster_owner_io_failure_recovery_and_rejoin() {
     fibril_util::init_tracing();
     for all in [false, true] {
         for after_sync in [false, true] {
-            tokio::time::timeout(Duration::from_secs(180), run_case(all, after_sync))
+            tokio::time::timeout(Duration::from_secs(180), run_case(all, after_sync, false))
                 .await
                 .expect("cluster case deadline");
         }
     }
 }
 
-async fn run_case(all: bool, after_sync: bool) {
-    eprintln!("CASE all={all} after_sync={after_sync}");
+/// A buffered owner confirms once followers hold written copies, so a later
+/// failed sync on the owner loses nothing confirmed. The owner latches, the
+/// queue fails over, and the old owner rejoins after cutting its log back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn buffered_owner_sync_failure_keeps_confirmed_messages() {
+    for after_sync in [false, true] {
+        tokio::time::timeout(Duration::from_secs(180), run_case(false, after_sync, true))
+            .await
+            .expect("cluster case deadline");
+    }
+}
+
+async fn run_case(all: bool, after_sync: bool, buffered: bool) {
+    eprintln!("CASE all={all} after_sync={after_sync} buffered={buffered}");
     use fibril_broker::coordination::{NodeInfo, QueueIdentity};
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../test_data/cluster-io")
@@ -149,6 +161,20 @@ async fn run_case(all: bool, after_sync: bool) {
         listeners.push(listener);
     }
     let coordinator = &providers[leader as usize - 1];
+    if buffered {
+        coordinator
+            .declare_queue_declared(
+                "q",
+                None,
+                1,
+                fibril_broker::queue_engine::QueueDeclaration::new(
+                    Default::default(),
+                    Some(fibril_broker::queue_engine::QueueDurability::Buffered),
+                ),
+            )
+            .await
+            .unwrap();
+    }
     coordinator
         .register_queue(&QueueIdentity::new("q", Partition::new(0), None))
         .await
@@ -234,6 +260,17 @@ async fn run_case(all: bool, after_sync: bool) {
     for i in 0..3 {
         brokers[i].spawn_assignment_watcher(providers[i].clone());
     }
+    if buffered {
+        for broker in &brokers {
+            assert!(broker.engine().queue_is_buffered("q", 0, None));
+        }
+        // Syncs happen only when the test asks for one.
+        brokers[0]
+            .engine()
+            .set_queue_background_sync_interval("q", 0, None, Duration::ZERO)
+            .await
+            .unwrap();
+    }
     owner_worker.abort();
     let _ = owner_worker.await;
     let assignment = providers[0]
@@ -270,6 +307,14 @@ async fn run_case(all: bool, after_sync: bool) {
         .await
         .unwrap();
     const PREFIX: u64 = 8;
+    // A declared queue starts with its Declare record.
+    let base = brokers[0]
+        .engine()
+        .queue_log_sync_status("q", 0, None)
+        .await
+        .unwrap()
+        .event_log
+        .written_next;
     for n in 0..PREFIX {
         let receipt = publisher
             .publish(
@@ -283,7 +328,7 @@ async fn run_case(all: bool, after_sync: bool) {
             .await
             .unwrap();
         for i in 1..3 {
-            catch_up(&brokers[i], &peers[i - 1], n + 1).await;
+            catch_up(&brokers[i], &peers[i - 1], base + n + 1).await;
         }
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(10), receipt)
@@ -291,7 +336,7 @@ async fn run_case(all: bool, after_sync: bool) {
                 .unwrap()
                 .unwrap()
                 .unwrap(),
-            n
+            base + n
         );
     }
     let path = segment_path(&root.join("data-a").join("storage"), "log");
@@ -300,6 +345,9 @@ async fn run_case(all: bool, after_sync: bool) {
     } else {
         keratin_log::io_fault_injection::Fault::Fsync
     };
+    if buffered {
+        buffered_sync_failure(&brokers, &peers, &publisher, &path, fault_kind, base, PREFIX).await;
+    } else {
     let fault = keratin_log::io_fault_injection::arm_gated(&path, fault_kind).unwrap();
     let mut failed = publisher
         .publish(
@@ -320,7 +368,7 @@ async fn run_case(all: bool, after_sync: bool) {
     .await
     .unwrap();
     for i in 1..3 {
-        catch_up(&brokers[i], &peers[i - 1], PREFIX + 1).await;
+        catch_up(&brokers[i], &peers[i - 1], base + PREFIX + 1).await;
     }
     assert!(
         tokio::time::timeout(Duration::from_millis(50), &mut failed)
@@ -333,7 +381,7 @@ async fn run_case(all: bool, after_sync: bool) {
     // holding this publish's fsync.
     let engine = brokers[0].engine();
     let visible = engine
-        .read_owner_queue_records("q", 0, None, PREFIX, 1, usize::MAX)
+        .read_owner_queue_records("q", 0, None, base + PREFIX, 1, usize::MAX)
         .await
         .map(|r| match r {
             fibril_broker::queue_engine::OwnerReplicationRead::Batch(b) => b.records.len(),
@@ -350,6 +398,7 @@ async fn run_case(all: bool, after_sync: bool) {
     assert!(result.is_err(), "false broker confirmation: {result:?}");
     eprintln!("FAULT all={all} after_sync={after_sync}: {result:?}");
     drop(fault);
+    }
     drop(publisher);
     drop(peers);
     eprintln!("STAGE stopping old owner");
@@ -603,6 +652,13 @@ async fn run_case(all: bool, after_sync: bool) {
             "confirmed prefix {n}: {values:?}"
         );
     }
+    if buffered {
+        assert_eq!(
+            values.iter().filter(|v| **v == PREFIX).count(),
+            1,
+            "confirmed before the failed sync: {values:?}"
+        );
+    }
     assert_eq!(values.iter().filter(|v| **v == 99).count(), 1);
     eprintln!("RECOVERED all={all} after_sync={after_sync}: {values:?}");
     drop(publisher);
@@ -627,6 +683,75 @@ async fn run_case(all: bool, after_sync: bool) {
     drop(brokers);
     drop(providers);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Confirm a buffered publish while the owner has not synced it, then fail
+/// the owner's next sync. The owner latches and refuses further publishes.
+async fn buffered_sync_failure(
+    brokers: &[Arc<Broker<StromaEngine>>],
+    peers: &[impl fibril_broker::broker::BrokerOwnerReplicationPeer],
+    publisher: &fibril_broker::broker::PublisherHandle,
+    path: &std::path::Path,
+    fault_kind: keratin_log::io_fault_injection::Fault,
+    base: u64,
+    prefix: u64,
+) {
+    let fault = keratin_log::io_fault_injection::arm(path, fault_kind).unwrap();
+    let receipt = publisher
+        .publish(
+            prefix.to_le_bytes().to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    for i in 1..3 {
+        catch_up(&brokers[i], &peers[i - 1], base + prefix + 1).await;
+    }
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), receipt)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        base + prefix,
+        "a buffered publish confirms before the owner syncs it"
+    );
+    assert_eq!(fault.hits(), 0);
+    let engine = brokers[0].engine();
+    let status = engine.queue_log_sync_status("q", 0, None).await.unwrap();
+    assert!(status.event_log.durable_next <= base + prefix, "{status:?}");
+    // Turning the background sync on syncs what the log has written first.
+    let _ = engine
+        .set_queue_background_sync_interval("q", 0, None, Duration::from_millis(10))
+        .await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while fault.hits() == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    drop(fault);
+    let refused = async {
+        let receipt = publisher
+            .publish(
+                (prefix + 1).to_le_bytes().to_vec(),
+                unix_millis(),
+                unix_millis(),
+                None,
+                Default::default(),
+                None,
+            )
+            .await?;
+        receipt.await.map_err(|_| fibril_broker::broker::BrokerError::ChannelClosed)?
+    };
+    let result = tokio::time::timeout(Duration::from_secs(10), refused).await.unwrap();
+    assert!(result.is_err(), "a latched owner confirmed a publish: {result:?}");
+    eprintln!("BUFFERED FAULT after_sync: {result:?}");
 }
 
 fn segment_path(root: &std::path::Path, log: &str) -> std::path::PathBuf {
