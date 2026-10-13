@@ -77,11 +77,14 @@ def process_sample(process):
         io = dict(line.split(": ") for line in (proc / "io").read_text().splitlines())
         hz = os.sysconf("SC_CLK_TCK")
         switches = [0, 0]
+        by_thread = {}
         for task in (proc / "task").iterdir():
             try:
+                name = (task / "comm").read_text().strip()
                 for line in (task / "status").read_text().splitlines():
                     if line.startswith("voluntary_ctxt_switches"):
                         switches[0] += int(line.split()[1])
+                        by_thread[name] = by_thread.get(name, 0) + int(line.split()[1])
                     elif line.startswith("nonvoluntary_ctxt_switches"):
                         switches[1] += int(line.split()[1])
             except (FileNotFoundError, ProcessLookupError):
@@ -89,6 +92,7 @@ def process_sample(process):
         return {"pid": process.pid, "rss_kib": int(rss[1]) if rss else 0,
                 "cpu_seconds": (int(stat[11]) + int(stat[12])) / hz,
                 "voluntary_switches": switches[0], "involuntary_switches": switches[1],
+                "voluntary_switches_by_thread": by_thread,
                 "syscr": int(io["syscr"]), "syscw": int(io["syscw"]), "write_bytes": int(io["write_bytes"])}
     except (FileNotFoundError, ProcessLookupError, PermissionError):
         # A process that just exited denies /proc reads.
@@ -353,6 +357,13 @@ def summarize(args, case, results, before, after, samples):
         "cpu_seconds_per_million": delta("cpu_seconds") * 1e6 / issued,
         "switches_per_message": (delta("voluntary_switches") + delta("involuntary_switches")) / issued,
         "write_syscalls_per_message": delta("syscw") / issued,
+        # A voluntary switch is a thread going to sleep until something wakes
+        # it, so this maps wakeups by thread role. Threads that exited during
+        # the run are missing from the end sample.
+        "sleeps_per_message_by_thread": {
+            name: (sum(a.get("voluntary_switches_by_thread", {}).get(name, 0) for a in after)
+                   - sum(b.get("voluntary_switches_by_thread", {}).get(name, 0) for b in before)) / issued
+            for name in sorted({n for a in after for n in a.get("voluntary_switches_by_thread", {})})},
         "staged_batches_per_message": [c["staged_batches"] / issued for c in counters],
         "fsync_jobs_per_message": sum(c["worker_fsync_jobs"] + c["direct_fsync_jobs"] for c in counters) / issued,
         "peak_rss_mib": max((sum(s.get("rss_kib", 0) for s in sample["servers"]) for sample in samples), default=0) / 1024,
