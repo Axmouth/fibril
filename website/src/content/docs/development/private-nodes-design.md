@@ -404,7 +404,11 @@ resume identity names a different owner id, so the outcome is
 no subscriptions on the server, or `resume_not_found` without one. Either way
 reconciliation recreates or closes the forwarded subscriptions client-side and
 supervisors resubscribe through the normal forwarded path (the `restore`
-policy resubscribes them on the owner during the reconcile). The old upstream
+policy resubscribes them on the owner during the reconcile). A restarted
+broker answers topology from a view that may still lag the cluster. Clients
+never apply an answer older than their cache, and every declared partition is
+listed even before it is placed, so a lagging or partial view never makes a
+subscribed queue look deleted. The old upstream
 sessions on owners end with the dead process: its sockets close in order, and
 an owner that got `release_on_close` releases the session at once and
 redelivers what it held. When the machine or network failed instead, nothing

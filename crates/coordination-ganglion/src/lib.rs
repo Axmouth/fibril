@@ -3038,6 +3038,12 @@ impl GanglionCoordination {
     /// owners from this and refresh on not-owner / stale-topology errors. The
     /// partitioning version is carried per queue for forward-compatibility with
     /// live repartitioning (constant today).
+    ///
+    /// Every catalogued partition is listed, also one that is not served yet
+    /// (no placement, or its history not active), with no owner and no
+    /// endpoints. Clients read a topic missing from a populated topology as
+    /// deleted, so leaving such a partition out would end subscriptions to a
+    /// queue that still exists.
     pub fn client_topology(&self) -> ClientTopology {
         let committed = self.node.committed_snapshot();
         // Per-node advertise list: the full priority-ordered list from the node's
@@ -3114,6 +3120,23 @@ impl GanglionCoordination {
                 }
             })
             .collect();
+        for queue in committed.resources.iter().filter_map(to_fibril_queue) {
+            if fibril.assignments.contains_key(&queue) {
+                continue;
+            }
+            let group = queue.group.as_ref().map(ToString::to_string);
+            let part = partitioning(&queue.topic, group.as_deref());
+            queues.push(ClientQueueTopology {
+                topic: queue.topic.to_string(),
+                partition: queue.partition,
+                group,
+                owner_node_id: String::new(),
+                owner_endpoints: Vec::new(),
+                via_gateway: false,
+                partitioning_version: part.partitioning_version,
+                partition_count: part.partition_count,
+            });
+        }
         queues.sort_by(|a, b| {
             a.topic
                 .cmp(&b.topic)
@@ -3154,6 +3177,21 @@ impl GanglionCoordination {
                 }
             })
             .collect();
+        for stream in committed.resources.iter().filter_map(to_fibril_stream) {
+            if fibril.stream_assignments.contains_key(&stream) {
+                continue;
+            }
+            let (partition_count, partitioning_version) = stream_partitioning(&stream.topic);
+            streams.push(ClientStreamTopology {
+                topic: stream.topic.to_string(),
+                partition: stream.partition,
+                owner_node_id: String::new(),
+                owner_endpoints: Vec::new(),
+                via_gateway: false,
+                partitioning_version,
+                partition_count,
+            });
+        }
         streams.sort_by(|a, b| {
             a.topic
                 .cmp(&b.topic)
@@ -4880,6 +4918,62 @@ mod tests {
             .shutdown()
             .await
             .expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn client_topology_lists_catalogued_partitions_before_placement() {
+        let router = InProcessRouter::new();
+        let config = default_raft_config().expect("config");
+        let raft_node = RaftMetadataNode::start(1, config, &router)
+            .await
+            .expect("raft node");
+        let mut members = BTreeMap::new();
+        members.insert(1u64, ganglion_openraft::openraft::BasicNode::new("n1"));
+        raft_node.initialize(members).await.expect("initialize");
+        raft_node
+            .wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .expect("election");
+        let provider = GanglionCoordination::new("broker-a", raft_node);
+
+        // Declared and catalogued, but no controller has placed anything yet.
+        provider
+            .declare_queue("jobs", None, 2, Default::default())
+            .await
+            .expect("declare queue");
+        for partition in 0..2 {
+            provider
+                .register_queue(&QueueIdentity::new("jobs", Partition::new(partition), None))
+                .await
+                .expect("register queue");
+        }
+        provider
+            .declare_stream("events", 1, 2, StreamRetentionConfig::default(), None)
+            .await
+            .expect("declare stream");
+        provider
+            .register_stream(&StreamIdentity::new("events", Partition::new(0)))
+            .await
+            .expect("register stream");
+
+        // Clients see the topics with their counts and no owner, so a
+        // populated topology never makes a declared queue look deleted.
+        let topology = provider.client_topology();
+        assert_eq!(topology.queues.len(), 2);
+        for (index, entry) in topology.queues.iter().enumerate() {
+            assert_eq!(entry.topic, "jobs");
+            assert_eq!(entry.partition, Partition::new(index as u32));
+            assert!(entry.owner_node_id.is_empty());
+            assert!(entry.owner_endpoints.is_empty());
+            assert_eq!(entry.partition_count, 2);
+        }
+        assert_eq!(topology.streams.len(), 1);
+        assert_eq!(topology.streams[0].topic, "events");
+        assert!(topology.streams[0].owner_endpoints.is_empty());
+        // An unplaced stream partition has no route to forward to.
+        assert!(provider
+            .client_stream_route("events", Partition::new(0))
+            .is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

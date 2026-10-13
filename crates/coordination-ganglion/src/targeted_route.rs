@@ -101,7 +101,11 @@ impl GanglionCoordination {
         let stream = topology
             .streams
             .into_iter()
-            .find(|stream| stream.topic == topic && stream.partition == partition)?;
+            .find(|stream| {
+                stream.topic == topic
+                    && stream.partition == partition
+                    && !stream.owner_node_id.is_empty()
+            })?;
         let owner_endpoints = if stream.via_gateway {
             Vec::new()
         } else {

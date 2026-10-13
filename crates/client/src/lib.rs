@@ -1937,6 +1937,11 @@ async fn partition_resubscribe_loop_manual(
             _ = tx.closed() => return,
             _ = tokio::time::sleep(interval) => {}
         }
+        // A partition supervisor gave up with a terminal reason, so the
+        // subscription ends instead of staying open with nothing behind it.
+        if reason.get().is_some() {
+            return;
+        }
         let _ = client.fetch_topology().await;
         for partition in partition_set(&client, &topic, group.as_deref()) {
             if known.contains(&partition) {
@@ -1980,6 +1985,11 @@ async fn partition_resubscribe_loop_auto(
         tokio::select! {
             _ = tx.closed() => return,
             _ = tokio::time::sleep(interval) => {}
+        }
+        // A partition supervisor gave up with a terminal reason, so the
+        // subscription ends instead of staying open with nothing behind it.
+        if reason.get().is_some() {
+            return;
         }
         let _ = client.fetch_topology().await;
         for partition in partition_set(&client, &topic, group.as_deref()) {
@@ -2026,6 +2036,11 @@ async fn stream_partition_resubscribe_loop_manual(
         tokio::select! {
             _ = tx.closed() => return,
             _ = tokio::time::sleep(interval) => {}
+        }
+        // A partition supervisor gave up with a terminal reason, so the
+        // subscription ends instead of staying open with nothing behind it.
+        if reason.get().is_some() {
+            return;
         }
         let _ = client.fetch_topology().await;
         for partition in partition_set(&client, &topic, None) {
@@ -2074,6 +2089,11 @@ async fn stream_partition_resubscribe_loop_auto(
         tokio::select! {
             _ = tx.closed() => return,
             _ = tokio::time::sleep(interval) => {}
+        }
+        // A partition supervisor gave up with a terminal reason, so the
+        // subscription ends instead of staying open with nothing behind it.
+        if reason.get().is_some() {
+            return;
         }
         let _ = client.fetch_topology().await;
         for partition in partition_set(&client, &topic, None) {
@@ -3252,12 +3272,14 @@ impl ClientShared {
     /// cluster. The assignment table is raft-replicated, so any one live node
     /// returns the authoritative current owners - we just need to reach one. Tries
     /// the configured seeds first, then any already-pooled endpoint (a likely
-    /// survivor), and stops at the first that answers. Best-effort: on total
-    /// failure the cache is left as-is and the caller's retry will try again.
+    /// survivor), and stops at the first that answers with a view at least as
+    /// new as the cache. Best-effort: on total failure the cache is left as-is
+    /// and the caller's retry will try again.
     ///
-    /// Returns `true` if a live node answered and the cache was updated (so the
-    /// caller may trust the refreshed view, e.g. to fail fast on an unknown
-    /// topic), `false` if nothing answered or the refresh was throttled.
+    /// Returns `true` if a live node answered with a view at least as new as
+    /// the cache, which the cache now reflects (so the caller may trust it, e.g.
+    /// to fail fast on an unknown topic), `false` if nothing answered, only
+    /// older views came back, or the refresh was throttled.
     async fn refresh_topology_throttled(&self) -> bool {
         let now = unix_millis();
         let last = self.topology.load().last_refresh_ms;
@@ -3265,16 +3287,27 @@ impl ClientShared {
             return false;
         }
 
-        self.fetch_topology().await.is_ok()
+        matches!(self.refresh_topology().await, Ok((_, true)))
     }
 
     async fn fetch_topology(&self) -> FibrilResult<TopologyOk> {
+        self.refresh_topology().await.map(|(topology, _)| topology)
+    }
+
+    /// Ask the candidates in order for the topology and apply the first answer
+    /// that is at least as new as the cache. The flag says whether the cache
+    /// took the returned view. A broker that just restarted answers from a view
+    /// that has not caught up yet, often empty, so an older answer is never
+    /// applied and the next candidate is asked. When every answer is older, the
+    /// first one is returned unapplied.
+    async fn refresh_topology(&self) -> FibrilResult<(TopologyOk, bool)> {
         let mut candidates: Vec<String> = self.bootstrap.clone();
         candidates.extend(self.opts.discovery_endpoints.iter().cloned());
         candidates.extend(self.topology.load().endpoints());
         candidates.extend(self.pool.read().keys().cloned());
         let mut seen = std::collections::HashSet::new();
         let mut last_error = FibrilError::BrokenPipe;
+        let mut older = None;
         for addr in candidates {
             if !seen.insert(addr.clone()) {
                 continue;
@@ -3289,26 +3322,33 @@ impl ClientShared {
                 Err(error) => { last_error = error; continue; }
             };
             let refreshed_at = unix_millis();
+            let mut applied = false;
             self.topology.rcu(|old| {
                 let mut updated = (**old).clone();
                 // Never regress to an older view, the same rule a push follows.
-                // A broker that just restarted can answer from a snapshot that
-                // predates queues declared since, and applying that would make
-                // them look deleted.
-                if topology.generation >= updated.generation {
+                // Applying one would make queues declared since look deleted.
+                applied = topology.generation >= updated.generation;
+                if applied {
                     updated.replace(topology.clone());
                 }
                 updated.last_refresh_ms = refreshed_at;
                 updated
             });
+            if !applied {
+                older.get_or_insert(topology);
+                continue;
+            }
             // A full refresh gives the complete current owner set, so prune
             // pooled connections to endpoints that are no longer owners (e.g. a
             // demoted/dead owner after failover).
             self.prune_pool_to_topology();
             self.refresh_catalogue(&topology);
-            return Ok(topology);
+            return Ok((topology, true));
         }
-        Err(last_error)
+        match older {
+            Some(topology) => Ok((topology, false)),
+            None => Err(last_error),
+        }
     }
 
     /// Drop pooled connections to endpoints that no longer own any partition
@@ -7106,6 +7146,273 @@ mod tests {
 
         client.shutdown().await;
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn restarted_broker_with_an_older_topology_does_not_end_a_subscription() {
+        // A broker restarts in place. It reconciles the subscription away and
+        // answers topology from a view that has not caught up (generation 0,
+        // no queues). The client's cache is newer but does not know the topic,
+        // which was declared after the cache last refreshed. Neither view
+        // says the topic was deleted, so the supervisor resubscribes and the
+        // subscription keeps delivering.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let endpoint = addr.to_string();
+
+        let server = tokio::spawn(async move {
+            let owner_id = uuid::Uuid::new_v4();
+            let client_id = uuid::Uuid::new_v4();
+            let resume_token = uuid::Uuid::new_v4();
+            let mut handlers = Vec::new();
+            for restarted in [false, true] {
+                let (conn, _) = listener.accept().await.unwrap();
+                let endpoint = endpoint.clone();
+                handlers.push(tokio::spawn(async move {
+                    let mut framed = Framed::new(conn, ProtoCodec);
+                    let mut next_sub_id = 60;
+                    while let Some(Ok(frame)) = framed.next().await {
+                        let reply = match frame.opcode {
+                            x if x == Op::Hello as u16 => try_encode(
+                                Op::HelloOk,
+                                frame.request_id,
+                                &HelloOk {
+                                    protocol_version: PROTOCOL_V1,
+                                    owner_id,
+                                    client_id,
+                                    resume_token,
+                                    resume_outcome: if restarted {
+                                        ResumeOutcome::ResumeNotFound
+                                    } else {
+                                        ResumeOutcome::New
+                                    },
+                                    server_name: "fake".into(),
+                                    compliance: COMPLIANCE_STRING.into(),
+                                },
+                            )
+                            .unwrap(),
+                            x if x == Op::Topology as u16 => {
+                                let topology = if restarted {
+                                    TopologyOk {
+                                        generation: 0,
+                                        queues: vec![],
+                                        streams: vec![],
+                                    }
+                                } else {
+                                    TopologyOk {
+                                        generation: 7,
+                                        queues: vec![QueueTopologyEntry {
+                                            topic: "orders".into(),
+                                            partition: Partition::new(0),
+                                            group: None,
+                                            owner_endpoints: vec![
+                                                AdvertisedAddress::parse(&endpoint).unwrap(),
+                                            ],
+                                            partitioning_version: 1,
+                                            partition_count: 1,
+                                        }],
+                                        streams: vec![],
+                                    }
+                                };
+                                try_encode(Op::TopologyOk, frame.request_id, &topology).unwrap()
+                            }
+                            x if x == Op::ReconcileClient as u16 => {
+                                let request: ReconcileClient = try_decode(&frame).unwrap();
+                                let subscriptions = request
+                                    .subscriptions
+                                    .into_iter()
+                                    .map(|client| ReconcileSubscriptionResult {
+                                        client: Some(client),
+                                        server: None,
+                                        action: ReconcileAction::CloseClientSide,
+                                        code: ReasonCode::ServerMissing,
+                                        reason: "server_missing".into(),
+                                    })
+                                    .collect();
+                                try_encode(
+                                    Op::ReconcileResult,
+                                    frame.request_id,
+                                    &ReconcileResult { subscriptions },
+                                )
+                                .unwrap()
+                            }
+                            x if x == Op::Subscribe as u16 => {
+                                let req: Subscribe = try_decode(&frame).unwrap();
+                                next_sub_id += 1;
+                                framed
+                                    .send(
+                                        try_encode(
+                                            Op::SubscribeOk,
+                                            frame.request_id,
+                                            &SubscribeOk {
+                                                sub_id: next_sub_id,
+                                                topic: req.topic.clone(),
+                                                group: req.group.clone(),
+                                                partition: Partition::new(0),
+                                                prefetch: req.prefetch,
+                                                consumer_group: None,
+                                                consumer_target: None,
+                                                member_id: None,
+                                            },
+                                        )
+                                        .unwrap(),
+                                    )
+                                    .await
+                                    .unwrap();
+                                if !restarted {
+                                    continue;
+                                }
+                                wire::encode_deliver(
+                                    0,
+                                    &Deliver {
+                                        sub_id: next_sub_id,
+                                        topic: req.topic,
+                                        group: None,
+                                        partition: Partition::new(0),
+                                        offset: 1,
+                                        delivery_tag: DeliveryTag { epoch: 1 },
+                                        published: 1,
+                                        publish_received: 2,
+                                        content_type: None,
+                                        headers: HashMap::new(),
+                                        payload: b"after".to_vec(),
+                                    },
+                                )
+                                .unwrap()
+                            }
+                            _ => continue,
+                        };
+                        if framed.send(reply).await.is_err() {
+                            break;
+                        }
+                    }
+                }));
+            }
+            for handler in handlers {
+                let _ = handler.await;
+            }
+        });
+
+        let mut options = ClientOptions::new().disable_topology_warm();
+        options.topology_refresh_cooldown_ms = 0;
+        let mut client = options.connect(addr).await.unwrap();
+        // The cache learns a view that predates "jobs".
+        client.fetch_topology().await.unwrap();
+        assert!(client.shared.topology.load().is_populated());
+        let mut sub = client.subscribe("jobs").unwrap().sub().await.unwrap();
+
+        let outcome = client.reconnect().await.unwrap();
+        assert_eq!(outcome.resume_outcome, ResumeOutcome::ResumeNotFound);
+
+        let event = tokio::time::timeout(Duration::from_secs(5), sub.recv())
+            .await
+            .expect("the subscription went quiet instead of resubscribing");
+        let msg = event.delivery().expect("a delivery after the resubscribe");
+        assert_eq!(msg.payload, b"after");
+        // The older answer never replaced the cache and does not count as a
+        // refresh, so callers do not trust the cache as fresh.
+        assert!(!client.shared.refresh_topology_throttled().await);
+        assert_eq!(client.shared.topology.load().generation, 7);
+
+        client.shutdown().await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn supervised_subscription_surfaces_a_terminal_close() {
+        // With the partition manager running, a terminal close of the only
+        // partition still ends the subscription with its typed reason instead
+        // of leaving it open and silent.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (conn, _) = listener.accept().await.unwrap();
+            let mut conn = Framed::new(conn, ProtoCodec);
+            while let Some(Ok(frame)) = conn.next().await {
+                let replies = match frame.opcode {
+                    x if x == Op::Hello as u16 => vec![
+                        try_encode(
+                            Op::HelloOk,
+                            frame.request_id,
+                            &HelloOk {
+                                protocol_version: PROTOCOL_V1,
+                                owner_id: uuid::Uuid::new_v4(),
+                                client_id: uuid::Uuid::new_v4(),
+                                resume_token: uuid::Uuid::new_v4(),
+                                resume_outcome: ResumeOutcome::New,
+                                server_name: "fake".into(),
+                                compliance: COMPLIANCE_STRING.into(),
+                            },
+                        )
+                        .unwrap(),
+                    ],
+                    x if x == Op::Topology as u16 => vec![
+                        try_encode(
+                            Op::TopologyOk,
+                            frame.request_id,
+                            &TopologyOk {
+                                generation: 1,
+                                queues: vec![],
+                                streams: vec![],
+                            },
+                        )
+                        .unwrap(),
+                    ],
+                    x if x == Op::Subscribe as u16 => {
+                        let req: Subscribe = try_decode(&frame).unwrap();
+                        vec![
+                            try_encode(
+                                Op::SubscribeOk,
+                                frame.request_id,
+                                &SubscribeOk {
+                                    sub_id: 56,
+                                    topic: req.topic,
+                                    group: req.group,
+                                    partition: Partition::new(0),
+                                    prefetch: req.prefetch,
+                                    consumer_group: None,
+                                    consumer_target: None,
+                                    member_id: None,
+                                },
+                            )
+                            .unwrap(),
+                            wire::encode_subscription_closed(
+                                0,
+                                &SubscriptionClosed {
+                                    sub_id: 56,
+                                    code: ReasonCode::TopicDeleted,
+                                    message: "the queue was deleted".into(),
+                                },
+                            )
+                            .unwrap(),
+                        ]
+                    }
+                    _ => continue,
+                };
+                for reply in replies {
+                    if conn.send(reply).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+
+        let client = ClientOptions::new()
+            .disable_topology_warm()
+            .partition_resubscribe_interval_ms(20)
+            .connect(addr)
+            .await
+            .unwrap();
+        let mut sub = client.subscribe("jobs").unwrap().sub().await.unwrap();
+
+        let event = tokio::time::timeout(Duration::from_secs(5), sub.recv())
+            .await
+            .expect("the subscription stayed open after a terminal close");
+        assert!(matches!(event, SubEvent::Closed(CloseReason::TopicDeleted)));
+
+        client.shutdown().await;
+        server.abort();
     }
 
     #[tokio::test]

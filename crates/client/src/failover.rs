@@ -239,6 +239,8 @@ fn supervise_forward<R, M, F>(
                 .lookup(req.topic(), req.partition(), req.group())
                 .map(|entry| entry.endpoint)
         };
+        let mut listed_at = None;
+        topic_deleted_in_cache(&client, &req, &mut listed_at);
         loop {
             // The owner this stream is bound to. The engine keeps a subscription
             // alive across reconnects to the SAME endpoint (good for blips), so a
@@ -268,14 +270,19 @@ fn supervise_forward<R, M, F>(
                         None => break true, // stream closed (owner gone / engine gave up)
                     },
                     _ = tokio::time::sleep(check) => {
+                        // Another partition's supervisor gave up with a terminal
+                        // reason. Let go of the fan-in so the subscription ends
+                        // with it instead of going quiet.
                         if tx.is_closed()
                             || client.shared.user_shutdown.load(Ordering::Acquire)
+                            || user_reason.get().is_some()
                         {
                             return;
                         }
                         // Refresh (throttled) so the cache reflects a committed
                         // reassignment, then migrate if the owner endpoint changed.
                         client.shared.refresh_topology_throttled().await;
+                        topic_deleted_in_cache(&client, &req, &mut listed_at);
                         let current = owner_of(&client, &req);
                         if current.is_some() && current != bound_owner {
                             tracing::debug!(?bound_owner, ?current, "subscription owner moved, migrating");
@@ -341,13 +348,15 @@ fn supervise_forward<R, M, F>(
                     stamp_reason(&user_reason, CloseReason::Unsubscribed);
                     return;
                 }
-                if client.shared.refresh_topology_throttled().await {
-                    let topo = client.shared.topology.load();
-                    if topo.is_populated() && !topo.knows_topic(req.topic(), req.group()) {
-                        // topic deleted - stop re-subscribing
-                        stamp_reason(&user_reason, CloseReason::TopicDeleted);
-                        return;
-                    }
+                if user_reason.get().is_some() {
+                    return;
+                }
+                if client.shared.refresh_topology_throttled().await
+                    && topic_deleted_in_cache(&client, &req, &mut listed_at)
+                {
+                    // topic deleted - stop re-subscribing
+                    stamp_reason(&user_reason, CloseReason::TopicDeleted);
+                    return;
                 }
                 let attempt = resubscribe(client.clone(), req.clone());
                 let Some(result) = forward_until(&mut old_leg, &tx, attempt).await else {
@@ -383,6 +392,25 @@ fn supervise_forward<R, M, F>(
             }
         }
     });
+}
+
+/// Whether the topology cache shows the subscription's topic as deleted,
+/// recording in `listed_at` the newest cache generation that listed it. Only a
+/// populated view newer than one that listed the topic counts. A view without
+/// the topic can simply predate its declare, such as the answer of a broker
+/// that restarted and has not caught up, or a cache that never learned the
+/// topic, and ending the subscription on that would leave it silent for good.
+fn topic_deleted_in_cache<R: SupervisedReq>(
+    client: &Client,
+    req: &R,
+    listed_at: &mut Option<u64>,
+) -> bool {
+    let topo = client.shared.topology.load();
+    if topo.knows_topic(req.topic(), req.group()) {
+        *listed_at = Some(listed_at.map_or(topo.generation, |seen| seen.max(topo.generation)));
+        return false;
+    }
+    topo.is_populated() && listed_at.is_some_and(|seen| topo.generation > seen)
 }
 
 /// Drive `work` to completion while forwarding whatever `old_leg` still

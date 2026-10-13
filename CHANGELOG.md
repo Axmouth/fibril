@@ -894,6 +894,23 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- A Rust client subscription could stop delivering for good after the broker
+  it connects through restarted. Its supervisor took a queue missing from a
+  populated topology as deleted and stopped resubscribing, but a topology can
+  lack a declared queue: a broker that just restarted answers from a view that
+  has not caught up, and brokers left out queues that were declared but not
+  placed or not serving yet. The subscription then stayed open with nothing
+  behind it, while its messages, those confirmed after the restart included,
+  waited on the owner. Brokers now list every declared queue and stream
+  partition in the topology, with no endpoints until it is placed. A topology
+  answer older than the client's cache no longer counts as a refresh, and the
+  client asks its other known brokers for a newer one. A supervisor only
+  treats its topic as deleted when a newer view drops a topic an earlier one
+  listed. When a supervisor does give up, the whole subscription now ends
+  with the typed reason, as documented, instead of staying open and silent.
+  The same stale answer could also fail a publish retry with a false "not
+  declared in the cluster".
+
 - Plexus streams in a cluster could break right after they were declared. A
   node could create a queue partition for a stream topic it had not opened
   yet, either when a stream follower pulled from it before its first publish
