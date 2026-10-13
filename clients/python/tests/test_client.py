@@ -410,6 +410,114 @@ async def test_stale_topology_fetch_does_not_regress_the_cache(broker: FakeBroke
         await client.shutdown()
 
 
+async def test_restarted_broker_with_an_older_topology_does_not_end_a_subscription(
+    broker: FakeBroker,
+) -> None:
+    # A broker restarts in place. It reconciles the subscription away and
+    # answers topology from a view that has not caught up (generation 0, no
+    # queues). The cache is newer but does not know the topic, which was
+    # declared after the cache last refreshed. Neither view says the topic was
+    # deleted, so the supervisor resubscribes and the subscription keeps
+    # delivering.
+    owners = [wire.AdvertisedAddress(broker.host, broker.port)]
+    broker.topology = wire.TopologyOk(
+        generation=7, queues=[wire.QueueTopologyEntry("orders", 0, None, owners, 1, 1)]
+    )
+    client = await Client.connect(
+        (broker.host, broker.port),
+        ClientOptions(supervise_subscriptions=True, topology_refresh_cooldown_ms=0),
+    )
+    try:
+        # The cache learns a view that predates "jobs".
+        await client.fetch_topology()
+        assert client._topology.is_populated()
+        sub = await client.subscribe("jobs").sub()
+
+        broker.resume_outcome = "resume_not_found"
+        broker.topology = wire.TopologyOk(generation=0, queues=[])
+        broker.reconcile_verdict = ("close_client_side", wire.REASON_SERVER_MISSING)
+        broker.deliver_on_subscribe = [b"after"]
+        outcome = await client.reconnect()
+        assert outcome.resume_outcome == "resume_not_found"
+
+        msg = await asyncio.wait_for(sub.recv(), timeout=5)
+        assert msg is not None and msg.payload == b"after"
+        # The older answer never replaced the cache and does not count as a
+        # refresh, so callers do not trust the cache as fresh.
+        assert not await client.refresh_topology_throttled()
+        assert client._topology.generation == 7
+        sub.close()
+    finally:
+        await client.shutdown()
+
+
+async def test_supervisor_that_sees_its_topic_deleted_ends_with_the_reason(
+    broker: FakeBroker,
+) -> None:
+    # A newer view that drops a topic an earlier view listed means the topic
+    # was deleted. The supervisor gives up and the subscription ends with the
+    # typed reason instead of a clean end that looks like a local close.
+    from fibril.errors import SubscriptionClosedError
+
+    owners = [wire.AdvertisedAddress(broker.host, broker.port)]
+    orders = wire.QueueTopologyEntry("orders", 0, None, owners, 1, 1)
+    broker.topology = wire.TopologyOk(
+        generation=1, queues=[orders, wire.QueueTopologyEntry("jobs", 0, None, owners, 1, 1)]
+    )
+    client = await Client.connect(
+        (broker.host, broker.port),
+        ClientOptions(supervise_subscriptions=True, topology_refresh_cooldown_ms=0),
+    )
+    try:
+        await client.fetch_topology()
+        sub = await client.subscribe("jobs").sub()
+
+        # The topic goes away and the owner drops the connection.
+        broker.topology = wire.TopologyOk(generation=2, queues=[orders])
+        for writer in broker._writers:
+            writer.close()
+
+        with pytest.raises(SubscriptionClosedError) as excinfo:
+            await asyncio.wait_for(sub.recv(), timeout=5)
+        assert excinfo.value.code == wire.REASON_TOPIC_DELETED
+    finally:
+        await client.shutdown()
+
+
+async def test_supervisor_that_gives_up_ends_the_whole_subscription(broker: FakeBroker) -> None:
+    # Mirrors the Rust client's supervised_subscription_surfaces_a_terminal_close.
+    # One partition's supervisor gives up for good while another partition is
+    # still live. The whole subscription ends with the typed reason instead of
+    # staying open with that partition silently gone.
+    from fibril.errors import SubscriptionClosedError
+
+    owners = [wire.AdvertisedAddress(broker.host, broker.port)]
+    broker.topology = wire.TopologyOk(
+        generation=1,
+        queues=[wire.QueueTopologyEntry("jobs", p, None, owners, 1, 2) for p in range(2)],
+    )
+    client = await Client.connect(
+        (broker.host, broker.port),
+        ClientOptions(supervise_subscriptions=True, topology_refresh_cooldown_ms=0),
+    )
+    try:
+        await client.fetch_topology()
+        sub = await client.subscribe("jobs").sub()
+
+        # Partition 0 can no longer be subscribed, and the owner drops the
+        # connection.
+        broker.error_subscribe = (403, "forbidden")
+        broker.error_subscribe_partition = 0
+        for writer in broker._writers:
+            writer.close()
+
+        with pytest.raises(SubscriptionClosedError) as excinfo:
+            await asyncio.wait_for(sub.recv(), timeout=5)
+        assert excinfo.value.code == wire.REASON_SERVER_ERROR
+    finally:
+        await client.shutdown()
+
+
 def _topology_three_queues(broker: FakeBroker) -> wire.TopologyOk:
     owners = [wire.AdvertisedAddress(broker.host, broker.port)]
     return wire.TopologyOk(

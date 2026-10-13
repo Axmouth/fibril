@@ -40,9 +40,14 @@ class FakeBroker:
     push_topology_on_hello: Optional[wire.TopologyOk] = None
     # When set, every SUBSCRIBE gets this error instead of SUBSCRIBE_OK.
     error_subscribe: Optional[tuple[int, str]] = None
+    # When set, error_subscribe applies only to this partition.
+    error_subscribe_partition: Optional[int] = None
     # Like the broker, refuse a second SUBSCRIBE to a partition on one
     # connection while the first is live.
     one_subscription_per_connection: bool = False
+    # When set, RECONCILE_CLIENT answers every subscription with this action
+    # and reason code instead of keeping it.
+    reconcile_verdict: Optional[tuple[wire.ReconcileAction, int]] = None
 
     # Records for assertions.
     publishes: list[wire.Publish] = field(default_factory=list)
@@ -196,7 +201,10 @@ class FakeBroker:
             req = decode_body(Op.SUBSCRIBE, frame.payload)
             assert isinstance(req, wire.Subscribe)
             self.subscribes.append(req)
-            if self.error_subscribe is not None:
+            if self.error_subscribe is not None and self.error_subscribe_partition in (
+                None,
+                req.partition,
+            ):
                 code, text = self.error_subscribe
                 await self._error(writer, Op.ERROR, rid, code, text)
                 return
@@ -280,10 +288,19 @@ class FakeBroker:
             rc = decode_body(Op.RECONCILE_CLIENT, frame.payload)
             assert isinstance(rc, wire.ReconcileClient)
             self.reconciles.append(rc)
-            results = [
-                wire.ReconcileSubscriptionResult(client=s, server=s, action="keep", reason="ok")
-                for s in rc.subscriptions
-            ]
+            if self.reconcile_verdict is not None:
+                action, code = self.reconcile_verdict
+                results = [
+                    wire.ReconcileSubscriptionResult(
+                        client=s, server=None, action=action, reason="verdict", code=code
+                    )
+                    for s in rc.subscriptions
+                ]
+            else:
+                results = [
+                    wire.ReconcileSubscriptionResult(client=s, server=s, action="keep", reason="ok")
+                    for s in rc.subscriptions
+                ]
             await self._send(
                 writer,
                 build_frame(

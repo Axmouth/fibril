@@ -242,6 +242,9 @@ class _PartitionSupervisor:
         # The re-subscribe in flight, shared by the stream-closed path and the
         # owner-move path so only one runs at a time.
         self._resubscribing: Optional[asyncio.Task[bool]] = None
+        # The newest cache generation that listed this topic, None until one does.
+        self._listed_at: Optional[int] = None
+        self._topic_deleted()
         self._owner_task: Optional[asyncio.Task[None]] = None
         self._run_task = asyncio.ensure_future(self._run_then(on_stopped))
         if client.supervise_subscriptions():
@@ -276,6 +279,7 @@ class _PartitionSupervisor:
                 if self._stopped or self._client.is_shutting_down():
                     return
                 await self._client.refresh_topology_throttled()
+                self._topic_deleted()
                 current = self._owner_now()
                 if (
                     current is not None
@@ -285,6 +289,20 @@ class _PartitionSupervisor:
                     self._migrate()
         except asyncio.CancelledError:
             pass
+
+    def _topic_deleted(self) -> bool:
+        """Whether the topology cache shows this topic as deleted, recording the
+        newest generation that listed it. Only a populated view newer than one
+        that listed the topic counts. A view without the topic can simply
+        predate its declare, such as the answer of a broker that restarted and
+        has not caught up, or a cache that never learned the topic, and giving
+        up on that would end a live subscription."""
+        generation, populated, listed = self._client.topic_view(self._req.topic, self._req.group)
+        if listed:
+            if self._listed_at is None or generation > self._listed_at:
+                self._listed_at = generation
+            return False
+        return populated and self._listed_at is not None and generation > self._listed_at
 
     async def _run(self) -> None:
         while True:
@@ -348,9 +366,15 @@ class _PartitionSupervisor:
         while True:
             if self._stopped or self._client.is_shutting_down():
                 return False
-            if await self._client.refresh_topology_throttled():
-                if self._client.is_topic_missing(self._req.topic, self._req.group):
-                    return False
+            # A newer view that drops the topic means it was deleted, so end the
+            # whole subscription with that reason rather than re-subscribing.
+            if await self._client.refresh_topology_throttled() and self._topic_deleted():
+                self._merged.close(
+                    SubscriptionClosedError(
+                        wire.REASON_TOPIC_DELETED, f"{self._req.topic} was deleted"
+                    )
+                )
+                return False
             try:
                 handle = await self._resubscribe(self._req)
                 if self._stopped or self._client.is_shutting_down():
@@ -367,6 +391,15 @@ class _PartitionSupervisor:
                     await sleep_ms(publish_retry_nap_ms(backoff))
                     backoff = min(backoff * 2, PUBLISH_RETRY_MAX_BACKOFF_MS)
                     continue
+                if self._stopped or self._client.is_shutting_down():
+                    return False
+                # Permanent (subscribe rejected, max redirects, etc.): the
+                # subscription cannot continue, so end all of it and say why.
+                self._merged.close(
+                    SubscriptionClosedError(
+                        wire.REASON_SERVER_ERROR, f"re-subscribe failed: {err}"
+                    )
+                )
                 return False
 
 

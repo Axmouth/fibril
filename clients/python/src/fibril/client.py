@@ -1054,28 +1054,44 @@ class Client:
     async def fetch_topology(
         self, topic: Optional[str] = None, group: Optional[str] = None
     ) -> wire.TopologyOk:
+        topology, _ = await self._refresh_topology(topic, group)
+        return topology
+
+    async def _refresh_topology(
+        self, topic: Optional[str] = None, group: Optional[str] = None
+    ) -> tuple[wire.TopologyOk, bool]:
+        """Ask the candidates in order for the topology and apply the first
+        answer that is at least as new as the cache. The flag says whether the
+        cache took the returned view. A broker that just restarted answers from
+        a view that has not caught up yet, often empty, so an older answer is
+        never applied and the next candidate is asked. When every answer is
+        older, the first one is returned unapplied."""
         candidates = dict.fromkeys((self._bootstrap_endpoint, *self._opts.discovery_endpoints,
                                     *self._topology.endpoints(), *self._pool))
         last_error: Optional[Exception] = None
+        older: Optional[wire.TopologyOk] = None
         for endpoint in candidates:
             try:
                 engine = await self._engine_at(endpoint)
                 topology = await engine.fetch_topology(topic, group)
-                break
             except Exception as error:
                 last_error = error
-        else:
-            assert last_error is not None
-            raise last_error
-        # Never regress to an older view, the same rule a push follows. A broker
-        # that just restarted can answer from a snapshot that predates queues
-        # declared since, and applying it would make them look deleted.
-        if topology.generation >= self._topology.generation:
+                continue
+            self._topology.last_refresh_ms = asyncio.get_running_loop().time() * 1000
+            # Never regress to an older view, the same rule a push follows.
+            # Applying one would make queues declared since look deleted.
+            if topology.generation < self._topology.generation:
+                if older is None:
+                    older = topology
+                continue
             self._topology.replace(topology)
             _prune_pool_to_topology(self._topology, self._pool)
-        self._topology.last_refresh_ms = asyncio.get_running_loop().time() * 1000
-        _refresh_catalogue(topology, self._catalogue)
-        return topology
+            _refresh_catalogue(topology, self._catalogue)
+            return topology, True
+        if older is not None:
+            return older, False
+        assert last_error is not None
+        raise last_error
 
     def _on_topology_update(self, topology: wire.TopologyOk) -> int:
         """Apply a broker-pushed topology snapshot and return the acked generation.
@@ -1104,6 +1120,15 @@ class Client:
     def is_topic_missing(self, topic: str, group: Optional[str]) -> bool:
         return self._topology.is_populated() and not self._topology.knows_topic(topic, group)
 
+    def topic_view(self, topic: str, group: Optional[str]) -> tuple[int, bool, bool]:
+        """The cache generation, whether the cache holds a real cluster view,
+        and whether that view lists this topic."""
+        return (
+            self._topology.generation,
+            self._topology.is_populated(),
+            self._topology.knows_topic(topic, group),
+        )
+
     def is_shutting_down(self) -> bool:
         return self._user_shutdown
 
@@ -1128,12 +1153,15 @@ class Client:
         return entry.endpoint if entry is not None else None
 
     async def refresh_topology_throttled(self) -> bool:
+        """Refresh topology, throttled by the refresh cooldown. True when a node
+        answered with a view at least as new as the cache, which the cache now
+        reflects, so the caller may trust it."""
         now = asyncio.get_running_loop().time() * 1000
         if now - self._topology.last_refresh_ms < self._opts.topology_refresh_cooldown_ms:
             return False
         try:
-            await self.fetch_topology()
-            return True
+            _, applied = await self._refresh_topology()
+            return applied
         except Exception:
             return False
 
