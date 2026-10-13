@@ -163,8 +163,14 @@ Its tracks:
   tail cache and fan-out ring share of RSS, and payloads pinned by long-lived
   delayed or dead-lettered messages.
 - CPU: a shared per-queue publisher sink, per-batch confirm handling instead of
-  per-message dependency waits, profiles at saturation, the unexplained CPU cost
-  of the AfterFlush probe, and the Rust client read/write engine split.
+  per-message dependency waits, profiles at saturation, and the Rust client
+  read/write engine split. After the October fixes, most remaining CPU at 10k/s
+  is threads waking each other: Tokio worker parking, the I/O driver, Keratin
+  writer threads waiting on their channel, and syscalls. Candidates are
+  completing a committed group's waiters in one batch, less spinning before
+  the writer sleeps, a short grouping window for buffered applies, and keeping
+  a partition's tasks and storage threads together, for example with
+  `tokio_util::task::LocalPoolHandle::spawn_pinned_by_idx` by partition.
 - Latency: a per-stage breakdown of replicated confirms, sending notifications
   before the periodic manifest store, background preparation of the next segment
   at rollover, write syscalls per confirm, and honest written versus durable
@@ -254,6 +260,9 @@ unless marked as Keratin or Ganglion.
 | 2026-09-28 | branch aa72fb2, Keratin cef6c35 | AfterFlush: complete appends after an OS write without fsync | Measure weak-durability latency and CPU | Storage-only append latency, then three NVMe brokers at 100/s and 10k/s with early replication | Storage-only median append 2.535ms with fsync against 14.72µs without, which reflects different guarantees. The broker needed written-cache reads to progress at all. At 10k/s the weak arm had a repeatable tail and CPU regression. A 100ms background sync cut p99 from 96.6-110.2ms to 11.2-11.7ms | Keratin primitive landed as an opt-in API (Keratin 3de5c7b). The broker mode is not merged and needs written versus durable progress reporting first |
 | 2026-09-28 | 3be4ac8, Keratin 456ec15 | Borrowed payload decoding during recovery inspection | Lower inspection CPU | Isolated inspection | About 32% less CPU at 128 B, 13% at 1 KiB and 7% at 8 KiB | Keep. Not a failover time claim |
 | 2026-10-11 | 4426dbe, Ganglion d45e682 | Wake the controller loop on raft leader change | Act on known transport failures without waiting for the next tick | Debug builds, three local nodes, killed node owned the queue and led raft, eager failover at zero grace | With raft heartbeat 100ms and election 0.5-1s, kill to activation fell from 3.7s (two runs) to 1.9 and 2.1s. Default raft timings gave 4.9 and 5.3s, mostly election and detection | Keep. Raft timing defaults are open |
+| 2026-10-13 | 26aa7ce4, Ganglion 3a71041 | Cache each queue's accepted history by committed Raft log id | Stop rebuilding it from JSON on every replication read and progress report | Three nodes on one NVMe disk, 1 KiB, 10k/s, ABBA, `perf` with frame pointers | Broker CPU per million messages 99 to 58 durable, 212 to 83 buffered. Also about 3x less CPU at 100/s | Keep |
+| 2026-10-13 | Keratin b42cfa9 | Serve tail cache hits for owner replication and delivery payload reads inline instead of through the blocking pool | Fewer cross-thread wakeups per message | Same setup, plus 8 queues at 2k/s each | 10k/s: 57 to 50 durable, 84 to 72 buffered, context switches per message down about a third. 8 queues: 166 to 150 durable, 437 to 350 buffered. Latency unchanged | Keep |
+| 2026-10-13 | none, environment only | Fewer Tokio workers (`TOKIO_WORKER_THREADS`), and each broker pinned to 4 cores with `taskset` | Less park and unpark churn | Same setups, plus saturation and 100/s | 4 workers: 5-9% less CPU. Pinned: 17-25% less CPU at 10k/s and saturation, no throughput or low-rate latency loss, but 15-17% higher durable latency with 8 queues | Not adopted. Capping cores trades latency under load, prefer keeping related work on the same thread |
 
 ## Lessons so far
 
