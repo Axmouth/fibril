@@ -95,8 +95,8 @@ class BlockingClient:
         """Opt in to the routing/discovery surface (synchronous facade)."""
         return BlockingRoutingClient(self, self._client.routing())
 
-    def declare_queue(self, config: QueueConfig) -> None:
-        self._run(self._client.declare_queue(config))
+    def declare_queue(self, config: QueueConfig) -> wire.DeclareQueueOk:
+        return self._run(self._client.declare_queue(config))
 
     def declare_plexus(self, config: StreamConfig) -> None:
         self._run(self._client.declare_plexus(config))

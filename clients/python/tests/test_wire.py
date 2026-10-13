@@ -526,3 +526,67 @@ def test_uuid_must_be_16_bytes() -> None:
             wire.HelloOk(1, b"short", _u(1), _u(2), "new", "s", "c")
         )
     assert exc.value.kind == "invalid_uuid"
+
+
+# ---- queue durability mode on declare ----
+
+_DECLARE_MIN = bytes.fromhex(_VECTORS["declare_min"])
+_FDK1 = bytes.fromhex("46444b31000000076372656174656400000004")
+# FDK2: status "stored", 2 partitions, then the mode and warnings.
+_FDK2_HEAD = bytes.fromhex("46444b320000000673746f72656400000002")
+
+
+def test_declare_without_mode_is_unchanged() -> None:
+    body = wire.encode_declare_queue_body(wire.DeclareQueue("t", None, None, None))
+    assert body == _DECLARE_MIN
+    assert wire.decode_declare_queue_body(body).durability is None
+
+
+@pytest.mark.parametrize(("mode", "tag"), [("durable", 0), ("buffered", 1)])
+def test_declare_mode_is_one_trailing_byte(mode: wire.QueueDurability, tag: int) -> None:
+    body = wire.encode_declare_queue_body(
+        wire.DeclareQueue("t", None, None, None, durability=mode)
+    )
+    # The ttl optional is still written before the mode byte.
+    assert body == _DECLARE_MIN + bytes([tag])
+    assert wire.decode_declare_queue_body(body).durability == mode
+
+
+def test_declare_unknown_mode_rejected() -> None:
+    with pytest.raises(WireError) as exc:
+        wire.decode_declare_queue_body(_DECLARE_MIN + b"\x02")
+    assert exc.value.kind == "unknown_tag"
+    with pytest.raises(WireError) as exc:
+        wire.decode_declare_queue_body(_DECLARE_MIN + b"\x01\x00")
+    assert exc.value.kind == "trailing_bytes"
+
+
+def test_declare_ok_fdk1() -> None:
+    ok = wire.decode_declare_queue_ok_body(_FDK1)
+    assert ok == wire.DeclareQueueOk("created", 4)
+    assert ok.durability is None
+    assert ok.warnings == []
+    assert wire.encode_declare_queue_ok_body(ok) == _FDK1
+
+
+def test_declare_ok_fdk2_with_mode_and_warnings() -> None:
+    body = _FDK2_HEAD + bytes.fromhex("0101" "00000001" "0000000177")
+    ok = wire.decode_declare_queue_ok_body(body)
+    assert ok == wire.DeclareQueueOk("stored", 2, durability="buffered", warnings=["w"])
+    assert wire.encode_declare_queue_ok_body(ok) == body
+
+    bare = _FDK2_HEAD + bytes.fromhex("00" "00000000")
+    ok = wire.decode_declare_queue_ok_body(bare)
+    assert ok == wire.DeclareQueueOk("stored", 2)
+
+
+def test_declare_ok_fdk2_rejects_bad_input() -> None:
+    with pytest.raises(WireError) as exc:
+        wire.decode_declare_queue_ok_body(_FDK2_HEAD + bytes.fromhex("0107" "00000000"))
+    assert exc.value.kind == "unknown_tag"
+    with pytest.raises(WireError) as exc:
+        wire.decode_declare_queue_ok_body(_FDK2_HEAD + bytes.fromhex("00" "00000000" "00"))
+    assert exc.value.kind == "trailing_bytes"
+    with pytest.raises(WireError) as exc:
+        wire.decode_declare_queue_ok_body(_FDK2_HEAD + bytes.fromhex("00" "ffffffff"))
+    assert exc.value.kind == "unexpected_eof"

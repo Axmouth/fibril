@@ -17,6 +17,23 @@ msgpack is optional: the client works with raw bytes, text, and JSON without it,
 and only the msgpack payload path (the default for plain published values) needs
 it. Install with `pip install 'fibril[msgpack]'` to enable it.
 
+## Queue durability
+
+`QueueConfig` picks how a queue confirms and delivers. `durable()` waits until
+each required copy has synced a message to disk. `buffered()` waits only until
+each required copy has written it to the OS, before fsync, so power loss or a
+storage failure on every required node at once can lose recent confirmed
+messages. Leaving both out keeps the broker default.
+
+```python
+ok = await client.declare_queue(QueueConfig("jobs").buffered())
+print(ok.durability, ok.warnings)
+```
+
+Only the first declare of a queue sets its mode. A later declare naming another
+mode fails with error code 409. Brokers that predate buffered queues refuse a
+declare that names a mode.
+
 ## Development
 
 The dev environment is managed with [uv](https://docs.astral.sh/uv/):

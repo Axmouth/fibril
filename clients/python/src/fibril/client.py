@@ -233,13 +233,33 @@ class ClientOptions:
 
 @dataclass
 class QueueConfig:
-    """Queue declaration for retry and dead-letter behavior. Immutable builder."""
+    """Queue declaration for retry, dead-letter and durability behavior.
+    Immutable builder."""
 
     topic: str
     group_name: Optional[str] = None
     dlq_policy: Optional[wire.QueueDlqPolicy] = None
     dlq_max_retries: Optional[int] = None
     default_message_ttl_ms: Optional[int] = None
+    #: Requested mode. None leaves it to the broker.
+    durability: Optional[wire.QueueDurability] = None
+
+    def buffered(self) -> "QueueConfig":
+        """Confirm and deliver once each required copy has written a message to
+        the OS, before it is synced to disk. Lower latency, but power loss or a
+        storage failure on every required node at once can lose recent
+        confirmed messages. Only the first declare of a queue sets its mode. A
+        later declare naming another mode fails with error code 409. Brokers
+        that predate buffered queues refuse the declare."""
+        return replace(self, durability="buffered")
+
+    def durable(self) -> "QueueConfig":
+        """Confirm and deliver only once each required copy has synced a message
+        to disk. New queues get this unless the cluster is configured with
+        ``replica_buffered``. Only the first declare of a queue sets its mode,
+        so naming it fails with error code 409 when the queue already exists as
+        buffered."""
+        return replace(self, durability="durable")
 
     def group(self, group: str) -> "QueueConfig":
         return replace(self, group_name=normalize_group(group))
@@ -275,6 +295,7 @@ class QueueConfig:
             dlq_policy=self.dlq_policy,
             dlq_max_retries=self.dlq_max_retries,
             default_message_ttl_ms=self.default_message_ttl_ms,
+            durability=self.durability,
         )
 
 
@@ -1040,9 +1061,13 @@ class Client:
 
         return RoutingClient(self)
 
-    async def declare_queue(self, config: QueueConfig) -> None:
+    async def declare_queue(self, config: QueueConfig) -> wire.DeclareQueueOk:
+        """Declare queue retry, dead-letter and durability behavior.
+
+        The reply carries the partition count and, when the declare named a
+        mode, the mode in effect and any broker warnings."""
         engine = await self._engine_for_operation()
-        await engine.declare_queue(config.to_wire())
+        return await engine.declare_queue(config.to_wire())
 
     async def declare_plexus(self, config: StreamConfig) -> None:
         """Declare a Plexus (fan-out stream) channel."""

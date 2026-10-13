@@ -119,6 +119,27 @@ async def test_declare_queue_via_config(broker: FakeBroker) -> None:
         await client.shutdown()
 
 
+async def test_declare_queue_returns_mode_and_warnings(broker: FakeBroker) -> None:
+    client = await _connect(broker)
+    try:
+        plain = await client.declare_queue(QueueConfig("plain"))
+        assert broker.declares[0].durability is None
+        assert plain.durability is None
+        assert plain.warnings == []
+
+        ok = await client.declare_queue(QueueConfig("jobs").buffered().max_retries(2))
+        assert broker.declares[1].durability == "buffered"
+        assert ok.durability == "buffered"
+        assert ok.warnings == ["buffered queue can lose recent confirmed messages"]
+
+        ok = await client.declare_queue(QueueConfig("audit").durable())
+        assert broker.declares[2].durability == "durable"
+        assert ok.durability == "durable"
+        assert ok.warnings == []
+    finally:
+        await client.shutdown()
+
+
 async def test_auto_ack_subscription_delivers(broker: FakeBroker) -> None:
     broker.deliver_on_subscribe = [b"hello"]
     client = await _connect(broker)

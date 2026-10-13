@@ -922,6 +922,30 @@ def decode_nack_body(body: bytes) -> Nack:
 
 # ---- declare queue ------------------------------------------------------
 
+#: How a queue confirms and delivers. ``"durable"`` waits until each required
+#: copy has synced a message to disk. ``"buffered"`` waits only until each
+#: required copy has written it to the OS, so power loss or a storage failure
+#: on every required node at once can lose recent confirmed messages.
+QueueDurability = Literal["durable", "buffered"]
+
+_QUEUE_DURABILITY_TO_U8: dict[str, int] = {"durable": 0, "buffered": 1}
+_U8_TO_QUEUE_DURABILITY: dict[int, QueueDurability] = {0: "durable", 1: "buffered"}
+
+
+def _queue_durability_tag(d: str) -> int:
+    tag = _QUEUE_DURABILITY_TO_U8.get(d)
+    if tag is None:
+        raise WireError("unknown_tag", f"wire: bad queue durability {d!r}")
+    return tag
+
+
+def _read_queue_durability(r: Reader) -> QueueDurability:
+    tag = r.u8()
+    durability = _U8_TO_QUEUE_DURABILITY.get(tag)
+    if durability is None:
+        raise WireError("unknown_tag", f"wire: unknown queue durability {tag}")
+    return durability
+
 
 @dataclass
 class DeclareQueue:
@@ -932,6 +956,9 @@ class DeclareQueue:
     partition_count: Optional[int] = None
     #: Default message TTL (ms) for the queue. Not queue expiration.
     default_message_ttl_ms: Optional[int] = None
+    #: Requested mode. None sends no mode byte, so the bytes stay readable by
+    #: brokers that predate it.
+    durability: Optional[QueueDurability] = None
 
 
 def encode_declare_queue_body(d: DeclareQueue) -> bytes:
@@ -944,6 +971,10 @@ def encode_declare_queue_body(d: DeclareQueue) -> bytes:
     w.optional_u32(d.partition_count)
     # Trailing so a peer that omits it still decodes (read as None).
     w.optional_u64(d.default_message_ttl_ms)
+    # Written only when set, so brokers that predate the mode refuse the
+    # declare instead of quietly making a durable queue.
+    if d.durability is not None:
+        w.u8(_queue_durability_tag(d.durability))
     return w.finish()
 
 
@@ -958,28 +989,56 @@ def decode_declare_queue_body(body: bytes) -> DeclareQueue:
         partition_count=r.optional_u32(),
         default_message_ttl_ms=r.optional_u64() if r.remaining() > 0 else None,
     )
+    if r.remaining() > 0:
+        value.durability = _read_queue_durability(r)
     r.finish()
     return value
 
 
 @dataclass
 class DeclareQueueOk:
+    """Declare reply. ``FDK1`` carries the status and partition count.
+
+    ``FDK2`` adds the mode in effect and broker warnings. Brokers send it only
+    to a declare that named a mode.
+    """
+
     status: str
     partition_count: int
+    durability: Optional[QueueDurability] = None
+    warnings: list[str] = field(default_factory=list)
 
 
 def encode_declare_queue_ok_body(ok: DeclareQueueOk) -> bytes:
+    extended = ok.durability is not None or bool(ok.warnings)
     w = Writer()
-    w.magic("FDK1")
+    w.magic("FDK2" if extended else "FDK1")
     w.write_str(ok.status)
     w.u32(ok.partition_count)
+    if extended:
+        if ok.durability is not None:
+            w.u8(1)
+            w.u8(_queue_durability_tag(ok.durability))
+        else:
+            w.u8(0)
+        w.u32(len(ok.warnings))
+        for warning in ok.warnings:
+            w.write_str(warning)
     return w.finish()
 
 
 def decode_declare_queue_ok_body(body: bytes) -> DeclareQueueOk:
+    extended = bytes(body[:4]) == b"FDK2"
     r = Reader(body)
-    r.expect_magic("FDK1")
+    r.expect_magic("FDK2" if extended else "FDK1")
     value = DeclareQueueOk(status=r.read_str(), partition_count=r.u32())
+    if extended:
+        value.durability = _read_queue_durability(r) if r.read_bool() else None
+        count = r.u32()
+        # Each warning takes at least its length prefix.
+        if count > r.remaining() // 4:
+            raise WireError("unexpected_eof", "wire: unexpected end of input")
+        value.warnings = [r.read_str() for _ in range(count)]
     r.finish()
     return value
 

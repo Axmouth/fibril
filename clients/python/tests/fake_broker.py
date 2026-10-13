@@ -194,6 +194,12 @@ class FakeBroker:
             assert isinstance(req, wire.DeclareQueue)
             self.declares.append(req)
             ok = wire.DeclareQueueOk(status="created", partition_count=req.partition_count or 1)
+            # Like the broker, answer a declare that named a mode with the
+            # mode in effect, plus a warning for buffered queues.
+            if req.durability is not None:
+                ok.durability = req.durability
+                if req.durability == "buffered":
+                    ok.warnings = ["buffered queue can lose recent confirmed messages"]
             await self._send(writer, build_frame(Op.DECLARE_QUEUE_OK, rid, encode_body(Op.DECLARE_QUEUE_OK, ok)))
             return
 

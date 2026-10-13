@@ -469,11 +469,13 @@ class Engine:
         assert isinstance(offset, int)
         return offset
 
-    async def declare_queue(self, req: wire.DeclareQueue) -> None:
-        await self._request("declare_queue", Op.DECLARE_QUEUE, req)
+    async def declare_queue(self, req: wire.DeclareQueue) -> wire.DeclareQueueOk:
+        result = await self._request("declare_queue", Op.DECLARE_QUEUE, req)
+        assert isinstance(result, wire.DeclareQueueOk)
+        return result
 
     async def declare_plexus(self, req: wire.DeclarePlexus) -> None:
-        await self._request("declare_queue", Op.DECLARE_PLEXUS, req)
+        await self._request("declare_plexus", Op.DECLARE_PLEXUS, req)
 
     async def fetch_topology(
         self, topic: Optional[str] = None, group: Optional[str] = None
@@ -712,11 +714,12 @@ class Engine:
             return
 
         if op == Op.DECLARE_QUEUE_OK:
-            self._resolve(frame.request_id, "declare_queue", None)
+            ok = decode_body(Op.DECLARE_QUEUE_OK, frame.payload)
+            self._resolve(frame.request_id, "declare_queue", ok)
             return
 
         if op == Op.DECLARE_PLEXUS_OK:
-            self._resolve(frame.request_id, "declare_queue", None)
+            self._resolve(frame.request_id, "declare_plexus", None)
             return
 
         if op == Op.TOPOLOGY_OK:
