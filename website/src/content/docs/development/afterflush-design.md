@@ -376,13 +376,16 @@ queues.
   mode depends on the live seal syncing first, which it does today. A latched
   replica cannot seal until it reopens, and the reopen cuts it back to its
   durable end first, so its seal never counts unsynced records.
-- **Owner restart after power loss.** This is the new hazard. An owner that lost
-  its unsynced suffix can come back with a shorter log than its followers hold.
-  If it resumed as owner it would write new records at offsets the followers
-  already hold with different bytes. A buffered queue must treat a dirty
-  restart whose log is shorter than reported follower progress as a recovery
-  event: fence, seal and select the longest history. Early replication has the
-  same open item for old-owner restart.
+- **Owner restart after power loss.** An owner that lost its unsynced suffix
+  comes back with a shorter log than its followers hold. If it resumed as
+  owner it would write new records at offsets the followers already hold with
+  different bytes. It does not resume: a restarted process is a new replica
+  instance, and history admission sends the queue through coordinated
+  recovery, which fences and seals every replica and installs the longest
+  history before anything is written. This holds whether the owner returns
+  before the controller notices or after its queue moved, and covers early
+  replication too. `crates/fibril/tests/buffered_queues.rs` checks both
+  orders with a simulated power loss.
 
 ### What a client observes after owner loss
 
@@ -405,7 +408,9 @@ why the warning in section 1 names storage failure as well as power loss.
 
 In a cluster this means:
 
-- a latched owner stops confirming, and the queue fails over,
+- a latched owner stops confirming. Nothing fails it over automatically yet,
+  for durable queues either, so the queue waits for the broker to restart,
+  which then recovers as after a power loss,
 - its reopen cuts its suffix past the durable end before it can seal, so that
   suffix never counts as recovery evidence,
 - surviving written copies on followers carry the confirmed records.
@@ -531,9 +536,17 @@ Follow the [optimization log](/development/optimization-log/) protocol:
    queues. Admin shows the mode and the queues page each partition's unsynced
    records. Runtime setting for cadence. The Rust client has
    `QueueConfig::buffered()`. The other SDKs follow.
-4. **Failure acceptance.** Section 9 correctness cases, including owner restart
-   after power loss. Docs for the mode, warning text and consumer guidance.
-   Ship as an experimental opt-in.
+4. **Failure acceptance (done).** Simulated power loss through Keratin's
+   `lose_unsynced_on_next_open`, which cuts a closed log back to a given
+   durable end the way a power loss drops unsynced writes. Covered: owner
+   power loss with a quick restart and after failover (nothing confirmed is
+   lost), power loss of every replica (the queue recovers from the longest
+   surviving history and keeps serving), a single-node power loss after a
+   checkpoint (the checkpointed state returns exactly and new records reuse
+   the lost offsets), and process kills. The user page is
+   [buffered queues](/reliability/buffered-queues/), marked experimental.
+   Not covered yet: a cluster test with injected fsync failures on a buffered
+   owner, and the cache pressure and sustained load runs, which fit phase 5.
 5. **Performance.** Rerun the matrix, profile the CPU cost, decide a default
    cadence.
 6. **Transitions.** Fenced mode changes on existing queues, with per-replica

@@ -54,6 +54,10 @@ export const sidebar = [
         slug: "reliability/replication",
       },
       {
+        label: "Buffered queues",
+        slug: "reliability/buffered-queues",
+      },
+      {
         label: "Failover and recovery",
         slug: "reliability/recovery-sealing",
       },

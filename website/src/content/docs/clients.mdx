@@ -1129,7 +1129,9 @@ Once the configured retry limit is exhausted, the broker routes the failed messa
 
 ## Queue Durability
 
-A queue declare can name how the queue confirms and delivers. Durable waits
+A queue declare can name how the queue confirms and delivers. Buffered queues
+are experimental, see [buffered queues](/reliability/buffered-queues/) for what
+they can lose and how consumers should handle it. Durable waits
 until each required copy has synced a message to disk. Buffered waits only
 until each required copy has written it to the OS, before fsync, so power loss
 or a storage failure on every required node at once can lose recent confirmed
