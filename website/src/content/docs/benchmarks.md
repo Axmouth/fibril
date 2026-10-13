@@ -24,6 +24,14 @@ Internal measurements with the current TCP transport and durable path on a singl
 
 Memory usage during these runs ranged from a few hundred MB at lower load to roughly 1-2GB near peak throughput, depending on queue depth, batching, and inflight state.
 
+Replicated runs on the same machine, with the shipped defaults
+(`majority_durable`, early replication on), three nodes sharing one NVMe disk,
+1 KiB durable messages and one confirmed client connection, reached roughly
+`125k` messages/sec at saturation. Requiring all three copies
+(`replica_durable:3`) reached roughly `120k`. Localhost has no network round
+trips, and one shared disk makes every node's fsync compete, so separate
+machines will move both numbers.
+
 ### What the durability claim means
 
 Default queue publish confirmations wait for both the message and its enqueue

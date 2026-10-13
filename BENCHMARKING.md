@@ -28,6 +28,49 @@ re-measure on your target hardware. The reference box:
 Payloads are 128 B unless noted; runs are single-box (client and broker share the
 32 threads), which caps absolute throughput versus a dedicated client host.
 
+## Reference preset and labels
+
+Advertised numbers use the reference preset, which is the shipped default
+configuration:
+
+- durable queues (no `buffered` declare)
+- clusters at `majority_durable` assignment durability, standalone brokers at
+  owner fsync
+- early replication on, follower apply linger 2 ms, tail cache 64 MiB, no
+  segment preallocation
+
+Client-side knobs are fair to tune for a benchmark (connections, confirm
+window, prefetch), but every published number states them. Label each number
+with nodes, policy, queue mode, storage, payload and client shape, for example:
+
+> 3 nodes, majority_durable, durable, one NVMe shared by all nodes, 1 KiB,
+> 1 connection with a 32k confirm window and 2000 prefetch: 126-130k msg/s
+
+Front-page claims use the single-node durable numbers. Replicated and buffered
+numbers appear with their labels.
+
+### Reference matrix
+
+Rerun these on the reference box when a release or a hot-path change could
+move them. 13 October 2026, current main, 1 KiB, one confirmed client
+connection (32k confirm window, 2000 prefetch), brokers and client on one
+machine, every node on one NVMe ext4 partition, APST tolerance 0.
+
+| Case | Throughput or latency |
+| --- | --- |
+| 1 node, durable, saturation | 231-267k msg/s |
+| 1 node, buffered, saturation | 287-288k msg/s |
+| 3 nodes, majority_durable, saturation | 126-130k msg/s |
+| 3 nodes, replica_durable:3, saturation | 119-122k msg/s |
+| 3 nodes, majority_durable, 10k/s | p50 13.6-14.2 ms, p99 27-30 ms |
+| 3 nodes, replica_durable:3, 10k/s | p50 14.1-14.5 ms, p99 29-32 ms |
+| 3 nodes, majority_durable, 100/s | p50 8-17 ms |
+| 3 nodes, majority_durable, 200/100 bursts at 100/s | p50 24-35 ms |
+
+Low-rate and burst latency varied more between runs than throughput did, so
+compare them over several ABBA runs. Latency is from the intended send time to
+delivery.
+
 ## Prerequisites
 
 - **Release build.** Always benchmark `--release`. Every harness builds the

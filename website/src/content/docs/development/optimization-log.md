@@ -268,9 +268,18 @@ unless marked as Keratin or Ganglion.
 | 2026-10-13 | branch `placement-experiment`, Keratin branch `placement-experiment` | Ceiling test for full locality: connections (socket on the thread's own I/O driver), queue actor, broker loops and follower workers on one thread per partition | Show the most a shard-per-core design could save | Three nodes, 1 KiB, one queue at 10k/s and saturation, eight queues at 2k/s, 100/s and bursts | Full: CPU per million 50 to 37 durable and 72 to 50 buffered, context switches per message halved, buffered p50 2.2 to 1.2 ms, but single-queue saturation halved (183k to 89k buffered, 125k to 88k durable). Without connections: saturation unchanged and steady-rate CPU down 4-25%, but burst p99 up (buffered 8 to 18 ms), eight-queue buffered p50 1.5 to 2.2 ms and eight-queue durable CPU up 16% | Not merged. Locality pays, but one thread per partition serializes bursts and caps a hot partition. A shard design would need hot partitions to borrow cores and even queue spreading |
 | 2026-10-13 | none, settings only | Sweep the follower apply linger (`stream_apply_linger_us`) at 0, 500, 2000 and 5000 us | Find whether more grouping lowers CPU | Three nodes, 1 KiB, one queue at 10k/s, eight queues at 2k/s, 100/s and bursts | 0 cost 18-20% more buffered CPU under load. 500 and up were flat at 10k/s. At 100/s the linger was pure added latency for buffered (p50 about 1.7 ms at 0, 4.4 ms at 2000, 6.2 ms at 5000). Durable barely moved | Keep 2000 us, make the wait conditional |
 | 2026-10-13 | af2a09a1 | Buffered followers linger only while frames are flowing | Low-rate buffered latency without losing grouping under load | Same setups | 100/s buffered p50 4.1-4.3 to 0.9-1.3 ms. 10k/s, eight queues and durable unchanged. Applying it to durable as well made durable bursts about 4 ms slower, since grouping saves a sync | Keep, buffered only |
+| 2026-10-13 | safe-defaults branch | Early replication off and on for durable queues, before making it the default | Check its cost after the history cache and inline reads | Three nodes, one NVMe disk, 1 KiB, majority durable: 10k/s, 100/s, bursts and saturation, two passes each | On: saturation 111-114k to 125-130k msg/s, lower burst and 10k/s medians, 10-20% more CPU per message at 10k/s, same at 100/s. Runs were noisier than earlier in the day | Default on |
 
 ## Lessons so far
 
+- Fibril runs its stages in parallel on purpose: the queue actor, publisher and
+  confirm loops, the Keratin writer, fsync and replication overlap across
+  cores. That buys single-queue throughput and absorbs bursts, at the price of
+  a cross-thread wakeup per handoff. A handoff costs about the same whether it
+  carries one message or a hundred, so make each handoff carry a batch and
+  remove hops that do no work. Pinning a partition's stages to one thread
+  saved CPU but halved single-queue throughput, so placement only fits work
+  that is already serial, such as one follower's replication stream.
 - End-to-end benchmarks are good enough to catch large regressions, but they do
   not isolate small serialization or allocation changes.
 - Low-rate steady runs are as important as saturation runs because batching can
