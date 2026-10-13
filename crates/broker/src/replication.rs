@@ -491,6 +491,9 @@ impl BrokerQueuePushApply for HistoryQueuePushApply {
             Ok(outcome)
         })
     }
+    fn queue_durable_next(&self) -> BoxFuture<'_, Option<Offset>> {
+        self.inner.queue_durable_next()
+    }
 }
 
 pub trait BrokerOwnerReplicationPeerResolver: Send + Sync {
@@ -685,10 +688,9 @@ pub trait BrokerQueuePushApply: Send + Sync {
         records: OwnerReplicationRead<StromaEvent>,
     ) -> BoxFuture<'a, Result<QueuePushApply, BrokerError>>;
     /// Current durable end of the follower queue log when it can trail what
-    /// was applied, as on a buffered queue. `None` otherwise.
-    fn queue_durable_next(&self) -> BoxFuture<'_, Option<Offset>> {
-        Box::pin(async { None })
-    }
+    /// was applied, as on a buffered queue. `None` otherwise. No default, so
+    /// a wrapping adapter cannot silently drop it.
+    fn queue_durable_next(&self) -> BoxFuture<'_, Option<Offset>>;
 }
 
 // ---------------- Follower replication worker types ----------------

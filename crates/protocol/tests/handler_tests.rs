@@ -8742,6 +8742,8 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
                     .apply_queue_push_batch("initial-wire", Partition::new(0), None, records)
                     .await
             })
+        }        fn queue_durable_next(&self) -> futures::future::BoxFuture<'_, Option<u64>> {
+            Box::pin(async { None })
         }
     }
     let (mut stream_connection, stream_task, dir, _) = open_node_connection_for_broker(
