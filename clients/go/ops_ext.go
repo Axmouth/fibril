@@ -116,6 +116,47 @@ type QueueConfig struct {
 	dlqMaxRetries       *uint32
 	partitionCount      *uint32
 	defaultMessageTTLms *uint64
+	durability          QueueDurability // empty sends no mode
+}
+
+// QueueDurability is how a queue confirms and delivers.
+type QueueDurability string
+
+const (
+	// QueueDurable confirms and delivers once each required copy has synced a
+	// message to disk.
+	QueueDurable QueueDurability = "durable"
+	// QueueBuffered confirms and delivers once each required copy has written
+	// a message to the OS, before it is synced to disk. Power loss or a
+	// storage failure on every required node at once can lose recent
+	// confirmed messages.
+	QueueBuffered QueueDurability = "buffered"
+)
+
+// Wire tags, indexed by tag value.
+var queueDurabilityOrder = []QueueDurability{QueueDurable, QueueBuffered}
+
+func (w *writer) queueDurability(d QueueDurability) {
+	for i, v := range queueDurabilityOrder {
+		if v == d {
+			w.u8(uint8(i))
+			return
+		}
+	}
+	// Callers only pass the declared constants.
+	panic("fibril: unknown queue durability " + string(d))
+}
+
+func (r *reader) queueDurability() QueueDurability {
+	tag := r.u8()
+	if r.err != nil {
+		return ""
+	}
+	if int(tag) >= len(queueDurabilityOrder) {
+		r.err = &WireError{Kind: WireUnknownTag, Message: "wire: unknown queue durability"}
+		return ""
+	}
+	return queueDurabilityOrder[tag]
 }
 
 // NewQueueConfig starts a queue declaration for the given topic.
@@ -143,6 +184,20 @@ func (q QueueConfig) DefaultMessageTTL(ttl time.Duration) QueueConfig {
 	return q
 }
 
+// Buffered confirms and delivers once each required copy has written a
+// message to the OS, before it is synced to disk. Lower latency, but power
+// loss or a storage failure on every required node at once can lose recent
+// confirmed messages. Only the first declare of a queue sets its mode. A later
+// declare naming another mode fails with error code 409. Brokers that predate
+// buffered queues refuse the declare.
+func (q QueueConfig) Buffered() QueueConfig { q.durability = QueueBuffered; return q }
+
+// Durable confirms and delivers only once each required copy has synced a
+// message to disk. New queues get this unless the cluster is configured with
+// replica_buffered. Only the first declare of a queue sets its mode, so naming
+// it fails with error code 409 when the queue already exists as buffered.
+func (q QueueConfig) Durable() QueueConfig { q.durability = QueueDurable; return q }
+
 func encodeDeclareQueue(d QueueConfig) []byte {
 	w := writer{}
 	w.magic("FDQ1")
@@ -153,6 +208,11 @@ func encodeDeclareQueue(d QueueConfig) []byte {
 	w.optionalU32(d.partitionCount)
 	// Trailing so a peer that omits it still decodes (read as nil).
 	w.optionalU64(d.defaultMessageTTLms)
+	// Written only when set, so brokers that predate the mode refuse the
+	// declare instead of quietly making a durable queue.
+	if d.durability != "" {
+		w.queueDurability(d.durability)
+	}
 	return w.buf
 }
 
@@ -169,27 +229,70 @@ func decodeDeclareQueue(body []byte) (QueueConfig, error) {
 	if r.remaining() > 0 {
 		d.defaultMessageTTLms = r.optionalU64()
 	}
+	if r.remaining() > 0 {
+		d.durability = r.queueDurability()
+	}
 	return d, r.finish()
 }
 
-// DeclareQueueOk is the broker's declare reply.
+// DeclareQueueOk is the broker's declare reply. The broker reports the mode
+// and warnings only when the declare named a mode.
 type DeclareQueueOk struct {
 	Status         string
 	PartitionCount uint32
+	// Durability is the mode in effect, empty when the declare named none.
+	Durability QueueDurability
+	// Warnings are broker notes about the declare, such as the data loss
+	// risk of a buffered queue.
+	Warnings []string
 }
 
+// FDK1 carries the status and partition count. FDK2 adds the mode and warnings.
 func encodeDeclareQueueOk(o DeclareQueueOk) []byte {
+	extended := o.Durability != "" || len(o.Warnings) > 0
 	w := writer{}
-	w.magic("FDK1")
+	if extended {
+		w.magic("FDK2")
+	} else {
+		w.magic("FDK1")
+	}
 	w.writeStr(o.Status)
 	w.u32(o.PartitionCount)
+	if extended {
+		w.writeBool(o.Durability != "")
+		if o.Durability != "" {
+			w.queueDurability(o.Durability)
+		}
+		w.u32(uint32(len(o.Warnings)))
+		for _, warning := range o.Warnings {
+			w.writeStr(warning)
+		}
+	}
 	return w.buf
 }
 
 func decodeDeclareQueueOk(body []byte) (DeclareQueueOk, error) {
+	extended := len(body) >= 4 && string(body[:4]) == "FDK2"
 	r := reader{buf: body}
-	r.expectMagic("FDK1")
+	if extended {
+		r.expectMagic("FDK2")
+	} else {
+		r.expectMagic("FDK1")
+	}
 	o := DeclareQueueOk{Status: r.readStr(), PartitionCount: r.u32()}
+	if extended {
+		if r.readBool() {
+			o.Durability = r.queueDurability()
+		}
+		count := int(r.u32())
+		// Each warning takes at least its length prefix.
+		if r.err == nil && count > r.remaining()/4 {
+			r.err = &WireError{Kind: WireUnexpectedEOF, Message: "wire: unexpected end of input"}
+		}
+		for i := 0; i < count && r.err == nil; i++ {
+			o.Warnings = append(o.Warnings, r.readStr())
+		}
+	}
 	return o, r.finish()
 }
 

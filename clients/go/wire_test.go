@@ -236,3 +236,86 @@ func TestFNV1aCanonical(t *testing.T) {
 		}
 	}
 }
+
+func TestDeclareQueueDurability(t *testing.T) {
+	vectors := loadVectors(t)
+	minimal := vectors["declare_min"]
+
+	// No mode leaves the bytes unchanged.
+	if got := hex.EncodeToString(encodeDeclareQueue(NewQueueConfig("t"))); got != minimal {
+		t.Fatalf("no-mode declare = %s, want %s", got, minimal)
+	}
+
+	for _, c := range []struct {
+		cfg  QueueConfig
+		mode QueueDurability
+		tag  string
+	}{
+		{NewQueueConfig("t").Durable(), QueueDurable, "00"},
+		{NewQueueConfig("t").Buffered(), QueueBuffered, "01"},
+	} {
+		body := encodeDeclareQueue(c.cfg)
+		// The ttl optional is still written before the mode byte.
+		if got := hex.EncodeToString(body); got != minimal+c.tag {
+			t.Errorf("%s declare = %s, want %s", c.mode, got, minimal+c.tag)
+		}
+		d, err := decodeDeclareQueue(body)
+		if err != nil || d.durability != c.mode {
+			t.Errorf("%s declare decodes to %q, %v", c.mode, d.durability, err)
+		}
+	}
+
+	bad, _ := hex.DecodeString(minimal + "02")
+	if _, err := decodeDeclareQueue(bad); !isWireKind(err, WireUnknownTag) {
+		t.Errorf("unknown mode tag: err = %v, want unknown_tag", err)
+	}
+	trailing, _ := hex.DecodeString(minimal + "0100")
+	if _, err := decodeDeclareQueue(trailing); !isWireKind(err, WireTrailingBytes) {
+		t.Errorf("trailing byte after mode: err = %v, want trailing_bytes", err)
+	}
+}
+
+func TestDeclareQueueOkReplies(t *testing.T) {
+	fdk1, _ := hex.DecodeString("46444b31000000076372656174656400000004")
+	ok, err := decodeDeclareQueueOk(fdk1)
+	if err != nil || ok.Status != "created" || ok.PartitionCount != 4 || ok.Durability != "" || ok.Warnings != nil {
+		t.Fatalf("FDK1 decodes to %+v, %v", ok, err)
+	}
+
+	// FDK2: status "stored", 2 partitions, buffered, one warning "w".
+	head := "46444b320000000673746f72656400000002"
+	fdk2, _ := hex.DecodeString(head + "0101" + "00000001" + "0000000177")
+	ok, err = decodeDeclareQueueOk(fdk2)
+	if err != nil || ok.Status != "stored" || ok.PartitionCount != 2 || ok.Durability != QueueBuffered ||
+		len(ok.Warnings) != 1 || ok.Warnings[0] != "w" {
+		t.Fatalf("FDK2 decodes to %+v, %v", ok, err)
+	}
+	if got := hex.EncodeToString(encodeDeclareQueueOk(ok)); got != hex.EncodeToString(fdk2) {
+		t.Errorf("FDK2 re-encodes to %s", got)
+	}
+
+	bare, _ := hex.DecodeString(head + "00" + "00000000")
+	ok, err = decodeDeclareQueueOk(bare)
+	if err != nil || ok.Durability != "" || len(ok.Warnings) != 0 {
+		t.Errorf("FDK2 without mode decodes to %+v, %v", ok, err)
+	}
+
+	for name, c := range map[string]struct {
+		hex  string
+		kind WireErrorKind
+	}{
+		"unknown mode":   {head + "0107" + "00000000", WireUnknownTag},
+		"trailing bytes": {head + "00" + "00000000" + "00", WireTrailingBytes},
+		"huge count":     {head + "00" + "ffffffff", WireUnexpectedEOF},
+	} {
+		b, _ := hex.DecodeString(c.hex)
+		if _, err := decodeDeclareQueueOk(b); !isWireKind(err, c.kind) {
+			t.Errorf("%s: err = %v, want %s", name, err, c.kind)
+		}
+	}
+}
+
+func isWireKind(err error, kind WireErrorKind) bool {
+	we, ok := err.(*WireError)
+	return ok && we.Kind == kind
+}

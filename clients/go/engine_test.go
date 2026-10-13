@@ -9,7 +9,7 @@ import (
 )
 
 // fakeBroker speaks just enough of the protocol over conn to exercise the
-// engine: it answers HELLO, AUTH, confirmed PUBLISH, and PING. compliance and
+// engine: it answers HELLO, AUTH, confirmed PUBLISH, DECLARE QUEUE and PING. compliance and
 // offset let a test steer the handshake reply and the publish offset.
 func fakeBroker(conn net.Conn, compliance string, offset uint64) {
 	go func() {
@@ -29,11 +29,55 @@ func fakeBroker(conn net.Conn, compliance string, offset uint64) {
 				if p, _ := decodePublish(f.Payload); p.RequireConfirm {
 					_, _ = conn.Write(encodeFrame(buildFrame(opPublishOk, f.RequestID, encodePublishOk(publishOk{Offset: offset}))))
 				}
+			case opDeclareQueue:
+				// Like the broker, a declare that named a mode gets the mode
+				// back, plus a warning for buffered queues.
+				d, _ := decodeDeclareQueue(f.Payload)
+				ok := DeclareQueueOk{Status: "stored", PartitionCount: 1, Durability: d.durability}
+				if d.durability == QueueBuffered {
+					ok.Warnings = []string{"buffered queue can lose recent confirmed messages"}
+				}
+				_, _ = conn.Write(encodeFrame(buildFrame(opDeclareQueueOk, f.RequestID, encodeDeclareQueueOk(ok))))
 			case opPing:
 				_, _ = conn.Write(encodeFrame(buildFrame(opPong, f.RequestID, nil)))
 			}
 		}
 	}()
+}
+
+func TestEngineDeclareQueueReturnsModeAndWarnings(t *testing.T) {
+	client, server := net.Pipe()
+	fakeBroker(server, ComplianceString, 1)
+
+	e, err := startEngine(context.Background(), client, EngineOptions{ClientName: "go-test", HeartbeatInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("startEngine: %v", err)
+	}
+	defer e.Shutdown()
+
+	ok, err := e.DeclareQueue(context.Background(), NewQueueConfig("plain"))
+	if err != nil {
+		t.Fatalf("DeclareQueue: %v", err)
+	}
+	if ok.Durability != "" || len(ok.Warnings) != 0 {
+		t.Errorf("plain declare reply = %+v, want no mode or warnings", ok)
+	}
+
+	ok, err = e.DeclareQueue(context.Background(), NewQueueConfig("jobs").Buffered().DlqMaxRetries(2))
+	if err != nil {
+		t.Fatalf("DeclareQueue buffered: %v", err)
+	}
+	if ok.Durability != QueueBuffered || len(ok.Warnings) != 1 {
+		t.Errorf("buffered declare reply = %+v, want buffered with one warning", ok)
+	}
+
+	ok, err = e.DeclareQueue(context.Background(), NewQueueConfig("audit").Durable())
+	if err != nil {
+		t.Fatalf("DeclareQueue durable: %v", err)
+	}
+	if ok.Durability != QueueDurable || len(ok.Warnings) != 0 {
+		t.Errorf("durable declare reply = %+v, want durable with no warnings", ok)
+	}
 }
 
 func TestEngineHandshakeAuthAndPublish(t *testing.T) {
