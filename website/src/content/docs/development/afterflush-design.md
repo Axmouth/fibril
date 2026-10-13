@@ -168,9 +168,6 @@ all replicas sharing one disk, as in the local benchmarks above.
   messages can be lost after power loss or storage failure on every required
   node at once. Background sync usually shortens that window, but slow I/O or
   failures can extend it."
-- Fix the stream docs while touching this area. The ephemeral tier is described
-  as surviving a process crash, but it confirms at `AfterWrite`, which can
-  complete before the bytes leave Keratin's buffers.
 
 ### Compared with other brokers
 
