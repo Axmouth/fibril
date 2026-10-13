@@ -18,6 +18,7 @@ import {
   publishRetryNap,
   sleep,
 } from "./internal/retry.js";
+import type { TopicView } from "./internal/topology.js";
 import type { Client, SubscribeHandle } from "./client.js";
 import { deadlineFromDelay, type DelayInput } from "./publisher.js";
 
@@ -338,7 +339,7 @@ interface SupervisorClient {
   _superviseIntervalMs(): number;
   _autoResubscribe(): boolean;
   _refreshTopologyThrottled(): Promise<boolean>;
-  _isTopicMissing(topic: string, group: string | null): boolean;
+  _topicView(topic: string, group: string | null): TopicView;
   _ownerEndpoint(topic: string, partition: number, group: string | null): string | null;
   _partitionSet(topic: string, group: string | null): number[];
 }
@@ -383,6 +384,8 @@ class PartitionSupervisor<R> {
   // owner-move path so only one runs at a time.
   #resubscribing: Promise<boolean> | null = null;
   #timer: ReturnType<typeof setInterval> | null = null;
+  // The newest cache generation that listed this topic, null until one does.
+  #listedAt: bigint | null = null;
 
   constructor(
     private readonly client: SupervisorClient,
@@ -395,6 +398,7 @@ class PartitionSupervisor<R> {
     this.#engine = first.engine;
     this.#partQueue = first.queue;
     this.#boundOwner = first.endpoint;
+    this.#topicDeleted();
     // The merged queue is shared, so this partition closing must not end the others.
     // Notify the fan-in so it can close the merged queue once all have stopped.
     void this.#run().finally(onStopped);
@@ -430,6 +434,7 @@ class PartitionSupervisor<R> {
         void (async () => {
           try {
             await this.client._refreshTopologyThrottled();
+            this.#topicDeleted();
             const current = this.#ownerNow();
             if (current !== null && current !== this.#boundOwner && !this.#resubscribing) {
               void this.#migrate();
@@ -442,6 +447,25 @@ class PartitionSupervisor<R> {
       Math.max(this.client._superviseIntervalMs(), 1),
     );
     this.#timer.unref?.();
+  }
+
+  /**
+   * Whether the topology cache shows this topic as deleted, recording the
+   * newest generation that listed it. Only a populated view newer than one
+   * that listed the topic counts. A view without the topic can simply predate
+   * its declare, such as the answer of a broker that restarted and has not
+   * caught up, or a cache that never learned the topic, and giving up on that
+   * would end a live subscription.
+   */
+  #topicDeleted(): boolean {
+    const view = this.client._topicView(this.req.topic, this.req.group);
+    if (view.listed) {
+      if (this.#listedAt === null || view.generation > this.#listedAt) {
+        this.#listedAt = view.generation;
+      }
+      return false;
+    }
+    return view.populated && this.#listedAt !== null && view.generation > this.#listedAt;
   }
 
   #clearTimer(): void {
@@ -508,10 +532,14 @@ class PartitionSupervisor<R> {
     let backoffMs = PUBLISH_RETRY_INITIAL_BACKOFF_MS;
     for (;;) {
       if (this.#stopped || this.client._isShuttingDown()) return false;
-      // Re-resolve the owner from a refreshed topology. If a populated view no
-      // longer knows the topic, stop re-subscribing (it was deleted).
-      if (await this.client._refreshTopologyThrottled()) {
-        if (this.client._isTopicMissing(this.req.topic, this.req.group)) return false;
+      // Re-resolve the owner from a refreshed topology. If a newer view drops
+      // the topic, it was deleted, so end the whole subscription with that
+      // reason rather than re-subscribing.
+      if ((await this.client._refreshTopologyThrottled()) && this.#topicDeleted()) {
+        this.merged.close(
+          new SubscriptionClosedError(REASON_CODES.topicDeleted, `${this.req.topic} was deleted`),
+        );
+        return false;
       }
       try {
         const next = await this.resubscribe(this.req);
@@ -531,7 +559,16 @@ class PartitionSupervisor<R> {
           backoffMs = Math.min(backoffMs * 2, PUBLISH_RETRY_MAX_BACKOFF_MS);
           continue;
         }
-        return false; // permanent: subscribe rejected, max redirects, etc.
+        if (this.#stopped || this.client._isShuttingDown()) return false;
+        // Permanent (subscribe rejected, max redirects, etc.): the subscription
+        // cannot continue, so end all of it and say why.
+        this.merged.close(
+          new SubscriptionClosedError(
+            REASON_CODES.serverError,
+            `re-subscribe failed: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
+        return false;
       }
     }
   }

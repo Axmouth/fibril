@@ -29,7 +29,13 @@ import type { BoundedQueue } from "./internal/bounded-queue.js";
 import { Publisher } from "./publisher.js";
 import { SubscriptionBuilder, StreamSubscriptionBuilder } from "./subscription.js";
 import { RoutingClient } from "./routing.js";
-import { TopologyCache, routePartition, type Route, type RoundRobin } from "./internal/topology.js";
+import {
+  TopologyCache,
+  routePartition,
+  type Route,
+  type RoundRobin,
+  type TopicView,
+} from "./internal/topology.js";
 import type { DeclarePlexus, StreamDurability, StreamRetention, SubscribeStream } from "./wire.js";
 import type {
   AssignmentChangedMsg,
@@ -1468,27 +1474,46 @@ provide one with withTlsClientCert(certPath, keyPath)`,
   async fetchTopology(
     filter: { topic?: string | null; group?: string | null } = {},
   ): Promise<TopologyOkMsg> {
+    return (await this.#refreshTopology(filter)).topology;
+  }
+
+  /**
+   * Ask the candidates in order for the topology and apply the first answer
+   * that is at least as new as the cache. `applied` says whether the cache
+   * took the returned view. A broker that just restarted answers from a view
+   * that has not caught up yet, often empty, so an older answer is never
+   * applied and the next candidate is asked. When every answer is older, the
+   * first one is returned unapplied.
+   */
+  async #refreshTopology(
+    filter: { topic?: string | null; group?: string | null } = {},
+  ): Promise<{ topology: TopologyOkMsg; applied: boolean }> {
     const candidates = new Set([this.#bootstrapEndpoint, ...this.#opts.discoveryEndpoints,
       ...this.#topology.endpoints(), ...this.#pool.keys()]);
-    let topology: TopologyOkMsg | undefined;
+    let older: TopologyOkMsg | undefined;
     let lastError: unknown;
     for (const endpoint of candidates) {
+      let topology: TopologyOkMsg;
       try {
         topology = await (await this.#engineAt(endpoint)).fetchTopology(filter);
-        break;
-      } catch (error) { lastError = error; }
-    }
-    if (!topology) throw lastError;
-    // Never regress to an older view, the same rule a push follows. A broker
-    // that just restarted can answer from a snapshot that predates queues
-    // declared since, and applying it would make them look deleted.
-    if (topology.generation >= this.#topology.generation) {
+      } catch (error) {
+        lastError = error;
+        continue;
+      }
+      this.#topology.lastRefreshMs = Date.now();
+      // Never regress to an older view, the same rule a push follows. Applying
+      // one would make queues declared since look deleted.
+      if (topology.generation < this.#topology.generation) {
+        older ??= topology;
+        continue;
+      }
       this.#topology.replace(topology);
       prunePoolToTopology(this.#topology, this.#pool);
+      refreshCatalogue(topology, this.#catalogue);
+      return { topology, applied: true };
     }
-    this.#topology.lastRefreshMs = Date.now();
-    refreshCatalogue(topology, this.#catalogue);
-    return topology;
+    if (older) return { topology: older, applied: false };
+    throw lastError;
   }
 
   /**
@@ -1522,8 +1547,10 @@ provide one with withTlsClientCert(certPath, keyPath)`,
 
   /**
    * @internal Refresh topology from a reachable node, throttled by the refresh
-   * cooldown. Returns true if a refresh actually happened. Used by the publish
-   * failover retry to re-resolve the new owner after a transient failure.
+   * cooldown. Returns true if a node answered with a view at least as new as
+   * the cache, which the cache now reflects, so the caller may trust it. Used
+   * by the publish failover retry to re-resolve the new owner after a
+   * transient failure.
    */
   async _refreshTopologyThrottled(): Promise<boolean> {
     const now = Date.now();
@@ -1531,8 +1558,7 @@ provide one with withTlsClientCert(certPath, keyPath)`,
       return false;
     }
     try {
-      await this.fetchTopology();
-      return true;
+      return (await this.#refreshTopology()).applied;
     } catch {
       return false;
     }
@@ -1550,6 +1576,15 @@ provide one with withTlsClientCert(certPath, keyPath)`,
    */
   _isTopicMissing(topic: string, group: string | null): boolean {
     return this.#topology.isPopulated() && !this.#topology.knowsTopic(topic, group);
+  }
+
+  /** @internal What the routing cache says about one topic, for a supervisor. */
+  _topicView(topic: string, group: string | null): TopicView {
+    return {
+      generation: this.#topology.generation,
+      populated: this.#topology.isPopulated(),
+      listed: this.#topology.knowsTopic(topic, group),
+    };
   }
 
   /**

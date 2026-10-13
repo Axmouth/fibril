@@ -1596,6 +1596,261 @@ test("a stale topology fetch does not regress the cache", async () => {
   }
 });
 
+// Mirrors the Rust client's
+// restarted_broker_with_an_older_topology_does_not_end_a_subscription. The
+// broker restarts in place, reconciles the subscription away and answers
+// topology from a view that has not caught up (generation 0, no queues). The
+// cache is newer but never learned the topic, which was declared after it last
+// refreshed. Neither view says the topic was deleted, so the supervisor
+// re-subscribes and the subscription keeps delivering.
+test("a restarted broker with an older topology does not end a subscription", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  let client: Client | undefined;
+  try {
+    const addr = `127.0.0.1:${broker.port}`;
+    let hellos = 0;
+    let subId = 60n;
+    broker.onFrame = (f, s) => {
+      const restarted = hellos > 1;
+      if (f.opcode === Op.Hello) {
+        hellos += 1;
+        broker.send(
+          s,
+          buildFrame(
+            Op.HelloOk,
+            f.requestId,
+            helloOk({ resume_outcome: hellos > 1 ? "resume_not_found" : "new" }),
+          ),
+        );
+      } else if (f.opcode === Op.Topology) {
+        const topology: TopologyOkMsg = restarted
+          ? { generation: 0n, queues: [] }
+          : {
+              generation: 7n,
+              queues: [
+                {
+                  topic: "orders",
+                  partition: 0,
+                  group: null,
+                  owner_endpoints: [adv(addr)],
+                  partitioning_version: 1n,
+                  partition_count: 1,
+                },
+              ],
+            };
+        broker.send(s, buildFrame(Op.TopologyOk, f.requestId, topology));
+      } else if (f.opcode === Op.ReconcileClient) {
+        const request = decodeFrameBody<ReconcileClientMsg>(f);
+        broker.send(
+          s,
+          buildFrame(Op.ReconcileResult, f.requestId, {
+            subscriptions: request.subscriptions.map((sub) => ({
+              client: sub,
+              server: null,
+              action: "close_client_side",
+              code: REASON_CODES.serverMissing,
+              reason: "server_missing",
+            })),
+          }),
+        );
+      } else if (f.opcode === Op.Subscribe) {
+        const req = decodeFrameBody<SubscribeMsg>(f);
+        subId += 1n;
+        broker.send(
+          s,
+          buildFrame(Op.SubscribeOk, f.requestId, {
+            sub_id: subId,
+            topic: req.topic,
+            group: req.group,
+            partition: 0,
+            prefetch: req.prefetch,
+          }),
+        );
+        if (!restarted) return;
+        broker.send(
+          s,
+          buildFrame(Op.Deliver, 0n, {
+            sub_id: subId,
+            topic: req.topic,
+            group: null,
+            partition: 0,
+            offset: 1n,
+            delivery_tag: { epoch: 1n },
+            published: 1n,
+            publish_received: 2n,
+            content_type: null,
+            headers: {},
+            payload: new TextEncoder().encode("after"),
+          }),
+        );
+      }
+    };
+
+    client = await Client.connect(addr, new ClientOptions({ topologyRefreshCooldownMs: 0 }));
+    // The cache learns a view that predates "jobs".
+    await client.fetchTopology();
+    assert.ok(client._topology().isPopulated());
+    const sub = await client.subscribe("jobs").sub();
+
+    const outcome = await client.reconnect();
+    assert.equal(outcome.resumeOutcome, "resume_not_found");
+
+    const msg = await Promise.race([
+      sub.recv(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("the subscription went quiet")), 5_000),
+      ),
+    ]);
+    assert.ok(msg, "a delivery after the re-subscribe");
+    assert.equal(new TextDecoder().decode(msg.payload), "after");
+    // The older answer never replaced the cache and does not count as a
+    // refresh, so callers do not trust the cache as fresh.
+    assert.equal(await client._refreshTopologyThrottled(), false);
+    assert.equal(client._topology().generation, 7n);
+    sub.close();
+  } finally {
+    await client?.shutdown();
+    await broker.stop();
+  }
+});
+
+// A newer view that drops a topic an earlier view listed means the topic was
+// deleted. The supervisor gives up and the subscription ends with the typed
+// reason instead of a clean end that looks like a local close.
+test("a supervisor that sees its topic deleted ends the subscription with the reason", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  let client: Client | undefined;
+  try {
+    const addr = `127.0.0.1:${broker.port}`;
+    let deleted = false;
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      } else if (f.opcode === Op.Topology) {
+        const entry = (topic: string) => ({
+          topic,
+          partition: 0,
+          group: null,
+          owner_endpoints: [adv(addr)],
+          partitioning_version: 1n,
+          partition_count: 1,
+        });
+        const topology: TopologyOkMsg = deleted
+          ? { generation: 2n, queues: [entry("orders")] }
+          : { generation: 1n, queues: [entry("orders"), entry("jobs")] };
+        broker.send(s, buildFrame(Op.TopologyOk, f.requestId, topology));
+      } else if (f.opcode === Op.Subscribe) {
+        const req = decodeFrameBody<SubscribeMsg>(f);
+        broker.send(
+          s,
+          buildFrame(Op.SubscribeOk, f.requestId, {
+            sub_id: 5n,
+            topic: req.topic,
+            group: req.group,
+            partition: 0,
+            prefetch: req.prefetch,
+          }),
+        );
+        if (deleted) return;
+        // The topic goes away and the owner drops the connection.
+        deleted = true;
+        setTimeout(() => s.destroy(), 20);
+      }
+    };
+
+    client = await Client.connect(addr, new ClientOptions({ topologyRefreshCooldownMs: 0 }));
+    await client.fetchTopology();
+    const sub = await client.subscribe("jobs").sub();
+
+    await assert.rejects(
+      () =>
+        Promise.race([
+          sub.recv(),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("the subscription went quiet")), 5_000),
+          ),
+        ]),
+      (err: unknown) =>
+        err instanceof SubscriptionClosedError && err.code === REASON_CODES.topicDeleted,
+    );
+  } finally {
+    await client?.shutdown();
+    await broker.stop();
+  }
+});
+
+// Mirrors the Rust client's supervised_subscription_surfaces_a_terminal_close.
+// One partition's supervisor gives up for good while another partition is
+// still live. The whole subscription ends with the typed reason instead of
+// staying open with that partition silently gone.
+test("a supervisor that gives up ends the whole subscription with the reason", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  let client: Client | undefined;
+  try {
+    const addr = `127.0.0.1:${broker.port}`;
+    let subscribes = 0;
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      } else if (f.opcode === Op.Topology) {
+        const topology: TopologyOkMsg = {
+          generation: 1n,
+          queues: [0, 1].map((partition) => ({
+            topic: "jobs",
+            partition,
+            group: null,
+            owner_endpoints: [adv(addr)],
+            partitioning_version: 1n,
+            partition_count: 2,
+          })),
+        };
+        broker.send(s, buildFrame(Op.TopologyOk, f.requestId, topology));
+      } else if (f.opcode === Op.Subscribe) {
+        const req = decodeFrameBody<SubscribeMsg>(f);
+        subscribes += 1;
+        if (subscribes > 2 && req.partition === 0) {
+          broker.send(s, buildFrame(Op.Error, f.requestId, { code: 403, message: "forbidden" }));
+          return;
+        }
+        broker.send(
+          s,
+          buildFrame(Op.SubscribeOk, f.requestId, {
+            sub_id: BigInt(subscribes),
+            topic: req.topic,
+            group: req.group,
+            partition: req.partition,
+            prefetch: req.prefetch,
+          }),
+        );
+        // Both legs are up, so the owner drops the connection.
+        if (subscribes === 2) setTimeout(() => s.destroy(), 20);
+      }
+    };
+
+    client = await Client.connect(addr, new ClientOptions({ topologyRefreshCooldownMs: 0 }));
+    await client.fetchTopology();
+    const sub = await client.subscribe("jobs").sub();
+
+    await assert.rejects(
+      () =>
+        Promise.race([
+          sub.recv(),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("the subscription stayed open")), 5_000),
+          ),
+        ]),
+      (err: unknown) =>
+        err instanceof SubscriptionClosedError && err.code === REASON_CODES.serverError,
+    );
+  } finally {
+    await client?.shutdown();
+    await broker.stop();
+  }
+});
+
 // Mirrors the Rust client's stream_subscribe_sends_durable_filtered_request:
 // the stream builder must carry durable name, start position, header filters,
 // prefetch, and ack mode onto the SubscribeStream request.

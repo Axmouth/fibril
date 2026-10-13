@@ -53,6 +53,15 @@ const queueKey = (topic: string, partition: number, group: string | null): strin
 const countKey = (topic: string, group: string | null): string =>
   JSON.stringify([topic, group ?? null]);
 
+/** What the routing cache says about one topic at its current generation. */
+export interface TopicView {
+  generation: bigint;
+  /** The cache holds a real cluster view (at least one declared queue). */
+  populated: boolean;
+  /** The view lists this topic. */
+  listed: boolean;
+}
+
 /**
  * Cache of queue ownership and partitioning. Empty (standalone brokers, or a
  * cold client) means "no routing info" and callers fall back to the bootstrap
