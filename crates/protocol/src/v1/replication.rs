@@ -1596,6 +1596,9 @@ impl FollowerPushSink for QueuePushSink {
     async fn durable_next(&self) -> Option<u64> {
         self.apply.queue_durable_next().await
     }
+    fn applies_without_sync(&self) -> bool {
+        self.apply.queue_applies_without_sync()
+    }
 }
 
 #[cfg(test)]

@@ -494,6 +494,9 @@ impl BrokerQueuePushApply for HistoryQueuePushApply {
     fn queue_durable_next(&self) -> BoxFuture<'_, Option<Offset>> {
         self.inner.queue_durable_next()
     }
+    fn queue_applies_without_sync(&self) -> bool {
+        self.inner.queue_applies_without_sync()
+    }
 }
 
 pub trait BrokerOwnerReplicationPeerResolver: Send + Sync {
@@ -691,6 +694,8 @@ pub trait BrokerQueuePushApply: Send + Sync {
     /// was applied, as on a buffered queue. `None` otherwise. No default, so
     /// a wrapping adapter cannot silently drop it.
     fn queue_durable_next(&self) -> BoxFuture<'_, Option<Offset>>;
+    /// Whether an apply returns once written, without waiting for a sync.
+    fn queue_applies_without_sync(&self) -> bool;
 }
 
 // ---------------- Follower replication worker types ----------------
@@ -795,6 +800,11 @@ impl BrokerQueuePushApply for WorkerQueuePushApply {
             }
             Ok(outcome)
         })
+    }
+    fn queue_applies_without_sync(&self) -> bool {
+        self.broker
+            .engine
+            .queue_is_buffered(&self.topic, self.partition.id(), self.group.as_deref())
     }
     fn queue_durable_next(&self) -> BoxFuture<'_, Option<Offset>> {
         Box::pin(async move {

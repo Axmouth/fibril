@@ -472,6 +472,13 @@ pub trait FollowerPushSink: Send + Sync + 'static {
     async fn durable_next(&self) -> Option<u64> {
         None
     }
+
+    /// Whether an apply returns once written, without waiting for a sync.
+    /// Applies that sync group frames by lingering even on a quiet stream,
+    /// since every extra apply costs a sync.
+    fn applies_without_sync(&self) -> bool {
+        false
+    }
 }
 
 /// Input is polled by storage after each frame is staged, keeping one recovery
@@ -549,8 +556,15 @@ pub async fn run_follower_push_applier<S: FollowerPushSink>(
     // `max_merge_bytes` is the other microbatch lever (replication runtime
     // setting stream_apply_max_merge_bytes): caps how large a coalesced apply can
     // grow, i.e. peak memory vs fsync-amortization. Pairs with apply_linger.
+    // With the default policy and applies that do not sync (buffered queues),
+    // the linger only applies while frames are flowing: a frame that arrives
+    // more than `apply_linger` after the previous apply finished starts an
+    // apply at once, since a quiet stream rarely sends a second frame in time
+    // and the wait would only add latency. Applies that sync keep lingering,
+    // since grouping saves a sync.
 
     let mut next = from;
+    let mut last_apply_done: Option<tokio::time::Instant> = None;
     let mut durable = from;
     let mut carry: Option<QueueReplicationReadOk> = None;
     let mut drain_continuation = false;
@@ -568,6 +582,7 @@ pub async fn run_follower_push_applier<S: FollowerPushSink>(
         // First frame for this apply: a carried-over unmergeable frame, otherwise
         // a fresh receive. Ok(Some) = batch, Ok(None) = reader closed, Err(()) =
         // idle keepalive tick.
+        let carried = carry.is_some();
         let first = match carry.take() {
             Some(batch) => batch,
             None => {
@@ -602,6 +617,14 @@ pub async fn run_follower_push_applier<S: FollowerPushSink>(
                 }
             }
         };
+
+        // The experimental collection policies keep their own timing.
+        let flowing = open_policy != 0
+            || deadline_policy
+            || !sink.applies_without_sync()
+            || carried
+            || last_apply_done.is_some_and(|done| done.elapsed() <= apply_linger);
+        let apply_linger = if flowing { apply_linger } else { std::time::Duration::ZERO };
 
         // Retain the epoch for matching a queued continuation to the completed
         // history. A carried epoch/gap boundary starts ordinary collection.
@@ -674,6 +697,7 @@ pub async fn run_follower_push_applier<S: FollowerPushSink>(
                 sink.apply(merged).await
             }
         };
+        last_apply_done = Some(tokio::time::Instant::now());
         match outcome {
             FollowerApplyOutcome::Applied {
                 durable_next,
@@ -1406,10 +1430,14 @@ mod tests {
 
     struct DeadlineSink {
         applied: mpsc::UnboundedSender<(u64, u64, tokio::time::Instant)>,
+        without_sync: bool,
     }
 
     #[async_trait]
     impl FollowerPushSink for DeadlineSink {
+        fn applies_without_sync(&self) -> bool {
+            self.without_sync
+        }
         async fn apply(&self, batch: QueueReplicationReadOk) -> FollowerApplyOutcome {
             let bytes = batch_bytes(&batch);
             let ReplicationEventRead::Batch {
@@ -1440,11 +1468,25 @@ mod tests {
         mpsc::Receiver<FollowerPushControl>,
         tokio::task::JoinHandle<ApplierExit>,
     ) {
+        sink_harness(policy, linger_us, max_bytes, false)
+    }
+
+    fn sink_harness(
+        policy: bool,
+        linger_us: u64,
+        max_bytes: u64,
+        without_sync: bool,
+    ) -> (
+        mpsc::Sender<QueueReplicationReadOk>,
+        mpsc::UnboundedReceiver<(u64, u64, tokio::time::Instant)>,
+        mpsc::Receiver<FollowerPushControl>,
+        tokio::task::JoinHandle<ApplierExit>,
+    ) {
         let (tx, rx) = mpsc::channel(8);
         let (applied, applied_rx) = mpsc::unbounded_channel();
         let (control, control_rx) = mpsc::channel(8);
         let task = tokio::spawn(run_follower_push_applier_with_policy(
-            Arc::new(DeadlineSink { applied }),
+            Arc::new(DeadlineSink { applied, without_sync }),
             rx,
             control,
             0,
@@ -1491,7 +1533,39 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn original_policy_still_closes_after_one_extra_arrival() {
+    async fn original_policy_lingers_only_while_frames_flow() {
+        let (tx, mut applied, _controls, task) = sink_harness(false, 20_000, 10_000, true);
+        // A frame on an idle stream applies at once.
+        let start = tokio::time::Instant::now();
+        tx.send(batch_from(0, 1)).await.unwrap();
+        let (first, next, at) = applied.recv().await.unwrap();
+        assert_eq!((first, next), (0, 1));
+        assert_eq!(at, start);
+        // Within one linger of that apply the stream counts as flowing, so the
+        // next frame waits and closes after one extra arrival.
+        tokio::time::advance(Duration::from_millis(5)).await;
+        let start = tokio::time::Instant::now();
+        tx.send(batch_from(1, 1)).await.unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(5)).await;
+        tx.send(batch_from(2, 1)).await.unwrap();
+        let (first, next, at) = applied.recv().await.unwrap();
+        assert_eq!((first, next), (1, 3));
+        assert!(at - start < Duration::from_millis(20));
+        // After a quiet spell longer than the linger, a frame applies at once again.
+        tokio::time::advance(Duration::from_millis(50)).await;
+        let start = tokio::time::Instant::now();
+        tx.send(batch_from(3, 1)).await.unwrap();
+        let (first, next, at) = applied.recv().await.unwrap();
+        assert_eq!((first, next), (3, 4));
+        assert_eq!(at, start);
+        drop(tx);
+        assert_eq!(task.await.unwrap(), ApplierExit::ReaderClosed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn original_policy_with_synced_applies_lingers_on_a_quiet_stream() {
+        // Grouping saves a sync, so even the first frame waits for company.
         let (tx, mut applied, _controls, task) = deadline_harness(false, 20_000, 10_000);
         let start = tokio::time::Instant::now();
         tx.send(batch_from(0, 1)).await.unwrap();
