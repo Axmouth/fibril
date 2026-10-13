@@ -334,8 +334,9 @@ failures can stretch the unsynced window. Never document it as a maximum loss
 window.
 
 The 100 ms cadence had the best p99 in the short screen. 500 ms and one second
-also helped a lot. Choosing a default needs longer runs, more queues and
-separate disks.
+also helped a lot. 100 ms stays the default, see the
+[October measurements](#october-measurements). Longer runs, many queues and
+separate disks are still to measure.
 
 Alternative: the broker task from the experiment. It works, but it duplicates
 dirty tracking, needs its own lifecycle per queue incarnation, and cannot merge
@@ -453,32 +454,68 @@ the high-rate cost (207.60-221.96 across intervals). Sampled RSS was lower at
 10k/s (525.01-536.69 against 577.48-592.52 MiB summed), but broker RSS does not
 include dirty page cache.
 
-Likely causes, none attributed yet:
+### October measurements
 
-- **Smaller groups.** The weak runs staged about 26.1-26.6k batches against
-  19.1-19.3k for the same 150,001 messages, and 161.6-161.8k staged records
-  against 155.6-155.7k. An fsync wait batches naturally. Without it, each wake
-  ships a smaller group through staging, flush, replication and apply.
-- **More rounds downstream.** Smaller groups mean more replication frames,
-  progress reports, ceiling refreshes, delivery polls and confirm wakeups.
-- **Known per-message costs** that the weak mode exposes: per-connection
-  publisher sinks, per-message confirm dependency waits, repeated event codecs
-  and payload copies (audit items P3 to P5).
-- **Fixes since the experiment.** The writer no longer spins at the fsync cap
-  (Keratin `561cbb1`), and selected reads skip unread records by length
-  (`c995932`). Rerun before attributing.
+Taken on 13 October 2026 on main, with the same setup as the evidence above:
+1 KiB payloads, every node on one NVMe ext4 filesystem, APST tolerance 0,
+early replication on in both arms, ABBA order, the mode set by declaration.
+Ranges are per run. CPU is broker CPU seconds per million messages.
 
-What to measure on the rebuilt mode:
+| Case | Durable p50 / p99 ms | Buffered p50 / p99 ms |
+| --- | --- | --- |
+| Solo, steady 100/s | 3.32-4.02 / 8.47-9.37 | 1.16-1.32 / 3.55-3.78 |
+| Solo, steady 10k/s | 8.62-8.98 / 20.29-20.93 | 2.06-2.08 / 3.67-4.05 |
+| 3 nodes, steady 100/s | 8.82-8.92 / 22.05-23.89 | 4.72-5.18 / 11.52-14.10 |
+| 3 nodes, 200/100 bursts | 30.94-32.00 / 70.08-150.53 | 8.61-9.50 / 26.61-31.15 |
+| 3 nodes, steady 10k/s | 13.78-13.82 / 28.18-28.30 | 2.27-2.28 / 8.13-8.58 |
 
-- CPU per message, plus write and fsync syscalls per message from `strace -c`
-  or eBPF counters.
-- Staged batches and records per message on owner and followers.
-- Replication frames and progress reports per message.
-- Tail cache hit rate for written delivery reads, and raw fallback reads.
-- Dirty and Writeback from `/proc/meminfo`, and durable lag per log.
-- A `perf` profile at 10k/s in both modes.
-- Whether a small linger for buffered queues restores grouping without giving
-  back the median.
+The 10k/s rows come from the build with the history cache below. Bursts have
+only eight bursts per run, so their p99 is the worst burst.
+
+The CPU gap was replication, not storage. Solo 10k/s cost about the same in
+both modes (25.2-25.5 durable, 28.0-28.5 buffered), and staged batches per
+message barely moved. Replicated 10k/s cost 98.5-98.6 durable against
+209-216 buffered, with about twice the write syscalls per message.
+
+A `perf` profile with frame pointers put 35% of the durable owner and 52% of
+the buffered owner in `validate_history_replication`. Every push read and
+progress report cloned the whole coordination snapshot and parsed the queue's
+history documents from JSON. Buffered queues make more, smaller reads, so
+they paid it more often. The coordination layer now caches the accepted
+history per resource, keyed by the committed Raft log id, so it is rebuilt
+only after a committed change. Replicated 10k/s then cost 56.9-59.4 durable
+and 81.7-83.6 buffered.
+
+What is left is per-frame cost: buffered applies return without waiting for
+an fsync, so the same traffic moves in smaller groups with more frames and
+progress reports. Owner samples differ by about 11% between modes after the
+cache, follower samples by about 32%. A small apply linger for buffered
+queues could trade some latency back for grouping, not measured yet.
+
+Background sync interval at replicated 10k/s, buffered:
+
+| Interval | p50 ms | p99 ms | p99.9 ms | CPU | Max unsynced records |
+| --- | --- | --- | --- | --- | --- |
+| 50 ms | 2.52-2.55 | 8.95-10.78 | 22.50-24.73 | 210.47-218.13 | 604-609 |
+| 100 ms | 2.53-2.55 | 9.43-10.46 | 22.73-25.05 | 209.40-218.33 | 1107-1127 |
+| 250 ms | 2.50-2.55 | 6.45-9.19 | 23.82-25.92 | 210.80-224.67 | 2500-2732 |
+| 1,000 ms | 2.48-2.54 | 8.49-9.27 | 41.22-45.28 | 211.00-223.40 | 9967-10008 |
+
+These ran before the history cache. The interval changes neither CPU nor the
+median. The unsynced window grows with it, and 1,000 ms also worsens the
+tail because each sync carries more. 100 ms stays the default: it keeps the
+window near a tenth of a second at no measurable cost, and every queue log
+syncs on its own timer, so a shorter default multiplies syncs on nodes with
+many queues.
+
+A control run of the 28 September binary on the same disk matched main on
+steady 100/s (9.10-9.46 / 21.38-23.22 ms) but not on bursts (22.51-27.10 /
+30.37-31.31 ms against 30.94-32.00 / 70.08-150.53 ms durable). That points to
+a durable burst regression since then, separate from buffered queues and
+still to investigate.
+
+Not measured yet: separate drives per node, cache pressure with a small tail
+cache, a many-queue screen, and a sustained run of ten minutes or more.
 
 ## 9. Acceptance test plan
 
@@ -545,10 +582,13 @@ Follow the [optimization log](/development/optimization-log/) protocol:
    checkpoint (the checkpointed state returns exactly and new records reuse
    the lost offsets), and process kills. The user page is
    [buffered queues](/reliability/buffered-queues/), marked experimental.
-   Not covered yet: a cluster test with injected fsync failures on a buffered
-   owner, and the cache pressure and sustained load runs, which fit phase 5.
-5. **Performance.** Rerun the matrix, profile the CPU cost, decide a default
-   cadence.
+   An injected fsync failure on a buffered owner keeps every confirmed
+   message: the owner latches and refuses new publishes, the queue fails
+   over, and the old owner rejoins after cutting its log back
+   (`buffered_owner_sync_failure_keeps_confirmed_messages`).
+5. **Performance (done).** Matrix rerun, CPU gap traced to the per-read
+   history check and fixed with a cache, 100 ms background sync kept as the
+   default. See the [October measurements](#october-measurements).
 6. **Transitions.** Fenced mode changes on existing queues, with per-replica
    applied status.
 
@@ -598,6 +638,9 @@ Decided:
    copies with buffered as the default for new queues, which also settles
    whether a cluster default for new queues exists. A declare naming a mode
    wins.
+10. Background sync stays at 100 ms by default. The October runs found no CPU or
+    median cost between 50 ms and 1,000 ms, a worse tail at 1,000 ms, and a
+    window that grows with the interval.
 
 Still open:
 
