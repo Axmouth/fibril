@@ -11,7 +11,7 @@ The operator-facing corruption policy is described in
 
 Durable queue events complete actor application in log order. Disk appends remain
 concurrent. The application gate advances an exclusive `event_next` only after
-all actor commands for that event batch have completed; zero represents an empty
+all actor commands for that event batch have completed. Zero represents an empty
 applied prefix.
 
 Checkpoint capture acquires this gate, passes its permit to the actor command and
@@ -23,8 +23,8 @@ replay.
 
 Partial application invalidates the sequence and blocks later owner application,
 checkpoint capture and promotion. Role changes preserve that failure. Completed
-recovery or a validated checkpoint installation establishes the next boundary;
-replaying verified follower overlap skips already-applied events. Reapplying a
+recovery or a validated checkpoint installation establishes the next boundary.
+Replaying verified follower overlap skips already-applied events. Reapplying a
 NACK can increment retries again, so replay starts at the exclusive checkpoint
 boundary.
 
@@ -33,12 +33,12 @@ boundary.
 Version-two snapshot envelopes store an exclusive event boundary. Legacy
 version-one envelopes store an inclusive value and remain readable, including the
 existing ambiguous-zero recovery handling. Older binaries cannot read version-two
-snapshots; preserve a compatible data copy when testing an older revision.
+snapshots, so preserve a compatible data copy when testing an older revision.
 
 The file and directory entries are synchronized before periodic prefix
 compaction. A failed write leaves the queue dirty for retry. Snapshot capture,
 persistence and compaction serialize with follower application and recovery
-installation; later owner applications can proceed after capture and mark the
+installation. Later owner applications can proceed after capture and mark the
 queue dirty again. Crash acceptance tests run on Linux only.
 
 ## Single-log queue recovery
@@ -86,7 +86,7 @@ Sealed inspection can replay different exact checkpoints to a common boundary an
 compare state and live payload identities. A separate lease projection accounts
 for ordinary owner delivery, which does not append a lease event. Timer state,
 resource incarnation and checkpoint authority still require explicit proof before
-source selection; see [recovery sealing](/reliability/recovery-sealing/) and the
+source selection. See [recovery sealing](/reliability/recovery-sealing/) and the
 [failover plan](/development/failover-plan/).
 
 ## Bounded sequential inspection
@@ -95,15 +95,15 @@ Automatic sealed-history inspection uses the node-only `RecoveryReadSequential`
 operation (112). Each connection owns at most one tentative cursor, bound to the
 resource, partition/group, transition, complete retained-history identity and log
 source. Every page receives fresh consensus authorization and seal/storage-receipt
-validation. Records are checked for CRC and contiguous offsets while reading;
-the final page is withheld if the complete canonical digest differs from the seal.
+validation. Records are checked for CRC and contiguous offsets while reading,
+and the final page is withheld if the complete canonical digest differs from the seal.
 The receiver independently verifies complete histories, checkpoints and replay
 before producing an artifact or selecting a source. Partial pages confer no
 recovery authority.
 
 Each storage engine admits two sessions and one active sealed read. Idle sessions
 expire after ten seconds without a successful recovery page. Completion, disconnect,
-error and cancellation release cursor resources; admitted blocking work retains its
+error and cancellation release cursor resources. Admitted blocking work retains its
 own lifecycle guards until it finishes. Read buffers and pages are bounded, and
 existing whole-inspection deadlines, byte/record/page and replay limits still apply.
 Snapshot reads retain complete envelope verification. No payload history cache is
@@ -111,12 +111,12 @@ kept across attempts.
 
 Strict `RecoveryRead` (105), used for diagnostics and target copying, still verifies
 every retained log per page. A selected artifact can be reused within its attempt
-only after verification against the persisted plan; restart falls back to source
+only after verification against the persisted plan. Restart falls back to source
 reconstruction or a completed target snapshot. Inspection connections are reused
 only after a valid reply, and discarded on timeout, cancellation or invalid data.
 
 This adds an internal broker opcode without changing the storage format. All
-participating brokers must support operation 112 for automatic inspection; an
+participating brokers must support operation 112 for automatic inspection. An
 older peer rejects it and recovery remains fenced. Mixed-version rolling recovery
 with older binaries is not supported by this change.
 
@@ -127,11 +127,11 @@ A target with the exact selected log range can initialize its recovery stage
 from its own sealed log. The target checks its resource incarnation and durable
 seal, then reads the actual records to validate CRCs, the full payload digest and
 the selected snapshot's live-payload dependencies. Unequal bounds or payloads use
-the existing verified transfer path. A matching local actor state is not required;
+the existing verified transfer path. A matching local actor state is not required, because
 installation still uses the selected, independently verified snapshot.
 
 Keratin closes the outgoing writable segment and gives each generation a new,
-private active tail. Closed payload segments can share filesystem inodes; indexes
+private active tail. Closed payload segments can share filesystem inodes, while indexes
 and metadata stay independent. Installation similarly forks the completed stage.
 Later suffix repair or unclean-open truncation copies a shared segment before
 mutating it. Appends use the private tail, and retention only removes local names.
@@ -143,8 +143,8 @@ unshared logs keep their existing format. A failed filesystem link falls back to
 copying. Never downgrade a shared log by editing its manifest version.
 
 The existing intent, stage completion, installation receipt and atomic route
-publication still control admission. Interrupted destinations remain unreferenced;
-process-kill tests cover file sharing, private-copy repair and publication. All retained payloads and event records still require verification. Opt-in agreed
-queue checkpoints can advance the retained event boundary to a common snapshot;
-comparison then verifies that snapshot and its later suffix. Live payloads retain
+publication still control admission. Interrupted destinations remain unreferenced.
+Process-kill tests cover file sharing, private-copy repair and publication. All retained payloads and event records still require verification. Opt-in agreed
+queue checkpoints can advance the retained event boundary to a common snapshot.
+Comparison then verifies that snapshot and its later suffix. Live payloads retain
 their ordinary integrity checks. See [checkpoint policy](/development/failover-plan/#4-agreed-checkpoints-and-suffix-comparison).
