@@ -497,9 +497,21 @@ internal sealed class FakeBroker : IAsyncDisposable
                     }
                     break;
                 case Op.DeclareQueue:
-                    QueueDeclares.Enqueue(WireOps.DecodeDeclareQueue(f.Payload));
-                    await WriteAsync(stream, Op.DeclareQueueOk, f.RequestId, WireOps.EncodeDeclareQueueOk(new DeclareQueueOk("created", 1)), ct);
+                {
+                    var declare = WireOps.DecodeDeclareQueue(f.Payload);
+                    QueueDeclares.Enqueue(declare);
+                    // Like the broker, a declare that named a mode gets the
+                    // mode back, plus a warning for buffered queues.
+                    var ok = new DeclareQueueOk("created", 1)
+                    {
+                        Durability = declare.Durability,
+                        Warnings = declare.Durability == QueueDurability.Buffered
+                            ? ["buffered queue can lose recent confirmed messages"]
+                            : [],
+                    };
+                    await WriteAsync(stream, Op.DeclareQueueOk, f.RequestId, WireOps.EncodeDeclareQueueOk(ok), ct);
                     break;
+                }
                 case Op.DeclarePlexus:
                     PlexusDeclares.Enqueue(WireOps.DecodeDeclarePlexus(f.Payload));
                     await WriteAsync(stream, Op.DeclarePlexusOk, f.RequestId, WireOps.EncodeDeclarePlexusOk(new DeclarePlexusOk("created", 1)), ct);

@@ -36,6 +36,33 @@ public sealed record QueueConfig
 
     /// <summary>Default per-message time to live for messages published without their own TTL.</summary>
     public TimeSpan? DefaultMessageTtl { get; init; }
+
+    /// <summary>
+    /// How the queue confirms and delivers. Null leaves it to the broker. Only
+    /// the first declare of a queue sets its mode. A later declare naming
+    /// another mode fails with error code 409. Brokers that predate the mode
+    /// refuse a declare that names one.
+    /// </summary>
+    public QueueDurability? Durability { get; init; }
+}
+
+/// <summary>How a queue confirms and delivers.</summary>
+public enum QueueDurability : byte
+{
+    /// <summary>
+    /// Confirm and deliver only once each required copy has synced a message
+    /// to disk. New queues get this unless the cluster is configured with
+    /// <c>replica_buffered</c>.
+    /// </summary>
+    Durable = 0,
+
+    /// <summary>
+    /// Confirm and deliver once each required copy has written a message to the
+    /// OS, before it is synced to disk. Lower latency, but power loss or a
+    /// storage failure on every required node at once can lose recent
+    /// confirmed messages.
+    /// </summary>
+    Buffered = 1,
 }
 
 /// <summary>A Plexus stream's durability tier.</summary>
@@ -65,7 +92,11 @@ public sealed record StreamConfig
 
 public sealed partial class Client
 {
-    /// <summary>Declares a queue with dead-letter, retry, partition, and TTL options.</summary>
+    /// <summary>
+    /// Declares a queue with dead-letter, retry, partition, TTL and durability
+    /// options. When the declare names a mode, the outcome carries the mode in
+    /// effect and any broker warnings.
+    /// </summary>
     public async Task<DeclareOutcome> DeclareQueueAsync(string topic, QueueConfig options, CancellationToken ct = default)
     {
         var ok = await BootstrapOpAsync(eng => eng.DeclareQueueAsync(new DeclareQueueFrame
@@ -76,8 +107,13 @@ public sealed partial class Client
             DlqMaxRetries = options.MaxRetries is null ? null : (uint)options.MaxRetries.Value,
             PartitionCount = options.PartitionCount is null ? null : (uint)options.PartitionCount.Value,
             DefaultMessageTtlMs = options.DefaultMessageTtl is { } ttl ? (ulong)ttl.TotalMilliseconds : null,
+            Durability = options.Durability,
         }, ct), ct).ConfigureAwait(false);
-        return new DeclareOutcome(ok.Status, (int)ok.PartitionCount);
+        return new DeclareOutcome(ok.Status, (int)ok.PartitionCount)
+        {
+            Durability = ok.Durability,
+            Warnings = ok.Warnings,
+        };
     }
 
     /// <summary>Declares a Plexus stream with partition, durability, retention, and replication options.</summary>

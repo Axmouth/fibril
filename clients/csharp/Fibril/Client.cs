@@ -78,7 +78,14 @@ public sealed record AssignmentChange(
     IReadOnlyList<uint> Revoked);
 
 /// <summary>The outcome of a queue or stream declaration.</summary>
-public sealed record DeclareOutcome(string Status, int PartitionCount);
+public sealed record DeclareOutcome(string Status, int PartitionCount)
+{
+    /// <summary>The queue mode in effect. Reported only when a queue declare named a mode, otherwise null.</summary>
+    public QueueDurability? Durability { get; init; }
+
+    /// <summary>Broker warnings about the declare, such as the data loss risk of a buffered queue.</summary>
+    public IReadOnlyList<string> Warnings { get; init; } = [];
+}
 
 /// <summary>A cluster-aware connection to a Fibril deployment.</summary>
 public sealed partial class Client : IAsyncDisposable

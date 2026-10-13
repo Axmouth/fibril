@@ -39,10 +39,21 @@ internal readonly record struct DeclareQueueFrame
     public uint? DlqMaxRetries { get; init; }
     public uint? PartitionCount { get; init; }
     public ulong? DefaultMessageTtlMs { get; init; }
+
+    /// <summary>Requested mode. Null sends no mode byte, so the bytes stay readable by brokers that predate it.</summary>
+    public QueueDurability? Durability { get; init; }
 }
 
-/// <summary>The broker's declare reply.</summary>
-internal readonly record struct DeclareQueueOk(string Status, uint PartitionCount);
+/// <summary>
+/// The broker's declare reply. <c>FDK1</c> carries the status and partition
+/// count. <c>FDK2</c> adds the mode in effect and warnings, and brokers send it
+/// only to a declare that named a mode.
+/// </summary>
+internal readonly record struct DeclareQueueOk(string Status, uint PartitionCount)
+{
+    public QueueDurability? Durability { get; init; }
+    public IReadOnlyList<string> Warnings { get; init; } = [];
+}
 
 /// <summary>A Plexus stream's durability tier.</summary>
 internal enum StreamDurability : byte
@@ -377,6 +388,18 @@ internal static class WireCompositesExt
 
     public static void Durability(this WireWriter w, StreamDurability d) => w.U8((byte)d);
 
+    public static void QueueDurability(this WireWriter w, QueueDurability d) => w.U8((byte)d);
+
+    public static QueueDurability QueueDurability(this WireReader r)
+    {
+        var tag = r.U8();
+        if (tag > (byte)Fibril.QueueDurability.Buffered)
+        {
+            throw new WireException(WireErrorKind.UnknownTag, "wire: unknown queue durability");
+        }
+        return (QueueDurability)tag;
+    }
+
     public static StreamDurability Durability(this WireReader r)
     {
         var tag = r.U8();
@@ -475,6 +498,12 @@ internal static partial class WireOps
         w.OptionalU32(d.PartitionCount);
         // Trailing so a peer that omits it still decodes (read as null).
         w.OptionalU64(d.DefaultMessageTtlMs);
+        // Written only when set, so brokers that predate the mode refuse the
+        // declare instead of quietly making a durable queue.
+        if (d.Durability is { } durability)
+        {
+            w.QueueDurability(durability);
+        }
         return w.ToArray();
     }
 
@@ -488,6 +517,7 @@ internal static partial class WireOps
         var dlqMaxRetries = r.OptionalU32();
         var partitionCount = r.OptionalU32();
         var ttl = r.Remaining > 0 ? r.OptionalU64() : null;
+        QueueDurability? durability = r.Remaining > 0 ? r.QueueDurability() : null;
         r.Finish();
         return new DeclareQueueFrame
         {
@@ -497,23 +527,59 @@ internal static partial class WireOps
             DlqMaxRetries = dlqMaxRetries,
             PartitionCount = partitionCount,
             DefaultMessageTtlMs = ttl,
+            Durability = durability,
         };
     }
 
     public static byte[] EncodeDeclareQueueOk(DeclareQueueOk o)
     {
+        var extended = o.Durability is not null || o.Warnings.Count > 0;
         var w = new WireWriter();
-        w.Magic("FDK1");
+        w.Magic(extended ? "FDK2" : "FDK1");
         w.WriteStr(o.Status);
         w.U32(o.PartitionCount);
+        if (extended)
+        {
+            if (o.Durability is { } durability)
+            {
+                w.U8(1);
+                w.QueueDurability(durability);
+            }
+            else
+            {
+                w.U8(0);
+            }
+            w.U32((uint)o.Warnings.Count);
+            foreach (var warning in o.Warnings)
+            {
+                w.WriteStr(warning);
+            }
+        }
         return w.ToArray();
     }
 
     public static DeclareQueueOk DecodeDeclareQueueOk(byte[] body)
     {
+        var extended = body.AsSpan().StartsWith("FDK2"u8);
         var r = new WireReader(body);
-        r.ExpectMagic("FDK1");
+        r.ExpectMagic(extended ? "FDK2" : "FDK1");
         var o = new DeclareQueueOk(r.ReadStr(), r.U32());
+        if (extended)
+        {
+            QueueDurability? durability = r.ReadBool() ? r.QueueDurability() : null;
+            var count = r.U32();
+            // Each warning takes at least its length prefix.
+            if (count > (uint)r.Remaining / 4)
+            {
+                throw new WireException(WireErrorKind.UnexpectedEof, "wire: unexpected end of input");
+            }
+            var warnings = new string[count];
+            for (var i = 0; i < warnings.Length; i++)
+            {
+                warnings[i] = r.ReadStr();
+            }
+            o = o with { Durability = durability, Warnings = warnings };
+        }
         r.Finish();
         return o;
     }
