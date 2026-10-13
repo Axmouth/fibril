@@ -97,10 +97,14 @@ durability:
   Readers see it sooner, the producer still gets a real durability confirmation.
   Speculative deliveries carry a `fibril.speculative` header so a consumer knows
   the record may not be durable yet.
-- **ephemeral** — deliver at staging and confirm immediately, persisting without
-  an fsync (the record goes to the OS but is not flushed to disk). Lowest
-  latency, weakest guarantee: a process crash is survivable, a power loss can
-  drop the newest ephemeral records.
+- **ephemeral**: deliver at staging and confirm the producer as soon as the
+  record has its offset, without waiting for the write. The record is written
+  without a per-record fsync, and the broker syncs the partition about every
+  5 ms while it has new records. Lowest latency, weakest guarantee. A confirmed
+  record can still be in the broker's own write buffers, so a process crash can
+  drop the newest confirmed records, and a power loss or OS crash can drop
+  records written since the last sync. See
+  [failure modes](/reliability/failure-modes/#what-survives-what).
 
 All three are log-backed, so durable cursors, replay, and retention work on any
 tier.
