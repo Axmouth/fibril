@@ -94,9 +94,9 @@ What the experiments also showed:
 | Piece | State on main |
 | --- | --- |
 | `KDurability::AfterFlush` | Landed in Keratin `3de5c7b`. One flush per staged group, no fsync, durable frontier unchanged. A failed write latches the log. |
-| Written frontier | Keratin `120ab87`. `written_next` and `watch_written_next`, never below `durable_next`. A latched log moves it back to the durable end at once (`0d36a67`). |
-| Written reads | `scan_written_with_byte_budget` (Keratin `0d36a67`) reads up to the written frontier from the tail cache, or from the segment files on a miss. `scan_for_replication` still falls back to a durable-only scan on a miss. |
-| Buffered declaration | The mode lives in the cluster queue declaration (`QueueDeclaration` in `crates/broker/src/queue_engine.rs`), fixed at first declare. Each node mirrors it into Stroma's `set_queue_buffered`, stored as a `buffered` partition marker (Keratin `4bebb9a`), when it opens the queue as owner or follower. Standalone brokers set it on first declare. |
+| Written frontier | Keratin `4830462`. `written_next` and `watch_written_next`, never below `durable_next`. A latched log moves it back to the durable end at once (`1ea4318`). |
+| Written reads | `scan_written_with_byte_budget` (Keratin `1ea4318`) reads up to the written frontier from the tail cache, or from the segment files on a miss. `scan_for_replication` still falls back to a durable-only scan on a miss. |
+| Buffered declaration | The mode lives in the cluster queue declaration (`QueueDeclaration` in `crates/broker/src/queue_engine.rs`), fixed at first declare. Each node mirrors it into Stroma's `set_queue_buffered`, stored as a `buffered` partition marker (Keratin `0272d81`), when it opens the queue as owner or follower. Standalone brokers set it on first declare. |
 | Queue delivery reads | `read_selected` in `stroma/core/src/stroma/combined.rs` reads at the written frontier for buffered queues and at the durable frontier otherwise. Dead-letter payload fetches follow the same rule. |
 | Queue apply | `append_combined` applies events only after the append completes at the requested durability, so under `AfterFlush` apply follows the flush. |
 | Queue append durability | Durable queues: the log config default, `AfterFsync`. Buffered queues: `AfterFlush` for publishes, acks, nacks, releases, discards and dead-letter markers. Legacy helpers that hard-code `AfterFsync` keep it. |
@@ -106,11 +106,11 @@ What the experiments also showed:
 | `replica_accepted` | Deprecated. Config maps it to `replica_durable` with a warning. |
 | `replica_buffered:N` | Cluster config mode. Assignments get `replica_durable:N`, and new queues declared without a mode are buffered. Admin shows a buffered queue's policy as `replica_buffered`. |
 | Early replication | Runtime setting `replication.early_replication`, off by default, history-bound assignments only. Ships written records to followers before owner fsync. Always on for buffered queues with a history-bound assignment. |
-| Background sync cadence | Runtime setting `storage.background_sync_interval_ms`, applied to open queue logs and to logs opened later (Keratin `9c81d3a`). |
-| Seal fence | An epoch advance syncs every written record first, also when no append waits (Keratin `9c81d3a`). Before that a seal of a follower holding unsynced buffered records refused. |
+| Background sync cadence | Runtime setting `storage.background_sync_interval_ms`, applied to open queue logs and to logs opened later (Keratin `9a69acb`). |
+| Seal fence | An epoch advance syncs every written record first, also when no append waits (Keratin `9a69acb`). Before that a seal of a follower holding unsynced buffered records refused. |
 | Live writer settings | Keratin `e333bce`. Revision-checked changes to default durability, batch limits and fsync timers, adopted after a persistence barrier, reset on reopen. |
-| Periodic sync | Keratin `c397294`. Every log syncs written records in the background, 100 ms by default, 0 turns it off. Logs that expect every write synced warn if a background sync ever covers an unsynced write (`faf39b0`). Streams' ephemeral tier still syncs every 5 ms from a broker task. |
-| Checkpoints | Keratin `a80288f`. The local checkpoint, the agreed checkpoint pin and the learner export sync the log up to the captured boundary before the snapshot becomes recovery authority. |
+| Periodic sync | Keratin `5acd5ee`. Every log syncs written records in the background, 100 ms by default, 0 turns it off. Logs that expect every write synced warn if a background sync ever covers an unsynced write (`766ebd1`). Streams' ephemeral tier still syncs every 5 ms from a broker task. |
+| Checkpoints | Keratin `d8f542a`. The local checkpoint, the agreed checkpoint pin and the learner export sync the log up to the captured boundary before the snapshot becomes recovery authority. |
 | Latched heal | Keratin `87e24ff` and `9ddf850`. A latched log records a cut to its last successful sync in `latched-cut.pending`, and the next open carries it out first, for bound and unbound logs alike. |
 | Live seal | The writer flushes, fsyncs and waits for in-flight fsyncs before advancing the epoch, so written records on a live replica are counted. |
 | Dirty reopen | `sync_recovered_tail` fsyncs records found in the page cache before publishing the frontier. |
