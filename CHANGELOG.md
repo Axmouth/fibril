@@ -909,7 +909,18 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   listed. When a supervisor does give up, the whole subscription now ends
   with the typed reason, as documented, instead of staying open and silent.
   The same stale answer could also fail a publish retry with a false "not
-  declared in the cluster".
+  declared in the cluster". The TypeScript and Python clients had the same
+  deleted-topic check and get the same fixes. A supervisor that gives up
+  there now ends the whole subscription with a typed
+  `SubscriptionClosedError`, topic deleted or, for a re-subscribe that failed
+  for good, server error, instead of ending as if closed locally or leaving
+  the other partitions running. The Go and C# clients never took a missing
+  topic as deleted, but their topology fetch now also skips older answers and
+  asks the other known brokers. A Go or C# whole-topic fan-in no longer stays
+  open and silent when one partition ends with a typed reason. It ends with
+  that reason, through the new `FanIn.CloseReason()` in Go and a
+  `SubscriptionClosedException` in C#, and a failed re-subscribe of a
+  supervised subscription carries a server error reason in both.
 
 - Plexus streams in a cluster could break right after they were declared. A
   node could create a queue partition for a stream topic it had not opened
