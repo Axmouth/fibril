@@ -36,11 +36,12 @@ import {
   type RoundRobin,
   type TopicView,
 } from "./internal/topology.js";
-import type { DeclarePlexus, StreamDurability, StreamRetention, SubscribeStream } from "./wire.js";
+import type { DeclarePlexus, QueueDurability, StreamDurability, StreamRetention, SubscribeStream } from "./wire.js";
 import type {
   AssignmentChangedMsg,
   AuthMsg,
   DeclareQueueMsg,
+  DeclareQueueOkMsg,
   GoingAwayMsg,
   QueueDlqPolicy,
   ReconcilePolicy,
@@ -420,6 +421,7 @@ export class QueueConfig {
   readonly dlqPolicy: QueueDlqPolicy | null;
   readonly dlqMaxRetries: number | null;
   readonly defaultMessageTtlMs: bigint | null;
+  readonly durability: QueueDurability | null;
 
   constructor(
     topic: string,
@@ -427,12 +429,48 @@ export class QueueConfig {
     dlqPolicy: QueueDlqPolicy | null = null,
     dlqMaxRetries: number | null = null,
     defaultMessageTtlMs: bigint | null = null,
+    durability: QueueDurability | null = null,
   ) {
     this.topic = topic;
     this.groupName = normalizeGroup(groupName);
     this.dlqPolicy = dlqPolicy;
     this.dlqMaxRetries = dlqMaxRetries;
     this.defaultMessageTtlMs = defaultMessageTtlMs;
+    this.durability = durability;
+  }
+
+  /**
+   * Confirm and deliver once each required copy has written a message to the
+   * OS, before it is synced to disk. Lower latency, but power loss or a storage
+   * failure on every required node at once can lose recent confirmed messages.
+   * Only the first declare of a queue sets its mode. A later declare naming
+   * another mode fails with error code 409. Brokers that predate buffered
+   * queues refuse the declare.
+   */
+  buffered(): QueueConfig {
+    return this.#withDurability("buffered");
+  }
+
+  /**
+   * Confirm and deliver only once each required copy has synced a message to
+   * disk. New queues get this unless the cluster is configured with
+   * `replica_buffered`. Only the first declare of a queue sets its mode, so
+   * naming it fails with error code 409 when the queue already exists as
+   * buffered.
+   */
+  durable(): QueueConfig {
+    return this.#withDurability("durable");
+  }
+
+  #withDurability(mode: QueueDurability): QueueConfig {
+    return new QueueConfig(
+      this.topic,
+      this.groupName,
+      this.dlqPolicy,
+      this.dlqMaxRetries,
+      this.defaultMessageTtlMs,
+      mode,
+    );
   }
 
   group(group: string): QueueConfig {
@@ -442,6 +480,7 @@ export class QueueConfig {
       this.dlqPolicy,
       this.dlqMaxRetries,
       this.defaultMessageTtlMs,
+      this.durability,
     );
   }
 
@@ -452,6 +491,7 @@ export class QueueConfig {
       this.dlqPolicy,
       maxRetries,
       this.defaultMessageTtlMs,
+      this.durability,
     );
   }
 
@@ -470,6 +510,7 @@ export class QueueConfig {
       this.dlqPolicy,
       this.dlqMaxRetries,
       BigInt(Math.trunc(ttlMs)),
+      this.durability,
     );
   }
 
@@ -480,6 +521,7 @@ export class QueueConfig {
       { kind: "discard" },
       this.dlqMaxRetries,
       this.defaultMessageTtlMs,
+      this.durability,
     );
   }
 
@@ -490,6 +532,7 @@ export class QueueConfig {
       { kind: "global" },
       this.dlqMaxRetries,
       this.defaultMessageTtlMs,
+      this.durability,
     );
   }
 
@@ -500,6 +543,7 @@ export class QueueConfig {
       { kind: "custom", topic, group: normalizeGroup(group) },
       this.dlqMaxRetries,
       this.defaultMessageTtlMs,
+      this.durability,
     );
   }
 
@@ -510,8 +554,26 @@ export class QueueConfig {
       dlq_policy: this.dlqPolicy,
       dlq_max_retries: this.dlqMaxRetries,
       default_message_ttl_ms: this.defaultMessageTtlMs,
+      durability: this.durability,
     };
   }
+}
+
+/**
+ * Broker reply to {@link Client.declareQueue}.
+ */
+export interface DeclareQueueResult {
+  /** Broker status string, such as `stored`. */
+  readonly status: string;
+  /** Partition count the queue has. */
+  readonly partitionCount: number;
+  /**
+   * Mode in effect for the queue. Reported only when the declare named a
+   * mode, otherwise null.
+   */
+  readonly durability: QueueDurability | null;
+  /** Broker warnings about the declare, such as the data loss risk of a buffered queue. */
+  readonly warnings: readonly string[];
 }
 
 /**
@@ -1722,10 +1784,11 @@ provide one with withTlsClientCert(certPath, keyPath)`,
   }
 
   /**
-   * Declare queue retry and dead-letter behavior.
+   * Declare queue retry, dead-letter and durability behavior. The result
+   * carries the mode in effect and any broker warnings.
    */
-  async declareQueue(config: QueueConfig): Promise<void> {
-    const reply = deferred<void>();
+  async declareQueue(config: QueueConfig): Promise<DeclareQueueResult> {
+    const reply = deferred<DeclareQueueOkMsg>();
     await (
       await this._engineForOperation()
     ).submit({
@@ -1733,7 +1796,13 @@ provide one with withTlsClientCert(certPath, keyPath)`,
       req: config.toWire(),
       reply,
     });
-    await reply.promise;
+    const ok = await reply.promise;
+    return {
+      status: ok.status,
+      partitionCount: ok.partition_count ?? 0,
+      durability: ok.durability ?? null,
+      warnings: ok.warnings ?? [],
+    };
   }
 
   /**

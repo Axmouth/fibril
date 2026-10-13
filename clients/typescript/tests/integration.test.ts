@@ -800,11 +800,56 @@ test("client declares queue policy", async () => {
       dlq_max_retries: 3,
       partition_count: null,
       default_message_ttl_ms: null,
+      durability: null,
     });
     await client.shutdown();
   } finally {
     await broker.stop();
   }
+});
+
+test("buffered declare sends the mode and returns the reply mode and warnings", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    let declare: DeclareQueueMsg | null = null;
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      } else if (f.opcode === Op.DeclareQueue) {
+        declare = decodeFrameBody<DeclareQueueMsg>(f);
+        broker.send(
+          s,
+          buildFrame(Op.DeclareQueueOk, f.requestId, {
+            status: "stored",
+            partition_count: 2,
+            durability: "buffered",
+            warnings: ["recent messages can be lost"],
+          }),
+        );
+      }
+    };
+
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    const result = await client.declareQueue(new QueueConfig("jobs").buffered());
+
+    assert.equal(declare!.durability, "buffered");
+    assert.deepEqual(result, {
+      status: "stored",
+      partitionCount: 2,
+      durability: "buffered",
+      warnings: ["recent messages can be lost"],
+    });
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
+test("queue config durability modes carry through toWire and other setters", () => {
+  assert.equal(new QueueConfig("jobs").toWire().durability, null);
+  assert.equal(new QueueConfig("jobs").durable().toWire().durability, "durable");
+  assert.equal(new QueueConfig("jobs").buffered().maxRetries(2).toWire().durability, "buffered");
 });
 
 test("queue config carries a default message ttl", () => {
@@ -814,6 +859,7 @@ test("queue config carries a default message ttl", () => {
     dlq_policy: null,
     dlq_max_retries: null,
     default_message_ttl_ms: 30_000n,
+    durability: null,
   });
 });
 
@@ -824,6 +870,7 @@ test("default and blank groups normalize to ungrouped declarations and subscript
     dlq_policy: null,
     dlq_max_retries: null,
     default_message_ttl_ms: null,
+    durability: null,
   });
   assert.deepEqual(new QueueConfig("jobs").group("   ").toWire(), {
     topic: "jobs",
@@ -831,6 +878,7 @@ test("default and blank groups normalize to ungrouped declarations and subscript
     dlq_policy: null,
     dlq_max_retries: null,
     default_message_ttl_ms: null,
+    durability: null,
   });
 
   const broker = new FakeBroker();

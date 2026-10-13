@@ -305,11 +305,17 @@ export function encodeBody(op: Op, value: unknown): Uint8Array {
         dlqMaxRetries: v.dlq_max_retries,
         partitionCount: v.partition_count ?? null,
         defaultMessageTtlMs: v.default_message_ttl_ms ?? null,
+        durability: v.durability ?? null,
       });
     }
     case Op.DeclareQueueOk: {
       const v = value as DeclareQueueOkMsg;
-      return wire.encodeDeclareQueueOkBody({ status: v.status, partitionCount: 0 });
+      return wire.encodeDeclareQueueOkBody({
+        status: v.status,
+        partitionCount: v.partition_count ?? 0,
+        durability: v.durability ?? null,
+        warnings: v.warnings ?? [],
+      });
     }
     // Plexus (fan-out stream) ops carry the wire-shaped body directly.
     case Op.DeclarePlexus:
@@ -525,11 +531,17 @@ export function decodeBody(op: Op, payload: Uint8Array): unknown {
         dlq_max_retries: w.dlqMaxRetries,
         partition_count: w.partitionCount,
         default_message_ttl_ms: w.defaultMessageTtlMs,
+        durability: w.durability ?? null,
       } satisfies DeclareQueueMsg;
     }
     case Op.DeclareQueueOk: {
       const w = wire.decodeDeclareQueueOkBody(payload);
-      return { status: w.status } satisfies DeclareQueueOkMsg;
+      return {
+        status: w.status,
+        partition_count: w.partitionCount,
+        durability: w.durability ?? null,
+        warnings: w.warnings ?? [],
+      } satisfies DeclareQueueOkMsg;
     }
     case Op.DeclarePlexus:
       return wire.decodeDeclarePlexusBody(payload);

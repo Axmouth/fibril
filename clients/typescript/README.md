@@ -66,6 +66,23 @@ await client.shutdown();
   The subscribe request is marked auto-ack and the client exposes delivered
   messages without a settlement handle.
 
+## Queue durability
+
+`QueueConfig` picks how a queue confirms and delivers. `durable()` waits until
+each required copy has synced a message to disk. `buffered()` waits only until
+each required copy has written it to the OS, before fsync, so power loss or a
+storage failure on every required node at once can lose recent confirmed
+messages. Leaving both out keeps the broker default.
+
+```ts
+const result = await client.declareQueue(new QueueConfig("jobs").buffered());
+console.log(result.durability, result.warnings);
+```
+
+Only the first declare of a queue sets its mode. A later declare naming another
+mode fails with error code 409. Brokers that predate buffered queues refuse a
+declare that names a mode.
+
 ## Examples
 
 Runnable examples live in `examples/`. The `*.example.ts` files double as light

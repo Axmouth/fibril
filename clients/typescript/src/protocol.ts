@@ -1,6 +1,10 @@
 // Wire protocol definitions. Mirrors fibril_protocol::v1.
 // Most application code should use Client, Publisher, and Subscription instead.
 
+import type { QueueDurability } from "./wire.js";
+
+export type { QueueDurability };
+
 /** Current Fibril TCP protocol version. */
 export const PROTOCOL_V1 = 1;
 
@@ -172,10 +176,16 @@ export interface DeclareQueueMsg {
   partition_count?: number | null;
   /** Default message TTL (ms) for the queue. Not queue expiration. */
   default_message_ttl_ms?: bigint | null;
+  /** Requested queue mode. Unset sends no mode byte. */
+  durability?: QueueDurability | null;
 }
 
 export interface DeclareQueueOkMsg {
   status: string;
+  partition_count?: number;
+  /** Mode in effect, present only when the declare named one. */
+  durability?: QueueDurability | null;
+  warnings?: string[];
 }
 
 /** Subscribe frame body. */

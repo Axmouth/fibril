@@ -97,7 +97,8 @@ export interface InternalInflight extends InternalDelivered {
 // Outstanding request waiters, keyed by request_id.
 type Waiter =
   | { kind: "publish"; deferred: Deferred<bigint> }
-  | { kind: "declareQueue"; deferred: Deferred<void> }
+  | { kind: "declareQueue"; deferred: Deferred<DeclareQueueOkMsg> }
+  | { kind: "declarePlexus"; deferred: Deferred<void> }
   | {
       kind: "subscribeManual";
       deferred: Deferred<SubscribeResult<InternalInflight>>;
@@ -166,7 +167,7 @@ export type Command =
       not_before: bigint;
       reply: Deferred<bigint>;
     }
-  | { type: "declareQueue"; req: DeclareQueueMsg; reply: Deferred<void> }
+  | { type: "declareQueue"; req: DeclareQueueMsg; reply: Deferred<DeclareQueueOkMsg> }
   | { type: "declarePlexus"; req: DeclarePlexus; reply: Deferred<void> }
   | {
       type: "subscribe";
@@ -973,7 +974,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
       }
       case "declarePlexus": {
         const reqId = nextReqId();
-        waiters.set(reqId, { kind: "declareQueue", deferred: cmd.reply });
+        waiters.set(reqId, { kind: "declarePlexus", deferred: cmd.reply });
         if (!(await sendOrDie(buildFrame(Op.DeclarePlexus, reqId, cmd.req)))) {
           waiters.delete(reqId);
         }
@@ -1121,11 +1122,11 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
       }
 
       case Op.DeclareQueueOk: {
-        decodeFrameBody<DeclareQueueOkMsg>(frame);
+        const ok = decodeFrameBody<DeclareQueueOkMsg>(frame);
         const w = waiters.get(frame.requestId);
         if (w?.kind === "declareQueue") {
           waiters.delete(frame.requestId);
-          w.deferred.resolve();
+          w.deferred.resolve(ok);
         }
         return;
       }
@@ -1133,7 +1134,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
       case Op.DeclarePlexusOk: {
         decodeFrameBody(frame);
         const w = waiters.get(frame.requestId);
-        if (w?.kind === "declareQueue") {
+        if (w?.kind === "declarePlexus") {
           waiters.delete(frame.requestId);
           w.deferred.resolve();
         }
@@ -1386,6 +1387,7 @@ function failWaiter(w: Waiter, err: FibrilError): void {
       w.deferred.reject(err);
       return;
     case "declareQueue":
+    case "declarePlexus":
       w.deferred.reject(err);
       return;
     case "subscribeManual":

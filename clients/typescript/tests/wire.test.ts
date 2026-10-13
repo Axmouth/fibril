@@ -265,6 +265,84 @@ test("declare_queue body round-trips across dlq policies", () => {
   );
 });
 
+test("declare_queue durability byte is trailing and only sent when set", () => {
+  const base = {
+    topic: "t",
+    group: null,
+    dlqPolicy: null,
+    dlqMaxRetries: null,
+    partitionCount: null,
+    defaultMessageTtlMs: null,
+  };
+  // No mode: identical to the shared minimal vector.
+  assert.equal(toHex(encodeDeclareQueueBody(base)), VECTORS.declare_min);
+  assert.equal(toHex(encodeDeclareQueueBody({ ...base, durability: null })), VECTORS.declare_min);
+  assert.deepEqual(decodeDeclareQueueBody(fromHex(VECTORS.declare_min)), base);
+
+  for (const [mode, tag] of [
+    ["durable", "00"],
+    ["buffered", "01"],
+  ] as const) {
+    const body = encodeDeclareQueueBody({ ...base, durability: mode });
+    // The ttl optional is still written before the mode byte.
+    assert.equal(toHex(body), VECTORS.declare_min + tag);
+    assert.deepEqual(decodeDeclareQueueBody(body), { ...base, durability: mode });
+  }
+
+  assert.throws(
+    () => decodeDeclareQueueBody(fromHex(VECTORS.declare_min + "02")),
+    (e: unknown) => e instanceof WireError && e.kind === "unknown_tag",
+  );
+  assert.throws(
+    () => decodeDeclareQueueBody(fromHex(VECTORS.declare_min + "0100")),
+    (e: unknown) => e instanceof WireError && e.kind === "trailing_bytes",
+  );
+});
+
+test("declare_queue_ok decodes FDK1 and FDK2 replies", () => {
+  // FDK1: status "created", partition count 4.
+  assert.deepEqual(decodeDeclareQueueOkBody(fromHex("46444b31000000076372656174656400000004")), {
+    status: "created",
+    partitionCount: 4,
+  });
+
+  // FDK2: status "stored", 2 partitions, buffered, one warning "w".
+  const fdk2 = "46444b3200000006" + "73746f726564" + "00000002" + "0101" + "00000001" + "0000000177";
+  const ok = { status: "stored", partitionCount: 2, durability: "buffered" as const, warnings: ["w"] };
+  assert.deepEqual(decodeDeclareQueueOkBody(fromHex(fdk2)), ok);
+  assert.equal(toHex(encodeDeclareQueueOkBody(ok)), fdk2);
+
+  // FDK2 with no mode and no warnings.
+  const bare = "46444b3200000006" + "73746f726564" + "00000002" + "00" + "00000000";
+  assert.deepEqual(decodeDeclareQueueOkBody(fromHex(bare)), {
+    status: "stored",
+    partitionCount: 2,
+    durability: null,
+    warnings: [],
+  });
+
+  // No mode and no warnings encodes as FDK1.
+  assert.equal(
+    toHex(encodeDeclareQueueOkBody({ status: "created", partitionCount: 4, durability: null, warnings: [] })),
+    "46444b31000000076372656174656400000004",
+  );
+
+  const badMode = "46444b3200000006" + "73746f726564" + "00000002" + "0107" + "00000000";
+  assert.throws(
+    () => decodeDeclareQueueOkBody(fromHex(badMode)),
+    (e: unknown) => e instanceof WireError && e.kind === "unknown_tag",
+  );
+  assert.throws(
+    () => decodeDeclareQueueOkBody(fromHex(bare + "00")),
+    (e: unknown) => e instanceof WireError && e.kind === "trailing_bytes",
+  );
+  // A warning count larger than the bytes left is rejected before reading.
+  assert.throws(
+    () => decodeDeclareQueueOkBody(fromHex("46444b3200000006" + "73746f726564" + "00000002" + "00" + "ffffffff")),
+    (e: unknown) => e instanceof WireError && e.kind === "unexpected_eof",
+  );
+});
+
 test("subscribe and subscribe_ok bodies round-trip", () => {
   const member = new Uint8Array(16).fill(3);
   const sub = {

@@ -853,6 +853,32 @@ export function decodeNackBody(body: Uint8Array): Nack {
 
 // ---- declare queue ----
 
+/**
+ * How a queue confirms and delivers. `durable` waits until each required copy
+ * has synced a message to disk. `buffered` waits only until each required copy
+ * has written it to the OS, so power loss or a storage failure on every
+ * required node at once can lose recent confirmed messages.
+ */
+export type QueueDurability = "durable" | "buffered";
+
+const QUEUE_DURABILITY_TO_U8: Record<QueueDurability, number> = {
+  durable: 0,
+  buffered: 1,
+};
+const U8_TO_QUEUE_DURABILITY: Record<number, QueueDurability> = {
+  0: "durable",
+  1: "buffered",
+};
+
+function readQueueDurability(r: Reader): QueueDurability {
+  const tag = r.u8();
+  const durability = U8_TO_QUEUE_DURABILITY[tag];
+  if (durability === undefined) {
+    throw new WireError("unknown_tag", `wire: unknown queue durability ${tag}`);
+  }
+  return durability;
+}
+
 export interface DeclareQueue {
   topic: string;
   group: string | null;
@@ -861,6 +887,11 @@ export interface DeclareQueue {
   partitionCount: number | null;
   /** Default message TTL (ms) for the queue. Not queue expiration. */
   defaultMessageTtlMs: bigint | null;
+  /**
+   * Requested mode. Left unset, the broker picks and the bytes stay readable
+   * by brokers that predate the mode. Decoding sets it only when present.
+   */
+  durability?: QueueDurability | null;
 }
 
 export function encodeDeclareQueueBody(d: DeclareQueue): Uint8Array {
@@ -873,6 +904,11 @@ export function encodeDeclareQueueBody(d: DeclareQueue): Uint8Array {
   w.optionalU32(d.partitionCount);
   // Trailing so a peer that omits it still decodes (read as null).
   w.optionalU64(d.defaultMessageTtlMs);
+  // Written only when set, so brokers that predate the mode refuse the
+  // declare instead of quietly making a durable queue.
+  if (d.durability != null) {
+    w.u8(QUEUE_DURABILITY_TO_U8[d.durability]);
+  }
   return w.finish();
 }
 
@@ -887,27 +923,63 @@ export function decodeDeclareQueueBody(body: Uint8Array): DeclareQueue {
     partitionCount: r.optionalU32(),
     defaultMessageTtlMs: r.remaining() > 0 ? r.optionalU64() : null,
   };
+  if (r.remaining() > 0) {
+    value.durability = readQueueDurability(r);
+  }
   r.finish();
   return value;
 }
 
+/**
+ * `FDK1` carries the status and partition count. `FDK2` adds the mode in
+ * effect and any warnings. Brokers send `FDK2` only to a declare that named a
+ * mode.
+ */
 export interface DeclareQueueOk {
   status: string;
   partitionCount: number;
+  /** Mode in effect. Decoded only from `FDK2`, where it may still be null. */
+  durability?: QueueDurability | null;
+  /** Broker warnings about the declare. Decoded only from `FDK2`. */
+  warnings?: string[];
 }
 
 export function encodeDeclareQueueOkBody(ok: DeclareQueueOk): Uint8Array {
+  const warnings = ok.warnings ?? [];
+  const extended = ok.durability != null || warnings.length > 0;
   const w = new Writer();
-  w.magic("FDK1");
+  w.magic(extended ? "FDK2" : "FDK1");
   w.str(ok.status);
   w.u32(ok.partitionCount);
+  if (extended) {
+    if (ok.durability != null) {
+      w.u8(1);
+      w.u8(QUEUE_DURABILITY_TO_U8[ok.durability]);
+    } else {
+      w.u8(0);
+    }
+    w.u32(warnings.length);
+    for (const warning of warnings) w.str(warning);
+  }
   return w.finish();
 }
 
 export function decodeDeclareQueueOkBody(body: Uint8Array): DeclareQueueOk {
+  const extended = body.length >= 4 && body[0] === 0x46 && body[1] === 0x44 && body[2] === 0x4b && body[3] === 0x32;
   const r = new Reader(body);
-  r.expectMagic("FDK1");
+  r.expectMagic(extended ? "FDK2" : "FDK1");
   const value: DeclareQueueOk = { status: r.str(), partitionCount: r.u32() };
+  if (extended) {
+    value.durability = r.bool() ? readQueueDurability(r) : null;
+    const count = r.u32();
+    // Each warning takes at least its length prefix.
+    if (count > r.remaining() / 4) {
+      throw new WireError("unexpected_eof", "wire: unexpected end of input");
+    }
+    const warnings: string[] = [];
+    for (let i = 0; i < count; i += 1) warnings.push(r.str());
+    value.warnings = warnings;
+  }
   r.finish();
   return value;
 }
