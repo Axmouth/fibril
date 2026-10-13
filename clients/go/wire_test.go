@@ -89,7 +89,12 @@ func cases() []vcase {
 			func(b []byte) ([]byte, error) { v, e := decodeDeclareQueue(b); return encodeDeclareQueue(v), e }},
 		{"declare_min", encodeDeclareQueue(NewQueueConfig("t")),
 			func(b []byte) ([]byte, error) { v, e := decodeDeclareQueue(b); return encodeDeclareQueue(v), e }},
+		{"declare_buffered", encodeDeclareQueue(NewQueueConfig("t").Buffered()),
+			func(b []byte) ([]byte, error) { v, e := decodeDeclareQueue(b); return encodeDeclareQueue(v), e }},
 		{"declare_ok", encodeDeclareQueueOk(DeclareQueueOk{Status: "created", PartitionCount: 4}),
+			func(b []byte) ([]byte, error) { v, e := decodeDeclareQueueOk(b); return encodeDeclareQueueOk(v), e }},
+		{"declare_ok_buffered", encodeDeclareQueueOk(DeclareQueueOk{Status: "stored", PartitionCount: 2,
+			Durability: QueueBuffered, Warnings: []string{"w"}}),
 			func(b []byte) ([]byte, error) { v, e := decodeDeclareQueueOk(b); return encodeDeclareQueueOk(v), e }},
 		{"declare_plexus", encodeDeclarePlexus(NewStreamConfig("t").PartitionCount(4).
 			Durability(StreamSpeculative).

@@ -1127,6 +1127,66 @@ await foreach (var msg in sub.Deliveries())
 
 Once the configured retry limit is exhausted, the broker routes the failed message to `_dlq.email`. Subscribe to that queue like any other queue when you want inspection or replay tooling.
 
+## Queue Durability
+
+A queue declare can name how the queue confirms and delivers. Durable waits
+until each required copy has synced a message to disk. Buffered waits only
+until each required copy has written it to the OS, before fsync, so power loss
+or a storage failure on every required node at once can lose recent confirmed
+messages. A declare that names neither keeps the cluster default, which is
+durable unless the cluster runs with `replica_buffered`.
+
+Only the first declare of a queue sets its mode. A later declare naming another
+mode fails with error code 409. Brokers that predate buffered queues refuse a
+declare that names a mode. When a declare names a mode, the broker reports the
+mode in effect and any warnings. The Rust client logs the warnings, the other
+clients return them with the declare result.
+
+<Tabs syncKey="client-language">
+  <TabItem label="Rust">
+
+```rust
+client
+    .declare_queue(QueueConfig::new("jobs")?.buffered())
+    .await?;
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```ts
+const result = await client.declareQueue(new QueueConfig("jobs").buffered());
+console.log(result.durability, result.warnings);
+```
+
+  </TabItem>
+  <TabItem label="Python">
+
+```python
+ok = await client.declare_queue(QueueConfig("jobs").buffered())
+print(ok.durability, ok.warnings)
+```
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+ok, err := client.DeclareQueue(ctx, fibril.NewQueueConfig("jobs").Buffered())
+```
+
+  </TabItem>
+  <TabItem label="C#">
+
+```csharp
+var outcome = await client.DeclareQueueAsync("jobs", new QueueConfig
+{
+    Durability = QueueDurability.Buffered,
+});
+```
+
+  </TabItem>
+</Tabs>
+
 ## Decode Messages
 
 In the clients that dispatch on content type, `deserialize()` picks the decoder

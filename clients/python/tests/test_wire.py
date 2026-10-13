@@ -196,8 +196,20 @@ def _cases() -> dict[str, tuple[bytes, object]]:
             ),
             wire.decode_declare_queue_body,
         ),
+        "declare_buffered": (
+            wire.encode_declare_queue_body(
+                wire.DeclareQueue("t", None, None, None, durability="buffered")
+            ),
+            wire.decode_declare_queue_body,
+        ),
         "declare_ok": (
             wire.encode_declare_queue_ok_body(wire.DeclareQueueOk("created", 4)),
+            wire.decode_declare_queue_ok_body,
+        ),
+        "declare_ok_buffered": (
+            wire.encode_declare_queue_ok_body(
+                wire.DeclareQueueOk("stored", 2, durability="buffered", warnings=["w"])
+            ),
             wire.decode_declare_queue_ok_body,
         ),
         "assignment": (
@@ -441,7 +453,9 @@ _ENCODERS = {
     "nack_no_nb": wire.encode_nack_body,
     "declare": wire.encode_declare_queue_body,
     "declare_min": wire.encode_declare_queue_body,
+    "declare_buffered": wire.encode_declare_queue_body,
     "declare_ok": wire.encode_declare_queue_ok_body,
+    "declare_ok_buffered": wire.encode_declare_queue_ok_body,
     "assignment": wire.encode_assignment_changed_body,
     "subscribe": wire.encode_subscribe_body,
     "subscribe_min": wire.encode_subscribe_body,

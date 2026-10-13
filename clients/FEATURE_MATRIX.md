@@ -60,6 +60,7 @@ Superscript numbers refer to the Notes under the tables.
 | Ack / Nack / retry-after | done | done | done | done | done |
 | Prefetch / backpressure | done | done | done | done | done |
 | Declare queue + DLQ policies | done | done | done | done | done |
+| Queue durability on declare (buffered / durable) + reply warnings | done | done | done | done | done |
 | Multi-partition subscribe fan-in | done | done | done | done | done |
 | Live-repartition partition pickup (consumer grow) | done | done <sup>2</sup> | done <sup>2</sup> | done <sup>2</sup> | done <sup>2</sup> |
 

@@ -17,11 +17,12 @@ use fibril_protocol::v1::wire;
 use fibril_protocol::v1::{
     Ack, AdvertisedAddress, AssignmentChanged, Auth, ContentType, DeclarePlexus, DeclarePlexusOk,
     DeclareQueue, DeclareQueueOk, Deliver, DeliveryTag, ErrorMsg, GoingAway, Hello, HelloOk, Nack,
-    Partition, Publish, PublishDelayed, PublishOk, QueueDlqPolicy, QueueTopologyEntry, ReasonCode,
-    ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult, ReconcileSubscription,
-    ReconcileSubscriptionResult, Redirect, ResumeIdentity, ResumeOutcome, StreamDurability,
-    StreamRetention, StreamStart, StreamTopologyEntry, Subscribe, SubscribeOk, SubscribeStream,
-    SubscriptionClosed, TopologyOk, TopologyRequest, TopologyUpdateAck,
+    Partition, Publish, PublishDelayed, PublishOk, QueueDlqPolicy, QueueDurability,
+    QueueTopologyEntry, ReasonCode, ReconcileAction, ReconcileClient, ReconcilePolicy,
+    ReconcileResult, ReconcileSubscription, ReconcileSubscriptionResult, Redirect, ResumeIdentity,
+    ResumeOutcome, StreamDurability, StreamRetention, StreamStart, StreamTopologyEntry, Subscribe,
+    SubscribeOk, SubscribeStream, SubscriptionClosed, TopologyOk, TopologyRequest,
+    TopologyUpdateAck,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -397,6 +398,43 @@ fn wire_encoders_match_shared_vectors() {
                 partition_count: None,
                 default_message_ttl_ms: None,
                 durability: None,
+            },
+        )
+        .unwrap()
+        .payload,
+    );
+
+    // A mode adds one trailing byte after the ttl optional.
+    check(
+        &v,
+        "declare_buffered",
+        wire::encode_declare_queue(
+            rid,
+            &DeclareQueue {
+                topic: "t".into(),
+                group: None,
+                dlq_policy: None,
+                dlq_max_retries: None,
+                partition_count: None,
+                default_message_ttl_ms: None,
+                durability: Some(QueueDurability::Buffered),
+            },
+        )
+        .unwrap()
+        .payload,
+    );
+
+    // FDK2: sent only to a declare that named a mode.
+    check(
+        &v,
+        "declare_ok_buffered",
+        wire::encode_declare_queue_ok(
+            rid,
+            &DeclareQueueOk {
+                status: "stored".into(),
+                partition_count: 2,
+                durability: Some(QueueDurability::Buffered),
+                warnings: vec!["w".into()],
             },
         )
         .unwrap()

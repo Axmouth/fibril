@@ -80,7 +80,11 @@ public class WireVectorsTest
             }), b => WireOps.EncodeDeclareQueue(WireOps.DecodeDeclareQueue(b))),
             new("declare_min", WireOps.EncodeDeclareQueue(new DeclareQueueFrame { Topic = "t" }),
                 b => WireOps.EncodeDeclareQueue(WireOps.DecodeDeclareQueue(b))),
+            new("declare_buffered", WireOps.EncodeDeclareQueue(new DeclareQueueFrame { Topic = "t", Durability = QueueDurability.Buffered }),
+                b => WireOps.EncodeDeclareQueue(WireOps.DecodeDeclareQueue(b))),
             new("declare_ok", WireOps.EncodeDeclareQueueOk(new DeclareQueueOk("created", 4)),
+                b => WireOps.EncodeDeclareQueueOk(WireOps.DecodeDeclareQueueOk(b))),
+            new("declare_ok_buffered", WireOps.EncodeDeclareQueueOk(new DeclareQueueOk("stored", 2) { Durability = QueueDurability.Buffered, Warnings = ["w"] }),
                 b => WireOps.EncodeDeclareQueueOk(WireOps.DecodeDeclareQueueOk(b))),
             new("declare_plexus", WireOps.EncodeDeclarePlexus(new DeclarePlexusFrame
             {

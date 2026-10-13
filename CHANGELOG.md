@@ -129,6 +129,16 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- Queue durability on declare in the TypeScript, Python, Go and C# clients,
+  matching the Rust client. TypeScript and Python `QueueConfig` gain
+  `buffered()` and `durable()`, Go gains `Buffered()` and `Durable()`, and C#
+  `QueueConfig` gains a `Durability` property taking `QueueDurability`. A
+  declare without a mode sends the same bytes as before. The declare result
+  carries the mode in effect and broker warnings decoded from `FDK2` replies:
+  TypeScript `declareQueue` and Python `declare_queue` return it, Go
+  `DeclareQueueOk` and C# `DeclareOutcome` gain the fields. Shared wire
+  vectors `declare_buffered` and `declare_ok_buffered` pin the new bytes.
+
 - Private brokers. `broker.visibility = "private"`
   (`FIBRIL_BROKER_VISIBILITY`) keeps a broker out of every topology answer and
   redirect. Each partition it owns is advertised with the client addresses of
