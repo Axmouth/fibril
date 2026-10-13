@@ -55,6 +55,82 @@ func TestSupervisedSubscriptionSurvivesFailover(t *testing.T) {
 	}
 }
 
+// TestSupervisedSubscriptionSurfacesAFailedResubscribe drops the first
+// connection, then rejects the re-subscribe for good. The subscription ends
+// with a typed server error instead of looking like a clean local close.
+func TestSupervisedSubscriptionSurfacesAFailedResubscribe(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	var conns atomic.Int32
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go serveRejectingResubscribe(conn, conns.Add(1))
+		}
+	}()
+
+	c, err := Dial(context.Background(), ln.Addr().String(), ClientOptions{ClientName: "go-test", HeartbeatInterval: time.Hour, SuperviseBackoff: 20 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Shutdown()
+
+	ss, err := c.SuperviseSubscribe(context.Background(), Subscribe{Topic: "t", Partition: 0, Prefetch: 8, AutoAck: true})
+	if err != nil {
+		t.Fatalf("SuperviseSubscribe: %v", err)
+	}
+	defer ss.Close()
+
+	recvPayload(t, ss.Deliveries, "first")
+	select {
+	case _, ok := <-ss.Deliveries:
+		if ok {
+			t.Fatal("expected the subscription to close")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the subscription stayed open after a failed re-subscribe")
+	}
+	reason := ss.CloseReason()
+	if reason == nil || reason.Code != ReasonServerError {
+		t.Fatalf("close reason = %+v, want code %d", reason, ReasonServerError)
+	}
+}
+
+// serveRejectingResubscribe behaves like serveSupervised on connection 1 and
+// rejects every SUBSCRIBE on later connections with a permanent error.
+func serveRejectingResubscribe(conn net.Conn, n int32) {
+	if n == 1 {
+		serveSupervised(conn, n)
+		return
+	}
+	defer conn.Close()
+	br := bufio.NewReader(conn)
+	for {
+		f, err := readFrame(br)
+		if err != nil {
+			return
+		}
+		switch f.Opcode {
+		case opHello:
+			ok := helloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, Compliance: ComplianceString}
+			_, _ = conn.Write(encodeFrame(buildFrame(opHelloOk, f.RequestID, encodeHelloOk(ok))))
+		case opTopology:
+			_, _ = conn.Write(encodeFrame(buildFrame(opTopologyOk, f.RequestID, encodeTopologyOk(TopologyOk{Generation: uint64(n)}))))
+		case opSubscribe:
+			_, _ = conn.Write(encodeFrame(buildFrame(opError, f.RequestID, encodeError(errorMsg{Code: 403, Message: "forbidden"}))))
+		case opPing:
+			_, _ = conn.Write(encodeFrame(buildFrame(opPong, f.RequestID, nil)))
+		}
+	}
+}
+
 func recvPayload(t *testing.T, ch <-chan Delivery, what string) string {
 	t.Helper()
 	select {

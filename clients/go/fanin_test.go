@@ -89,3 +89,72 @@ func TestClientFanInAcrossPartitions(t *testing.T) {
 		}
 	}
 }
+
+// TestFanInEndsWithATerminalPartitionClose mirrors the Rust client's
+// supervised_subscription_surfaces_a_terminal_close. With the growth loop
+// running and another partition still live, a terminal close of one partition
+// ends the whole fan-in with its typed reason instead of leaving it open and
+// silent.
+func TestFanInEndsWithATerminalPartitionClose(t *testing.T) {
+	client, server := net.Pipe()
+	const bootEndpoint = "127.0.0.1:9999"
+	owner := []AdvertisedAddress{{Host: "127.0.0.1", Port: 9999}}
+
+	go func() {
+		br := bufio.NewReader(server)
+		for {
+			f, err := readFrame(br)
+			if err != nil {
+				return
+			}
+			switch f.Opcode {
+			case opHello:
+				ok := helloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, Compliance: ComplianceString}
+				_, _ = server.Write(encodeFrame(buildFrame(opHelloOk, f.RequestID, encodeHelloOk(ok))))
+			case opTopology:
+				topo := TopologyOk{Generation: 1, Queues: []QueueTopologyEntry{
+					{Topic: "jobs", Partition: 0, PartitionCount: 2, OwnerEndpoints: owner},
+					{Topic: "jobs", Partition: 1, PartitionCount: 2, OwnerEndpoints: owner},
+				}}
+				_, _ = server.Write(encodeFrame(buildFrame(opTopologyOk, f.RequestID, encodeTopologyOk(topo))))
+			case opSubscribe:
+				req, _ := decodeSubscribe(f.Payload)
+				subID := uint64(100) + uint64(req.Partition)
+				so := subscribeOk{SubID: subID, Topic: req.Topic, Partition: req.Partition, Prefetch: 4}
+				_, _ = server.Write(encodeFrame(buildFrame(opSubscribeOk, f.RequestID, encodeSubscribeOk(so))))
+				if req.Partition == 0 {
+					sc := subscriptionClosed{SubID: subID, Code: ReasonTopicDeleted, Message: "the queue was deleted"}
+					_, _ = server.Write(encodeFrame(buildFrame(opSubscriptionClosed, 0, encodeSubscriptionClosed(sc))))
+				}
+			case opPing:
+				_, _ = server.Write(encodeFrame(buildFrame(opPong, f.RequestID, nil)))
+			}
+		}
+	}()
+
+	e, err := startEngine(context.Background(), client, EngineOptions{ClientName: "go-test", HeartbeatInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("startEngine: %v", err)
+	}
+	c := newClientWith(bootEndpoint, e, ClientOptions{RepartitionPollInterval: 20 * time.Millisecond})
+	defer c.Shutdown()
+
+	fi, err := c.SubscribeTopic(context.Background(), "jobs", TopicSubscribeOptions{Prefetch: 4})
+	if err != nil {
+		t.Fatalf("SubscribeTopic: %v", err)
+	}
+	defer fi.Close()
+
+	select {
+	case _, ok := <-fi.Deliveries:
+		if ok {
+			t.Fatal("expected the fan-in to close")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the fan-in stayed open after a terminal close")
+	}
+	reason := fi.CloseReason()
+	if reason == nil || reason.Code != ReasonTopicDeleted {
+		t.Fatalf("close reason = %+v, want code %d", reason, ReasonTopicDeleted)
+	}
+}

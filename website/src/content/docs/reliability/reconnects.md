@@ -112,7 +112,7 @@ reason too. Each client surfaces it in its idiomatic shape:
 - **TypeScript** and **Python** throw a typed `SubscriptionClosedError` from the
   subscription's iterator (a clean user `close()` still ends iteration quietly).
 - **Go** closes the `Deliveries` channel and exposes `CloseReason()`, read after
-  the channel closes.
+  the channel closes. A whole-topic `FanIn` does the same.
 - **C#** completes the `Deliveries()` enumeration with a typed
   `SubscriptionClosedException`.
 

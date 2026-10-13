@@ -30,6 +30,8 @@ type FanIn struct {
 	attach func(ctx context.Context, partition uint32) (*SupervisedSubscription, error)
 	cancel chan struct{}
 
+	reason *closeReasonCell
+
 	mu      sync.Mutex
 	covered map[uint32]bool
 	subs    []*SupervisedSubscription
@@ -53,6 +55,7 @@ func (c *Client) newFanIn(ctx context.Context, topic string, group *string, buff
 		group:      group,
 		attach:     attach,
 		cancel:     make(chan struct{}),
+		reason:     newCloseReasonCell(),
 		covered:    map[uint32]bool{},
 	}
 	for p := uint32(0); p < count; p++ {
@@ -102,16 +105,23 @@ func (fi *FanIn) attachPartition(ctx context.Context, p uint32, strict bool) err
 	fi.subs = append(fi.subs, ss)
 	fi.wg.Add(1)
 	fi.mu.Unlock()
-	go fi.forward(ss.Deliveries)
+	go fi.forward(ss)
 	return nil
 }
 
-func (fi *FanIn) forward(ch <-chan Delivery) {
+func (fi *FanIn) forward(ss *SupervisedSubscription) {
 	defer fi.wg.Done()
 	for {
 		select {
-		case d, ok := <-ch:
+		case d, ok := <-ss.Deliveries:
 			if !ok {
+				// A partition that ended with a typed reason ends the whole
+				// fan-in with it. Otherwise the growth loop would keep the
+				// fan-in open with nothing behind that partition.
+				if r := ss.CloseReason(); r != nil {
+					fi.reason.set(r.Code, r.Message)
+					fi.Close()
+				}
 				return
 			}
 			select {
@@ -146,6 +156,13 @@ func (fi *FanIn) growthLoop(interval time.Duration) {
 			}
 		}
 	}
+}
+
+// CloseReason returns why the fan-in ended, once Deliveries has closed: nil for
+// a clean local Close, else the typed reason that ended one of its partitions
+// (see SupervisedSubscription.CloseReason).
+func (fi *FanIn) CloseReason() *CloseReason {
+	return fi.reason.get()
 }
 
 // Close stops the growth loop and every partition subscription; Deliveries closes

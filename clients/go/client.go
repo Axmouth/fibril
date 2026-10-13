@@ -365,6 +365,13 @@ func (t *topologyCache) replace(topo TopologyOk) {
 	}
 }
 
+// currentGeneration returns the generation the cache reflects.
+func (t *topologyCache) currentGeneration() uint64 {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.generation
+}
+
 // applyPush installs a broker-pushed snapshot and returns the generation the
 // cache now reflects (for the ack). Signature matches EngineOptions.OnTopologyUpdate.
 func (t *topologyCache) applyPush(topo TopologyOk) uint64 {
@@ -739,7 +746,11 @@ func (c *Client) DeclarePlexus(ctx context.Context, d StreamConfig) (DeclarePlex
 }
 
 // FetchTopology fetches the topology and warms the routing cache, reconnecting
-// once on a transient failure.
+// once on a transient failure. Candidates are asked in order and the first
+// answer at least as new as the cache is applied. A broker that just restarted
+// answers from a view that has not caught up yet, often empty, so an older
+// answer is never applied and the next candidate is asked. When every answer
+// is older, the first one is returned unapplied.
 func (c *Client) FetchTopology(ctx context.Context, req TopologyRequest) (TopologyOk, error) {
 	candidates := append([]string{c.bootstrapEndpoint}, c.opts.DiscoveryEndpoints...)
 	for endpoint := range c.topo.endpoints() {
@@ -752,6 +763,7 @@ func (c *Client) FetchTopology(ctx context.Context, req TopologyRequest) (Topolo
 	c.poolMu.Unlock()
 	seen := map[string]bool{}
 	var lastErr error
+	var older *TopologyOk
 	for _, endpoint := range candidates {
 		if seen[endpoint] {
 			continue
@@ -761,6 +773,12 @@ func (c *Client) FetchTopology(ctx context.Context, req TopologyRequest) (Topolo
 		if err == nil {
 			var topo TopologyOk
 			topo, err = eng.FetchTopology(ctx, req)
+			if err == nil && topo.Generation < c.topo.currentGeneration() {
+				if older == nil {
+					older = &topo
+				}
+				continue
+			}
 			if err == nil {
 				c.topo.replace(topo)
 				c.prunePool()
@@ -771,6 +789,9 @@ func (c *Client) FetchTopology(ctx context.Context, req TopologyRequest) (Topolo
 		if ctx.Err() != nil {
 			return TopologyOk{}, ctx.Err()
 		}
+	}
+	if older != nil {
+		return *older, nil
 	}
 	return TopologyOk{}, lastErr
 }

@@ -30,7 +30,8 @@ func (s *SupervisedSubscription) Close() {
 
 // CloseReason returns why the supervised subscription ended, once Deliveries
 // has closed: nil for a clean local Close, else the typed terminal reason
-// (topic deleted, server error, or a recreate the client opted out of).
+// (topic deleted, server error, a re-subscribe that failed for good, or a
+// recreate the client opted out of).
 func (s *SupervisedSubscription) CloseReason() *CloseReason {
 	if s.reason == nil {
 		return nil
@@ -105,7 +106,12 @@ func (c *Client) superviseLoop(topic string, attach func(context.Context) (*Subs
 				sub = newSub
 				break
 			}
-			if !IsRetryable(err) || c.closed.Load() {
+			if c.closed.Load() {
+				return
+			}
+			if !IsRetryable(err) {
+				// The subscription cannot continue, say why.
+				reason.set(ReasonServerError, "re-subscribe failed: "+err.Error())
 				return
 			}
 		}

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -178,5 +179,78 @@ func TestDiscoveryEndpointSurvivesBootstrapLoss(t *testing.T) {
 	}
 	if topo.Generation != 9 {
 		t.Fatalf("generation = %d", topo.Generation)
+	}
+}
+
+// TestOlderTopologyAnswerAsksAnotherBroker covers a broker that restarted in
+// place and answers topology from a view that has not caught up. The client
+// keeps its newer cache and asks its other known brokers for a newer view.
+func TestOlderTopologyAnswerAsksAnotherBroker(t *testing.T) {
+	restarted, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	survivor, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer survivor.Close()
+	var restartedGen atomic.Uint64
+	restartedGen.Store(7)
+	go acceptTopology(restarted, restartedGen.Load)
+	go acceptTopology(survivor, func() uint64 { return 8 })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	c, err := Dial(ctx, restarted.Addr().String(), ClientOptions{DiscoveryEndpoints: []string{survivor.Addr().String()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Shutdown()
+	if topo, err := c.FetchTopology(ctx, TopologyRequest{}); err != nil || topo.Generation != 7 {
+		t.Fatalf("first fetch = %d, %v, want generation 7", topo.Generation, err)
+	}
+
+	restartedGen.Store(0)
+	topo, err := c.FetchTopology(ctx, TopologyRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if topo.Generation != 8 {
+		t.Fatalf("generation = %d, want 8 from the other broker", topo.Generation)
+	}
+	if gen := c.topo.currentGeneration(); gen != 8 {
+		t.Fatalf("cache generation = %d, want 8", gen)
+	}
+}
+
+// acceptTopology serves HELLO and TOPOLOGY on every connection, answering
+// topology at the generation gen returns at the time of the request.
+func acceptTopology(ln net.Listener, gen func() uint64) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go func() {
+			defer conn.Close()
+			br := bufio.NewReader(conn)
+			for {
+				f, err := readFrame(br)
+				if err != nil {
+					return
+				}
+				switch f.Opcode {
+				case opHello:
+					ok := helloOk{ProtocolVersion: ProtocolV1, ResumeOutcome: ResumeNew, Compliance: ComplianceString}
+					_, _ = conn.Write(encodeFrame(buildFrame(opHelloOk, f.RequestID, encodeHelloOk(ok))))
+				case opTopology:
+					_, _ = conn.Write(encodeFrame(buildFrame(opTopologyOk, f.RequestID, encodeTopologyOk(TopologyOk{Generation: gen()}))))
+				case opPing:
+					_, _ = conn.Write(encodeFrame(buildFrame(opPong, f.RequestID, nil)))
+				}
+			}
+		}()
 	}
 }
