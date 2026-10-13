@@ -2311,7 +2311,14 @@ impl ClientTopologySource for ForwardingTopology {
 fn spawn_private_owner(sim: &mut turmoil::Sim<'_>) {
     sim.host("p-owner", || async {
         let (engine, _dir) = open_engine("private-owner").await;
-        let broker = Broker::new(engine, test_broker_config(), None);
+        // Leases outlast the tests' 25s partitions. A delivery lost on the cut
+        // link then comes back once after the repair, instead of expiring
+        // into the dead link until its retries run out and it is discarded.
+        let config = BrokerConfig {
+            inflight_ttl_ms: 30_000,
+            ..test_broker_config()
+        };
+        let broker = Broker::new(engine, config, None);
         run_server(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), PRIVATE_OWNER_PORT),
             None,

@@ -108,7 +108,12 @@ determinism catches - and only after weighing it against the openraft dep graph.
    network or through plain shared memory (atomics), never by calling another
    host's broker. A no-network smoke test (build, publish, confirm, checkpoint)
    proves the broker cooperates with turmoil's runtime and clock before any
-   cluster scenario builds on it.
+   cluster scenario builds on it. Under the `simulation` feature,
+   `fibril_util::unix_millis` inside a simulation is a fixed start time plus
+   turmoil's simulated elapsed time, so delivery leases, TTLs and other wall
+   clock deadlines pass as the simulation advances. A whole simulation runs
+   in well under a second of real time, so a real clock would never let a
+   lease expire.
 4. **First real scenario.** DONE. Two scenarios run on the simulated network
    with static/scripted coordination (no ganglion transport on the seam yet):
    (a) a follower, driven only by its supervised assignment watcher, catches up

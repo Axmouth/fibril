@@ -13,6 +13,17 @@ pub mod sniff;
 pub type UnixMillis = u64;
 
 pub fn unix_millis() -> UnixMillis {
+    // Inside a deterministic simulation, wall time follows virtual time, so
+    // lease and expiry deadlines pass as the simulation advances.
+    #[cfg(feature = "simulation")]
+    if let Some(elapsed) = turmoil::sim_elapsed() {
+        static SIM_EPOCH: OnceLock<UnixMillis> = OnceLock::new();
+        return *SIM_EPOCH.get_or_init(wall_millis) + elapsed.as_millis() as u64;
+    }
+    wall_millis()
+}
+
+fn wall_millis() -> UnixMillis {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(d) => d.as_millis().min(u64::MAX as u128) as u64,
         Err(_) => 0, // clock went backwards; clamp
