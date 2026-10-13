@@ -108,6 +108,18 @@ internal sealed class TopologyCache
         };
     }
 
+    // The generation the cache reflects.
+    public ulong Generation
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _generation;
+            }
+        }
+    }
+
     // Installs a broker-pushed snapshot and returns the generation the cache now
     // reflects, for the engine to ack. Matches EngineOptions.OnTopologyUpdate.
     public ulong ApplyPush(TopologyOk topo)

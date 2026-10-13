@@ -208,6 +208,20 @@ internal sealed class FakeBroker : IAsyncDisposable
     public bool PushCloseOnSubscribe { get; init; }
     public bool CloseOnTopology { get; init; }
 
+    /// <summary>When set, PushCloseOnSubscribe applies only to this partition.</summary>
+    public uint? PushClosePartition { get; init; }
+
+    /// <summary>
+    /// When true, the first subscribe is answered and then the connection drops, and
+    /// every later subscribe is rejected with a permanent error.
+    /// </summary>
+    public bool RejectResubscribe { get; init; }
+
+    private bool _subscribedOnce;
+
+    /// <summary>The generation TOPOLOGY answers with. Settable to script a broker that restarted.</summary>
+    public ulong TopologyGeneration { get; set; } = 1;
+
     /// <summary>The resume outcome returned in HELLO_OK. Set to Resumed to script a resumed reconnect.</summary>
     public ResumeOutcome ResumeOutcome { get; init; } = ResumeOutcome.New;
 
@@ -387,6 +401,11 @@ internal sealed class FakeBroker : IAsyncDisposable
                 case Op.Subscribe:
                     var sub = WireOps.DecodeSubscribe(f.Payload);
                     Subscribes.Enqueue(sub);
+                    if (RejectResubscribe && _subscribedOnce)
+                    {
+                        await WriteAsync(stream, Op.Error, f.RequestId, WireOps.EncodeError(new ErrorMsg(403, "forbidden")), ct);
+                        break;
+                    }
                     var subId = ++_subId;
                     // Mint a member id for the first cohort subscribe, echo the carried one after.
                     var memberId = sub.ConsumerGroup is null ? (Uuid?)null : (sub.MemberId ?? CohortMemberId);
@@ -413,10 +432,15 @@ internal sealed class FakeBroker : IAsyncDisposable
                             Payload = System.Text.Encoding.UTF8.GetBytes("hello"),
                         }), ct);
                     }
-                    if (PushCloseOnSubscribe)
+                    if (PushCloseOnSubscribe && (PushClosePartition is null || PushClosePartition == sub.Partition))
                     {
                         await WriteAsync(stream, Op.SubscriptionClosed, 0, WireOps.EncodeSubscriptionClosed(new SubscriptionClosed(
                             subId, ReasonCode.TopicDeleted, "the queue was deleted")), ct);
+                    }
+                    if (RejectResubscribe)
+                    {
+                        _subscribedOnce = true;
+                        return; // drop so the supervisor re-subscribes
                     }
                     if (ReconcileOnReconnect && !_reconcileDropped)
                     {
@@ -496,11 +520,11 @@ internal sealed class FakeBroker : IAsyncDisposable
             var catalogue = CatalogueTopics
                 .Select(t => new QueueTopologyEntry { Topic = t, Partition = 0, PartitionCount = 1 })
                 .ToList();
-            return new TopologyOk { Generation = 1, Queues = catalogue };
+            return new TopologyOk { Generation = TopologyGeneration, Queues = catalogue };
         }
         if (TopologyQueuePartitions == 0 && TopologyStreamPartitions == 0)
         {
-            return new TopologyOk { Generation = 1 };
+            return new TopologyOk { Generation = TopologyGeneration };
         }
         var topic = req.Topic ?? "orders";
         // No owner endpoints, so routing stays on the bootstrap connection.
@@ -514,7 +538,7 @@ internal sealed class FakeBroker : IAsyncDisposable
         {
             streams.Add(new StreamTopologyEntry { Topic = topic, Partition = p, PartitionCount = TopologyStreamPartitions });
         }
-        return new TopologyOk { Generation = 1, Queues = queues, Streams = streams };
+        return new TopologyOk { Generation = TopologyGeneration, Queues = queues, Streams = streams };
     }
 
     private static (string Host, ushort Port) SplitAddress(string addr)

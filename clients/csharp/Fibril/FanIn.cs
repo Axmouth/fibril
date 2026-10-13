@@ -12,7 +12,9 @@ namespace Fibril;
 
 /// <summary>
 /// A subscription across all partitions of a topic. <see cref="Deliveries"/> yields
-/// messages from every partition, merged. Dispose to stop it.
+/// messages from every partition, merged. Dispose to stop it. When a partition
+/// ends with a typed reason, the whole fan-in ends and the enumeration throws a
+/// <see cref="SubscriptionClosedException"/>.
 /// </summary>
 public sealed class FanIn : IAsyncDisposable
 {
@@ -101,6 +103,14 @@ public sealed class FanIn : IAsyncDisposable
         }
         catch (OperationCanceledException)
         {
+        }
+        catch (SubscriptionClosedException closed)
+        {
+            // A partition that ended with a typed reason ends the whole fan-in with
+            // it. Otherwise the growth loop would keep the fan-in open with nothing
+            // behind that partition.
+            _merged.Writer.TryComplete(closed);
+            _ = DisposeAsync().AsTask();
         }
     }
 

@@ -501,6 +501,11 @@ public sealed partial class Client : IAsyncDisposable
         return new TopologyView(topo.Generation);
     }
 
+    // Asks the candidates in order and applies the first answer at least as new as
+    // the cache. A broker that just restarted answers from a view that has not
+    // caught up yet, often empty, so an older answer is never applied and the next
+    // candidate is asked. When every answer is older, the first one is returned
+    // unapplied.
     private async Task<TopologyOk> FetchTopologyInternalAsync(TopologyRequest req, CancellationToken ct)
     {
         var candidates = new List<string> { _bootstrapEndpoint };
@@ -508,6 +513,7 @@ public sealed partial class Client : IAsyncDisposable
         candidates.AddRange(_topo.Endpoints());
         lock (_poolLock) { candidates.AddRange(_pool.Keys); }
         Exception? lastError = null;
+        TopologyOk? older = null;
         foreach (var endpoint in candidates.Distinct())
         {
             ct.ThrowIfCancellationRequested();
@@ -515,12 +521,17 @@ public sealed partial class Client : IAsyncDisposable
             {
                 var engine = await EngineForAsync(endpoint, ct).ConfigureAwait(false);
                 var topo = await engine.FetchTopologyAsync(req, ct).ConfigureAwait(false);
+                if (topo.Generation < _topo.Generation)
+                {
+                    older ??= topo;
+                    continue;
+                }
                 _topo.Replace(topo);
                 return topo;
             }
             catch (Exception error) when (!ct.IsCancellationRequested) { lastError = error; }
         }
-        throw lastError ?? new DisconnectionException("No reachable topology endpoint");
+        return older ?? throw lastError ?? new DisconnectionException("No reachable topology endpoint");
     }
 
     // A cluster op handled on the bootstrap connection, reconnecting once on a

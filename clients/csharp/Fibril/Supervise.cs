@@ -10,7 +10,9 @@ namespace Fibril;
 
 /// <summary>
 /// A subscription that re-attaches across owner failovers. <see cref="Deliveries"/>
-/// yields messages until the subscription is disposed.
+/// yields messages until the subscription is disposed, or throws a
+/// <see cref="SubscriptionClosedException"/> when it ends with a typed reason (a
+/// terminal close or a re-subscribe that failed for good).
 /// </summary>
 public sealed class SupervisedSubscription : IAsyncDisposable
 {
@@ -156,9 +158,16 @@ public sealed partial class Client
                     {
                         // Transient: retry the re-attach.
                     }
-                    catch
+                    catch (Exception ex)
                     {
-                        return; // permanent error (for example, the topic is gone)
+                        // Permanent (for example, the topic is gone): the
+                        // subscription cannot continue, say why.
+                        if (!cancel.IsCancellationRequested && !IsClientClosed)
+                        {
+                            outChannel.Writer.TryComplete(new SubscriptionClosedException(
+                                ReasonCode.ServerError, "re-subscribe failed: " + ex.Message));
+                        }
+                        return;
                     }
                 }
             }

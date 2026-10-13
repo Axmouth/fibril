@@ -39,6 +39,51 @@ public class FanInTest
     }
 
     [Fact]
+    public async Task TerminalPartitionCloseEndsTheFanIn()
+    {
+        // Mirrors the Rust client's supervised_subscription_surfaces_a_terminal_close.
+        // With the growth loop running and another partition still live, a terminal
+        // close of one partition ends the whole fan-in with its typed reason instead
+        // of leaving it open and silent.
+        await using var broker = new FakeBroker { TopologyQueuePartitions = 2, PushCloseOnSubscribe = true, PushClosePartition = 0 };
+        await using var client = await Client.ConnectAsync(broker.Address,
+            Opts() with { RepartitionPollInterval = TimeSpan.FromMilliseconds(20) }, Timeout());
+
+        await using var fan = await client.SubscribeTopicAsync("jobs", prefetch: 4, ct: Timeout());
+
+        var ex = await Assert.ThrowsAsync<SubscriptionClosedException>(async () =>
+        {
+            await foreach (var msg in fan.Deliveries(Timeout()))
+            {
+                msg.Complete();
+            }
+        });
+        Assert.Equal(ReasonCode.TopicDeleted, ex.Code);
+    }
+
+    [Fact]
+    public async Task FailedResubscribeSurfacesTypedReason()
+    {
+        // The connection drops and the re-subscribe is rejected for good. The
+        // supervised subscription ends with a typed server error instead of looking
+        // like a clean local close.
+        await using var broker = new FakeBroker { RejectResubscribe = true };
+        await using var client = await Client.ConnectAsync(broker.Address,
+            Opts() with { SuperviseBackoff = TimeSpan.FromMilliseconds(20) }, Timeout());
+
+        await using var sub = await client.SuperviseSubscribeAsync("jobs", prefetch: 4, ct: Timeout());
+
+        var ex = await Assert.ThrowsAsync<SubscriptionClosedException>(async () =>
+        {
+            await foreach (var msg in sub.Deliveries(Timeout()))
+            {
+                msg.Complete();
+            }
+        });
+        Assert.Equal(ReasonCode.ServerError, ex.Code);
+    }
+
+    [Fact]
     public async Task ExclusiveCohortCarriesMemberIdAcrossPartitions()
     {
         // Two partitions joined as the default exclusive cohort. The broker mints a

@@ -26,6 +26,22 @@ public class RoutingTest
     }
 
     [Fact]
+    public async Task OlderTopologyAnswerAsksAnotherBroker()
+    {
+        // A broker that restarted in place answers topology from a view that has
+        // not caught up. The client keeps its newer cache and asks its other known
+        // brokers for a newer view.
+        await using var restarted = new FakeBroker { TopologyGeneration = 7 };
+        await using var survivor = new FakeBroker { TopologyGeneration = 8 };
+        await using var client = await Client.ConnectAsync(restarted.Address,
+            Opts() with { DiscoveryEndpoints = new[] { survivor.Address } }, Timeout());
+        Assert.Equal(7ul, (await client.FetchTopologyAsync(ct: Timeout())).Generation);
+
+        restarted.TopologyGeneration = 0;
+        Assert.Equal(8ul, (await client.FetchTopologyAsync(ct: Timeout())).Generation);
+    }
+
+    [Fact]
     public async Task FollowsRedirectToOwner()
     {
         // The bootstrap redirects the first publish to a second broker, which owns
