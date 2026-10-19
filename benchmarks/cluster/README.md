@@ -70,6 +70,9 @@ mode, queues, payload, rate, client credit and any non-default setting) and:
   node, the best single sign of handoff cost between threads
 - `sleeps_per_message_by_thread`, voluntary switches per thread name: Tokio
   workers and each log's `keratin-writer`, `keratin-fsync` and `keratin-notify`
+- `task_polls_per_message`, Tokio task polls by spawn site, from a diagnostic
+  build only (see [Profiling](#profiling)). A task polled again was woken again,
+  so this maps the handoffs a message takes
 - `write_syscalls_per_message`, `staged_batches_per_message`, `fsync_jobs_per_message`
 
 Low-rate latency moves more between runs than throughput, so compare it over
@@ -101,7 +104,15 @@ CARGO_TARGET_DIR=target-profile CARGO_PROFILE_RELEASE_DEBUG=line-tables-only \
   RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release --bin fibril-server
 ```
 
-Then point `--bin-dir` at `target-profile/release` and read the recording
+Task polls by spawn site need no root at all. Build the diagnostic binary
+and point `--bin-dir` at it:
+
+```sh
+CARGO_TARGET_DIR=target-polls RUSTFLAGS="--cfg tokio_unstable" \
+  cargo build --release --features task-polls --bin fibril-server
+```
+
+For perf recordings, point `--bin-dir` at `target-profile/release` and read the recording
 with the scripts in `profile/`:
 
 | Script | Shows |

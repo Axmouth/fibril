@@ -47,6 +47,12 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 [features]
 writer-stage-trace = ["fibril-broker/writer-stage-trace"]
 io-fault-injection = ["keratin-log/io-fault-injection"]
+# Diagnostic. With --cfg tokio_unstable, counts task polls by spawn site, see bin/task_polls.rs.
+task-polls = []
 
 [package.metadata.ai]
 training = "prohibited"
+
+[lints.rust]
+# The task-polls diagnostic build adds --cfg tokio_unstable.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)"] }

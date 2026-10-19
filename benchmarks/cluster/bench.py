@@ -215,7 +215,8 @@ def run(args):
         cpusets = args.broker_cpusets.split(";") if args.broker_cpusets else []
         for i in range(copies):
             node_data[i].mkdir(parents=True)
-            node_env = dict(env, KERATIN_DRAIN_COUNTERS_PATH=str(case / f"node-{i}-counters.json"))
+            node_env = dict(env, KERATIN_DRAIN_COUNTERS_PATH=str(case / f"node-{i}-counters.json"),
+                            FIBRIL_TASK_POLLS_PATH=str(case / f"node-{i}-polls.json"))
             node_env.update(item.split("=", 1) for item in args.node_env)
             if args.preallocate_bytes is not None:
                 node_env["FIBRIL_KERATIN_SEGMENT_PREALLOCATE_BYTES"] = str(args.preallocate_bytes)
@@ -250,6 +251,11 @@ def run(args):
         for i, endpoint in enumerate(endpoints):
             save(case / f"node-{i}-runtime-before.json", wait_for(lambda e=endpoint: settings_applied(e)))
 
+        # Task poll counts, written once a second by a task-polls build.
+        read_polls = lambda: [json.loads(f.read_text()) if f.exists() else {}
+                              for f in (case / f"node-{i}-polls.json" for i in range(copies))]
+        time.sleep(1.2)
+        polls_before = read_polls()
         before = [process_sample(p) for p in servers]
         if args.perf:
             # One perf process per broker, since perf's per-user locked memory
@@ -309,6 +315,8 @@ def run(args):
         # Delivery counts alone cannot show settlement or catch duplicates.
         save(case / "settled.json", wait_for(lambda: topology(settled=True), 120))
         after = [process_sample(p) for p in servers]
+        time.sleep(1.2)
+        save(case / "polls.json", {"before": polls_before, "after": read_polls()})
         for i, endpoint in enumerate(endpoints):
             save(case / f"node-{i}-runtime-after.json", settings_applied(endpoint))
         save(case / "summary.json", summarize(args, case, results, before, after, samples))
@@ -343,6 +351,12 @@ def summarize(args, case, results, before, after, samples):
     issued = sum(r["counts"]["issued"] for r in results)
     delta = lambda key: sum(a.get(key, 0) for a in after) - sum(b.get(key, 0) for b in before)
     counters = [json.loads(f.read_text()) for f in sorted(case.glob("node-*-counters.json"))]
+    polls = json.loads((case / "polls.json").read_text()) if (case / "polls.json").exists() else None
+    polls_by_site = {}
+    if polls:
+        for b, a in zip(polls["before"], polls["after"]):
+            for site, n in a.items():
+                polls_by_site[site] = polls_by_site.get(site, 0) + n - b.get(site, 0)
     return {
         "status": "passed",
         "label": {"nodes": args.copies, "policy": args.assignment if args.copies == 3 else "standalone",
@@ -366,6 +380,9 @@ def summarize(args, case, results, before, after, samples):
             name: (sum(a.get("voluntary_switches_by_thread", {}).get(name, 0) for a in after)
                    - sum(b.get("voluntary_switches_by_thread", {}).get(name, 0) for b in before)) / issued
             for name in sorted({n for a in after for n in a.get("voluntary_switches_by_thread", {})})},
+        # Only from a task-polls build. Polls by spawn site, summed over nodes.
+        "task_polls_per_message": {site: n / issued for site, n in
+                                   sorted(polls_by_site.items(), key=lambda kv: -kv[1]) if n > 0},
         "staged_batches_per_message": [c["staged_batches"] / issued for c in counters],
         "fsync_jobs_per_message": sum(c["worker_fsync_jobs"] + c["direct_fsync_jobs"] for c in counters) / issued,
         "peak_rss_mib": max((sum(s.get("rss_kib", 0) for s in sample["servers"]) for sample in samples), default=0) / 1024,
