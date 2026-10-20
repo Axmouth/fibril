@@ -3906,6 +3906,29 @@ impl Coordination for GanglionCoordination {
         self.tx.borrow().clone()
     }
 
+    // Lookups of one partition borrow the snapshot instead of cloning all of
+    // it. Owner checks run on hot paths, and a clone costs time linear in the
+    // partition count.
+    fn assignment_for(
+        &self,
+        topic: &str,
+        partition: fibril_broker::Partition,
+        group: Option<&str>,
+    ) -> Option<PartitionAssignment> {
+        self.tx.borrow().assignment_for(topic, partition, group).cloned()
+    }
+
+    fn owner_for(
+        &self,
+        topic: &str,
+        partition: fibril_broker::Partition,
+        group: Option<&str>,
+    ) -> Option<NodeInfo> {
+        let snapshot = self.tx.borrow();
+        let owner = &snapshot.assignment_for(topic, partition, group)?.owner;
+        snapshot.nodes.get(owner).cloned()
+    }
+
     fn watch(&self) -> CoordinationStream {
         self.tx.subscribe()
     }

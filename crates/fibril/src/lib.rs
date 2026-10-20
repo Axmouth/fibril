@@ -1606,9 +1606,7 @@ pub fn topology_source_for_ganglion(
     local_client_endpoints: Vec<String>,
 ) -> Arc<dyn ClientTopologySource> {
     let coordination = parts.coordination.clone();
-    let full = CoordinationTopologySource {
-        fetch: Arc::new(move || coordination.client_topology()),
-    };
+    let full = CoordinationTopologySource::new(Arc::new(move || coordination.client_topology()));
     Arc::new(TargetedCoordinationTopologySource {
         full,
         coordination: parts.coordination.clone(),
@@ -2963,7 +2961,64 @@ impl RuntimeSettingsClusterStore for GanglionRuntimeSettingsStore {
 /// handler's `ClientTopologySource`, keeping coordination-ganglion free of a
 /// protocol dependency. The closure fetches a fresh snapshot each call.
 pub struct CoordinationTopologySource {
-    pub fetch: Arc<dyn Fn() -> ClientTopology + Send + Sync>,
+    fetch: Arc<dyn Fn() -> ClientTopology + Send + Sync>,
+    pushed: std::sync::Mutex<Option<(std::time::Instant, TopologyOk)>>,
+    rebuilding: std::sync::atomic::AtomicBool,
+}
+
+/// How long one built topology serves the periodic pushes. Every connection
+/// checks the topology each second, and building it costs time linear in the
+/// partition count, so connections share one build. Each build comes from one
+/// snapshot, so a reused one is as consistent as a check made that much
+/// earlier.
+const TOPOLOGY_PUSH_REUSE: Duration = Duration::from_millis(250);
+
+impl CoordinationTopologySource {
+    pub fn new(fetch: Arc<dyn Fn() -> ClientTopology + Send + Sync>) -> Self {
+        Self {
+            fetch,
+            pushed: std::sync::Mutex::new(None),
+            rebuilding: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn build(&self) -> TopologyOk {
+        let topology = (self.fetch)();
+        TopologyOk {
+            generation: topology.generation,
+            queues: topology
+                .queues
+                .into_iter()
+                .map(|queue| QueueTopologyEntry {
+                    topic: queue.topic,
+                    partition: queue.partition,
+                    group: queue.group,
+                    owner_endpoints: queue
+                        .owner_endpoints
+                        .iter()
+                        .filter_map(|endpoint| AdvertisedAddress::parse(endpoint))
+                        .collect(),
+                    partitioning_version: queue.partitioning_version,
+                    partition_count: queue.partition_count,
+                })
+                .collect(),
+            streams: topology
+                .streams
+                .into_iter()
+                .map(|stream| StreamTopologyEntry {
+                    topic: stream.topic,
+                    partition: stream.partition,
+                    owner_endpoints: stream
+                        .owner_endpoints
+                        .iter()
+                        .filter_map(|endpoint| AdvertisedAddress::parse(endpoint))
+                        .collect(),
+                    partitioning_version: stream.partitioning_version,
+                    partition_count: stream.partition_count,
+                })
+                .collect(),
+        }
+    }
 }
 
 /// Standalone topology source: a single node serving its own declared streams so
@@ -3013,41 +3068,48 @@ impl ClientTopologySource for LocalTopologySource {
 
 impl ClientTopologySource for CoordinationTopologySource {
     fn topology(&self) -> TopologyOk {
-        let topology = (self.fetch)();
-        TopologyOk {
-            generation: topology.generation,
-            queues: topology
-                .queues
-                .into_iter()
-                .map(|queue| QueueTopologyEntry {
-                    topic: queue.topic,
-                    partition: queue.partition,
-                    group: queue.group,
-                    owner_endpoints: queue
-                        .owner_endpoints
-                        .iter()
-                        .filter_map(|endpoint| AdvertisedAddress::parse(endpoint))
-                        .collect(),
-                    partitioning_version: queue.partitioning_version,
-                    partition_count: queue.partition_count,
-                })
-                .collect(),
-            streams: topology
-                .streams
-                .into_iter()
-                .map(|stream| StreamTopologyEntry {
-                    topic: stream.topic,
-                    partition: stream.partition,
-                    owner_endpoints: stream
-                        .owner_endpoints
-                        .iter()
-                        .filter_map(|endpoint| AdvertisedAddress::parse(endpoint))
-                        .collect(),
-                    partitioning_version: stream.partitioning_version,
-                    partition_count: stream.partition_count,
-                })
-                .collect(),
+        use std::sync::atomic::Ordering;
+        let cached = self
+            .pushed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|(built, topology)| (built.elapsed() < TOPOLOGY_PUSH_REUSE, topology.clone()));
+        match cached {
+            Some((true, topology)) => return topology,
+            // One caller rebuilds, the others keep serving the previous build
+            // meanwhile instead of all building at once.
+            Some((false, topology))
+                if self
+                    .rebuilding
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err() =>
+            {
+                return topology;
+            }
+            Some(_) => {}
+            None => {
+                self.rebuilding.store(true, Ordering::Release);
+            }
         }
+        // Clears the flag even if the build panics.
+        struct Rebuilt<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for Rebuilt<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, std::sync::atomic::Ordering::Release);
+            }
+        }
+        let _rebuilt = Rebuilt(&self.rebuilding);
+        let built = std::time::Instant::now();
+        let topology = self.build();
+        // Never replace a newer build, so a connection never sees the
+        // generation step back.
+        let mut pushed = self.pushed.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pushed.as_ref().is_none_or(|(newest, _)| *newest < built) {
+            *pushed = Some((built, topology.clone()));
+        }
+        drop(pushed);
+        topology
     }
 
     fn owner_endpoint(
@@ -3161,6 +3223,26 @@ impl DeclareCoordinator for CoordinationDeclareCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn topology_pushes_share_one_build_until_it_ages() {
+        let builds = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let counter = builds.clone();
+        let source = CoordinationTopologySource::new(Arc::new(move || ClientTopology {
+            generation: counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1,
+            queues: Vec::new(),
+            streams: Vec::new(),
+        }));
+
+        assert_eq!(source.topology().generation, 1);
+        assert_eq!(source.topology().generation, 1);
+        assert_eq!(builds.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        std::thread::sleep(TOPOLOGY_PUSH_REUSE + Duration::from_millis(20));
+        assert_eq!(source.topology().generation, 2);
+        assert_eq!(source.topology().generation, 2);
+        assert_eq!(builds.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
 
     #[test]
     fn forwarding_labels_ride_only_while_non_zero() {
