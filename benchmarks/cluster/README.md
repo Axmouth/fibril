@@ -35,6 +35,10 @@ benchmarks/cluster/matrix.py reference --storage /mnt/nvme/fibril-bench --tag ma
 benchmarks/cluster/report.py main-reference
 ```
 
+For an A/B, give each arm its own tag and line them up with
+`benchmarks/cluster/compare.py TAG_A TAG_B`, which prints the median of each
+case's repeats per tag.
+
 Results go to `benchmarks/cluster/results/<tag>-<suite>-<shape>-<arm>-<run>`.
 A rerun skips cases that passed and keeps failed attempts beside the new run.
 Flags `matrix.py` does not know go to every `bench.py` run, so
