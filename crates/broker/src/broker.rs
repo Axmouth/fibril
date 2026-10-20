@@ -237,12 +237,15 @@ pub struct PublishRequest {
 
 #[derive(Debug)]
 pub struct PublisherHandle {
-    // Intentionally not Clone. A broker publisher handle owns one sink task and
-    // one active-publisher lease. Sharing a cloned sender would make lease
-    // accounting easy to misunderstand, while cloning with a new lease would
-    // need a matching sink lifetime. Call get_publisher again for another
-    // independently tracked publisher.
+    // Intentionally not Clone. A broker publisher handle holds one
+    // active-publisher lease and one sender into its partition's shared sink.
+    // A cloned sender without a lease would make lease accounting easy to
+    // misunderstand. Call get_publisher again for another independently
+    // tracked publisher.
     pub publisher: mpsc::Sender<PublishRequest>,
+    /// Keeps the queue counted as published to while this handle lives. The
+    /// shared pipeline outlives single handles, so each handle holds its own.
+    _lease: PublisherLease,
 }
 
 impl PublisherHandle {
@@ -897,6 +900,15 @@ fn evict_outcome_label(outcome: EvictOutcome) -> &'static str {
         EvictOutcome::HasInflight => "has_inflight",
         EvictOutcome::RaceLost => "race_lost",
     }
+}
+
+/// The publisher pipeline every handle of one partition shares while the owner
+/// runtime that created it lasts, so requests from many connections batch
+/// together. The map holds a weak sender, so the pipeline ends when its last
+/// handle drops.
+struct SharedPublisher {
+    publisher: mpsc::WeakSender<PublishRequest>,
+    runtime: CancellationToken,
 }
 
 #[derive(Debug)]
@@ -1640,6 +1652,8 @@ pub struct Broker<
     avg_payload_bytes: AtomicUsize,
 
     pub(crate) task_group: Arc<TaskGroup>,
+    /// Shared publisher pipelines, one per owned partition.
+    shared_publishers: Arc<DashMap<QueueKey, SharedPublisher>>,
 
     metrics: Option<Arc<BrokerStats>>,
     pub(crate) recovery_transfer_stage: Arc<tokio::sync::Mutex<Option<crate::recovery_transfer::RecoveryTransferStage>>>,
@@ -1915,6 +1929,7 @@ impl<
             history_admitted: Notify::new(),
             settings_epoch: AtomicU64::new(1),
             task_group: Arc::new(TaskGroup::new()),
+            shared_publishers: Arc::new(DashMap::new()),
             metrics,
             recovery_transfer_stage: Arc::new(tokio::sync::Mutex::new(None)),
             initial_history_flight: Arc::new(std::sync::Mutex::new(None)),
@@ -2716,6 +2731,12 @@ impl<
         }
     }
 
+    /// Shared publisher pipelines in the map, for tests.
+    #[doc(hidden)]
+    pub fn shared_publisher_count(&self) -> usize {
+        self.shared_publishers.len()
+    }
+
     pub async fn get_publisher(
         self: &Arc<Self>,
         topic: &str,
@@ -2777,10 +2798,32 @@ impl<
         let qs_clone = qs.clone();
         let replication_timing = self.replication_timing.clone();
         let owner_runtime_shutdown = qs.owner_runtime_shutdown.clone();
+        let existing = self.shared_publishers.get(&confirm_key).and_then(|existing| {
+            // Demotion and eviction cancel the runtime token, so an
+            // uncancelled one belongs to the current owner term.
+            if existing.runtime.is_cancelled() {
+                return None;
+            }
+            existing.publisher.upgrade().filter(|publisher| !publisher.is_closed())
+        });
+        if let Some(publisher) = existing {
+            return Ok(PublisherHandle {
+                publisher,
+                _lease: activity_lease,
+            });
+        }
+        self.shared_publishers.insert(
+            confirm_key.clone(),
+            SharedPublisher {
+                publisher: tx.downgrade(),
+                runtime: owner_runtime_shutdown.clone(),
+            },
+        );
+        let shared_publishers = self.shared_publishers.clone();
+        let shared_key = confirm_key.clone();
         // Bounded: breaks on owner_runtime_shutdown (demotion/eviction) and the TaskGroup
         // cancel token (broker shutdown), and TaskTracker reaps finished tasks.
         self.task_group.spawn("publisher_sink", async move {
-            let _activity_lease = activity_lease;
             const MAX_BATCH: usize = 256;
             const COALESCE_WINDOW: Duration = Duration::from_micros(250);
             const SMALL_BATCH: usize = 32;
@@ -2948,6 +2991,12 @@ impl<
                 qs_publish.wake();
                 last_flush = Some(tokio::time::Instant::now());
             }
+            // Close the channel, then drop the map entry unless a newer
+            // pipeline already replaced it.
+            drop(rx);
+            shared_publishers.remove_if(&shared_key, |_, entry| {
+                entry.publisher.upgrade().is_none_or(|publisher| publisher.is_closed())
+            });
         });
 
         // Bounded: breaks on owner_runtime_shutdown (demotion/eviction) and the TaskGroup
@@ -3002,7 +3051,10 @@ impl<
             }
         });
 
-        Ok(PublisherHandle { publisher: tx })
+        Ok(PublisherHandle {
+            publisher: tx,
+            _lease: activity_lease,
+        })
     }
 
     pub(crate) async fn queue(&self, key: &QueueKey) -> Arc<QueueLoopState> {

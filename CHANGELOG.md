@@ -620,6 +620,19 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Changed
 
+- Publishers on one queue partition share one publisher pipeline, so
+  requests from many connections batch into the same appends. Each
+  connection keeps its own order. On a three-node cluster with 16 publishing
+  connections on one queue, broker CPU per million messages fell from 214 to
+  113 s durable and from 241 to 154 s buffered at 10k/s, and saturation rose
+  from 114k to 120k msg/s durable and from 144k to 152k buffered. A single
+  connection is unchanged.
+
+- Connections share one client topology build for 250 ms instead of each
+  building its own every second, and single-partition owner lookups no longer
+  copy the whole coordination state. With 200 quiet queues on three nodes,
+  idle CPU per node fell from about 3.7 cores to about 0.2.
+
 - Durable-tier streams tell storage that every write waits for a sync when
   they open, so Keratin warns if a background sync ever has to cover their
   writes. Durable queues get the same check from Stroma. The warning points at

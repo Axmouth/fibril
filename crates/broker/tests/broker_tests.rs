@@ -9985,3 +9985,65 @@ async fn pending_follower_admission_does_not_replay_a_removed_assignment() {
     assert!(debug.queues.iter().all(|q| q.role != QueueRole::Follower));
     broker.shutdown().await;
 }
+
+async fn publish_confirmed(publisher: &fibril_broker::broker::PublisherHandle, payload: &[u8]) -> u64 {
+    let reply = publisher
+        .publish(payload.to_vec(), unix_millis(), unix_millis(), None, Default::default(), None)
+        .await
+        .unwrap();
+    reply.await.unwrap().unwrap()
+}
+
+#[tokio::test]
+async fn shared_publisher_pipeline_ends_with_its_last_handle() {
+    let (broker, _dir) = open_test_broker_with_cfg(BrokerConfig::default()).await;
+
+    let a = broker.get_publisher("shared", Partition::new(0), &None).await.unwrap();
+    let b = broker.get_publisher("shared", Partition::new(0), &None).await.unwrap();
+    assert!(a.publisher.same_channel(&b.publisher));
+    assert_eq!(broker.shared_publisher_count(), 1);
+    assert_eq!(publish_confirmed(&a, b"a").await, 0);
+    assert_eq!(publish_confirmed(&b, b"b").await, 1);
+
+    drop(a);
+    assert_eq!(publish_confirmed(&b, b"c").await, 2);
+    assert_eq!(broker.shared_publisher_count(), 1);
+
+    drop(b);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while broker.shared_publisher_count() > 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the pipeline should end and leave the map after its last handle drops");
+
+    let c = broker.get_publisher("shared", Partition::new(0), &None).await.unwrap();
+    assert_eq!(broker.shared_publisher_count(), 1);
+    assert_eq!(publish_confirmed(&c, b"d").await, 3);
+    broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn shared_publisher_closes_when_owner_is_frozen() {
+    let (broker, _dir) = open_test_broker_with_cfg(BrokerConfig::default()).await;
+    let group = Some("workers".to_string());
+    let publisher = broker.get_publisher("frozen", Partition::new(0), &group).await.unwrap();
+    assert_eq!(publish_confirmed(&publisher, b"a").await, 0);
+
+    let freeze = assignment_transition(
+        "frozen",
+        LocalAssignmentIntent::FreezeOwner,
+        Some(LocalAssignmentRole::Owner),
+        None,
+    );
+    broker.apply_assignment_transition(&freeze).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !publisher.publisher.is_closed() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("a frozen owner's publisher pipeline should end");
+    broker.shutdown().await;
+}
