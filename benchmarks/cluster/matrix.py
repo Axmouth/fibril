@@ -76,6 +76,11 @@ SUITES = {
     "fanin": [(shape, (f"{mode}-c{n}", flags + ["--connections", str(n)]), str(i))
               for i in range(2) for shape in ("smooth10000", "saturation")
               for mode, flags in (DURABLE, BUFFERED) for n in (1, 16)],
+    # Idle queue cost: 0, 200 and 1000 extra quiet queues against the Keratin
+    # writer buffer factor, with one durable queue at 10k/s.
+    "idle": [("smooth10000", (f"q{n}-wb{factor}", ["--idle-queues", str(n), "--node-env",
+                                                 f"FIBRIL_KERATIN_WRITER_BUFFER_FACTOR={factor}"]), str(i))
+             for i in range(2) for factor in (128, 32, 16) for n in (0, 200, 1000)],
     # Eight queues at 2k/s each, owners spread over the nodes.
     "manyq": [(shape, (name + "-q8", flags + ["--queues", "8"]), run) for shape, (name, flags), run
               in abba("smooth2000", DURABLE, BUFFERED)],

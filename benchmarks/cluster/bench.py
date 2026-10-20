@@ -27,6 +27,8 @@ import urllib.request
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
+# Length of the traffic-free window that measures idle queue cost.
+IDLE_WINDOW_SECS = 10
 CREDENTIAL = "bench"
 
 
@@ -244,7 +246,7 @@ def run(args):
             body = {"topic": queue, "partition_count": 1, "durability": args.durability}
             save(case / f"declare-{queue}.json", http(endpoints[0], "/admin/api/queues", body))
         save(case / "before.json", wait_for(topology))
-        if args.idle_queues:
+        if args.idle_queues is not None:
             for k in range(args.idle_queues):
                 http(endpoints[0], "/admin/api/queues",
                      {"topic": f"idle{k}", "partition_count": 1, "durability": args.durability}, timeout=30)
@@ -254,8 +256,12 @@ def run(args):
                                      if q.get("materialized")) >= per_node for b in endpoints)
             wait_for(opened, 600)
             time.sleep(5)
+            # A quiet window with no traffic at all: what idle queues cost.
+            idle_start = [process_sample(p) for p in servers]
+            time.sleep(IDLE_WINDOW_SECS)
             idle = [process_sample(p) for p in servers]
             save(case / "idle.json", idle)
+            save(case / "idle-start.json", idle_start)
         if args.sync_interval_ms is not None:
             current = http(endpoints[0], "/admin/api/runtime-settings")
             current["settings"]["storage"]["background_sync_interval_ms"] = args.sync_interval_ms
@@ -372,11 +378,23 @@ def summarize(args, case, results, before, after, samples):
             for site, n in a.items():
                 polls_by_site[site] = polls_by_site.get(site, 0) + n - b.get(site, 0)
     idle = json.loads((case / "idle.json").read_text()) if (case / "idle.json").exists() else None
+    idle_start = json.loads((case / "idle-start.json").read_text()) if (case / "idle-start.json").exists() else None
+    if idle and idle_start:
+        for start, end in zip(idle_start, idle):
+            end["idle_cpu_ms_per_sec"] = (end["cpu_seconds"] - start["cpu_seconds"]) * 1000 / IDLE_WINDOW_SECS
+            end["idle_wakeups_per_sec"] = (end["voluntary_switches"] - start["voluntary_switches"]) / IDLE_WINDOW_SECS
+            by_thread = end.get("voluntary_switches_by_thread", {})
+            start_by_thread = start.get("voluntary_switches_by_thread", {})
+            end["idle_wakeups_per_sec_by_thread"] = {
+                name: (n - start_by_thread.get(name, 0)) / IDLE_WINDOW_SECS for name, n in by_thread.items()}
     return {
         "status": "passed",
         "idle": idle and {"queues": args.idle_queues,
                           "rss_mib_per_node": [i.get("rss_kib", 0) / 1024 for i in idle],
-                          "threads_per_node": [i.get("threads") for i in idle]},
+                          "threads_per_node": [i.get("threads") for i in idle],
+                          "cpu_ms_per_sec_per_node": [i.get("idle_cpu_ms_per_sec") for i in idle],
+                          "wakeups_per_sec_per_node": [i.get("idle_wakeups_per_sec") for i in idle],
+                          "wakeups_per_sec_by_thread": [i.get("idle_wakeups_per_sec_by_thread") for i in idle]},
         "label": {"nodes": args.copies, "policy": args.assignment if args.copies == 3 else "standalone",
                   "queue_mode": args.durability, "queues": args.queues, "payload_bytes": args.size,
                   "rate_per_queue": args.rate or "saturation", "burst_pattern": args.burst_pattern,
@@ -427,8 +445,8 @@ def main():
     parser.add_argument("--size", type=int, default=1024, help="Payload bytes")
     parser.add_argument("--connections", type=int, default=1,
                         help="Publisher and consumer connection pairs per queue, sharing the total rate and credit")
-    parser.add_argument("--idle-queues", type=int, default=0,
-                        help="Extra queues declared and left without traffic, to measure idle cost")
+    parser.add_argument("--idle-queues", type=int,
+                        help="Extra queues declared and left without traffic, then a quiet window measures their cost. 0 measures the baseline")
     parser.add_argument("--confirm-window", type=int, default=32768)
     parser.add_argument("--prefetch", type=int, default=2000)
     parser.add_argument("--warmup-secs", type=int, default=3)

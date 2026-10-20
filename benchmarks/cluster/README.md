@@ -56,6 +56,8 @@ Flags `matrix.py` does not know go to every `bench.py` run, so
 | `peak` | Saturation only, four runs per mode |
 | `manyq` | Eight queues at 2k/s each, owners spread over the nodes |
 | `publishers` | One queue fed by 1, 4 and 16 publisher connections at the same total rate and credit |
+| `fanin` | The same with 1 and 16 connections only |
+| `idle` | 0, 200 and 1000 quiet queues against the Keratin writer buffer factor, with one durable queue at 10k/s |
 
 Single runs use `bench.py` directly. `bench.py --help` lists every flag.
 
@@ -74,7 +76,9 @@ mode, queues, payload, rate, client credit and any non-default setting) and:
 - `switches_per_message`, voluntary and involuntary context switches over every
   node, the best single sign of handoff cost between threads
 - `idle`, with `--idle-queues N`: RSS and thread count per node after N extra
-  queues are open and quiet, before the workload starts
+  queues are open, and CPU and wakeups per second per node over a 10 second
+  window with no traffic, before the workload starts. `--idle-queues 0` gives
+  the baseline
 - `sleeps_per_message_by_thread`, voluntary switches per thread name: Tokio
   workers and each log's `keratin-writer`, `keratin-fsync` and `keratin-notify`
 - `task_polls_per_message`, Tokio task polls by spawn site, from a diagnostic
