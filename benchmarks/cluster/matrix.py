@@ -72,6 +72,10 @@ SUITES = {
     "publishers": [(shape, (f"{mode}-c{n}", flags + ["--connections", str(n)]), str(i))
                    for i in range(2) for shape in ("smooth10000", "saturation")
                    for mode, flags in (DURABLE, BUFFERED) for n in (1, 4, 16)],
+    # Publisher fan-in, 1 against 16 connections only.
+    "fanin": [(shape, (f"{mode}-c{n}", flags + ["--connections", str(n)]), str(i))
+              for i in range(2) for shape in ("smooth10000", "saturation")
+              for mode, flags in (DURABLE, BUFFERED) for n in (1, 16)],
     # Eight queues at 2k/s each, owners spread over the nodes.
     "manyq": [(shape, (name + "-q8", flags + ["--queues", "8"]), run) for shape, (name, flags), run
               in abba("smooth2000", DURABLE, BUFFERED)],
