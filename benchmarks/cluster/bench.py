@@ -90,6 +90,7 @@ def process_sample(process):
             except (FileNotFoundError, ProcessLookupError):
                 pass
         return {"pid": process.pid, "rss_kib": int(rss[1]) if rss else 0,
+                "threads": sum(1 for _ in (proc / "task").iterdir()),
                 "cpu_seconds": (int(stat[11]) + int(stat[12])) / hz,
                 "voluntary_switches": switches[0], "involuntary_switches": switches[1],
                 "voluntary_switches_by_thread": by_thread,
@@ -243,6 +244,18 @@ def run(args):
             body = {"topic": queue, "partition_count": 1, "durability": args.durability}
             save(case / f"declare-{queue}.json", http(endpoints[0], "/admin/api/queues", body))
         save(case / "before.json", wait_for(topology))
+        if args.idle_queues:
+            for k in range(args.idle_queues):
+                http(endpoints[0], "/admin/api/queues",
+                     {"topic": f"idle{k}", "partition_count": 1, "durability": args.durability}, timeout=30)
+            # Every node opens a log for each queue it owns or follows.
+            per_node = args.idle_queues + args.queues
+            opened = lambda: all(sum(1 for q in http(b, "/admin/api/queues_debug", timeout=30)["queues"]
+                                     if q.get("materialized")) >= per_node for b in endpoints)
+            wait_for(opened, 600)
+            time.sleep(5)
+            idle = [process_sample(p) for p in servers]
+            save(case / "idle.json", idle)
         if args.sync_interval_ms is not None:
             current = http(endpoints[0], "/admin/api/runtime-settings")
             current["settings"]["storage"]["background_sync_interval_ms"] = args.sync_interval_ms
@@ -274,7 +287,8 @@ def run(args):
         for queue in queues:
             command = [str(args.compare_bin), "--broker", "fibril", "--fibril-sparse-offsets", "--queue", queue,
                        "--endpoint", f"127.0.0.1:{broker_port(owner_index(queue))}", "--copies", str(copies),
-                       "--connections", "1", "--payload-bytes", str(args.size), "--prefetch", str(args.prefetch),
+                       "--connections", str(args.connections), "--payload-bytes", str(args.size),
+                       "--prefetch", str(args.prefetch),
                        "--confirm-window", str(args.confirm_window), "--delivery-window", str(args.confirm_window),
                        "--workers", "4", "--warmup-secs", str(args.warmup_secs),
                        "--duration-secs", str(args.duration_secs), "--drain-secs", "15",
@@ -306,8 +320,8 @@ def run(args):
         for queue in queues:
             one = json.loads((case / f"client-{queue}.json").read_text())
             counts = one["counts"]
-            confirms = 1 if args.unconfirmed else counts["issued"]
-            if (one["status"] != "client_validated" or counts["issued"] <= 1
+            confirms = args.connections if args.unconfirmed else counts["issued"]
+            if (one["status"] != "client_validated" or counts["issued"] <= args.connections
                     or counts["confirmed"] != confirms
                     or counts["delivered"] != counts["issued"] or counts["ack_sent"] != counts["issued"]):
                 raise RuntimeError(f"client counts failed validation on {queue}: {counts}")
@@ -357,12 +371,17 @@ def summarize(args, case, results, before, after, samples):
         for b, a in zip(polls["before"], polls["after"]):
             for site, n in a.items():
                 polls_by_site[site] = polls_by_site.get(site, 0) + n - b.get(site, 0)
+    idle = json.loads((case / "idle.json").read_text()) if (case / "idle.json").exists() else None
     return {
         "status": "passed",
+        "idle": idle and {"queues": args.idle_queues,
+                          "rss_mib_per_node": [i.get("rss_kib", 0) / 1024 for i in idle],
+                          "threads_per_node": [i.get("threads") for i in idle]},
         "label": {"nodes": args.copies, "policy": args.assignment if args.copies == 3 else "standalone",
                   "queue_mode": args.durability, "queues": args.queues, "payload_bytes": args.size,
                   "rate_per_queue": args.rate or "saturation", "burst_pattern": args.burst_pattern,
                   "confirm_window": args.confirm_window, "prefetch": args.prefetch,
+                  "connections": args.connections, "idle_queues": args.idle_queues,
                   "early_replication": bool(args.early_replication), "linger_us": args.linger_us,
                   "sync_interval_ms": args.sync_interval_ms, "unconfirmed": args.unconfirmed,
                   "node_env": args.node_env,
@@ -406,6 +425,10 @@ def main():
     parser.add_argument("--rate", type=int, default=0, help="Messages per second per queue, 0 for saturation")
     parser.add_argument("--burst-pattern", help="Repeating burst sizes at the average --rate, for example 200,100")
     parser.add_argument("--size", type=int, default=1024, help="Payload bytes")
+    parser.add_argument("--connections", type=int, default=1,
+                        help="Publisher and consumer connection pairs per queue, sharing the total rate and credit")
+    parser.add_argument("--idle-queues", type=int, default=0,
+                        help="Extra queues declared and left without traffic, to measure idle cost")
     parser.add_argument("--confirm-window", type=int, default=32768)
     parser.add_argument("--prefetch", type=int, default=2000)
     parser.add_argument("--warmup-secs", type=int, default=3)
@@ -432,6 +455,8 @@ def main():
             parser.error(f"warmup and duration must be whole burst cycles of {cycle:g}s")
     if not 1 <= args.prefetch <= 2000:
         parser.error("the comparison client takes --prefetch from 1 to 2000")
+    if not 1 <= args.connections <= 16 or args.prefetch % args.connections:
+        parser.error("--connections must be 1 to 16 and divide --prefetch")
     if args.node_storage and args.copies != 3:
         parser.error("--node-storage needs --copies 3")
     for name in ("output", "storage", "bin_dir", "compare_bin"):

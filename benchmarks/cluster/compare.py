@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Side-by-side medians for two or more result tags: compare.py TAG_A TAG_B...
 
-Groups each tag's runs by suite, shape and queue mode, and prints the median
+Groups each tag's runs by suite, shape and arm, and prints the median
 of every repeat, so the arms of an A/B line up row by row. Runs whose name
 does not match a matrix.py result are skipped.
 """
@@ -27,7 +27,7 @@ def load(results, tag):
         if summary.get("status") != "passed":
             failed.append(path.parent.name)
             continue
-        groups[(m["suite"], m["shape"], summary["label"]["queue_mode"])].append(summary)
+        groups[(m["suite"], m["shape"], m["arm"])].append(summary)
     return groups, failed
 
 
@@ -39,7 +39,7 @@ def main():
     arms = {tag: load(args.results, tag) for tag in args.tags}
     med = statistics.median
     keys = sorted({key for groups, _ in arms.values() for key in groups})
-    print("| Suite | Shape | Mode | Tag | Delivered/s | p50 ms | p99 ms | CPU s/M | Switches/msg | Runs |")
+    print("| Suite | Shape | Arm | Tag | Delivered/s | p50 ms | p99 ms | CPU s/M | Switches/msg | Runs |")
     print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for key in keys:
         for tag, (groups, _) in arms.items():

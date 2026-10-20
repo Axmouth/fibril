@@ -67,6 +67,11 @@ SUITES = {
     + repeat(["smooth100", "smooth10000", "saturation"], BUFFERED, 2),
     # Peak throughput, durable and buffered, four runs each.
     "peak": repeat(["saturation"], DURABLE, 4) + repeat(["saturation"], BUFFERED, 4),
+    # One queue fed by 1, 4 and 16 publisher connections at the same total
+    # rate and credit, interleaved.
+    "publishers": [(shape, (f"{mode}-c{n}", flags + ["--connections", str(n)]), str(i))
+                   for i in range(2) for shape in ("smooth10000", "saturation")
+                   for mode, flags in (DURABLE, BUFFERED) for n in (1, 4, 16)],
     # Eight queues at 2k/s each, owners spread over the nodes.
     "manyq": [(shape, (name + "-q8", flags + ["--queues", "8"]), run) for shape, (name, flags), run
               in abba("smooth2000", DURABLE, BUFFERED)],
