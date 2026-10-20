@@ -246,6 +246,13 @@ pub struct PublisherHandle {
 }
 
 impl PublisherHandle {
+    /// True once the pipeline behind this handle ended, for example after the
+    /// owner runtime was frozen or demoted. Every publish on it fails, so a
+    /// caller that caches handles should get a new one.
+    pub fn is_closed(&self) -> bool {
+        self.publisher.is_closed()
+    }
+
     pub async fn publish(
         &self,
         payload: Vec<u8>,

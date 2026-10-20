@@ -1065,6 +1065,18 @@ struct CachedPublisher {
     last_used_ms: u64,
 }
 
+/// Forgets a cached publisher whose pipeline ended, so the next publish takes
+/// the routing path again. An owner that is frozen and then owns the queue
+/// again in a new term would otherwise fail every publish on this connection.
+fn drop_closed_publisher(
+    publishers: &mut HashMap<(Topic, Partition, Option<Group>), CachedPublisher>,
+    key: &(Topic, Partition, Option<Group>),
+) {
+    if publishers.get(key).is_some_and(|cached| cached.handle.is_closed()) {
+        publishers.remove(key);
+    }
+}
+
 struct LogicalConnection {
     client_id: Uuid,
     state: Mutex<ConnState>,
@@ -5375,6 +5387,7 @@ where
 
                 let key = (pubreq.topic.clone(), pubreq.partition, pubreq.group.clone());
                 let now_ms = unix_millis();
+                drop_closed_publisher(&mut publishers, &key);
                 // A cached publisher means the topic is a queue, so the steady
                 // state skips the stream lookups entirely. The stream checks run
                 // only on a cache miss, before a queue publisher is created.
@@ -5631,6 +5644,7 @@ where
 
                 let key = (pubreq.topic.clone(), pubreq.partition, pubreq.group.clone());
                 let now_ms = unix_millis();
+                drop_closed_publisher(&mut publishers, &key);
                 if !publishers.contains_key(&key) {
                     if may_forward
                         && let RouteDecision::Forward { owner } = forwarding_decision(

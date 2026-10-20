@@ -10017,3 +10017,54 @@ async fn register_legacy_test_queue(
         .await
         .unwrap();
 }
+
+/// A frozen owner ends its publisher pipelines. A connection that cached one
+/// must drop it and get a new publisher when the node owns the queue again,
+/// instead of failing every later publish.
+#[tokio::test]
+async fn cached_publisher_is_replaced_after_owner_freeze() {
+    let (mut framed, server_task, _dir, broker) =
+        open_protocol_connection_with_settings(ConnectionSettings::new(Some(60))).await;
+    handshake(&mut framed).await;
+    framed_publish(&mut framed, 2, "refrozen", None, b"before").await;
+
+    let freeze = LocalAssignmentTransition {
+        queue: QueueIdentity::new("refrozen", Partition::new(0), None),
+        previous_role: Some(LocalAssignmentRole::Owner),
+        next_role: None,
+        previous: None,
+        next: None,
+        intent: LocalAssignmentIntent::FreezeOwner,
+    };
+    broker.apply_assignment_transition(&freeze).await.unwrap();
+    let queue = QueueIdentity::new("refrozen", Partition::new(0), None);
+    let own_again = LocalAssignmentTransition {
+        queue: queue.clone(),
+        previous_role: Some(LocalAssignmentRole::Owner),
+        next_role: Some(LocalAssignmentRole::Owner),
+        previous: None,
+        next: Some(PartitionAssignment::new(queue, "node-a", vec![], 2)),
+        intent: LocalAssignmentIntent::RefreshOwner,
+    };
+    broker.apply_assignment_transition(&own_again).await.unwrap();
+
+    // A publish racing the pipeline shutdown may fail once, later ones must
+    // not.
+    let mut request_id = 3;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        framed.send(publish_frame(request_id, "refrozen", b"after".to_vec())).await.unwrap();
+        let frame = recv_frame(&mut framed).await;
+        assert_eq!(frame.request_id, request_id);
+        if frame.opcode == Op::PublishOk as u16 {
+            break;
+        }
+        let err: ErrorMsg = try_decode(&frame).unwrap();
+        assert!(Instant::now() < deadline, "publish kept failing after the freeze: {}", err.message);
+        request_id += 1;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+}
