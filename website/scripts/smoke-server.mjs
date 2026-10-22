@@ -9,7 +9,7 @@ import { pages } from '../demo/build.mjs';
 const docker = (...args) => execFileSync('docker', args, { encoding: 'utf8' }).trim();
 const dist = fileURLToPath(new URL('../dist', import.meta.url));
 const config = fileURLToPath(new URL('../docker/nginx.conf', import.meta.url));
-const image = process.env.WEBSITE_SMOKE_IMAGE || 'nginx:1.28-alpine';
+const image = process.env.WEBSITE_SMOKE_IMAGE || 'nginx:1.30-alpine';
 let container;
 
 function get(port, path) {

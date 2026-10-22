@@ -11,7 +11,7 @@ COPY crates/admin/admin-ui /app/crates/admin/admin-ui
 COPY crates/admin/tests /app/crates/admin/tests
 RUN npm run verify
 
-FROM nginx:1.28-alpine
+FROM nginx:1.30-alpine
 
 COPY website/docker/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=builder /app/website/dist /usr/share/nginx/html
