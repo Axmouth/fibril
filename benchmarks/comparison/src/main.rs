@@ -278,6 +278,23 @@ impl Stats {
     }
 }
 
+/// Waits until `deadline` to within a few microseconds. Tokio's timer wakes on
+/// whole milliseconds, which would send a paced rate as one burst per
+/// millisecond and add up to 1 ms of client delay to every latency. So sleep
+/// on the timer only while the deadline is far, then yield until it passes.
+/// This keeps one client core busy at high paced rates.
+async fn pace_until(deadline: Instant) {
+    const SPIN: Duration = Duration::from_micros(1500);
+    if let Some(far) = deadline.checked_sub(SPIN)
+        && far > Instant::now()
+    {
+        sleep_until(far).await;
+    }
+    while Instant::now() < deadline {
+        tokio::task::yield_now().await;
+    }
+}
+
 async fn issue(
     a: Arc<Args>,
     p: Arc<Progress>,
@@ -305,10 +322,7 @@ async fn issue(
             .rate
             .map(|r| scheduled_ns(metrics::burst_bounds(id, &a.burst_pattern).0, r))
             .unwrap_or_else(|| ns(start));
-        let deadline = start + Duration::from_nanos(intended);
-        if deadline > Instant::now() {
-            sleep_until(deadline).await;
-        }
+        pace_until(start + Duration::from_nanos(intended)).await;
         let request_permit = match &request_credits {
             Some(window) => Some(window.clone().acquire_owned().await?),
             None => None,
