@@ -447,6 +447,8 @@ pub struct BrokerConfig {
     /// Cap on distinct cursors flushed in one commit batch; reaching it flushes
     /// immediately without waiting out the window.
     pub stream_cursor_commit_max_batch: usize,
+    /// How publishers batch requests, per queue durability. Read live.
+    pub publish: crate::runtime_settings::PublishRuntimeSettings,
     /// Partition count for a queue declared without an explicit count.
     pub default_partition_count: u32,
     /// Soft target partitions-per-consumer for exclusive consumer groups. When
@@ -490,6 +492,7 @@ impl Default for BrokerConfig {
             replication_stream_apply_open_batch: 0,
             stream_cursor_commit_window_us: 100,
             stream_cursor_commit_max_batch: 1024,
+            publish: Default::default(),
             default_partition_count: 1,
             default_consumer_target: None,
         }
@@ -2821,13 +2824,16 @@ impl<
         );
         let shared_publishers = self.shared_publishers.clone();
         let shared_key = confirm_key.clone();
+        let sink_cfg = self.cfg.clone();
+        let buffered = self.engine.queue_is_buffered(&tp, part.id(), group.as_deref());
         // Bounded: breaks on owner_runtime_shutdown (demotion/eviction) and the TaskGroup
         // cancel token (broker shutdown), and TaskTracker reaps finished tasks.
         self.task_group.spawn("publisher_sink", async move {
             const MAX_BATCH: usize = 256;
             const COALESCE_WINDOW: Duration = Duration::from_micros(250);
             const SMALL_BATCH: usize = 32;
-            let mut last_flush = None;
+            let mut last_flush: Option<tokio::time::Instant> = None;
+            let mut gap = crate::publish_coalesce::GapCoalescer::default();
 
             loop {
                 let first = tokio::select! {
@@ -2850,9 +2856,22 @@ impl<
                     }
                 }
 
-                // Coalesce only inside the window opened by the previous flush.
-                // A first message after a quiet period should not wait for a batch.
-                if batch.len() < SMALL_BATCH {
+                let publish = sink_cfg.load().publish;
+                let (coalesce, gap_us) = if buffered {
+                    (publish.buffered_coalesce, publish.buffered_gap_us)
+                } else {
+                    (publish.durable_coalesce, publish.durable_gap_us)
+                };
+                // Both modes wait only when the previous flush was recent. A
+                // first message after a quiet period should not wait for a batch.
+                let gathered = coalesce == crate::runtime_settings::PublishCoalesce::Gap
+                    && last_flush.is_some_and(|at| at.elapsed() < crate::publish_coalesce::QUIET)
+                    && gap
+                        .gather(&mut rx, &mut batch, MAX_BATCH, gap_us, &shutdown, &owner_runtime_shutdown)
+                        .await;
+                let windowed = coalesce == crate::runtime_settings::PublishCoalesce::Window
+                    || gap.unavailable();
+                if !gathered && windowed && batch.len() < SMALL_BATCH {
                     if let Some(last_flush) = last_flush {
                         let deadline = last_flush + COALESCE_WINDOW;
                         if deadline > tokio::time::Instant::now() {

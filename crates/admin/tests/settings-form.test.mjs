@@ -22,7 +22,8 @@ function form() {
       min: /min="([^"]+)"/.exec(tag)?.[1] || '',
       type: /type="([^"]+)"/.exec(tag)?.[1] || '', dataset: {}, textContent: '',
       runtime: tag.includes('data-runtime-setting'), optional: tag.includes('data-runtime-optional'),
-      hasAttribute(name) { return name === 'data-runtime-optional' && this.optional; },
+      text: tag.includes('data-runtime-text'),
+      hasAttribute(name) { return (name === 'data-runtime-optional' && this.optional) || (name === 'data-runtime-text' && this.text); },
       addEventListener() {},
     });
   }
@@ -114,6 +115,16 @@ test('all newly exposed controls save edits using their actual form types', () =
   assert.equal(saved.connection.resume_session_restart_ttl_ms, 2000);
   assert.equal(saved.replication.read_timeout_slack_ms, 2000);
   assert.equal(saved.replication.owner_connect_timeout_ms, 2000);
+});
+
+test('publish batching saves its modes as text and its gaps as numbers', () => {
+  const f = form();
+  f.context.renderSettings(f.data);
+  assert.equal(f.controls.get('publish.buffered_coalesce').value, 'gap');
+  f.controls.get('publish.durable_coalesce').value = 'gap';
+  f.controls.get('publish.durable_gap_us').value = '40';
+  assert.deepEqual(f.collect().publish, { buffered_coalesce: 'gap', buffered_gap_us: 100,
+    durable_coalesce: 'gap', durable_gap_us: 40 });
 });
 
 test('routing limits save with their units and keep an unset connect timeout unset', () => {

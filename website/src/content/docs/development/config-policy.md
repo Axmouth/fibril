@@ -179,6 +179,12 @@ idle_evict_enabled = false
 [consumer_groups]
 # default_target_per_consumer is unset by default, which disables the signal.
 
+[publish]
+buffered_coalesce = "gap"
+buffered_gap_us = 100
+durable_coalesce = "window"
+durable_gap_us = 100
+
 [routing]
 max_upstream_sessions = 4096
 max_upstream_sessions_per_owner = 1024

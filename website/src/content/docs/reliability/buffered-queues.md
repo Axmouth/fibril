@@ -90,6 +90,15 @@ limit on how long a confirmed message stays unsynced.
 Checkpoints, recovery seals and shutdowns also sync first, so none of them
 ever relies on records that could still be lost.
 
+## Publish batching
+
+A buffered queue's owner ends a publish batch once no request arrived for a
+short gap, 100 µs by default, instead of waiting on a fixed window. This cuts
+confirm and delivery latency at steady rates for some CPU per message. The
+`publish.buffered_coalesce` and `publish.buffered_gap_us` runtime settings
+change it, and [Configuration](/configuration/) describes both modes. Gap
+mode needs Linux, other platforms use the window.
+
 ## Watching it
 
 The queues page of the admin dashboard marks buffered queues and shows, per

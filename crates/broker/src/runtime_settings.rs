@@ -31,6 +31,8 @@ pub struct RuntimeSettings {
     pub routing: RoutingRuntimeSettings,
     #[serde(default)]
     pub storage: StorageRuntimeSettings,
+    #[serde(default)]
+    pub publish: PublishRuntimeSettings,
 }
 
 /// Longest background sync interval accepted, one hour.
@@ -52,6 +54,48 @@ impl Default for StorageRuntimeSettings {
     fn default() -> Self {
         Self {
             background_sync_interval_ms: 100,
+        }
+    }
+}
+
+/// Longest publish gap accepted. Batches stop growing after 1 ms anyway.
+pub const MAX_PUBLISH_GAP_US: u64 = 1000;
+
+/// How a queue's publisher gathers requests from its connections into one
+/// append.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PublishCoalesce {
+    /// Wait up to 250 us after the previous append for a batch of 32. Tokio's
+    /// timer rounds that up to the next millisecond tick, so a lone request
+    /// can wait up to about 1 ms. Fewest appends per message.
+    Window,
+    /// Wait until no request arrived for the gap, on a precise timer, with a
+    /// cap that grows with the batch up to 1 ms. Lower latency at steady
+    /// rates for more CPU per message. Linux only: other platforms use the
+    /// window.
+    Gap,
+}
+
+/// Publish batching, set separately for buffered and durable queues.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct PublishRuntimeSettings {
+    pub buffered_coalesce: PublishCoalesce,
+    /// Quiet time after the last request that ends a batch, in gap mode.
+    pub buffered_gap_us: u64,
+    pub durable_coalesce: PublishCoalesce,
+    /// Quiet time after the last request that ends a batch, in gap mode.
+    pub durable_gap_us: u64,
+}
+
+impl Default for PublishRuntimeSettings {
+    fn default() -> Self {
+        Self {
+            buffered_coalesce: PublishCoalesce::Gap,
+            buffered_gap_us: 100,
+            durable_coalesce: PublishCoalesce::Window,
+            durable_gap_us: 100,
         }
     }
 }
@@ -233,6 +277,16 @@ impl RuntimeSettings {
                 "storage.background_sync_interval_ms must be at most {MAX_BACKGROUND_SYNC_INTERVAL_MS}"
             )));
         }
+        for (name, gap) in [
+            ("publish.buffered_gap_us", self.publish.buffered_gap_us),
+            ("publish.durable_gap_us", self.publish.durable_gap_us),
+        ] {
+            if gap == 0 || gap > MAX_PUBLISH_GAP_US {
+                return Err(RuntimeSettingsError::Invalid(format!(
+                    "{name} must be from 1 to {MAX_PUBLISH_GAP_US}"
+                )));
+            }
+        }
         let routing = &self.routing;
         if routing.max_upstream_sessions == 0
             || routing.max_upstream_sessions_per_owner == 0
@@ -267,6 +321,7 @@ impl Default for RuntimeSettings {
             stream: StreamRuntimeSettings::default(),
             routing: RoutingRuntimeSettings::default(),
             storage: StorageRuntimeSettings::default(),
+            publish: PublishRuntimeSettings::default(),
         }
     }
 }
@@ -722,6 +777,7 @@ impl BrokerConfig {
             default_partition_count: settings.partitioning.default_partition_count,
             stream_cursor_commit_window_us: settings.stream.cursor_commit_window_us,
             stream_cursor_commit_max_batch: settings.stream.cursor_commit_max_batch,
+            publish: settings.publish,
             stream_idle_evict_after_ms: settings
                 .stream
                 .idle_evict_enabled
@@ -954,6 +1010,7 @@ mod tests {
             stream: StreamRuntimeSettings::default(),
             routing: RoutingRuntimeSettings::default(),
             storage: StorageRuntimeSettings::default(),
+            publish: PublishRuntimeSettings::default(),
         };
 
         let decoded = decode_snapshot(GlobalValue {
@@ -998,6 +1055,7 @@ mod tests {
             stream: StreamRuntimeSettings::default(),
             routing: RoutingRuntimeSettings::default(),
             storage: StorageRuntimeSettings::default(),
+            publish: PublishRuntimeSettings::default(),
         };
 
         let config = BrokerConfig::from_runtime_settings(&settings);
@@ -1098,6 +1156,35 @@ mod tests {
         let mut settings = RuntimeSettings::default();
         settings.connection.warn_message_bytes = 0;
         settings.validate().unwrap();
+    }
+
+    #[test]
+    fn publish_settings_default_per_durability_and_bound_the_gap() {
+        let decoded: PublishRuntimeSettings =
+            serde_json::from_str(r#"{"durable_coalesce": "gap"}"#).unwrap();
+        assert_eq!(decoded.durable_coalesce, PublishCoalesce::Gap);
+        assert_eq!(decoded.buffered_coalesce, PublishCoalesce::Gap);
+        assert_eq!(decoded.buffered_gap_us, 100);
+        assert_eq!(PublishRuntimeSettings::default().durable_coalesce, PublishCoalesce::Window);
+
+        for (gap, ok) in [(0, false), (1, true), (MAX_PUBLISH_GAP_US, true), (MAX_PUBLISH_GAP_US + 1, false)] {
+            for buffered in [true, false] {
+                let mut settings = RuntimeSettings::default();
+                if buffered {
+                    settings.publish.buffered_gap_us = gap;
+                } else {
+                    settings.publish.durable_gap_us = gap;
+                }
+                match settings.validate() {
+                    Ok(()) => assert!(ok, "{gap} should be rejected"),
+                    Err(RuntimeSettingsError::Invalid(message)) => {
+                        assert!(!ok, "{gap} should be accepted: {message}");
+                        assert!(message.contains("_gap_us"), "{message}");
+                    }
+                    Err(other) => panic!("unexpected error {other:?}"),
+                }
+            }
+        }
     }
 
     #[test]

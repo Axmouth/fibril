@@ -10047,3 +10047,33 @@ async fn shared_publisher_closes_when_owner_is_frozen() {
     .expect("a frozen owner's publisher pipeline should end");
     broker.shutdown().await;
 }
+
+#[tokio::test]
+async fn gap_coalescing_confirms_every_publish_in_order() {
+    let mut cfg = BrokerConfig::default();
+    cfg.publish.durable_coalesce = fibril_broker::runtime_settings::PublishCoalesce::Gap;
+    cfg.publish.durable_gap_us = 50;
+    let (broker, _dir) = open_test_broker_with_cfg(cfg).await;
+    let a = broker.get_publisher("gap", Partition::new(0), &None).await.unwrap();
+    let b = broker.get_publisher("gap", Partition::new(0), &None).await.unwrap();
+
+    let mut replies = Vec::new();
+    for i in 0..200u32 {
+        let publisher = if i % 2 == 0 { &a } else { &b };
+        replies.push(
+            publisher
+                .publish(i.to_le_bytes().to_vec(), unix_millis(), unix_millis(), None, Default::default(), None)
+                .await
+                .unwrap(),
+        );
+        if i % 16 == 0 {
+            tokio::time::sleep(Duration::from_micros(200)).await;
+        }
+    }
+    let mut offsets = Vec::new();
+    for reply in replies {
+        offsets.push(reply.await.unwrap().unwrap());
+    }
+    assert_eq!(offsets, (0..200).collect::<Vec<u64>>());
+    broker.shutdown().await;
+}

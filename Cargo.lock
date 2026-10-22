@@ -1332,6 +1332,7 @@ dependencies = [
  "futures",
  "hashbrown 0.17.1",
  "rmp-serde",
+ "rustix",
  "serde",
  "serde_json",
  "stroma-common",

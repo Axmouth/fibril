@@ -26,6 +26,10 @@ SHAPES = {
     "burst100": (3, 100, "200,100"),
     "smooth10000": (3, 10000, None),
     "smooth2000": (3, 2000, None),
+    "smooth10": (3, 10, None),
+    "smooth1000": (3, 1000, None),
+    "smooth50000": (3, 50000, None),
+    "smooth100000": (3, 100000, None),
     "solo-saturation": (1, 0, None),
     "solo-smooth100": (1, 100, None),
     "solo-smooth10000": (1, 10000, None),
@@ -81,6 +85,15 @@ SUITES = {
     "idle": [("smooth10000", (f"q{n}-wb{factor}", ["--idle-queues", str(n), "--node-env",
                                                  f"FIBRIL_KERATIN_WRITER_BUFFER_FACTOR={factor}"]), str(i))
              for i in range(2) for factor in (128, 32, 16) for n in (0, 200, 1000)],
+    # Publish batching, window against gap, per queue mode, from 10/s to
+    # saturation. One connection everywhere, 16 at 1k/s and up.
+    "coalesce": [(shape, (f"{mode}-{c}-c{n}", flags + ["--publish", f"{mode}_coalesce={c}", "--connections", str(n)]), str(i))
+                 for i in range(2)
+                 for shape, conns in (("smooth10", (1,)), ("smooth100", (1,)), ("smooth1000", (1, 16)),
+                                      ("smooth10000", (1, 16)), ("smooth50000", (1, 16)),
+                                      ("smooth100000", (1, 16)), ("saturation", (1, 16)))
+                 for n in conns for mode, flags in (DURABLE, BUFFERED)
+                 for c in (("window", "gap") if i == 0 else ("gap", "window"))],
     # Eight queues at 2k/s each, owners spread over the nodes.
     "manyq": [(shape, (name + "-q8", flags + ["--queues", "8"]), run) for shape, (name, flags), run
               in abba("smooth2000", DURABLE, BUFFERED)],

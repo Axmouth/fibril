@@ -143,6 +143,8 @@ def seed_toml(args):
 def run(args):
     case = args.output
     copies = args.copies
+    # Numeric values are gaps, the rest are mode names.
+    publish = {k: int(v) if v.isdigit() else v for k, v in (item.split("=", 1) for item in args.publish)}
     queues = ["topic1"] + [f"topic{k}" for k in range(2, args.queues + 1)]
     data = args.storage / case.name
     data.mkdir(parents=True, exist_ok=False)
@@ -210,6 +212,8 @@ def run(args):
             return None
         if args.sync_interval_ms is not None and settings["storage"]["background_sync_interval_ms"] != args.sync_interval_ms:
             return None
+        if any(settings.get("publish", {}).get(k) != v for k, v in publish.items()):
+            return None
         if not (response.get("local_application") or {}).get("broker_matches_saved"):
             return None
         return response
@@ -262,9 +266,11 @@ def run(args):
             idle = [process_sample(p) for p in servers]
             save(case / "idle.json", idle)
             save(case / "idle-start.json", idle_start)
-        if args.sync_interval_ms is not None:
+        if args.sync_interval_ms is not None or publish:
             current = http(endpoints[0], "/admin/api/runtime-settings")
-            current["settings"]["storage"]["background_sync_interval_ms"] = args.sync_interval_ms
+            if args.sync_interval_ms is not None:
+                current["settings"]["storage"]["background_sync_interval_ms"] = args.sync_interval_ms
+            current["settings"].setdefault("publish", {}).update(publish)
             http(endpoints[0], "/admin/api/runtime-settings", method="PUT", timeout=10,
                  body={"expected_version": current["version"], "settings": current["settings"]})
         for i, endpoint in enumerate(endpoints):
@@ -401,7 +407,7 @@ def summarize(args, case, results, before, after, samples):
                   "confirm_window": args.confirm_window, "prefetch": args.prefetch,
                   "connections": args.connections, "idle_queues": args.idle_queues,
                   "early_replication": bool(args.early_replication), "linger_us": args.linger_us,
-                  "sync_interval_ms": args.sync_interval_ms, "unconfirmed": args.unconfirmed,
+                  "sync_interval_ms": args.sync_interval_ms, "publish": publish or None, "unconfirmed": args.unconfirmed,
                   "node_env": args.node_env,
                   "broker_cpusets": args.broker_cpusets},
         "issued": issued,
@@ -455,6 +461,8 @@ def main():
     parser.add_argument("--early-replication", type=int, choices=[0, 1], default=1)
     parser.add_argument("--linger-us", type=int, default=2000, help="Follower apply linger")
     parser.add_argument("--sync-interval-ms", type=int, help="Background sync interval for buffered queues")
+    parser.add_argument("--publish", action="append", default=[], metavar="KEY=VALUE",
+                        help="Publish runtime setting, for example buffered_coalesce=window or durable_gap_us=50")
     parser.add_argument("--preallocate-bytes", type=int)
     parser.add_argument("--broker-cpusets", help="Per-node CPU lists for taskset, for example '0-3;4-7;8-11'")
     parser.add_argument("--perf", choices=["flat", "fp", "switches"],

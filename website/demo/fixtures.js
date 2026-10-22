@@ -44,6 +44,7 @@
       stream_apply_max_merge_bytes: 1048576, stream_buffer_batches: 64,
       stream_initial_credit_bytes: 0, stream_apply_fixed_deadline: false, stream_apply_open_batch: 0 },
     stream: { cursor_commit_window_us: 100, cursor_commit_max_batch: 1024, idle_evict_enabled: false, idle_evict_after_ms: 600000, idle_sweep_interval_ms: 60000 },
+    publish: { buffered_coalesce: 'gap', buffered_gap_us: 100, durable_coalesce: 'window', durable_gap_us: 100 },
     partitioning: { default_partition_count: 1 }, consumer_groups: { default_target_per_consumer: null },
   };
   const fixtures = {

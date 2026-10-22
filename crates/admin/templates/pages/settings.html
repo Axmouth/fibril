@@ -570,6 +570,45 @@
       </div>
     </section>
 
+    <section class="settings-section">
+      <div class="settings-section-heading">
+        <h5>Publishing</h5>
+        <p>How a queue's owner gathers publish requests from its connections into one append, set separately for buffered and durable queues. Applies to the next batch on every queue.</p>
+      </div>
+      <div class="settings-grid settings-grid-two">
+      <label class="settings-field">
+        <span class="settings-label">Buffered queue batching</span>
+        <span class="settings-help">Window waits up to 250 microseconds after the previous append, which Tokio rounds up to about 1 millisecond, and makes the fewest appends. Gap stops waiting once no request arrived for the gap below, for lower latency at steady rates and more CPU per message. Gap needs Linux. Other platforms use the window. Default gap.</span>
+        <select id="publish.buffered_coalesce" data-runtime-setting data-runtime-text>
+          <option value="window">Window</option>
+          <option value="gap">Gap (Linux only)</option>
+        </select>
+      <span id="seed.publish.buffered_coalesce" class="settings-help"></span>
+      </label>
+      <label class="settings-field">
+        <span class="settings-label">Buffered queue gap (microseconds)</span>
+        <span class="settings-help">Quiet time after the last request that ends a batch in gap mode. A batch that keeps filling stops growing after at most 1 millisecond. From 1 to 1000. Default 100.</span>
+        <input id="publish.buffered_gap_us" data-runtime-setting type="number" min="1" max="1000" step="1">
+      <span id="seed.publish.buffered_gap_us" class="settings-help"></span>
+      </label>
+      <label class="settings-field">
+        <span class="settings-label">Durable queue batching</span>
+        <span class="settings-help">The same choice for durable queues, where the disk sync dominates latency and smaller batches mostly cost CPU. Gap needs Linux. Default window.</span>
+        <select id="publish.durable_coalesce" data-runtime-setting data-runtime-text>
+          <option value="window">Window</option>
+          <option value="gap">Gap (Linux only)</option>
+        </select>
+      <span id="seed.publish.durable_coalesce" class="settings-help"></span>
+      </label>
+      <label class="settings-field">
+        <span class="settings-label">Durable queue gap (microseconds)</span>
+        <span class="settings-help">Quiet time after the last request that ends a batch in gap mode. From 1 to 1000. Default 100.</span>
+        <input id="publish.durable_gap_us" data-runtime-setting type="number" min="1" max="1000" step="1">
+      <span id="seed.publish.durable_gap_us" class="settings-help"></span>
+      </label>
+      </div>
+    </section>
+
     <div class="settings-actions">
       <button class="btn btn-primary" type="submit">Save runtime settings</button>
       <button class="btn" type="button" id="reload-settings">Reload</button>
@@ -1066,6 +1105,7 @@ function collectSettings() {
     const [group, key] = input.id.split(".");
     if (input.disabled || settings[group]?.[key] === undefined) continue;
     if (input.type === "checkbox") settings[group][key] = input.checked;
+    else if (input.hasAttribute("data-runtime-text")) settings[group][key] = input.value;
     else if (input.hasAttribute("data-runtime-optional") && input.value.trim() === "") {
       settings[group][key] = null;
     } else {

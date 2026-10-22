@@ -514,6 +514,20 @@ written but not synced. Only buffered queues leave such records.
 | --- | --- | --- |
 | `storage.background_sync_interval_ms` | `100` | Target interval between syncs of a queue log's unsynced records. Slow disks can stretch it. `0` turns it off and leaves syncing to the operating system, with no limit on how long a confirmed buffered message stays unsynced. Applies to open queue logs at once. |
 
+The `publish` runtime settings set how a queue's owner gathers publish
+requests from its connections into one append, separately for buffered and
+durable queues. They apply to the next batch on every queue.
+
+| Runtime setting | Default | Meaning |
+| --- | --- | --- |
+| `publish.buffered_coalesce` | `gap` | `window` waits up to 250 µs after the previous append for a batch of 32. Tokio rounds that up to the next millisecond, so a lone request can wait about 1 ms, and it makes the fewest appends. `gap` stops waiting once no request arrived for the gap, with a cap that grows with the batch up to 1 ms. Lower latency at steady rates for more CPU per message. Gap needs Linux. Other platforms use the window |
+| `publish.buffered_gap_us` | `100` | Quiet time after the last request that ends a batch in gap mode, from 1 to 1000 |
+| `publish.durable_coalesce` | `window` | The same choice for durable queues. The disk sync dominates their latency, so smaller batches mostly cost CPU |
+| `publish.durable_gap_us` | `100` | Quiet time that ends a durable batch in gap mode, from 1 to 1000 |
+
+Both modes wait only when the previous append was recent, so a request after
+a quiet period goes out at once.
+
 ## Linux Memory Policy
 
 The Linux broker uses mimalloc, which exposes a startup environment option for
