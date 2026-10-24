@@ -59,7 +59,7 @@ and `--publish buffered_coalesce=window` sets a publish runtime setting.
 | `publishers` | One queue fed by 1, 4 and 16 publisher connections at the same total rate and credit |
 | `fanin` | The same with 1 and 16 connections only |
 | `idle` | 0, 200 and 1000 quiet queues against the Keratin writer buffer factor, with one durable queue at 10k/s |
-| `coalesce` | Publish batching, window against gap, for durable and buffered queues from 10/s to saturation |
+| `coalesce` | Publish batching, window against gap, for durable and buffered queues from 10/s to saturation. 10/s runs 5 minutes and 100/s 30 seconds |
 
 Single runs use `bench.py` directly. `bench.py --help` lists every flag.
 

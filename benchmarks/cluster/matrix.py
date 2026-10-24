@@ -86,12 +86,16 @@ SUITES = {
                                                  f"FIBRIL_KERATIN_WRITER_BUFFER_FACTOR={factor}"]), str(i))
              for i in range(2) for factor in (128, 32, 16) for n in (0, 200, 1000)],
     # Publish batching, window against gap, per queue mode, from 10/s to
-    # saturation. One connection everywhere, 16 at 1k/s and up.
-    "coalesce": [(shape, (f"{mode}-{c}-c{n}", flags + ["--publish", f"{mode}_coalesce={c}", "--connections", str(n)]), str(i))
+    # saturation. One connection everywhere, 16 at 1k/s and up. Low rates run
+    # longer so each run has about 3000 messages for a usable p99. A later
+    # --duration-secs overrides the default one, since bench.py keeps the last.
+    "coalesce": [(shape, (f"{mode}-{c}-c{n}", flags + ["--publish", f"{mode}_coalesce={c}", "--connections", str(n)]
+                          + (["--duration-secs", str(secs)] if secs else [])), str(i))
                  for i in range(2)
-                 for shape, conns in (("smooth10", (1,)), ("smooth100", (1,)), ("smooth1000", (1, 16)),
-                                      ("smooth10000", (1, 16)), ("smooth50000", (1, 16)),
-                                      ("smooth100000", (1, 16)), ("saturation", (1, 16)))
+                 for shape, conns, secs in (("smooth10", (1,), 300), ("smooth100", (1,), 30),
+                                            ("smooth1000", (1, 16), None), ("smooth10000", (1, 16), None),
+                                            ("smooth50000", (1, 16), None), ("smooth100000", (1, 16), None),
+                                            ("saturation", (1, 16), None))
                  for n in conns for mode, flags in (DURABLE, BUFFERED)
                  for c in (("window", "gap") if i == 0 else ("gap", "window"))],
     # Eight queues at 2k/s each, owners spread over the nodes.

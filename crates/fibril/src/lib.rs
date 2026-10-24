@@ -149,6 +149,7 @@ pub fn runtime_seed_from_config(config: &ServerConfig) -> RuntimeSettings {
         stream: StreamRuntimeSettings::default(),
         routing: Default::default(),
         storage: Default::default(),
+        publish: Default::default(),
     }
 }
 
