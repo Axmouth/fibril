@@ -20,11 +20,14 @@ const CAPS_US: [(usize, u64); 4] = [(16, 150), (32, 300), (64, 600), (usize::MAX
 /// after a quiet period goes out at once.
 pub(crate) const QUIET: Duration = Duration::from_millis(1);
 
-/// Backstop. The timerfd should always end the wait first, so every flush by
-/// this guard is counted and logged as a bug.
+/// Backstop. The timerfd should always end the wait first. A guard flush
+/// after the timer expired means the task ran late, a guard flush before it
+/// expired means the timer is broken. Both are counted, and a broken timer
+/// logs its state.
 const GUARD: Duration = Duration::from_millis(2);
 
-static GUARD_FLUSHES: AtomicU64 = AtomicU64::new(0);
+static GUARD_FLUSHES_LATE: AtomicU64 = AtomicU64::new(0);
+static GUARD_FLUSHES_MISSED: AtomicU64 = AtomicU64::new(0);
 
 fn cap_us(len: usize) -> u64 {
     CAPS_US.iter().find(|(size, _)| len < *size).map_or(1000, |(_, us)| *us)
@@ -78,6 +81,11 @@ impl GapCoalescer {
         let mut last_arrival_us = 0;
         while batch.len() < max {
             let us = cap_us(batch.len()).min(last_arrival_us + gap_us);
+            // A task that ran late can find its deadline already gone. Flush
+            // then, since re-arming would also drop the expiry it missed.
+            if us <= GapTimer::elapsed_us(start) {
+                break;
+            }
             if us != armed_us {
                 if timer.arm(start, us).is_err() {
                     break;
@@ -101,9 +109,26 @@ impl GapCoalescer {
                 }
                 _ = timer.fired() => break,
                 _ = &mut guard => {
-                    let n = GUARD_FLUSHES.fetch_add(1, Ordering::Relaxed) + 1;
-                    if n.is_power_of_two() {
-                        tracing::error!(flushes = n, "publish gap timer missed, guard flushed");
+                    if timer.expired() {
+                        let n = GUARD_FLUSHES_LATE.fetch_add(1, Ordering::Relaxed) + 1;
+                        if n.is_power_of_two() {
+                            tracing::debug!(flushes = n, "publish gap timer woke late, guard flushed");
+                        }
+                    } else {
+                        let n = GUARD_FLUSHES_MISSED.fetch_add(1, Ordering::Relaxed) + 1;
+                        if n.is_power_of_two() {
+                            let (remaining_us, interval_us) = timer.remaining_us();
+                            tracing::error!(
+                                flushes = n,
+                                elapsed_us = GapTimer::elapsed_us(start),
+                                armed_us,
+                                last_arrival_us,
+                                batch = batch.len(),
+                                remaining_us,
+                                interval_us,
+                                "publish gap timer never expired, guard flushed"
+                            );
+                        }
                     }
                     break;
                 }
@@ -166,6 +191,18 @@ impl GapTimer {
         let _ = timerfd_settime(self.fd.get_ref(), TimerfdTimerFlags::empty(), &spec);
     }
 
+    fn remaining_us(&self) -> (i64, i64) {
+        let us = |t: rustix::time::Timespec| t.tv_sec * 1_000_000 + t.tv_nsec / 1000;
+        rustix::time::timerfd_gettime(self.fd.get_ref())
+            .map_or((-1, -1), |spec| (us(spec.it_value), us(spec.it_interval)))
+    }
+
+    /// True if the timer expired and nobody read it yet.
+    fn expired(&self) -> bool {
+        let mut buf = [0u8; 8];
+        rustix::io::read(self.fd.get_ref(), &mut buf).is_ok()
+    }
+
     async fn fired(&self) {
         loop {
             let Ok(mut guard) = self.fd.readable().await else {
@@ -201,6 +238,14 @@ impl GapTimer {
     }
 
     fn disarm(&self) {}
+
+    fn expired(&self) -> bool {
+        false
+    }
+
+    fn remaining_us(&self) -> (i64, i64) {
+        (-1, -1)
+    }
 
     async fn fired(&self) {
         std::future::pending().await
