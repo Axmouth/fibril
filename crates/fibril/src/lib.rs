@@ -1051,7 +1051,10 @@ impl HeartbeatRateTracker {
     }
 
     pub fn tick(&mut self, published: u64, delivered: u64) -> (u64, u64) {
-        let now = std::time::Instant::now();
+        self.tick_at(std::time::Instant::now(), published, delivered)
+    }
+
+    fn tick_at(&mut self, now: std::time::Instant, published: u64, delivered: u64) -> (u64, u64) {
         let rates = match self.prev {
             Some((at, prev_pub, prev_dlv)) => {
                 let secs = now.duration_since(at).as_secs_f64().max(0.001);
@@ -3270,20 +3273,12 @@ mod tests {
     #[test]
     fn heartbeat_rate_tracker_reports_deltas_per_second() {
         let mut tracker = HeartbeatRateTracker::new();
+        let start = std::time::Instant::now();
         // First tick has no baseline.
-        assert_eq!(tracker.tick(1000, 500), (0, 0));
-        // Deltas divide by the (tiny) elapsed time; force a known baseline
-        // by rewriting the stored instant one second into the past.
-        if let Some((at, published, delivered)) = tracker.prev.as_mut() {
-            *at -= Duration::from_secs(1);
-            assert_eq!((*published, *delivered), (1000, 500));
-        }
-        assert_eq!(tracker.tick(4000, 2500), (3000, 2000));
+        assert_eq!(tracker.tick_at(start, 1000, 500), (0, 0));
+        assert_eq!(tracker.tick_at(start + Duration::from_secs(1), 4000, 2500), (3000, 2000));
         // A counter going backwards (restart) must not underflow.
-        if let Some((at, _, _)) = tracker.prev.as_mut() {
-            *at -= Duration::from_secs(1);
-        }
-        assert_eq!(tracker.tick(0, 0), (0, 0));
+        assert_eq!(tracker.tick_at(start + Duration::from_secs(2), 0, 0), (0, 0));
     }
 
     #[test]
