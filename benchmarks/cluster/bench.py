@@ -140,11 +140,15 @@ def seed_toml(args):
     return "\n".join(lines) + "\n"
 
 
+def publish_settings(args):
+    # Numeric values are gaps, the rest are mode names.
+    return {k: int(v) if v.isdigit() else v for k, v in (item.split("=", 1) for item in args.publish)}
+
+
 def run(args):
     case = args.output
     copies = args.copies
-    # Numeric values are gaps, the rest are mode names.
-    publish = {k: int(v) if v.isdigit() else v for k, v in (item.split("=", 1) for item in args.publish)}
+    publish = publish_settings(args)
     queues = ["topic1"] + [f"topic{k}" for k in range(2, args.queues + 1)]
     data = args.storage / case.name
     data.mkdir(parents=True, exist_ok=False)
@@ -407,7 +411,7 @@ def summarize(args, case, results, before, after, samples):
                   "confirm_window": args.confirm_window, "prefetch": args.prefetch,
                   "connections": args.connections, "idle_queues": args.idle_queues,
                   "early_replication": bool(args.early_replication), "linger_us": args.linger_us,
-                  "sync_interval_ms": args.sync_interval_ms, "publish": publish or None, "unconfirmed": args.unconfirmed,
+                  "sync_interval_ms": args.sync_interval_ms, "publish": publish_settings(args) or None, "unconfirmed": args.unconfirmed,
                   "node_env": args.node_env,
                   "broker_cpusets": args.broker_cpusets},
         "issued": issued,
