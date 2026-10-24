@@ -93,11 +93,26 @@ ever relies on records that could still be lost.
 ## Publish batching
 
 A buffered queue's owner ends a publish batch once no request arrived for a
-short gap, 100 µs by default, instead of waiting on a fixed window. This cuts
-confirm and delivery latency at steady rates for some CPU per message. The
+short gap, 100 µs by default, instead of waiting on a fixed window. The
 `publish.buffered_coalesce` and `publish.buffered_gap_us` runtime settings
 change it, and [Configuration](/configuration/) describes both modes. Gap
 mode needs Linux, other platforms use the window.
+
+On three nodes with 1 KiB messages and `majority_durable` placement, one
+queue fed by 16 connections had these median delivery latencies (2 runs each,
+October 2026):
+
+| Rate | Window | Gap | CPU per message |
+| --- | --- | --- | --- |
+| 1k/s | 0.22 ms | 0.33 ms | +11% |
+| 10k/s | 0.99 ms | 0.37 ms | +71% |
+| 50k/s | 1.44 ms | 0.58 ms | +59% |
+| 100k/s | 2.44 ms | 1.94 ms | +6% |
+
+Saturation throughput was the same, about 152k msg/s. Below about 1k/s a
+batch rarely forms and both modes behave the same. Durable queues default to
+the window, since the disk sync dominates their latency and gap mode gave no
+gain there at any rate.
 
 ## Watching it
 

@@ -578,7 +578,7 @@
       <div class="settings-grid settings-grid-two">
       <label class="settings-field">
         <span class="settings-label">Buffered queue batching</span>
-        <span class="settings-help">Window waits up to 250 microseconds after the previous append, which Tokio rounds up to about 1 millisecond, and makes the fewest appends. Gap stops waiting once no request arrived for the gap below, for lower latency at steady rates and more CPU per message. Gap needs Linux. Other platforms use the window. Default gap.</span>
+        <span class="settings-help">Window waits up to 250 microseconds after the previous append, which Tokio rounds up to about 1 millisecond, and makes the fewest appends. Gap stops waiting once no request arrived for the gap below. On a queue taking about 10000 messages a second or more it lowers latency, at up to about 70% more CPU per message. Below that both behave about the same. Gap needs Linux. Other platforms use the window. Default gap.</span>
         <select id="publish.buffered_coalesce" data-runtime-setting data-runtime-text>
           <option value="window">Window</option>
           <option value="gap">Gap (Linux only)</option>

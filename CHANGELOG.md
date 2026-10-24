@@ -143,6 +143,16 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- Publish batching runtime settings, `publish.buffered_coalesce` and
+  `publish.durable_coalesce`, with a gap length for each. `window` waits up to
+  250 µs after the previous append, which Tokio rounds up to about 1 ms. `gap`
+  ends a batch once no request arrived for the gap, 100 µs by default, using a
+  Linux timerfd, and other platforms fall back to the window. Buffered queues
+  default to gap and durable queues to window. On a three-node cluster with 16
+  connections on one buffered queue, median delivery latency fell from 0.99 to
+  0.37 ms at 10k/s and from 1.44 to 0.58 ms at 50k/s, for 59-71% more CPU per
+  message. Saturation and rates below 1k/s are unchanged.
+
 - Queue durability on declare in the TypeScript, Python, Go and C# clients,
   matching the Rust client. TypeScript and Python `QueueConfig` gain
   `buffered()` and `durable()`, Go gains `Buffered()` and `Durable()`, and C#
