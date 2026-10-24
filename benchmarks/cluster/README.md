@@ -45,6 +45,8 @@ Flags `matrix.py` does not know go to every `bench.py` run, so
 `--linger-us 0`, `--broker-cpusets '0-3;4-7;8-11'` or
 `--node-env KERATIN_EXPERIMENT_SOMETHING=1` turn a suite into an experiment,
 and `--publish buffered_coalesce=window` sets a publish runtime setting.
+`--replication stream_initial_credit_bytes=33554432` seeds a replication
+setting at first boot, for settings read when a stream starts.
 
 | Suite | What it compares |
 | --- | --- |

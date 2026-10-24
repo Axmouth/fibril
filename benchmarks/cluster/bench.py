@@ -137,6 +137,7 @@ def seed_toml(args):
     lines = ["[runtime_seed.replication]",
              f"stream_apply_linger_us = {args.linger_us}",
              f"early_replication = {str(bool(args.early_replication)).lower()}"]
+    lines += [f"{key} = {value}" for key, value in (item.split("=", 1) for item in args.replication)]
     return "\n".join(lines) + "\n"
 
 
@@ -488,7 +489,8 @@ def summarize(args, case, results, before, after, samples):
                   "confirm_window": args.confirm_window, "prefetch": args.prefetch,
                   "connections": args.connections, "idle_queues": args.idle_queues,
                   "early_replication": bool(args.early_replication), "linger_us": args.linger_us,
-                  "sync_interval_ms": args.sync_interval_ms, "publish": publish_settings(args) or None, "unconfirmed": args.unconfirmed,
+                  "sync_interval_ms": args.sync_interval_ms, "publish": publish_settings(args) or None,
+                  "replication": args.replication or None, "unconfirmed": args.unconfirmed,
                   "node_env": args.node_env,
                   "broker_cpusets": args.broker_cpusets},
         "issued": issued,
@@ -548,6 +550,9 @@ def main():
     parser.add_argument("--sync-interval-ms", type=int, help="Background sync interval for buffered queues")
     parser.add_argument("--publish", action="append", default=[], metavar="KEY=VALUE",
                         help="Publish runtime setting, for example buffered_coalesce=window or durable_gap_us=50")
+    parser.add_argument("--replication", action="append", default=[], metavar="KEY=VALUE",
+                        help="Replication setting seeded at first boot, as TOML, for example "
+                             "stream_initial_credit_bytes=33554432")
     parser.add_argument("--preallocate-bytes", type=int)
     parser.add_argument("--broker-cpusets", help="Per-node CPU lists for taskset, for example '0-3;4-7;8-11'")
     parser.add_argument("--perf", choices=["flat", "fp", "switches"],
