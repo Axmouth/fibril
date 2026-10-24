@@ -12,6 +12,7 @@
 //! The batch payload is the pull `QueueReplicationReadOk` body, so this is a
 //! transport choice, not a storage or apply change.
 
+use fibril_broker::pipeline_diagnostics as diag;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -152,6 +153,13 @@ enum BatchOutcome {
 }
 
 /// Payload bytes of a batch. A checkpoint requirement carries none.
+fn batch_records(batch: &QueueReplicationReadOk) -> u64 {
+    match batch {
+        ReplicationEventRead::Batch { records, .. } => records.len() as u64,
+        ReplicationEventRead::CheckpointRequired(_) => 0,
+    }
+}
+
 pub(crate) fn batch_bytes(batch: &QueueReplicationReadOk) -> u64 {
     match batch {
         ReplicationEventRead::Batch { records, .. } => {
@@ -306,7 +314,12 @@ pub async fn run_owner_queue_push<S: OwnerPushSource>(
     'push: loop {
         // Out of budget: park until the follower refills (or stops / drops).
         if credit.available == 0 {
-            match control_rx.recv().await {
+            let parked = diag::enabled().then(std::time::Instant::now);
+            let control = control_rx.recv().await;
+            if let Some(parked) = parked {
+                diag::owner_credit_park(parked.elapsed());
+            }
+            match control {
                 Some(control) => {
                     if !apply_control(
                         control,
@@ -328,6 +341,8 @@ pub async fn run_owner_queue_push<S: OwnerPushSource>(
 
         let cfg = source.push_config().unwrap_or(cfg);
         let max_bytes = credit.available.min(cfg.max_batch_bytes as u64) as usize;
+        let credit_capped = credit.available < cfg.max_batch_bytes as u64;
+        let read_started = diag::enabled().then(std::time::Instant::now);
         let read = source.read(
             &topic,
             partition,
@@ -368,6 +383,9 @@ pub async fn run_owner_queue_push<S: OwnerPushSource>(
                     }
                 }
                 result = &mut read => {
+                    if let Some(started) = read_started {
+                        diag::owner_read(started.elapsed(), credit_capped);
+                    }
                     match result {
                         Ok(batch) => match classify(&batch) {
                             BatchOutcome::Empty => continue 'push,
@@ -382,6 +400,7 @@ pub async fn run_owner_queue_push<S: OwnerPushSource>(
                                 break 'push;
                             }
                             BatchOutcome::Records { bytes, next } => {
+                                let records = batch_records(&batch);
                                 let frame = match wire::encode_queue_push_batch(push_id, &batch) {
                                     Ok(frame) => frame,
                                     Err(err) => {
@@ -389,8 +408,12 @@ pub async fn run_owner_queue_push<S: OwnerPushSource>(
                                         break 'push;
                                     }
                                 };
+                                let sending = diag::enabled().then(std::time::Instant::now);
                                 if frame_tx.send(frame).await.is_err() {
                                     break 'push;
+                                }
+                                if let Some(sending) = sending {
+                                    diag::owner_frame(records, bytes, sending.elapsed());
                                 }
                                 from = next;
                                 credit.consume(bytes);
@@ -583,6 +606,7 @@ pub async fn run_follower_push_applier<S: FollowerPushSink>(
         // a fresh receive. Ok(Some) = batch, Ok(None) = reader closed, Err(()) =
         // idle keepalive tick.
         let carried = carry.is_some();
+        let waited = diag::enabled().then(std::time::Instant::now);
         let first = match carry.take() {
             Some(batch) => batch,
             None => {
@@ -618,6 +642,14 @@ pub async fn run_follower_push_applier<S: FollowerPushSink>(
             }
         };
 
+        let first_at = waited.map(|_| std::time::Instant::now());
+        let idle = match (waited, first_at) {
+            (Some(waited), Some(first_at)) if !carried => Some(first_at.duration_since(waited)),
+            _ => None,
+        };
+        let mut frames = 1u64;
+        let apply_started: Option<(std::time::Instant, u64)>;
+
         // The experimental collection policies keep their own timing.
         let flowing = open_policy != 0
             || deadline_policy
@@ -637,10 +669,14 @@ pub async fn run_follower_push_applier<S: FollowerPushSink>(
                 drain_only: drain_continuation,
                 bytes: 0, limit: max_merge_bytes, tail: None,
             };
-            let frames = futures::stream::unfold(input, |mut input| async move {
+            let open_frames = futures::stream::unfold(input, |mut input| async move {
                 input.next().await.map(|frame| (frame, input))
             }).boxed();
-            sink.apply_open(frames).await
+            // Open batches stream their frames into the apply, so collection
+            // and apply time are one span and frames are not counted.
+            frames = 0;
+            apply_started = first_at.map(|at| (at, 0));
+            sink.apply_open(open_frames).await
         } else {
         // Fold as many contiguous frames as are ready (plus a one-shot linger).
         let mut merged = first;
@@ -681,7 +717,10 @@ pub async fn run_follower_push_applier<S: FollowerPushSink>(
             };
             match received {
                 Some(batch) => match try_fold_pushed(&mut merged, batch) {
-                    Ok(()) => continue,
+                    Ok(()) => {
+                        frames += 1;
+                        continue;
+                    }
                     Err(unmerged) => {
                         carry = Some(unmerged);
                         break;
@@ -691,6 +730,8 @@ pub async fn run_follower_push_applier<S: FollowerPushSink>(
             }
         }
 
+            let records = batch_records(&merged);
+            apply_started = first_at.map(|_| (std::time::Instant::now(), records));
             if open_policy == 2 && frame_tail(&merged).is_some() {
                 sink.apply_open(futures::stream::iter([merged]).boxed()).await
             } else {
@@ -698,12 +739,14 @@ pub async fn run_follower_push_applier<S: FollowerPushSink>(
             }
         };
         last_apply_done = Some(tokio::time::Instant::now());
+        let applied_at = apply_started.map(|(started, records)| (started, records, std::time::Instant::now()));
         match outcome {
             FollowerApplyOutcome::Applied {
                 durable_next,
                 written_next,
                 bytes,
             } => {
+                let backlogged = carry.is_some() || !batch_rx.is_empty();
                 next = written_next;
                 durable = durable_next.min(written_next);
                 // Snapshot readiness immediately after successful application.
@@ -720,15 +763,26 @@ pub async fn run_follower_push_applier<S: FollowerPushSink>(
                             if (epoch, start) == (applied_epoch, next)
                     );
                 }
-                if control_tx
+                let sent = control_tx
                     .send(FollowerPushControl::Progress {
                         durable_next: durable,
                         written_next,
                         credit_add_bytes: bytes,
                     })
-                    .await
-                    .is_err()
-                {
+                    .await;
+                if let (Some(first_at), Some((started, records, done))) = (first_at, applied_at) {
+                    diag::follower_apply(diag::FollowerApply {
+                        frames,
+                        records,
+                        bytes,
+                        idle,
+                        collect: started.saturating_duration_since(first_at),
+                        apply: done.saturating_duration_since(started),
+                        progress_send: done.elapsed(),
+                        backlogged,
+                    });
+                }
+                if sent.is_err() {
                     return ApplierExit::ReaderClosed;
                 }
             }

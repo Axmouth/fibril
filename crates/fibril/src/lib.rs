@@ -1959,6 +1959,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         .map_err(FibrilServerError::TlsConfig)?;
 
     let metrics = Metrics::new(3 * 60 * 60);
+    fibril_broker::pipeline_diagnostics::start_runtime_probe();
     let keratin_default = KeratinConfig::default();
     let adaptive_staging =
         config

@@ -22,6 +22,7 @@ fn main() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .on_before_task_poll(task_polls::count)
+        .on_after_task_poll(task_polls::finish)
         .build()?;
     task_polls::start_writer();
     runtime.block_on(async {

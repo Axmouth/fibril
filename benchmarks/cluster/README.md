@@ -125,6 +125,26 @@ CARGO_TARGET_DIR=target-polls RUSTFLAGS="--cfg tokio_unstable" \
   cargo build --release --features task-polls --bin fibril-server
 ```
 
+That build also times every poll. `long_polls_by_node` in the summary lists
+the spawn sites whose polls held a worker for 1 ms or more, as polls over
+1 ms, polls over 4 ms, total ms and the longest in ms. Tasks queued behind a
+long poll on the same worker wait for it.
+
+Every run also records replication pipeline counters as `pipeline` in the
+summary, one entry per node, over the measured window:
+
+- Owner: reads capped by credit rather than the read limit, records and KiB
+  per pushed frame, read and send times, and time parked on zero credit.
+- Follower: frames, records and KiB per merged apply, how often another
+  frame was already waiting when an apply finished, and time spent idle,
+  collecting, applying and returning progress.
+- Runtime probe: how late a 1 ms sleep woke and how long a yield took to be
+  polled again. Tokio rounds the sleep to its 1 ms tick, so lateness up to
+  about 1 ms is normal.
+
+Times are power of two histograms, reported as a mean, bucket upper bounds
+for p50 and p99, and counts over 1 ms and 4 ms.
+
 For perf recordings, point `--bin-dir` at `target-profile/release` and read the recording
 with the scripts in `profile/`:
 

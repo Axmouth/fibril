@@ -3,6 +3,8 @@ pub mod broker;
 pub mod coordination;
 pub mod queue_engine;
 pub mod local_storage_settings;
+#[doc(hidden)]
+pub mod pipeline_diagnostics;
 mod publish_coalesce;
 pub mod recovery;
 pub mod recovery_transfer;

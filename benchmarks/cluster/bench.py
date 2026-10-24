@@ -227,7 +227,9 @@ def run(args):
         for i in range(copies):
             node_data[i].mkdir(parents=True)
             node_env = dict(env, KERATIN_DRAIN_COUNTERS_PATH=str(case / f"node-{i}-counters.json"),
-                            FIBRIL_TASK_POLLS_PATH=str(case / f"node-{i}-polls.json"))
+                            FIBRIL_TASK_POLLS_PATH=str(case / f"node-{i}-polls.json"),
+                            FIBRIL_PIPELINE_COUNTERS_PATH=str(case / f"node-{i}-pipeline.json"),
+                            FIBRIL_LONG_POLLS_PATH=str(case / f"node-{i}-long-polls.json"))
             node_env.update(item.split("=", 1) for item in args.node_env)
             if args.preallocate_bytes is not None:
                 node_env["FIBRIL_KERATIN_SEGMENT_PREALLOCATE_BYTES"] = str(args.preallocate_bytes)
@@ -285,6 +287,12 @@ def run(args):
                               for f in (case / f"node-{i}-polls.json" for i in range(copies))]
         time.sleep(1.2)
         polls_before = read_polls()
+        read_pipeline = lambda: [json.loads(f.read_text()) if f.exists() else {}
+                                 for f in (case / f"node-{i}-pipeline.json" for i in range(copies))]
+        pipeline_before = read_pipeline()
+        read_long_polls = lambda: [json.loads(f.read_text()) if f.exists() else {}
+                                   for f in (case / f"node-{i}-long-polls.json" for i in range(copies))]
+        long_polls_before = read_long_polls()
         before = [process_sample(p) for p in servers]
         if args.perf:
             # One perf process per broker, since perf's per-user locked memory
@@ -347,6 +355,8 @@ def run(args):
         after = [process_sample(p) for p in servers]
         time.sleep(1.2)
         save(case / "polls.json", {"before": polls_before, "after": read_polls()})
+        save(case / "pipeline.json", {"before": pipeline_before, "after": read_pipeline()})
+        save(case / "long-polls.json", {"before": long_polls_before, "after": read_long_polls()})
         for i, endpoint in enumerate(endpoints):
             save(case / f"node-{i}-runtime-after.json", settings_applied(endpoint))
         save(case / "summary.json", summarize(args, case, results, before, after, samples))
@@ -375,6 +385,73 @@ def run(args):
         if not args.keep_data:
             for parent in {data, *(d.parent for d in node_data)}:
                 shutil.rmtree(parent, ignore_errors=True)
+
+
+def histogram_delta(before, after):
+    """Mean, bucket upper bounds for p50 and p99, and long waits, in microseconds."""
+    if not after:
+        return None
+    count = after["count"] - (before or {}).get("count", 0)
+    buckets = [a - b for a, b in zip(after["buckets"], (before or {}).get("buckets", [0] * len(after["buckets"])))]
+    if count <= 0:
+        return {"count": 0}
+
+    def upper(q):
+        seen = 0
+        for i, n in enumerate(buckets):
+            seen += n
+            if seen >= q * count:
+                return 2 ** (i + 1)
+        return None
+    return {"count": count, "mean_us": (after["total_us"] - (before or {}).get("total_us", 0)) / count,
+            "p50_under_us": upper(0.5), "p99_under_us": upper(0.99),
+            "over_1ms": sum(buckets[10:]), "over_4ms": sum(buckets[12:]), "run_max_us": after["max_us"]}
+
+
+def pipeline_summary(case):
+    """Replication pipeline counters per node, over the measured window."""
+    path = case / "pipeline.json"
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text())
+    nodes = []
+    for b, a in zip(data["before"], data["after"]):
+        if not a:
+            nodes.append(None)
+            continue
+        d = lambda key: a.get(key, 0) - b.get(key, 0)
+        per = lambda num, den: d(num) / d(den) if d(den) else None
+        nodes.append({
+            "owner_reads": d("owner_reads"),
+            "owner_credit_capped_share": per("owner_credit_capped_reads", "owner_reads"),
+            "owner_records_per_frame": per("owner_frame_records", "owner_frames"),
+            "owner_kib_per_frame": per("owner_frame_bytes", "owner_frames") and per("owner_frame_bytes", "owner_frames") / 1024,
+            "follower_applies": d("follower_applies"),
+            "follower_frames_per_apply": per("follower_frames", "follower_applies"),
+            "follower_records_per_apply": per("follower_records", "follower_applies"),
+            "follower_kib_per_apply": per("follower_bytes", "follower_applies") and per("follower_bytes", "follower_applies") / 1024,
+            "follower_backlogged_share": per("follower_backlogged_applies", "follower_applies"),
+            **{name: histogram_delta(b.get(name), a.get(name)) for name in (
+                "owner_read", "owner_send", "owner_credit_park", "follower_idle", "follower_collect",
+                "follower_apply", "follower_progress_send", "probe_sleep_late", "probe_yield")},
+        })
+    return nodes
+
+
+def long_polls_summary(case):
+    path = case / "long-polls.json"
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text())
+    nodes = []
+    for b, a in zip(data["before"], data["after"]):
+        rows = {}
+        for site, (n1, n4, total, longest) in a.items():
+            p1, p4, ptotal, _ = b.get(site, [0, 0, 0, 0])
+            if n1 - p1:
+                rows[site] = [n1 - p1, n4 - p4, round((total - ptotal) / 1000, 1), round(longest / 1000, 1)]
+        nodes.append(dict(sorted(rows.items(), key=lambda kv: -kv[1][2])))
+    return nodes if any(nodes) else None
 
 
 def summarize(args, case, results, before, after, samples):
@@ -432,6 +509,10 @@ def summarize(args, case, results, before, after, samples):
                                    sorted(polls_by_site.items(), key=lambda kv: -kv[1]) if n > 0},
         "staged_batches_per_message": [c["staged_batches"] / issued for c in counters],
         "fsync_jobs_per_message": sum(c["worker_fsync_jobs"] + c["direct_fsync_jobs"] for c in counters) / issued,
+        "pipeline": pipeline_summary(case),
+        # Only from a task-polls build. Polls of 1 ms or more by spawn site, per
+        # node: over 1 ms, over 4 ms, total ms and the run's longest in ms.
+        "long_polls_by_node": long_polls_summary(case),
         "peak_rss_mib": max((sum(s.get("rss_kib", 0) for s in sample["servers"]) for sample in samples), default=0) / 1024,
         "peak_dirty_mib": max((s["meminfo"]["Dirty"] for s in samples), default=0) / 1024,
     }
