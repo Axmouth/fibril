@@ -65,6 +65,15 @@ struct Counters {
     follower_collect: Histogram,
     follower_apply: Histogram,
     follower_progress_send: Histogram,
+    // Owner publish sink and confirm loop.
+    sink_batches: AtomicU64,
+    sink_messages: AtomicU64,
+    sink_wait: Histogram,
+    sink_gather: Histogram,
+    sink_append: Histogram,
+    sink_confirm_send: Histogram,
+    confirm_local: Histogram,
+    confirm_replicated: Histogram,
     // Runtime probe.
     probe_sleep_late: Histogram,
     probe_yield: Histogram,
@@ -109,6 +118,8 @@ impl Counters {
             ("follower_records", n(&self.follower_records)),
             ("follower_bytes", n(&self.follower_bytes)),
             ("follower_backlogged_applies", n(&self.follower_backlogged_applies)),
+            ("sink_batches", n(&self.sink_batches)),
+            ("sink_messages", n(&self.sink_messages)),
         ];
         let histograms = [
             ("owner_read", &self.owner_read),
@@ -118,6 +129,12 @@ impl Counters {
             ("follower_collect", &self.follower_collect),
             ("follower_apply", &self.follower_apply),
             ("follower_progress_send", &self.follower_progress_send),
+            ("sink_wait", &self.sink_wait),
+            ("sink_gather", &self.sink_gather),
+            ("sink_append", &self.sink_append),
+            ("sink_confirm_send", &self.sink_confirm_send),
+            ("confirm_local", &self.confirm_local),
+            ("confirm_replicated", &self.confirm_replicated),
             ("probe_sleep_late", &self.probe_sleep_late),
             ("probe_yield", &self.probe_yield),
         ];
@@ -195,6 +212,44 @@ pub fn follower_apply(a: FollowerApply) {
         c.follower_collect.record(a.collect);
         c.follower_apply.record(a.apply);
         c.follower_progress_send.record(a.progress_send);
+    }
+}
+
+/// One owner publish sink batch.
+pub struct SinkBatch {
+    pub messages: u64,
+    /// Idle wait for the batch's first request.
+    pub wait: Duration,
+    /// From the first request to the append call, coalescing included.
+    pub gather: Duration,
+    /// The append call, which waits when the storage writer is full.
+    pub append: Duration,
+    /// Handing the batch's confirmations to the confirm loop.
+    pub confirm_send: Duration,
+}
+
+pub fn sink_batch(b: SinkBatch) {
+    if let Some(c) = counters() {
+        c.sink_batches.fetch_add(1, Ordering::Relaxed);
+        c.sink_messages.fetch_add(b.messages, Ordering::Relaxed);
+        c.sink_wait.record(b.wait);
+        c.sink_gather.record(b.gather);
+        c.sink_append.record(b.append);
+        c.sink_confirm_send.record(b.confirm_send);
+    }
+}
+
+/// Per message, from its batch's append to the owner's own sync.
+pub fn confirm_local(elapsed: Duration) {
+    if let Some(c) = counters() {
+        c.confirm_local.record(elapsed);
+    }
+}
+
+/// Per message, from its batch's append to the replicated confirm.
+pub fn confirm_replicated(elapsed: Duration) {
+    if let Some(c) = counters() {
+        c.confirm_replicated.record(elapsed);
     }
 }
 

@@ -2778,6 +2778,8 @@ impl<
             oneshot::Receiver<Result<AppendResult, IoError>>,
             oneshot::Sender<Result<u64, BrokerError>>,
             Arc<OnceLock<(stroma_core::QueuePublishCommit, Option<PartitionAssignment>)>>,
+            // When the batch was appended, kept only for pipeline diagnostics.
+            Option<std::time::Instant>,
         )>(16384);
         let metrics = self.metrics.clone();
         let activity_lease = {
@@ -2836,6 +2838,7 @@ impl<
             let mut gap = crate::publish_coalesce::GapCoalescer::default();
 
             loop {
+                let waiting = crate::pipeline_diagnostics::enabled().then(std::time::Instant::now);
                 let first = tokio::select! {
                     biased;
                     _ = shutdown.cancelled() => break,
@@ -2845,6 +2848,7 @@ impl<
                 let Some(first) = first else {
                     break;
                 };
+                let first_at = waiting.map(|waiting| (waiting.elapsed(), std::time::Instant::now()));
 
                 let mut batch = vec![first];
 
@@ -2979,10 +2983,12 @@ impl<
                         qs_committed.wake_with_replication();
                     }
                 });
-                if let Err(err) = engine
+                let appending = first_at.map(|_| std::time::Instant::now());
+                let appended = engine
                     .publish_batch_observed(&tp, part.id(), group.as_deref(), items, observer)
-                    .await
-                {
+                    .await;
+                let appended_at = appending.map(|_| std::time::Instant::now());
+                if let Err(err) = appended {
                     tracing::error!("publish_batch failed: {err:?}");
                     let err_msg = err.to_string();
                     for (_, reply, _) in confirmations {
@@ -2994,9 +3000,9 @@ impl<
                     continue;
                 }
 
-                for confirmation in confirmations {
-                    if let Err(e) = confirm_sink_tx.send(confirmation).await {
-                        let (_, reply, _) = e.0;
+                for (rx_completion, reply, commit) in confirmations {
+                    if let Err(e) = confirm_sink_tx.send((rx_completion, reply, commit, appended_at)).await {
+                        let (_, reply, _, _) = e.0;
                         if let Err(e) = reply.send(Err(BrokerError::ChannelClosed)) {
                             tracing::error!("Failed to send publish error response: {e:?}");
                         }
@@ -3008,6 +3014,15 @@ impl<
                 }
                 qs_publish.activity.touch();
                 qs_publish.wake();
+                if let (Some((wait, first_at)), Some(appending), Some(appended_at)) = (first_at, appending, appended_at) {
+                    crate::pipeline_diagnostics::sink_batch(crate::pipeline_diagnostics::SinkBatch {
+                        messages: batch_size as u64,
+                        wait,
+                        gather: appending.saturating_duration_since(first_at),
+                        append: appended_at.saturating_duration_since(appending),
+                        confirm_send: appended_at.elapsed(),
+                    });
+                }
                 last_flush = Some(tokio::time::Instant::now());
             }
             // Close the channel, then drop the map entry unless a newer
@@ -3022,9 +3037,13 @@ impl<
         // cancel token (broker shutdown), and TaskTracker reaps finished tasks.
 
         self.task_group.spawn("confirm_sink_loop", async move {
-            while let Some((rx_completion, reply, commit)) = confirm_sink_rx.recv().await {
+            while let Some((rx_completion, reply, commit, appended_at)) = confirm_sink_rx.recv().await {
                 // Wait for durability
-                match rx_completion.await {
+                let completion = rx_completion.await;
+                if let Some(appended_at) = appended_at {
+                    crate::pipeline_diagnostics::confirm_local(appended_at.elapsed());
+                }
+                match completion {
                     Ok(Ok(append)) => {
                         let offset = append.base_offset;
                         // Local durability first, then the assignment's
@@ -3044,6 +3063,9 @@ impl<
                                 "queue completion omitted its enqueue dependency".into(),
                             )),
                         };
+                        if let Some(appended_at) = appended_at {
+                            crate::pipeline_diagnostics::confirm_replicated(appended_at.elapsed());
+                        }
                         if let Err(e) = reply.send(res) {
                             tracing::error!("Failed to send publish response: {e:?}");
                         }

@@ -432,9 +432,11 @@ def pipeline_summary(case):
             "follower_records_per_apply": per("follower_records", "follower_applies"),
             "follower_kib_per_apply": per("follower_bytes", "follower_applies") and per("follower_bytes", "follower_applies") / 1024,
             "follower_backlogged_share": per("follower_backlogged_applies", "follower_applies"),
+            "sink_messages_per_batch": per("sink_messages", "sink_batches"),
             **{name: histogram_delta(b.get(name), a.get(name)) for name in (
                 "owner_read", "owner_send", "owner_credit_park", "follower_idle", "follower_collect",
-                "follower_apply", "follower_progress_send", "probe_sleep_late", "probe_yield")},
+                "follower_apply", "follower_progress_send", "sink_wait", "sink_gather", "sink_append",
+                "sink_confirm_send", "confirm_local", "confirm_replicated", "probe_sleep_late", "probe_yield")},
         })
     return nodes
 

@@ -140,6 +140,10 @@ summary, one entry per node, over the measured window:
 - Follower: frames, records and KiB per merged apply, how often another
   frame was already waiting when an apply finished, and time spent idle,
   collecting, applying and returning progress.
+- Owner publish sink: messages per batch, idle wait for a batch's first
+  request, gathering, the append call and handing confirms over. Per
+  message, time from append to the owner's own sync and to the replicated
+  confirm.
 - Runtime probe: how late a 1 ms sleep woke and how long a yield took to be
   polled again. Tokio rounds the sleep to its 1 ms tick, so lateness up to
   about 1 ms is normal.
