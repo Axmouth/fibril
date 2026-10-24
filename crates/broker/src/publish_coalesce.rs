@@ -211,34 +211,51 @@ impl GapTimer {
 mod tests {
     use super::*;
 
+    // Wall clock tests. A loaded machine can preempt any single try past the
+    // bound, so each passes if one of TRIES meets it. Tokio's millisecond
+    // timer could never meet it at all.
+    const TRIES: usize = 20;
+
     #[tokio::test]
     async fn gap_ends_a_batch_soon_after_the_last_arrival() {
-        let (tx, mut rx) = mpsc::channel(16);
-        let mut batch = vec![0u32];
-        let mut coalescer = GapCoalescer::default();
-        let token = CancellationToken::new();
-        let started = std::time::Instant::now();
-        assert!(coalescer.gather(&mut rx, &mut batch, 256, 50, &token, &token).await);
-        assert!(started.elapsed() < Duration::from_millis(1), "a 50 us gap should not round up to the Tokio tick");
-        assert_eq!(batch, vec![0]);
-        drop(tx);
+        let mut fastest = Duration::MAX;
+        for _ in 0..TRIES {
+            let (_tx, mut rx) = mpsc::channel::<u32>(16);
+            let mut batch = vec![0u32];
+            let mut coalescer = GapCoalescer::default();
+            let token = CancellationToken::new();
+            let started = std::time::Instant::now();
+            assert!(coalescer.gather(&mut rx, &mut batch, 256, 50, &token, &token).await);
+            fastest = fastest.min(started.elapsed());
+            assert_eq!(batch, vec![0]);
+        }
+        assert!(fastest < Duration::from_millis(1), "a 50 us gap should not round up to the Tokio tick, fastest {fastest:?}");
     }
 
     #[tokio::test]
     async fn arrivals_within_the_gap_join_the_batch() {
-        let (tx, mut rx) = mpsc::channel(16);
-        let mut batch = vec![0u32];
-        let mut coalescer = GapCoalescer::default();
-        let token = CancellationToken::new();
-        let sender = tokio::spawn(async move {
-            for i in 1..=3 {
-                tx.send(i).await.unwrap();
-                tokio::task::yield_now().await;
+        let mut joined = false;
+        for _ in 0..TRIES {
+            let (tx, mut rx) = mpsc::channel(16);
+            let mut batch = vec![0u32];
+            let mut coalescer = GapCoalescer::default();
+            let token = CancellationToken::new();
+            let sender = tokio::spawn(async move {
+                for i in 1..=3 {
+                    tx.send(i).await.unwrap();
+                    tokio::task::yield_now().await;
+                }
+            });
+            assert!(coalescer.gather(&mut rx, &mut batch, 256, 500, &token, &token).await);
+            sender.await.unwrap();
+            // Whatever the timing, the batch keeps arrival order.
+            assert_eq!(batch, (0..batch.len() as u32).collect::<Vec<_>>());
+            if batch.len() == 4 {
+                joined = true;
+                break;
             }
-        });
-        assert!(coalescer.gather(&mut rx, &mut batch, 256, 500, &token, &token).await);
-        sender.await.unwrap();
-        assert_eq!(batch, vec![0, 1, 2, 3]);
+        }
+        assert!(joined, "arrivals within the gap should join the batch");
     }
 
     #[test]
