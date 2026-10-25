@@ -345,15 +345,16 @@ with writer-side syncs. Keep it only as a fallback if writer changes prove hard.
 ### Barriers that still force syncs
 
 - **Retention.** The experiment traced owner retention spans of 95.95 and
-  92.84 ms without background sync, and 8.95 and 3.77 ms with it.
-  `truncate_before_inner` on current main returns before its flush and fsync
-  when nothing is deletable, so the empty case no longer forces a sync. When a
-  segment is deletable it still syncs first. Remeasure on main.
-- **Manifest publication.** About 11-13 ms writer spans in the trace. It runs
-  inline at fsync completion unless `KERATIN_BACKGROUND_MANIFEST=1`.
+  92.84 ms without background sync, and 8.95 and 3.77 ms with it. Truncation
+  now moves the head on the writer and leaves the manifest store and file
+  removal to the manifest worker, so it no longer holds the writer.
+- **Manifest publication.** About 11-13 ms writer spans in the trace. Periodic
+  stores run on the manifest worker unless `KERATIN_BACKGROUND_MANIFEST=0`.
 - **Segment rollover.** Owner staging took 14.01 ms and followers about 25 ms
   at a rollover with background sync, against 34.58 ms and about 50 ms without.
-  Rollover runs several fsyncs inline.
+  Rollover now syncs only the outgoing segment's log data inline. The new
+  segment's header, directory entry and the sealed index sync with the next
+  fsync.
 
 None of these barriers may be removed to improve the written numbers. They can
 be moved off the writer thread or prepared ahead, which also helps durable

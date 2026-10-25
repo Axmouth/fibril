@@ -119,11 +119,14 @@ fresh-storage requirement and unchanged stream storage.
 
 ## Storage writer experiments (not defaults)
 
-Keratin carries three scheduling experiments, each off unless its environment
-switch is set to `1`: background periodic manifests (`KERATIN_BACKGROUND_MANIFEST`),
-closing a batch when input drains (`KERATIN_FLUSH_ON_DRAIN`) and stage-then-commit
-scheduling (`KERATIN_STAGE_THEN_COMMIT`). They cut replicated burst latency in
-September screens with mixed CPU and tail effects, so defaults are unchanged.
+Keratin carries two scheduling experiments, each off unless its environment
+switch is set to `1`: closing a batch when input drains (`KERATIN_FLUSH_ON_DRAIN`)
+and stage-then-commit scheduling (`KERATIN_STAGE_THEN_COMMIT`). They cut
+replicated burst latency in September screens with mixed CPU and tail effects, so
+defaults are unchanged. Background periodic manifests started as a third
+experiment and are on by default since October, when they took durable p99 at
+10k msg/s from 45-47 ms to 28-33 ms. `KERATIN_BACKGROUND_MANIFEST=0` turns them
+off for comparison.
 `KDurability::AfterFlush` is an opt-in Keratin completion mode with no broker
 setting, because a weak queue mode first needs separate written and durable
 progress. Results are in the [optimization log](/development/optimization-log/).
