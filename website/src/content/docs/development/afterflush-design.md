@@ -349,7 +349,7 @@ with writer-side syncs. Keep it only as a fallback if writer changes prove hard.
   now moves the head on the writer and leaves the manifest store and file
   removal to the manifest worker, so it no longer holds the writer.
 - **Manifest publication.** About 11-13 ms writer spans in the trace. Periodic
-  stores run on the manifest worker unless `KERATIN_BACKGROUND_MANIFEST=0`.
+  stores run on the manifest worker.
 - **Segment rollover.** Owner staging took 14.01 ms and followers about 25 ms
   at a rollover with background sync, against 34.58 ms and about 50 ms without.
   Rollover now syncs only the outgoing segment's log data inline. The new

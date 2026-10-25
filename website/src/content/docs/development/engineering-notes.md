@@ -117,16 +117,18 @@ and owner-loss coverage in
 [Fibril 886f239](https://github.com/Axmouth/fibril/commit/886f239), with a breaking
 fresh-storage requirement and unchanged stream storage.
 
-## Storage writer experiments (not defaults)
+## Storage writer experiments
 
-Keratin carries two scheduling experiments, each off unless its environment
-switch is set to `1`: closing a batch when input drains (`KERATIN_FLUSH_ON_DRAIN`)
-and stage-then-commit scheduling (`KERATIN_STAGE_THEN_COMMIT`). They cut
-replicated burst latency in September screens with mixed CPU and tail effects, so
-defaults are unchanged. Background periodic manifests started as a third
-experiment and are on by default since October, when they took durable p99 at
-10k msg/s from 45-47 ms to 28-33 ms. `KERATIN_BACKGROUND_MANIFEST=0` turns them
-off for comparison.
+Three scheduling experiments from September were measured again on current
+main in October 2026 and removed. Closing a batch when input drains made no
+difference at 100 msg/s or 1k msg/s. Stage-then-commit, which stages input at
+once and decides fsync submission afterwards, used 2.2 times the CPU per
+message at 1k msg/s and 10k msg/s and raised 1k msg/s p99 from 16-17 ms to
+25-31 ms, with saturation unchanged and 8 KiB bursts mixed. The idle commit
+window only worked in that mode. Background periodic manifests started as an
+experiment and are always on since October, when they took durable p99 at
+10k msg/s from 45-47 ms to 28-33 ms. Loaded fsync spacing is the
+`storage.loaded_fsync_spacing_ms` runtime setting.
 `KDurability::AfterFlush` is an opt-in Keratin completion mode with no broker
 setting, because a weak queue mode first needs separate written and durable
 progress. Results are in the [optimization log](/development/optimization-log/).

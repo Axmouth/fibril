@@ -636,6 +636,9 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Changed
 
+- The `FIBRIL_DELIVERY_POLL_BATCH_BYTES` environment variable is removed. The
+  per-poll delivery budget is a fixed 1 MiB.
+
 - `storage.keratin.segment_preallocate_bytes` defaults to 8 MiB instead of 0.
   Keratin keeps that much synced zero space ahead of each active segment, so
   durable writes to a fresh segment sync without waiting for a journal commit.
