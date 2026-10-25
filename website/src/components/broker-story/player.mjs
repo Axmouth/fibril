@@ -63,9 +63,13 @@ const path = (p) =>
 function machine(n, label, role, dead, inactive, client = false) {
   const x = n.x,
     y = n.y;
+  // Keep the screen above the divider drawn 37 px from the bottom, so shorter
+  // nodes get a shorter screen with the sprite centred in it.
+  const screenH = Math.min(111, n.h - 89);
+  const spriteY = y + 46 + Math.min(6, (screenH - 96) / 2);
   const screen = client
     ? `<rect x="${x + 51}" y="${y + 59}" width="98" height="64" rx="5" class="machine-screen"/><path d="M${x + 39} ${y + 132}h122l-12 8H${x + 51}Z" fill="var(--story-line)"/><text x="${x + 100}" y="${y + 99}" text-anchor="middle" font-family="monospace" font-size="19">${n.id === "a" ? "&gt;_" : "{ }"}</text>`
-    : `<rect x="${x + 30}" y="${y + 46}" width="140" height="111" rx="8" class="machine-screen"/><g data-sway="${n.id}"><image data-sprite="${n.id}" class="sprite" x="${x + 52}" y="${y + 52}" width="96" height="96" href="${sprite(dead ? "dead" : "open-a")}"/></g>`;
+    : `<rect x="${x + 30}" y="${y + 46}" width="140" height="${screenH}" rx="8" class="machine-screen"/><g data-sway="${n.id}"><image data-sprite="${n.id}" class="sprite" x="${x + 52}" y="${spriteY}" width="96" height="96" href="${sprite(dead ? "dead" : "open-a")}"/></g>`;
   return `<g class="${dead ? "machine-dead" : ""} ${inactive ? "machine-inactive" : ""}"><rect x="${x}" y="${y}" width="${n.w}" height="${n.h}" rx="13" class="machine"/>
     <text x="${x + 17}" y="${y + 27}" class="machine-label">${esc(label)}</text><circle class="machine-led" cx="${x + 178}" cy="${y + 22}" r="4"/>
     ${screen}<path d="M${x + 14} ${y + n.h - 37}h172" class="machine-rule"/><text x="${x + 100}" y="${y + n.h - 15}" class="machine-role" text-anchor="middle">${esc(role)}</text>
