@@ -296,6 +296,69 @@ async fn send_push_end(frame_tx: &mpsc::Sender<Frame>, push_id: u64, code: u16, 
 /// Drive one owner queue push until the follower stops it, the connection
 /// drops, or a fatal read error. The frame `request_id` of every pushed batch
 /// is `push_id`.
+/// Largest single read while building a push frame. A frame is filled by
+/// several such reads with a yield between them, so building a large frame
+/// does not hold a runtime worker for its whole read.
+const SUB_READ_BYTES: usize = 1024 * 1024;
+const SUB_READ_RECORDS: usize = 1024;
+
+/// Fill `batch` toward the frame limits with further immediate reads, yielding
+/// before each. Stops when the owner has nothing more, the limits are reached,
+/// or a read is not a plain continuation of the batch.
+#[allow(clippy::too_many_arguments)]
+async fn extend_batch<S: OwnerPushSource>(
+    source: &S,
+    topic: &str,
+    partition: Partition,
+    group: Option<&str>,
+    batch: &mut QueueReplicationReadOk,
+    max_records: usize,
+    max_bytes: usize,
+) -> Result<(), String> {
+    loop {
+        let ReplicationEventRead::Batch {
+            epoch,
+            next_offset,
+            records,
+            ..
+        } = batch
+        else {
+            return Ok(());
+        };
+        let bytes: usize = records.iter().map(|r| r.payload.len()).sum();
+        if records.len() >= max_records || bytes >= max_bytes {
+            return Ok(());
+        }
+        tokio::task::yield_now().await;
+        let more = source
+            .read(
+                topic,
+                partition,
+                group,
+                *next_offset,
+                (max_records - records.len()).min(SUB_READ_RECORDS),
+                (max_bytes - bytes).min(SUB_READ_BYTES),
+                0,
+            )
+            .await?;
+        match more {
+            ReplicationEventRead::Batch {
+                epoch: more_epoch,
+                requested_offset,
+                next_offset: more_next,
+                records: more_records,
+            } if more_epoch == *epoch
+                && requested_offset == *next_offset
+                && !more_records.is_empty() =>
+            {
+                records.extend(more_records);
+                *next_offset = more_next;
+            }
+            _ => return Ok(()),
+        }
+    }
+}
+
 pub async fn run_owner_queue_push<S: OwnerPushSource>(
     source: Arc<S>,
     frame_tx: mpsc::Sender<Frame>,
@@ -348,8 +411,8 @@ pub async fn run_owner_queue_push<S: OwnerPushSource>(
             partition,
             group.as_deref(),
             from,
-            cfg.max_records,
-            max_bytes,
+            cfg.max_records.min(SUB_READ_RECORDS),
+            max_bytes.min(SUB_READ_BYTES),
             cfg.long_poll_ms,
         );
 
@@ -386,6 +449,22 @@ pub async fn run_owner_queue_push<S: OwnerPushSource>(
                     if let Some(started) = read_started {
                         diag::owner_read(started.elapsed(), credit_capped);
                     }
+                    let result = match result {
+                        Ok(mut batch) if matches!(classify(&batch), BatchOutcome::Records { .. }) => {
+                            extend_batch(
+                                source.as_ref(),
+                                &topic,
+                                partition,
+                                group.as_deref(),
+                                &mut batch,
+                                cfg.max_records,
+                                max_bytes,
+                            )
+                            .await
+                            .map(|()| batch)
+                        }
+                        other => other,
+                    };
                     match result {
                         Ok(batch) => match classify(&batch) {
                             BatchOutcome::Empty => continue 'push,
@@ -1079,6 +1158,47 @@ mod tests {
         // Every returned record restores only half a record of available credit.
         let budgets: Vec<_> = source.reads.lock().unwrap().iter().map(|r| r.1).collect();
         assert_eq!(budgets, vec![100, 50, 50, 50, 50, 50]);
+        control_tx.send(OwnerPushControl::Stop).await.unwrap();
+        task.await.unwrap();
+    }
+
+    /// A frame larger than one sub-read is filled by several immediate reads
+    /// and still goes out as one frame.
+    #[tokio::test]
+    async fn a_large_frame_is_built_from_several_reads() {
+        let total = (SUB_READ_RECORDS * 3) as u64;
+        let source = Arc::new(MockSource {
+            total,
+            progress: Mutex::new(Vec::new()),
+            config: Mutex::new(Some(OwnerPushConfig {
+                max_records: SUB_READ_RECORDS * 2 + 10,
+                max_batch_bytes: 1 << 30,
+                long_poll_ms: 17,
+            })),
+            reads: Mutex::new(Vec::new()),
+            read_gate: None,
+        });
+        let (frame_tx, mut frame_rx) = mpsc::channel(64);
+        let (control_tx, control_rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_owner_queue_push(
+            source.clone(),
+            frame_tx,
+            1,
+            start(1 << 30),
+            control_rx,
+            cfg(),
+        ));
+        let first = recv_offsets(&mut frame_rx, 1).await;
+        assert_eq!(first, (0..(SUB_READ_RECORDS * 2 + 10) as u64).collect::<Vec<_>>());
+        let reads = source.reads.lock().unwrap().clone();
+        assert_eq!(
+            reads[..3],
+            [
+                (SUB_READ_RECORDS, SUB_READ_BYTES, 17),
+                (SUB_READ_RECORDS, SUB_READ_BYTES, 0),
+                (10, SUB_READ_BYTES, 0),
+            ]
+        );
         control_tx.send(OwnerPushControl::Stop).await.unwrap();
         task.await.unwrap();
     }
