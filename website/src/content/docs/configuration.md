@@ -715,8 +715,11 @@ A PUT contains the node identity and revision returned by GET:
 }
 ```
 
-`segment_preallocate_bytes` sets the allocation chunk for message, event and
-internal metadata logs. Zero disables preallocation; `null` removes the override
+`segment_preallocate_bytes` sets how much space message, event and internal
+metadata logs keep ready ahead of their write cursor, 8 MiB by default. Keratin
+reserves it and fills it with synced zeros in the background, so a durable write
+into it syncs without waiting for a filesystem journal commit. Zero disables
+preallocation; `null` removes the override
 and follows `storage.keratin.segment_preallocate_bytes` from startup configuration.
 The override is durably saved before publication and survives restart. Startup
 file/environment/CLI changes remain the fallback until the override is reset.

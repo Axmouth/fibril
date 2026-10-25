@@ -160,25 +160,27 @@ RATE_PER_SEC=500 SIZE=128 CONFIRMED=1 DURATION_SECS=10 \
 
 ### Segment preallocation A/B (durable low-latency lever)
 
-Preallocation makes each fsync hit an already-allocated segment (in-place,
-~0.67ms) instead of an extending one (~2.4ms), which cuts the durable-publish
-floor at low load. Toggle it with a server config:
+Preallocation keeps synced zeros ahead of the write cursor, so each fsync
+overwrites blocks that already exist (about 0.7ms) instead of extending the file
+or writing into fallocated space, which waits for an ext4 journal commit (about
+2.5ms idle, 5ms when several logs share the filesystem). It is on by default at
+8 MiB. Compare against it off with a server config:
 
 ```bash
-printf '[storage.keratin]\nsegment_preallocate_bytes = 67108864\n' > /tmp/prealloc.toml
+printf '[storage.keratin]\nsegment_preallocate_bytes = 0\n' > /tmp/prealloc.toml
 
-# OFF
+# ON (default 8 MiB)
 RATE_PER_SEC=500 SIZE=128 CONFIRMED=1 DURATION_SECS=10 \
   SERVER_DATA_DIR=/mnt/nvme-scratch/ab scripts/bench-steady-c.sh
-# ON (64 MiB preallocation chunk)
+# OFF
 RATE_PER_SEC=500 SIZE=128 CONFIRMED=1 DURATION_SECS=10 \
   SERVER_DATA_DIR=/mnt/nvme-scratch/ab SERVER_CONFIG=/tmp/prealloc.toml \
   scripts/bench-steady-c.sh
 ```
 
-`segment_preallocate_bytes` is the chunk size preallocated ahead of the write
-cursor (0 = off; may equal the segment max). See the interpretation section for
-where the win shows up (spoiler: low load only).
+`segment_preallocate_bytes` is how far ahead of the write cursor zeros are kept
+(0 = off). The win shows at low and moderate load. Busy logs mostly reuse freed
+segments, whose blocks are already written.
 
 ### Saturation (uncapped throughput)
 

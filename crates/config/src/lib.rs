@@ -1573,10 +1573,12 @@ pub struct KeratinStorageSection {
     /// file under fsync/writeback.
     #[serde(default = "default_tail_cache_bytes")]
     pub tail_cache_bytes: usize,
-    /// Bytes preallocated ahead of each active segment write cursor (`0` = off).
-    /// In-place writes let fdatasync skip the block-allocation flush an extending
-    /// write pays. Disk use tracks written data plus at most one chunk per log.
-    #[serde(default)]
+    /// Bytes kept ready ahead of each active segment write cursor (`0` = off).
+    /// Keratin reserves them and fills them with synced zeros in the
+    /// background, so a sync after a write into them flushes data without a
+    /// journal commit. Disk use tracks written data plus at most one chunk per
+    /// log.
+    #[serde(default = "default_segment_preallocate_bytes")]
     pub segment_preallocate_bytes: usize,
     /// Commits allowed in flight to the fsync worker at once. Above 1 the worker
     /// coalesces the queued commits into one fdatasync, so small batches reach
@@ -1613,6 +1615,13 @@ fn default_tail_cache_bytes() -> usize {
     64 * 1024 * 1024
 }
 
+/// 8 MiB took 1k msg/s durable p50 from about 9.5 ms to about 3 ms on three
+/// replicas sharing one NVMe drive, since appends to a fresh segment no longer
+/// wait for journal commits.
+fn default_segment_preallocate_bytes() -> usize {
+    8 * 1024 * 1024
+}
+
 fn default_batch_linger_ms() -> u64 {
     5
 }
@@ -1638,7 +1647,7 @@ impl Default for KeratinStorageSection {
             message_log: default_message_log_section(),
             event_log: default_event_log_section(),
             tail_cache_bytes: default_tail_cache_bytes(),
-            segment_preallocate_bytes: 0,
+            segment_preallocate_bytes: default_segment_preallocate_bytes(),
             max_inflight_fsyncs: default_max_inflight_fsyncs(),
             pipeline_commit_records: default_pipeline_commit_records(),
             writer_buffer_factor: default_writer_buffer_factor(),

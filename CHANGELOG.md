@@ -630,6 +630,13 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Changed
 
+- `storage.keratin.segment_preallocate_bytes` defaults to 8 MiB instead of 0.
+  Keratin keeps that much synced zero space ahead of each active segment, so
+  durable writes to a fresh segment sync without waiting for a journal commit.
+  At 1k msg/s with three replicas on one NVMe drive, durable p50 went from about
+  9.5 ms to about 3 ms and p99 from 28-30 ms to 13-16 ms. At 100 msg/s p50 went
+  from about 6.5 ms to about 4 ms. Set it to 0 for the old behaviour.
+
 - Publishers on one queue partition share one publisher pipeline, so
   requests from many connections batch into the same appends. Each
   connection keeps its own order. On a three-node cluster with 16 publishing
