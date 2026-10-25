@@ -2048,7 +2048,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
             .global_store()
             .await
             .map_err(FibrilServerError::Storage)?,
-        log_runtime,
+        log_runtime.clone(),
     )
     .await?;
 
@@ -2318,6 +2318,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         let connection_settings = connection_settings.clone();
         let mut runtime_updates = runtime_settings.subscribe();
         let runtime_settings = Arc::downgrade(&runtime_settings);
+        let log_runtime = log_runtime.clone();
         tokio::spawn(async move {
             let mut applied_sync_interval = None;
             // Install the latest subscribed snapshot first, including updates
@@ -2334,6 +2335,9 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
                         .await;
                     applied_sync_interval = Some(sync_interval);
                 }
+                log_runtime.set_loaded_fsync_spacing(Duration::from_millis(
+                    snapshot.settings.storage.loaded_fsync_spacing_ms,
+                ));
                 connection_settings.update_runtime(ProtocolConnectionRuntimeSettings {
                     publisher_cache_idle_timeout_ms: snapshot
                         .settings

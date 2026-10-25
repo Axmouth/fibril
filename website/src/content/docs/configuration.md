@@ -513,6 +513,7 @@ written but not synced. Only buffered queues leave such records.
 | Runtime setting | Default | Meaning |
 | --- | --- | --- |
 | `storage.background_sync_interval_ms` | `100` | Target interval between syncs of a queue log's unsynced records. Slow disks can stretch it. `0` turns it off and leaves syncing to the operating system, with no limit on how long a confirmed buffered message stays unsynced. Applies to open queue logs at once. |
+| `storage.loaded_fsync_spacing_ms` | `2` | Least time between fsync starts on a log while an earlier fsync of that log is still running, from 0 to 1000. A log with no fsync running syncs at once, so light traffic is unaffected. Under load it merges many small syncs into fewer, for less CPU and steadier tail latency. `0` turns it off. Applies to open logs at once. |
 
 The `publish` runtime settings set how a queue's owner gathers publish
 requests from its connections into one append, separately for buffered and

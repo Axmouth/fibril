@@ -567,6 +567,12 @@
         </span>
       <span id="seed.storage.background_sync_interval_ms" class="settings-help"></span>
       </label>
+      <label class="settings-field">
+        <span class="settings-label">Loaded fsync spacing (milliseconds)</span>
+        <span class="settings-help">Least time between disk syncs of one queue log while an earlier sync is still running. A log with no sync running syncs at once, so light traffic is not affected. Under load it merges many small syncs into fewer, for less CPU and steadier tail latency. 0 turns it off. From 0 to 1000. Default 2.</span>
+        <input id="storage.loaded_fsync_spacing_ms" data-runtime-setting type="number" min="0" max="1000" step="1">
+      <span id="seed.storage.loaded_fsync_spacing_ms" class="settings-help"></span>
+      </label>
       </div>
     </section>
 
