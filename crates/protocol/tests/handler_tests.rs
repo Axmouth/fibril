@@ -26,7 +26,8 @@ use fibril_broker::{
         ReplicationDurabilityPolicy, StaticCoordination,
     },
     queue_engine::{
-        EvictOutcome, GlobalDLQ, OwnerReplicationRead, QueueEngine, QueuePromotionOutcome,
+        EncodedEvent, EvictOutcome, GlobalDLQ, OwnerReplicationRead, QueueEngine,
+        QueuePromotionOutcome,
         StromaEngine,
     },
 };
@@ -586,15 +587,15 @@ fn test_storage_history_binding() -> stroma_core::StorageHistoryBinding {
 
 /// Queue publishes are payload-carrying records in the queue event log. The
 /// containing event offset is the message id, so this returns (id, payload).
-fn queue_publishes(events: &OwnerReplicationRead<StromaEvent>) -> Vec<(u64, Vec<u8>)> {
+fn queue_publishes(events: &OwnerReplicationRead<EncodedEvent>) -> Vec<(u64, Vec<u8>)> {
     let OwnerReplicationRead::Batch(batch) = events else {
         panic!("expected event batch, got {events:?}");
     };
     batch
         .records
         .iter()
-        .filter_map(|(offset, event)| match event {
-            StromaEvent::PayloadEnqueue { payload, .. } => Some((*offset, payload.clone())),
+        .filter_map(|(offset, event)| match event.decode().unwrap() {
+            StromaEvent::PayloadEnqueue { payload, .. } => Some((*offset, payload)),
             _ => None,
         })
         .collect()
@@ -3470,7 +3471,7 @@ async fn follower_worker_loop_reports_checkpoint_requirement_without_history() {
         .into_iter()
         .map(|(offset, event)| ReplicationEventRecord {
             offset,
-            payload: event.encode().expect("owner event should encode"),
+            payload: event.0,
         })
         .collect::<Vec<_>>();
 
@@ -7007,6 +7008,7 @@ async fn recovery_seal_requires_node_auth_and_exact_committed_authority_over_tcp
                     payload: b"sealed-wire-body".to_vec(),
                 }],
                 durability: None,
+                encoded: None,
             })
         .await
         .unwrap();
@@ -7737,6 +7739,7 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
                     first_offset: 0,
                     durability: None,
                     events: shared[..first].to_vec(),
+                    encoded: None,
                 })
             .await
             .unwrap();
@@ -7757,6 +7760,7 @@ async fn sealed_pair_inspection_scenario(checkpoints: bool) {
                         first_offset: first as u64,
                         durability: None,
                         events: suffix,
+                        encoded: None,
                     })
                 .await
                 .unwrap();
@@ -8731,7 +8735,7 @@ async fn authenticated_recovery_scenario(handoff: bool, learner: LearnerCase) {
     impl fibril_broker::broker::BrokerQueuePushApply for ApplyHistory {
         fn apply_queue_push<'a>(
             &'a self,
-            records: OwnerReplicationRead<StromaEvent>,
+            records: OwnerReplicationRead<EncodedEvent>,
         ) -> futures::future::BoxFuture<
             'a,
             Result<fibril_broker::broker::QueuePushApply, fibril_broker::broker::BrokerError>,

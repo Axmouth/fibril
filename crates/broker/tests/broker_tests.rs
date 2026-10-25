@@ -30,7 +30,7 @@ use fibril_broker::{
         QueueIdentity, StaticCoordination, StreamAssignment, StreamIdentity,
     },
     queue_engine::{
-        Deliverable, DestroyOutcome, DiskUsedBreakdownEntry, EvictOutcome,
+        Deliverable, DestroyOutcome, DiskUsedBreakdownEntry, EncodedEvent, EvictOutcome,
         InspectMode, IoError, KeratinAppendCompletion, Message,
         MessageHeaders, OwnerReplicationBatch, OwnerReplicationRead, QueueStateCheckpoint,
         QueueEngine, QueuePromotionOutcome, ReplayDeadLetterOutcome, ReplayDeadLettersReport,
@@ -652,16 +652,23 @@ async fn prepare_test_queue_learner(
         .unwrap()
 }
 
-/// Published payloads in a queue event batch, keyed by their event offset,
-/// which is also the message id.
-fn event_payloads(batch: &OwnerReplicationBatch<stroma_core::StromaEvent>) -> Vec<(Offset, Vec<u8>)> {
+/// Events in a queue replication batch, decoded from their stored bytes and
+/// keyed by their event offset.
+fn decoded(batch: &OwnerReplicationBatch<EncodedEvent>) -> Vec<(Offset, stroma_core::StromaEvent)> {
     batch
         .records
         .iter()
+        .map(|(offset, event)| (*offset, event.decode().unwrap()))
+        .collect()
+}
+
+/// Published payloads in a queue event batch, keyed by their event offset,
+/// which is also the message id.
+fn event_payloads(batch: &OwnerReplicationBatch<EncodedEvent>) -> Vec<(Offset, Vec<u8>)> {
+    decoded(batch)
+        .into_iter()
         .filter_map(|(offset, event)| match event {
-            stroma_core::StromaEvent::PayloadEnqueue { payload, .. } => {
-                Some((*offset, payload.clone()))
-            }
+            stroma_core::StromaEvent::PayloadEnqueue { payload, .. } => Some((offset, payload)),
             _ => None,
         })
         .collect()
@@ -1519,12 +1526,13 @@ async fn assignment_transition_apply_can_stop_follower() {
         next_offset: 1,
         records: vec![(
             0,
-            stroma_core::StromaEvent::PayloadEnqueue {
+            EncodedEvent::encode(&stroma_core::StromaEvent::PayloadEnqueue {
                 not_before: None,
                 expire_at: None,
                 headers: Vec::new(),
                 payload: b"payload".to_vec(),
-            },
+            })
+            .unwrap(),
         )],
     });
     let err = broker
@@ -5231,7 +5239,7 @@ impl BrokerOwnerReplicationPeer for EmptyOwnerPeer {
         _max_records: usize,
         _max_bytes: usize,
         _max_wait_ms: u64,
-    ) -> BoxFuture<'a, Result<OwnerReplicationRead<stroma_core::StromaEvent>, BrokerError>> {
+    ) -> BoxFuture<'a, Result<OwnerReplicationRead<EncodedEvent>, BrokerError>> {
         Box::pin(async move {
             Ok(OwnerReplicationRead::Batch(OwnerReplicationBatch {
                 epoch: 0,
@@ -5373,7 +5381,7 @@ impl BrokerOwnerReplicationPeer for NotOwnerPeer {
         _max_records: usize,
         _max_bytes: usize,
         _max_wait_ms: u64,
-    ) -> BoxFuture<'a, Result<OwnerReplicationRead<stroma_core::StromaEvent>, BrokerError>> {
+    ) -> BoxFuture<'a, Result<OwnerReplicationRead<EncodedEvent>, BrokerError>> {
         Box::pin(async move {
             Err(BrokerError::NotOwner {
                 topic: topic.into(),
@@ -5442,7 +5450,7 @@ impl BrokerOwnerReplicationPeer for CountingEmptyOwnerPeer {
         _max_records: usize,
         _max_bytes: usize,
         max_wait_ms: u64,
-    ) -> BoxFuture<'a, Result<OwnerReplicationRead<stroma_core::StromaEvent>, BrokerError>> {
+    ) -> BoxFuture<'a, Result<OwnerReplicationRead<EncodedEvent>, BrokerError>> {
         if self.reads.load(Ordering::Acquire) >= self.complete_reads_limit {
             return Box::pin(std::future::pending());
         }
@@ -5504,7 +5512,7 @@ impl BrokerOwnerReplicationPeer for BlockingOwnerPeer {
         _max_records: usize,
         _max_bytes: usize,
         _max_wait_ms: u64,
-    ) -> BoxFuture<'a, Result<OwnerReplicationRead<stroma_core::StromaEvent>, BrokerError>> {
+    ) -> BoxFuture<'a, Result<OwnerReplicationRead<EncodedEvent>, BrokerError>> {
         self.reads.fetch_add(1, Ordering::AcqRel);
         self.read_notify.notify_waiters();
         Box::pin(std::future::pending())
@@ -5641,7 +5649,7 @@ impl BrokerOwnerReplicationPeer for FailAfterFirstReadPeer<'_> {
         max_records: usize,
         max_bytes: usize,
         max_wait_ms: u64,
-    ) -> BoxFuture<'a, Result<OwnerReplicationRead<stroma_core::StromaEvent>, BrokerError>> {
+    ) -> BoxFuture<'a, Result<OwnerReplicationRead<EncodedEvent>, BrokerError>> {
         if self.reads.fetch_add(1, Ordering::AcqRel) > 0 {
             return Box::pin(async { Err(BrokerError::Unknown("connection dropped".into())) });
         }
@@ -6944,9 +6952,10 @@ async fn delayed_publish_with_elapsed_deadline_records_an_ordinary_enqueue() {
         .read_owner_queue_records("elapsed", 0, None, 0, 100, usize::MAX).await.unwrap() else { panic!("event batch") };
     // The payload record itself is the enqueue. An elapsed deadline must not
     // leave a not_before on it.
-    assert!(events.records.iter().any(|(_, event)| matches!(event,
+    let events = decoded(&events);
+    assert!(events.iter().any(|(_, event)| matches!(event,
         stroma_core::StromaEvent::PayloadEnqueue { not_before: None, payload, .. } if payload == b"ready")));
-    assert!(!events.records.iter().any(|(_, event)| matches!(event,
+    assert!(!events.iter().any(|(_, event)| matches!(event,
         stroma_core::StromaEvent::PayloadEnqueue { not_before: Some(_), .. }
         | stroma_core::StromaEvent::EnqueueDelayed { .. }
         | stroma_core::StromaEvent::EnqueueDelayedMany { .. }
@@ -9047,7 +9056,7 @@ async fn coordinated_declaration_is_written_only_by_owner_and_reapplied_after_re
         panic!()
     };
     assert_eq!(
-        events.records,
+        decoded(&events),
         vec![(0, StromaEvent::Declare(meta.clone()))]
     );
 
@@ -9079,7 +9088,7 @@ async fn coordinated_declaration_is_written_only_by_owner_and_reapplied_after_re
         panic!()
     };
     assert_eq!(
-        events.records.last(),
+        decoded(&events).last(),
         Some(&(1, StromaEvent::Declare(updated.clone())))
     );
     assert_eq!(events.records.len(), 2);
@@ -9108,7 +9117,7 @@ async fn coordinated_declaration_is_written_only_by_owner_and_reapplied_after_re
     else {
         panic!()
     };
-    assert_eq!(events.records, vec![(0, StromaEvent::Declare(updated))]);
+    assert_eq!(decoded(&events), vec![(0, StromaEvent::Declare(updated))]);
     broker.shutdown().await;
 }
 

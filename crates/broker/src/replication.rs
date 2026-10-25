@@ -17,7 +17,7 @@ use tokio::sync::{Mutex as AsyncMutex, Notify};
 use tokio_util::sync::CancellationToken;
 
 use crate::storage::{Offset, Partition};
-use stroma_core::{Message, OwnerReplicationRead, StromaEvent};
+use stroma_core::{EncodedEvent, Message, OwnerReplicationRead, StromaEvent};
 
 use crate::broker::{Broker, BrokerConfig, BrokerError, FOLLOWER_STREAM_BUFFER_BATCHES, QueueKey};
 use crate::coordination::PartitionAssignment;
@@ -200,7 +200,7 @@ pub trait BrokerOwnerReplicationPeer: Send + Sync {
         max_records: usize,
         max_bytes: usize,
         max_wait_ms: u64,
-    ) -> BoxFuture<'a, Result<OwnerReplicationRead<StromaEvent>, BrokerError>>;
+    ) -> BoxFuture<'a, Result<OwnerReplicationRead<EncodedEvent>, BrokerError>>;
 
     fn read_owner_queue_records_fenced<'a>(
         &'a self,
@@ -212,7 +212,7 @@ pub trait BrokerOwnerReplicationPeer: Send + Sync {
         max_bytes: usize,
         max_wait_ms: u64,
         reporter_epoch: Option<u64>,
-    ) -> BoxFuture<'a, Result<OwnerReplicationRead<StromaEvent>, BrokerError>> {
+    ) -> BoxFuture<'a, Result<OwnerReplicationRead<EncodedEvent>, BrokerError>> {
         let _ = reporter_epoch;
         self.read_owner_queue_records(
             topic,
@@ -345,7 +345,7 @@ impl BrokerOwnerReplicationPeer for AssignmentReplicationPeer<'_> {
         max_records: usize,
         max_bytes: usize,
         max_wait_ms: u64,
-    ) -> BoxFuture<'a, Result<OwnerReplicationRead<StromaEvent>, BrokerError>> {
+    ) -> BoxFuture<'a, Result<OwnerReplicationRead<EncodedEvent>, BrokerError>> {
         Box::pin(async move {
             self.check_history()?;
             let records = self
@@ -465,7 +465,7 @@ struct HistoryQueuePushApply {
 impl BrokerQueuePushApply for HistoryQueuePushApply {
     fn apply_open_queue_push<'a>(
         &'a self,
-        frames: BoxStream<'a, Result<OwnerReplicationRead<StromaEvent>, BrokerError>>,
+        frames: BoxStream<'a, Result<OwnerReplicationRead<EncodedEvent>, BrokerError>>,
     ) -> BoxFuture<'a, Result<QueuePushApply, BrokerError>> {
         Box::pin(async move {
             self.broker.authorize_history_replication(&self.history, false)?;
@@ -480,7 +480,7 @@ impl BrokerQueuePushApply for HistoryQueuePushApply {
     }
     fn apply_queue_push<'a>(
         &'a self,
-        records: OwnerReplicationRead<StromaEvent>,
+        records: OwnerReplicationRead<EncodedEvent>,
     ) -> BoxFuture<'a, Result<QueuePushApply, BrokerError>> {
         Box::pin(async move {
             self.broker
@@ -682,13 +682,13 @@ pub enum FollowerStreamExit {
 pub trait BrokerQueuePushApply: Send + Sync {
     fn apply_open_queue_push<'a>(
         &'a self,
-        _frames: BoxStream<'a, Result<OwnerReplicationRead<StromaEvent>, BrokerError>>,
+        _frames: BoxStream<'a, Result<OwnerReplicationRead<EncodedEvent>, BrokerError>>,
     ) -> BoxFuture<'a, Result<QueuePushApply, BrokerError>> {
         Box::pin(async { Err(BrokerError::InvalidArgument("open follower batches unsupported".into())) })
     }
     fn apply_queue_push<'a>(
         &'a self,
-        records: OwnerReplicationRead<StromaEvent>,
+        records: OwnerReplicationRead<EncodedEvent>,
     ) -> BoxFuture<'a, Result<QueuePushApply, BrokerError>>;
     /// Current durable end of the follower queue log when it can trail what
     /// was applied, as on a buffered queue. `None` otherwise. No default, so
@@ -723,7 +723,7 @@ impl WorkerQueuePushApply {
 impl BrokerQueuePushApply for WorkerQueuePushApply {
     fn apply_open_queue_push<'a>(
         &'a self,
-        frames: BoxStream<'a, Result<OwnerReplicationRead<StromaEvent>, BrokerError>>,
+        frames: BoxStream<'a, Result<OwnerReplicationRead<EncodedEvent>, BrokerError>>,
     ) -> BoxFuture<'a, Result<QueuePushApply, BrokerError>> {
         Box::pin(async move {
             let written = self.broker.engine.queue_is_buffered(
@@ -741,7 +741,7 @@ impl BrokerQueuePushApply for WorkerQueuePushApply {
                         let p = owner_read_batch_progress("queue", &read)?.ok_or_else(|| {
                             BrokerError::InvalidArgument("open batch requires queue history".into())
                         })?;
-                        let batch = queue_apply_batch(read, written);
+                        let batch = queue_apply_batch(read, written)?;
                         progress.push((p, batch.is_some()));
                         Ok(batch)
                     };
@@ -788,7 +788,7 @@ impl BrokerQueuePushApply for WorkerQueuePushApply {
     }
     fn apply_queue_push<'a>(
         &'a self,
-        records: OwnerReplicationRead<StromaEvent>,
+        records: OwnerReplicationRead<EncodedEvent>,
     ) -> BoxFuture<'a, Result<QueuePushApply, BrokerError>> {
         Box::pin(async move {
             let outcome = self
@@ -1633,23 +1633,25 @@ pub(crate) fn owner_stream_records_empty(records: &BrokerOwnerStreamRecords) -> 
 /// separately. Otherwise followers apply durably, so the position they report
 /// is honest durable progress for the confirm policies.
 fn queue_apply_batch(
-    read: OwnerReplicationRead<StromaEvent>,
+    read: OwnerReplicationRead<EncodedEvent>,
     written: bool,
-) -> Option<ReplicatedEventBatch> {
+) -> Result<Option<ReplicatedEventBatch>, BrokerError> {
     match read {
         OwnerReplicationRead::Batch(batch) if !batch.records.is_empty() => {
-            Some(ReplicatedEventBatch {
-                epoch: batch.epoch,
-                first_offset: batch.records[0].0,
-                events: batch.records.into_iter().map(|(_, event)| event).collect(),
-                durability: Some(if written {
-                    KDurability::AfterFlush
-                } else {
-                    KDurability::AfterFsync
-                }),
-            })
+            let first_offset = batch.records[0].0;
+            let durability = Some(if written {
+                KDurability::AfterFlush
+            } else {
+                KDurability::AfterFsync
+            });
+            let records = batch.records.into_iter().map(|(_, record)| record).collect();
+            ReplicatedEventBatch::from_encoded(batch.epoch, first_offset, records, durability)
+                .map(Some)
+                .map_err(|err| {
+                    BrokerError::Unknown(format!("failed to decode replicated event record: {err}"))
+                })
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 
@@ -2538,7 +2540,7 @@ impl Broker<StromaEngine> {
         max_records: usize,
         max_bytes: usize,
         max_wait_ms: u64,
-    ) -> Result<OwnerReplicationRead<StromaEvent>, BrokerError> {
+    ) -> Result<OwnerReplicationRead<EncodedEvent>, BrokerError> {
         if max_records == 0 || max_bytes == 0 {
             return Err(BrokerError::InvalidArgument(
                 "replication read limits must be greater than zero".into(),
@@ -2604,7 +2606,7 @@ impl Broker<StromaEngine> {
         from: Offset,
         max_records: usize,
         max_bytes: usize,
-    ) -> Result<OwnerReplicationRead<StromaEvent>, BrokerError> {
+    ) -> Result<OwnerReplicationRead<EncodedEvent>, BrokerError> {
         self.ensure_replication_source_owner(topic, partition, group)?;
         let _owner_read_timer = self.replication_timing.owner_read.timer();
         if self.early_replication_enabled(topic, partition, group) {
@@ -2869,7 +2871,7 @@ impl Broker<StromaEngine> {
         topic: &str,
         partition: Partition,
         group: Option<&str>,
-        read: OwnerReplicationRead<StromaEvent>,
+        read: OwnerReplicationRead<EncodedEvent>,
     ) -> Result<BrokerQueueFollowerApply, BrokerError> {
         Self::apply_follower_queue_records_using_engine(
             &self.engine,
@@ -2888,7 +2890,7 @@ impl Broker<StromaEngine> {
         topic: &str,
         partition: Partition,
         group: Option<&str>,
-        read: OwnerReplicationRead<StromaEvent>,
+        read: OwnerReplicationRead<EncodedEvent>,
         written: bool,
     ) -> Result<BrokerQueueFollowerApply, BrokerError> {
         if let Some(required) = checkpoint_required(&read) {
@@ -2903,7 +2905,7 @@ impl Broker<StromaEngine> {
             );
             return Ok(BrokerQueueFollowerApply::CheckpointRequired(required));
         }
-        let outcome = match queue_apply_batch(read, written) {
+        let outcome = match queue_apply_batch(read, written)? {
             Some(batch) => Some(
                 engine
                     .apply_replicated_queue_batch(topic, partition.id(), group, batch)
@@ -2991,6 +2993,7 @@ impl Broker<StromaEngine> {
                     // are honest DURABLE progress for owner confirm policies
                     // (replica_durable/majority_durable).
                     durability: Some(KDurability::AfterFsync),
+                    encoded: None,
                 })
             }
             OwnerReplicationRead::Batch(_) => None,
@@ -3037,7 +3040,7 @@ impl Broker<StromaEngine> {
         topic: &str,
         partition: Partition,
         group: Option<&str>,
-        read: OwnerReplicationRead<StromaEvent>,
+        read: OwnerReplicationRead<EncodedEvent>,
     ) -> Result<QueuePushApply, BrokerError> {
         // A checkpoint-required read has nothing to append.
         let Some(progress) = owner_read_batch_progress("queue", &read)? else {
@@ -4027,7 +4030,7 @@ impl BrokerOwnerReplicationPeer for Broker<StromaEngine> {
         max_records: usize,
         max_bytes: usize,
         max_wait_ms: u64,
-    ) -> BoxFuture<'a, Result<OwnerReplicationRead<StromaEvent>, BrokerError>> {
+    ) -> BoxFuture<'a, Result<OwnerReplicationRead<EncodedEvent>, BrokerError>> {
         Box::pin(async move {
             Broker::<StromaEngine>::read_owner_queue_records(
                 self,
@@ -4096,7 +4099,7 @@ where
         max_records: usize,
         max_bytes: usize,
         max_wait_ms: u64,
-    ) -> BoxFuture<'a, Result<OwnerReplicationRead<StromaEvent>, BrokerError>> {
+    ) -> BoxFuture<'a, Result<OwnerReplicationRead<EncodedEvent>, BrokerError>> {
         self.as_ref().read_owner_queue_records(
             topic,
             partition,
@@ -4118,7 +4121,7 @@ where
         max_bytes: usize,
         max_wait_ms: u64,
         reporter_epoch: Option<u64>,
-    ) -> BoxFuture<'a, Result<OwnerReplicationRead<StromaEvent>, BrokerError>> {
+    ) -> BoxFuture<'a, Result<OwnerReplicationRead<EncodedEvent>, BrokerError>> {
         self.as_ref().read_owner_queue_records_fenced(
             topic,
             partition,

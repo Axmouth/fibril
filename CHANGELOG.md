@@ -636,6 +636,12 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Changed
 
+- Queue replication moves each record as the bytes the owner stored. The
+  owner no longer decodes and re-encodes records for the wire, and followers
+  append the bytes they received. On a three-node cluster sharing one NVMe
+  drive, durable saturation rose from about 129k to 135k msg/s at 1 KiB and
+  from 38k to 40k msg/s at 4 KiB, with about 8% less CPU per message at 4 KiB.
+
 - The `FIBRIL_DELIVERY_POLL_BATCH_BYTES` environment variable is removed. The
   per-poll delivery budget is a fixed 1 MiB.
 

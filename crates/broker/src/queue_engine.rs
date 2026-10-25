@@ -14,7 +14,7 @@ use stroma_core::{
 };
 pub use stroma_core::{
     AdaptiveStagingConfig, AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, DestroyOutcome,
-    DiskUsedBreakdownEntry, RecoveryDiskUsage, EmptyBufferResize, EmptyQueueRemoval, EnqueuedStreamAppend, EvictOutcome,
+    DiskUsedBreakdownEntry, RecoveryDiskUsage, EmptyBufferResize, EmptyQueueRemoval, EncodedEvent, EnqueuedStreamAppend, EvictOutcome,
     GlobalDLQ,
     GlobalDlqSnapshot, GlobalDlqUpdateOutcome, GlobalKey, GlobalStore, GlobalValue, InspectMode,
     IoError, KDurability, KeratinAppendCompletion, KeratinConfig, LogRuntimeConfig,
@@ -1110,9 +1110,9 @@ impl StromaEngine {
         from: Offset,
         max: usize,
         max_bytes: usize,
-    ) -> Result<OwnerReplicationRead<StromaEvent>, StromaError> {
+    ) -> Result<OwnerReplicationRead<EncodedEvent>, StromaError> {
         self.inner
-            .read_owner_queue_records(tp, part, group, from, max, max_bytes)
+            .read_owner_queue_encoded(tp, part, group, from, max, max_bytes)
             .await
     }
 
@@ -1124,9 +1124,9 @@ impl StromaEngine {
         from: Offset,
         max: usize,
         max_bytes: usize,
-    ) -> Result<OwnerReplicationRead<StromaEvent>, StromaError> {
+    ) -> Result<OwnerReplicationRead<EncodedEvent>, StromaError> {
         self.inner
-            .read_owner_queue_records_early(tp, part, group, from, max, max_bytes)
+            .read_owner_queue_encoded_early(tp, part, group, from, max, max_bytes)
             .await
     }
 

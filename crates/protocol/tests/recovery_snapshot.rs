@@ -100,6 +100,7 @@ async fn authenticated_snapshot_chunks_require_authority_and_complete_artifact()
                 epoch: 1,
                 first_offset: 0,
                 durability: Some(stroma_core::KDurability::AfterFsync),
+                encoded: None,
                 events: (0..12)
                     .map(|n| stroma_core::StromaEvent::PayloadEnqueue {
                         not_before: None,

@@ -7,7 +7,7 @@ use fibril_broker::{
     },
     queue_engine::{
         OwnerReplicationBatch, OwnerReplicationRead, QueueStateCheckpoint, StromaEngine,
-        StromaEvent,
+        EncodedEvent,
     },
 };
 use fibril_coordination_ganglion::GanglionCoordination;
@@ -56,7 +56,7 @@ impl BrokerOwnerReplicationPeer for CutPeer<'_> {
         max_records: usize,
         max_bytes: usize,
         max_wait_ms: u64,
-    ) -> futures::future::BoxFuture<'a, Result<OwnerReplicationRead<StromaEvent>, BrokerError>> {
+    ) -> futures::future::BoxFuture<'a, Result<OwnerReplicationRead<EncodedEvent>, BrokerError>> {
         self.read_owner_queue_records_fenced(
             topic,
             partition,
@@ -78,7 +78,7 @@ impl BrokerOwnerReplicationPeer for CutPeer<'_> {
         max_bytes: usize,
         max_wait_ms: u64,
         epoch: Option<u64>,
-    ) -> futures::future::BoxFuture<'a, Result<OwnerReplicationRead<StromaEvent>, BrokerError>> {
+    ) -> futures::future::BoxFuture<'a, Result<OwnerReplicationRead<EncodedEvent>, BrokerError>> {
         Box::pin(async move {
             let read = self
                 .owner

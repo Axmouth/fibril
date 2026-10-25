@@ -90,6 +90,7 @@ async fn inspection_download_resumes_over_tcp_then_revalidates_without_source() 
                 epoch: 1,
                 first_offset: 0,
                 durability: Some(stroma_core::KDurability::AfterFsync),
+                encoded: None,
                 events: (0..12)
                     .map(|n| stroma_core::StromaEvent::PayloadEnqueue {
                         not_before: None,

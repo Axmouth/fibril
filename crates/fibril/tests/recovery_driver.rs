@@ -1784,7 +1784,7 @@ async fn admitted_replica_reseed(
             'a,
             Result<
                 fibril_broker::queue_engine::OwnerReplicationRead<
-                    fibril_broker::queue_engine::StromaEvent,
+                    fibril_broker::queue_engine::EncodedEvent,
                 >,
                 fibril_broker::broker::BrokerError,
             >,

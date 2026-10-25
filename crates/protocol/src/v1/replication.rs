@@ -15,7 +15,8 @@ use fibril_broker::{
     },
     coordination::{Coordination, NodeInfo, PartitionAssignment},
     queue_engine::{
-        Message, OwnerReplicationBatch, OwnerReplicationRead, QueueStateCheckpoint, StromaEvent,
+        EncodedEvent, Message, OwnerReplicationBatch, OwnerReplicationRead, QueueStateCheckpoint,
+        StromaEvent,
     },
     replication::StreamApplyTunablesFn,
 };
@@ -853,7 +854,7 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
         max_records: usize,
         max_bytes: usize,
         max_wait_ms: u64,
-    ) -> futures::future::BoxFuture<'a, Result<OwnerReplicationRead<StromaEvent>, BrokerError>> {
+    ) -> futures::future::BoxFuture<'a, Result<OwnerReplicationRead<EncodedEvent>, BrokerError>> {
         self.read_owner_queue_records_fenced(
             topic,
             partition,
@@ -876,7 +877,7 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
         max_bytes: usize,
         max_wait_ms: u64,
         reporter_epoch: Option<u64>,
-    ) -> futures::future::BoxFuture<'a, Result<OwnerReplicationRead<StromaEvent>, BrokerError>> {
+    ) -> futures::future::BoxFuture<'a, Result<OwnerReplicationRead<EncodedEvent>, BrokerError>> {
         Box::pin(async move {
             let max_records = u32::try_from(max_records).map_err(|_| {
                 BrokerError::InvalidArgument("max_records exceeds protocol limit".into())
@@ -909,7 +910,7 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
                     max_wait_ms,
                 )
                 .await?;
-            to_broker_event_read(read)
+            Ok(to_broker_encoded_read(read))
         })
     }
 
@@ -1304,7 +1305,36 @@ fn to_broker_message_read(
     })
 }
 
-/// Decode one log read: a queue log reply, or a stream's cursor-event lane.
+/// A queue log reply with each record kept as the owner's stored bytes.
+/// Followers decode them when they apply the batch.
+fn to_broker_encoded_read(read: ReplicationEventRead) -> OwnerReplicationRead<EncodedEvent> {
+    match read {
+        ReplicationEventRead::Batch {
+            epoch,
+            requested_offset,
+            next_offset,
+            records,
+        } => OwnerReplicationRead::Batch(OwnerReplicationBatch {
+            epoch,
+            requested_offset,
+            next_offset,
+            records: records
+                .into_iter()
+                .map(|record| (record.offset, EncodedEvent(record.payload)))
+                .collect(),
+        }),
+        ReplicationEventRead::CheckpointRequired(required) => {
+            OwnerReplicationRead::CheckpointRequired {
+                epoch: required.epoch,
+                requested_offset: required.requested_offset,
+                head_offset: required.head_offset,
+                next_offset: required.next_offset,
+            }
+        }
+    }
+}
+
+/// Decode a stream's cursor-event lane.
 fn to_broker_event_read(
     read: ReplicationEventRead,
 ) -> Result<OwnerReplicationRead<StromaEvent>, BrokerError> {
@@ -1579,7 +1609,7 @@ impl FollowerPushSink for QueuePushSink {
         let records = frames
             .map(|frame| {
                 bytes = bytes.saturating_add(queue_push::batch_bytes(&frame));
-                to_broker_event_read(frame)
+                Ok(to_broker_encoded_read(frame))
             })
             .boxed();
         let outcome = self.apply.apply_open_queue_push(records).await;
@@ -1587,10 +1617,7 @@ impl FollowerPushSink for QueuePushSink {
     }
     async fn apply(&self, batch: QueueReplicationReadOk) -> FollowerApplyOutcome {
         let bytes = queue_push::batch_bytes(&batch);
-        let records = match to_broker_event_read(batch) {
-            Ok(records) => records,
-            Err(err) => return FollowerApplyOutcome::Error(err.to_string()),
-        };
+        let records = to_broker_encoded_read(batch);
         queue_push_outcome(self.apply.apply_queue_push(records).await, bytes)
     }
     async fn durable_next(&self) -> Option<u64> {

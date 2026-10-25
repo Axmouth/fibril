@@ -34,7 +34,7 @@ use fibril_broker::{
         DLQDiscardPolicyWire, DeclareMeta, GlobalDLQ, Message, MessageContentType, MessageHeaders,
         LocalDeclareError, OwnerReplicationRead, QueueDeclaration, QueueDurability,
         QueueStateCheckpoint, RetentionConfig, StreamStore, StromaEngine,
-        StromaError, StromaEvent, declare_local_queue_partition,
+        EncodedEvent, StromaError, StromaEvent, declare_local_queue_partition,
     },
     stream::{
         StreamChannel, StreamDurability as BrokerStreamDurability, StreamFilter, StreamRecord,
@@ -841,6 +841,34 @@ fn to_replication_event_read(
     }
 }
 
+/// A queue log read as wire records. The stored bytes move into the frame
+/// without being decoded.
+fn to_replication_encoded_read(read: OwnerReplicationRead<EncodedEvent>) -> ReplicationEventRead {
+    match read {
+        OwnerReplicationRead::Batch(batch) => ReplicationEventRead::Batch {
+            epoch: batch.epoch,
+            requested_offset: batch.requested_offset,
+            next_offset: batch.next_offset,
+            records: batch
+                .records
+                .into_iter()
+                .map(|(offset, EncodedEvent(payload))| ReplicationEventRecord { offset, payload })
+                .collect(),
+        },
+        OwnerReplicationRead::CheckpointRequired {
+            epoch,
+            requested_offset,
+            head_offset,
+            next_offset,
+        } => ReplicationEventRead::CheckpointRequired(replication_checkpoint_required(
+            epoch,
+            requested_offset,
+            head_offset,
+            next_offset,
+        )),
+    }
+}
+
 fn stream_records_to_wire(
     records: BrokerOwnerStreamRecords,
 ) -> std::io::Result<StreamReplicationReadOk> {
@@ -903,7 +931,7 @@ impl queue_push::OwnerPushSource for BrokerOwnerPushSource {
             true,
         )
         .map_err(|e| e.to_string())?;
-        to_replication_event_read(records).map_err(|err| err.to_string())
+        Ok(to_replication_encoded_read(records))
     }
 
     fn record_progress(
@@ -4089,24 +4117,7 @@ where
                         Ok(records)
                     }) {
                     Ok(records) => {
-                        let response = match to_replication_event_read(records) {
-                            Ok(response) => response,
-                            Err(err) => {
-                                tracing::error!(
-                                    error = %err,
-                                    "failed to encode replication read response"
-                                );
-                                send_error_response_and_count(
-                                    &frame_tx_high_prio,
-                                    &metrics,
-                                    frame.request_id,
-                                    500,
-                                    "replication read encoding failed",
-                                )
-                                .await;
-                                continue;
-                            }
-                        };
+                        let response = to_replication_encoded_read(records);
                         frame_tx_high_prio
                             .send(wire::encode_queue_replication_read_ok(
                                 frame.request_id,
