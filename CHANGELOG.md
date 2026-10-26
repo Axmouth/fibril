@@ -636,6 +636,11 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Changed
 
+- `storage.keratin.writer_buffer_factor` defaults to 32 instead of 128, so
+  each log's writer and notification channels start with 2,048 slots instead
+  of 8,192. With 200 idle queues on a three-node cluster, memory per node fell
+  from about 950 MiB to about 765 MiB, with throughput and latency unchanged.
+
 - The per-log tail cache defaults to 16 MiB instead of 64 MiB, and only the
   queue's owner fills it. On a three-node cluster at 10k msg/s, peak memory
   fell from about 221 to 166 MiB on the owner node and from about 185 to

@@ -1604,8 +1604,10 @@ pub struct KeratinStorageSection {
     pub staging_idle_release_secs: u64,
 }
 
+/// 2048 slots per channel. Larger factors mostly cost memory on idle queues,
+/// see the optimization log.
 fn default_writer_buffer_factor() -> usize {
-    128
+    32
 }
 
 fn default_max_inflight_fsyncs() -> usize {
@@ -2413,7 +2415,7 @@ mod tests {
                 .storage
                 .keratin
                 .writer_buffer_factor,
-            128
+            32
         );
         for factor in [0, 129, usize::MAX] {
             let input = format!("[storage.keratin]\nwriter_buffer_factor = {factor}\n");
@@ -2431,7 +2433,7 @@ mod tests {
     #[test]
     fn defaults_match_current_server_behavior() {
         let config = ServerConfig::default();
-        assert_eq!(config.storage.keratin.writer_buffer_factor, 128);
+        assert_eq!(config.storage.keratin.writer_buffer_factor, 32);
 
         assert_eq!(config.server.data_dir, PathBuf::from("server_data"));
         assert_eq!(

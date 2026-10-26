@@ -64,9 +64,9 @@ fsync_interval_ms = 5
 # tmpfs). On slow-fsync storage such as SATA SSDs a floor around the fsync
 # interval (5) gives the drive breathing room between write barriers.
 min_fsync_interval_ms = 0
-# Writer and notification channels each have 64 * factor slots per log.
-# 128 preserves the default 8192 slots; smaller values reduce eager allocation.
-writer_buffer_factor = 128
+# Writer and notification channels each have 64 * factor slots per log,
+# from 1 to 128. Smaller values allocate less per log.
+writer_buffer_factor = 32
 adaptive_staging = true
 staging_decay_secs = 10
 staging_idle_release_secs = 60
@@ -185,7 +185,7 @@ These fields are read on process start.
 | `coordination.secret_path` | `FIBRIL_CLUSTER_SECRET_PATH` (or `FIBRIL_CLUSTER_SECRET` for the value) | none | unset |
 | `storage.keratin.fsync_interval_ms` | `FIBRIL_KERATIN_FSYNC_INTERVAL_MS` | `--keratin-fsync-interval-ms` | `5` |
 | `storage.keratin.min_fsync_interval_ms` | `FIBRIL_KERATIN_MIN_FSYNC_INTERVAL_MS` | `--keratin-min-fsync-interval-ms` | `0` |
-| `storage.keratin.writer_buffer_factor` | `FIBRIL_KERATIN_WRITER_BUFFER_FACTOR` | none | `128` |
+| `storage.keratin.writer_buffer_factor` | `FIBRIL_KERATIN_WRITER_BUFFER_FACTOR` | none | `32` |
 | `storage.keratin.tail_cache_bytes` | `FIBRIL_KERATIN_TAIL_CACHE_BYTES` | none | `16777216` |
 | `storage.keratin.adaptive_staging` | `FIBRIL_KERATIN_ADAPTIVE_STAGING` | none | `true` |
 | `storage.keratin.staging_decay_secs` | `FIBRIL_KERATIN_STAGING_DECAY_SECS` | none | `10` |
