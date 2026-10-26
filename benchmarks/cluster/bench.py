@@ -605,9 +605,10 @@ def main():
     if args.burst_pattern and not args.rate:
         parser.error("--burst-pattern needs --rate")
     if args.burst_pattern:
-        cycle = sum(int(n) for n in args.burst_pattern.split(",")) / args.rate
-        if args.warmup_secs % cycle or args.duration_secs % cycle:
-            parser.error(f"warmup and duration must be whole burst cycles of {cycle:g}s")
+        # In whole messages: a float cycle like 0.7 s does not divide 7 s exactly.
+        total = sum(int(n) for n in args.burst_pattern.split(","))
+        if (args.warmup_secs * args.rate) % total or (args.duration_secs * args.rate) % total:
+            parser.error(f"warmup and duration must be whole burst cycles of {total / args.rate:g}s")
     if not 1 <= args.prefetch <= 2000:
         parser.error("the comparison client takes --prefetch from 1 to 2000")
     if not 1 <= args.connections <= 16 or args.prefetch % args.connections:
