@@ -310,38 +310,19 @@ pub async fn run_owner_queue_push<S: OwnerPushSource>(
     let reporter = start.reporter_node_id;
     let mut from = start.from;
     let mut credit = PushCredit::new(start.credit_bytes);
+    // With no credit left, the next frame is read ahead at half the window,
+    // so it is ready once the follower returns one frame's credit while it
+    // still applies another.
+    let window = start.credit_bytes;
 
     'push: loop {
-        // Out of budget: park until the follower refills (or stops / drops).
-        if credit.available == 0 {
-            let parked = diag::enabled().then(std::time::Instant::now);
-            let control = control_rx.recv().await;
-            if let Some(parked) = parked {
-                diag::owner_credit_park(parked.elapsed());
-            }
-            match control {
-                Some(control) => {
-                    if !apply_control(
-                        control,
-                        source.as_ref(),
-                        &topic,
-                        partition,
-                        group.as_deref(),
-                        reporter.as_deref(),
-                        &mut credit,
-                        &mut from,
-                    ) {
-                        break 'push;
-                    }
-                    continue 'push;
-                }
-                None => break 'push,
-            }
-        }
-
         let cfg = source.push_config().unwrap_or(cfg);
-        let max_bytes = credit.available.min(cfg.max_batch_bytes as u64) as usize;
-        let credit_capped = credit.available < cfg.max_batch_bytes as u64;
+        let max_frame = cfg.max_batch_bytes as u64;
+        let (max_bytes, credit_capped) = if credit.available > 0 {
+            (credit.available.min(max_frame), credit.available < max_frame)
+        } else {
+            ((window / 2).min(max_frame), true)
+        };
         let read_started = diag::enabled().then(std::time::Instant::now);
         let read = source.read(
             &topic,
@@ -349,12 +330,12 @@ pub async fn run_owner_queue_push<S: OwnerPushSource>(
             group.as_deref(),
             from,
             cfg.max_records,
-            max_bytes,
+            max_bytes.max(1) as usize,
             cfg.long_poll_ms,
         );
 
         tokio::pin!(read);
-        loop {
+        let batch = loop {
             tokio::select! {
                 // Progress only updates credit and durable acknowledgements. Keep
                 // the scan alive across progress so its blocking storage work is not
@@ -387,39 +368,7 @@ pub async fn run_owner_queue_push<S: OwnerPushSource>(
                         diag::owner_read(started.elapsed(), credit_capped);
                     }
                     match result {
-                        Ok(batch) => match classify(&batch) {
-                            BatchOutcome::Empty => continue 'push,
-                            BatchOutcome::CheckpointRequired => {
-                                send_push_end(
-                                    &frame_tx,
-                                    push_id,
-                                    PUSH_END_CHECKPOINT_REQUIRED,
-                                    "checkpoint required",
-                                )
-                                .await;
-                                break 'push;
-                            }
-                            BatchOutcome::Records { bytes, next } => {
-                                let records = batch_records(&batch);
-                                let frame = match wire::encode_queue_push_batch(push_id, &batch) {
-                                    Ok(frame) => frame,
-                                    Err(err) => {
-                                        send_push_end(&frame_tx, push_id, PUSH_END_ERROR, &err.to_string()).await;
-                                        break 'push;
-                                    }
-                                };
-                                let sending = diag::enabled().then(std::time::Instant::now);
-                                if frame_tx.send(frame).await.is_err() {
-                                    break 'push;
-                                }
-                                if let Some(sending) = sending {
-                                    diag::owner_frame(records, bytes, sending.elapsed());
-                                }
-                                from = next;
-                                credit.consume(bytes);
-                                continue 'push;
-                            }
-                        },
+                        Ok(batch) => break batch,
                         Err(err) => {
                             send_push_end(&frame_tx, push_id, PUSH_END_ERROR, &err).await;
                             break 'push;
@@ -427,7 +376,81 @@ pub async fn run_owner_queue_push<S: OwnerPushSource>(
                     }
                 }
             }
+        };
+
+        let (bytes, next) = match classify(&batch) {
+            BatchOutcome::Empty => continue 'push,
+            BatchOutcome::CheckpointRequired => {
+                send_push_end(
+                    &frame_tx,
+                    push_id,
+                    PUSH_END_CHECKPOINT_REQUIRED,
+                    "checkpoint required",
+                )
+                .await;
+                break 'push;
+            }
+            BatchOutcome::Records { bytes, next } => (bytes, next),
+        };
+        let records = batch_records(&batch);
+        let frame = match wire::encode_queue_push_batch(push_id, &batch) {
+            Ok(frame) => frame,
+            Err(err) => {
+                send_push_end(&frame_tx, push_id, PUSH_END_ERROR, &err.to_string()).await;
+                break 'push;
+            }
+        };
+
+        // Send once credit covers the frame. A single record larger than the
+        // credit left goes once any credit is back, its excess kept as debt.
+        let parked = diag::enabled().then(std::time::Instant::now);
+        let mut waited = false;
+        while !(credit.available >= bytes || (records == 1 && credit.available > 0)) {
+            waited = true;
+            match control_rx.recv().await {
+                Some(control) => {
+                    let reset = matches!(control, OwnerPushControl::Reset { .. });
+                    if !apply_control(
+                        control,
+                        source.as_ref(),
+                        &topic,
+                        partition,
+                        group.as_deref(),
+                        reporter.as_deref(),
+                        &mut credit,
+                        &mut from,
+                    ) {
+                        break 'push;
+                    }
+                    if reset {
+                        // The prepared frame no longer starts at the cursor.
+                        continue 'push;
+                    }
+                    // Read limits changed live. A prepared frame over them is
+                    // read again, unless it is a single oversized record.
+                    let now = source.push_config().unwrap_or(cfg);
+                    if records > 1
+                        && (records > now.max_records as u64 || bytes > now.max_batch_bytes as u64)
+                    {
+                        continue 'push;
+                    }
+                }
+                None => break 'push,
+            }
         }
+        if let (Some(parked), true) = (parked, waited) {
+            diag::owner_credit_park(parked.elapsed());
+        }
+
+        let sending = diag::enabled().then(std::time::Instant::now);
+        if frame_tx.send(frame).await.is_err() {
+            break 'push;
+        }
+        if let Some(sending) = sending {
+            diag::owner_frame(records, bytes, sending.elapsed());
+        }
+        from = next;
+        credit.consume(bytes);
     }
 }
 
@@ -1076,9 +1099,10 @@ mod tests {
                     .is_err()
             );
         }
-        // Every returned record restores only half a record of available credit.
+        // One frame per returned record: each return repays half a record of
+        // debt. Frames read ahead while credit was out ask for half the window.
         let budgets: Vec<_> = source.reads.lock().unwrap().iter().map(|r| r.1).collect();
-        assert_eq!(budgets, vec![100, 50, 50, 50, 50, 50]);
+        assert_eq!(budgets, vec![100, 50, 75, 75, 75, 75, 75]);
         control_tx.send(OwnerPushControl::Stop).await.unwrap();
         task.await.unwrap();
     }
@@ -1120,9 +1144,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(recv_offsets(&mut frame_rx, 2).await, vec![2, 3]);
+        // The frame after [0, 1] is read ahead at half the window and already
+        // fits the new limits, then [3] and the frame after it use them.
         assert_eq!(
             *source.reads.lock().unwrap(),
-            vec![(2, 200, 17), (1, 100, 23), (1, 100, 23)]
+            vec![(2, 200, 17), (2, 100, 17), (1, 100, 23), (1, 100, 23)]
         );
         control_tx.send(OwnerPushControl::Stop).await.unwrap();
         task.await.unwrap();
@@ -1168,13 +1194,15 @@ mod tests {
                 .unwrap();
             until(|| source.progress.lock().unwrap().len() == count).await;
         }
-        gate.add_permits(1);
-        assert_eq!(recv_offsets(&mut frame_rx, 1).await, vec![0]);
         assert_eq!(
             source.reads.lock().unwrap().len(),
             1,
             "progress must not restart a scan"
         );
+        gate.add_permits(1);
+        assert_eq!(recv_offsets(&mut frame_rx, 1).await, vec![0]);
+        // The next frame is read while the follower still holds the credit.
+        until(|| source.reads.lock().unwrap().len() == 2).await;
         control_tx
             .send(OwnerPushControl::Progress {
                 durable_next: 1, written_next: 1,
