@@ -1615,16 +1615,15 @@ fn default_max_inflight_fsyncs() -> usize {
 fn default_pipeline_commit_records() -> u64 {
     2048
 }
-/// Per log, owner only. 16 MiB matched 64 MiB on throughput and latency at
-/// 10k msg/s and saturation on three nodes sharing one NVMe drive, about 1.6 s
-/// of 1 KiB records at 10k msg/s.
+/// Per log, filled only by the owner. A couple of seconds of tail at typical
+/// rates. Larger budgets gave no measurable gain, see the optimization log.
 fn default_tail_cache_bytes() -> usize {
     16 * 1024 * 1024
 }
 
-/// 8 MiB took 1k msg/s durable p50 from about 9.5 ms to about 3 ms on three
-/// replicas sharing one NVMe drive, since appends to a fresh segment no longer
-/// wait for journal commits.
+/// Zeros synced ahead of the cursor let a fresh segment's syncs skip the
+/// journal commit an extending write waits for, which sets durable latency at
+/// low rates. See the optimization log.
 fn default_segment_preallocate_bytes() -> usize {
     8 * 1024 * 1024
 }

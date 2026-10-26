@@ -55,8 +55,8 @@ pub struct StorageRuntimeSettings {
     /// Least time between fsync starts on a log while an earlier fsync of
     /// that log is still running. A log with no fsync running syncs at once,
     /// so light traffic is unaffected. Under load it merges many small
-    /// overlapping syncs into fewer, which saved 8 to 10% CPU and steadied
-    /// p99 at 1k msg/s on a consumer NVMe drive. `0` turns it off.
+    /// overlapping syncs into fewer, for less CPU and a steadier tail. `0`
+    /// turns it off.
     pub loaded_fsync_spacing_ms: u64,
 }
 
