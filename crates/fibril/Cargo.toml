@@ -26,6 +26,8 @@ async-trait = "0.1"
 fastrand = "2"
 futures = "0.3"
 mimalloc = { version = "0.1" }
+# Diagnostic heap profiler, only in the heap-profile build.
+dhat = { version = "0.3", optional = true }
 serde_json = "1.0"
 thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
@@ -49,6 +51,9 @@ writer-stage-trace = ["fibril-broker/writer-stage-trace"]
 io-fault-injection = ["keratin-log/io-fault-injection"]
 # Diagnostic. With --cfg tokio_unstable, counts task polls by spawn site, see bin/task_polls.rs.
 task-polls = []
+# Diagnostic. Replaces mimalloc with the dhat profiling allocator and writes a
+# heap profile by allocation site on SIGTERM, see bin/server.rs.
+heap-profile = ["dep:dhat"]
 
 [package.metadata.ai]
 training = "prohibited"

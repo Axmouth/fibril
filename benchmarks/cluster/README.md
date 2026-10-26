@@ -132,6 +132,18 @@ the spawn sites whose polls held a worker for 1 ms or more, as polls over
 1 ms, polls over 4 ms, total ms and the longest in ms. Tasks queued behind a
 long poll on the same worker wait for it.
 
+Heap by allocation site comes from a build with the dhat allocator in place
+of mimalloc. Each broker writes `dhat-heap.json` in its node directory when
+the bench stops it, so pass `--keep-data`. The profiler slows the broker
+several times over, so use rates well below what a normal build sustains:
+
+```sh
+CARGO_TARGET_DIR=target-heap cargo build --release --features heap-profile --bin fibril-server
+```
+
+The profile opens in the dhat viewer. Bytes live at the global peak, by
+allocation site, are the figures to compare.
+
 Every run also records replication pipeline counters as `pipeline` in the
 summary, one entry per node, over the measured window:
 
