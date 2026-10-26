@@ -598,6 +598,12 @@ fn main() -> Result<()> {
         .build()?;
     let a = Arc::new(args.clone());
     let p = Arc::new(Progress::default());
+    // Wall clock at the timeline origin, to line the samples up with broker
+    // traces.
+    let origin_unix_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
     let (result, samples) = runtime.block_on(async {
         let origin = Instant::now();
         let (stop, mut stopped) = watch::channel(false);
@@ -624,6 +630,7 @@ fn main() -> Result<()> {
         ),
     };
     output["timeline"] = json!(samples);
+    output["timeline_origin_unix_ns"] = json!(origin_unix_ns);
     std::fs::write(&args.output, serde_json::to_vec_pretty(&output)?)?;
     if let Some(e) = error {
         return Err(e);
