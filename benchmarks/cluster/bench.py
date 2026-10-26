@@ -227,10 +227,11 @@ def run(args):
         cpusets = args.broker_cpusets.split(";") if args.broker_cpusets else []
         for i in range(copies):
             node_data[i].mkdir(parents=True)
-            node_env = dict(env, KERATIN_DRAIN_COUNTERS_PATH=str(case / f"node-{i}-counters.json"),
-                            FIBRIL_TASK_POLLS_PATH=str(case / f"node-{i}-polls.json"),
-                            FIBRIL_PIPELINE_COUNTERS_PATH=str(case / f"node-{i}-pipeline.json"),
-                            FIBRIL_LONG_POLLS_PATH=str(case / f"node-{i}-long-polls.json"))
+            node_env = dict(env) if args.no_diagnostics else dict(
+                env, KERATIN_DRAIN_COUNTERS_PATH=str(case / f"node-{i}-counters.json"),
+                FIBRIL_TASK_POLLS_PATH=str(case / f"node-{i}-polls.json"),
+                FIBRIL_PIPELINE_COUNTERS_PATH=str(case / f"node-{i}-pipeline.json"),
+                FIBRIL_LONG_POLLS_PATH=str(case / f"node-{i}-long-polls.json"))
             node_env.update(item.split("=", 1) for item in args.node_env)
             if args.preallocate_bytes is not None:
                 node_env["FIBRIL_KERATIN_SEGMENT_PREALLOCATE_BYTES"] = str(args.preallocate_bytes)
@@ -563,6 +564,9 @@ def main():
     parser.add_argument("--node-env", action="append", default=[], metavar="KEY=VALUE",
                         help="Environment for every broker, for experiment switches. Repeatable")
     parser.add_argument("--rust-log", default="warn")
+    parser.add_argument("--no-diagnostics", action="store_true",
+                        help="Leave the broker's counter files off. Their runtime probe wakes a worker every 1 ms, "
+                             "so idle wakeups and CPU then match a production broker")
     parser.add_argument("--keep-data", action="store_true", help="Keep broker data after the run")
     args = parser.parse_args()
     if args.burst_pattern and not args.rate:
