@@ -186,6 +186,7 @@ These fields are read on process start.
 | `storage.keratin.fsync_interval_ms` | `FIBRIL_KERATIN_FSYNC_INTERVAL_MS` | `--keratin-fsync-interval-ms` | `5` |
 | `storage.keratin.min_fsync_interval_ms` | `FIBRIL_KERATIN_MIN_FSYNC_INTERVAL_MS` | `--keratin-min-fsync-interval-ms` | `0` |
 | `storage.keratin.writer_buffer_factor` | `FIBRIL_KERATIN_WRITER_BUFFER_FACTOR` | none | `128` |
+| `storage.keratin.tail_cache_bytes` | `FIBRIL_KERATIN_TAIL_CACHE_BYTES` | none | `16777216` |
 | `storage.keratin.adaptive_staging` | `FIBRIL_KERATIN_ADAPTIVE_STAGING` | none | `true` |
 | `storage.keratin.staging_decay_secs` | `FIBRIL_KERATIN_STAGING_DECAY_SECS` | none | `10` |
 | `storage.keratin.staging_idle_release_secs` | `FIBRIL_KERATIN_STAGING_IDLE_RELEASE_SECS` | none | `60` |

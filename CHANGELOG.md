@@ -636,6 +636,12 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Changed
 
+- The per-log tail cache defaults to 16 MiB instead of 64 MiB, and only the
+  queue's owner fills it. On a three-node cluster at 10k msg/s, peak memory
+  fell from about 221 to 166 MiB on the owner node and from about 185 to
+  110 MiB on each follower node, with throughput and latency unchanged.
+  `FIBRIL_KERATIN_TAIL_CACHE_BYTES` sets it.
+
 - Queue replication moves each record as the bytes the owner stored. The
   owner no longer decodes and re-encodes records for the wire, and followers
   append the bytes they received. On a three-node cluster sharing one NVMe

@@ -672,6 +672,10 @@ impl ServerConfig {
             self.storage.keratin.staging_idle_release_secs =
                 parse_env("FIBRIL_KERATIN_STAGING_IDLE_RELEASE_SECS", &value)?;
         }
+        if let Some(value) = env_value(&mut get, "FIBRIL_KERATIN_TAIL_CACHE_BYTES")? {
+            self.storage.keratin.tail_cache_bytes =
+                parse_env("FIBRIL_KERATIN_TAIL_CACHE_BYTES", &value)?;
+        }
         if let Some(value) = env_value(&mut get, "FIBRIL_KERATIN_WRITER_BUFFER_FACTOR")? {
             self.storage.keratin.writer_buffer_factor =
                 parse_env("FIBRIL_KERATIN_WRITER_BUFFER_FACTOR", &value)?;
@@ -1567,10 +1571,10 @@ pub struct KeratinStorageSection {
     pub message_log: KeratinLogSection,
     #[serde(default = "default_event_log_section")]
     pub event_log: KeratinLogSection,
-    /// In-memory tail-read cache budget in bytes for the message log (`0`
-    /// disables, e.g. to keep RAM free). Recent records are served to
-    /// tail-following consumers from memory instead of scanning the segment
-    /// file under fsync/writeback.
+    /// In-memory tail-read cache budget in bytes per queue log (`0` disables).
+    /// Recent records are served to tail-following consumers and replication
+    /// from memory instead of scanning the segment file under fsync and
+    /// writeback. Only the owner fills it.
     #[serde(default = "default_tail_cache_bytes")]
     pub tail_cache_bytes: usize,
     /// Bytes kept ready ahead of each active segment write cursor (`0` = off).
@@ -1611,8 +1615,11 @@ fn default_max_inflight_fsyncs() -> usize {
 fn default_pipeline_commit_records() -> u64 {
     2048
 }
+/// Per log, owner only. 16 MiB matched 64 MiB on throughput and latency at
+/// 10k msg/s and saturation on three nodes sharing one NVMe drive, about 1.6 s
+/// of 1 KiB records at 10k msg/s.
 fn default_tail_cache_bytes() -> usize {
-    64 * 1024 * 1024
+    16 * 1024 * 1024
 }
 
 /// 8 MiB took 1k msg/s durable p50 from about 9.5 ms to about 3 ms on three
