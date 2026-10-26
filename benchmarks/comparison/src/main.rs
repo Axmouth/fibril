@@ -146,9 +146,11 @@ impl Args {
             self.payload_bytes >= metrics::HEADER && self.payload_bytes <= 1024 * 1024,
             "payload must be 32 bytes..1 MiB, including the 32-byte measurement header"
         );
+        // Six hours. Memory per run is one bit per message for identity
+        // checks, fixed-size histograms and a sample every 100 ms.
         ensure!(
             self.duration_secs > 0
-                && self.duration_secs <= 1800
+                && self.duration_secs <= 21_600
                 && self.warmup_secs <= 600
                 && self.drain_secs > 0
                 && self.drain_secs <= 600,
