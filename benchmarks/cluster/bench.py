@@ -230,6 +230,8 @@ def run(args):
             node_env = dict(env, FIBRIL_TASK_POLLS_PATH=str(case / f"node-{i}-polls.json"),
                             FIBRIL_TASK_BUSY_PATH=str(case / f"node-{i}-busy.json"),
                             FIBRIL_LONG_POLLS_PATH=str(case / f"node-{i}-long-polls.json"))
+            if args.stage_trace:
+                node_env["KERATIN_WRITER_STAGE_TRACE"] = str(case / f"node-{i}-stage.jsonl")
             if not args.no_diagnostics:
                 node_env.update(KERATIN_DRAIN_COUNTERS_PATH=str(case / f"node-{i}-counters.json"),
                                 FIBRIL_PIPELINE_COUNTERS_PATH=str(case / f"node-{i}-pipeline.json"))
@@ -593,6 +595,9 @@ def main():
                         help="Leave the pipeline and Keratin counter files off. The pipeline counters' runtime probe "
                              "wakes a worker every 1 ms, so idle wakeups and CPU then match a production broker. "
                              "Task polls from a task-polls build are still recorded")
+    parser.add_argument("--stage-trace", action="store_true",
+                        help="Write each broker's Keratin writer stage trace to node-N-stage.jsonl. "
+                             "Needs a build with the writer-stage-trace feature")
     parser.add_argument("--idle-window-secs", type=int, default=IDLE_WINDOW_SECS,
                         help="Length of the quiet window measured after --idle-queues are open")
     parser.add_argument("--keep-data", action="store_true", help="Keep broker data after the run")
