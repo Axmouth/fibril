@@ -370,6 +370,9 @@ pub async fn learn_queue_once(
     }
 }
 
+/// Longest the learner loop skips passes while the state looks unchanged.
+const IDLE_PASS_BACKSTOP: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The learner loop is independent of recovery: an unavailable owner cannot
 /// delay witness collection or installation for another queue on this broker.
 pub(crate) struct LearnerWorker(tokio::task::JoinHandle<()>);
@@ -387,10 +390,18 @@ pub(crate) fn spawn(
         use std::{collections::HashMap, time::Duration};
         let mut learner_failures: HashMap<ResourceIdentity, (tokio::time::Instant, u64, String)> =
             HashMap::new();
+        // Content digest of the state a pass found no work in, and when. A
+        // pass scans every partition, so while the state is unchanged apart
+        // from heartbeats the next one is skipped, up to a backstop.
+        let mut idle_pass: Option<(u64, tokio::time::Instant)> = None;
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             if broker.is_shutting_down() {
                 break;
+            }
+            let (digest, _) = provider.committed_content_digest();
+            if idle_pass.is_some_and(|(seen, at)| seen == digest && at.elapsed() < IDLE_PASS_BACKSTOP) {
+                continue;
             }
             config.nodes = provider
                 .consensus_node()
@@ -416,7 +427,12 @@ pub(crate) fn spawn(
                     }
                 }
             }
-            match provider.queue_learner_work() {
+            let learner_work = provider.queue_learner_work();
+            idle_pass = (reseeds.is_empty()
+                && learner_failures.is_empty()
+                && learner_work.as_ref().is_ok_and(|work| work.is_empty()))
+            .then(|| (digest, tokio::time::Instant::now()));
+            match learner_work {
                 Ok(mut work) => {
                     work.extend(reseeds.iter().filter(|i| i.node==provider.node_id() && i.phase==fibril_coordination_ganglion::queue_reseed::ReseedPhase::Ready).map(|i|i.assignment.resource.clone()));
                     learner_failures.retain(|r, _| work.contains(r));

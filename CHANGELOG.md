@@ -636,6 +636,15 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Changed
 
+- Coordination work skips heartbeat-only commits. Each broker commits a
+  heartbeat every few seconds, which used to make the controller replan,
+  every node rebuild its routing view and accepted histories for all
+  partitions, every connection rebuild the client topology, and the learner
+  loop rescan every partition. They now key on a digest of the coordination
+  state without heartbeat stamps, with a 30 second backstop for the
+  controller and the learner loop. With 200 idle queues on a three-node
+  cluster, idle CPU per node fell from about 200-250 to about 60-67 ms/s.
+
 - `storage.keratin.writer_buffer_factor` defaults to 32 instead of 128, so
   each log's writer and notification channels start with 2,048 slots instead
   of 8,192. With 200 idle queues on a three-node cluster, memory per node fell

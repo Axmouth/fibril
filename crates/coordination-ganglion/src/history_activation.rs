@@ -348,49 +348,63 @@ impl GanglionCoordination {
 }
 
 type CachedHistory = (
-    Option<ganglion_openraft::openraft::LogId<u64>>,
+    u64,
     std::sync::Arc<Result<fibril_broker::history_replication::AcceptedHistory, String>>,
 );
 
-/// Accepted histories by resource, each tagged with the committed log id it
-/// was built from. Replication checks the history on every read and progress
-/// report, and building it parses several metadata documents.
+/// Accepted histories by resource, each tagged with the content digest of the
+/// committed state it was built from. Replication checks the history on every
+/// read and progress report, and building it parses several metadata
+/// documents. Heartbeat commits leave the digest, and so the entries, as they
+/// are.
 #[derive(Default)]
-pub(crate) struct AcceptedHistoryCache(
-    std::sync::Mutex<std::collections::HashMap<ganglion_core::ResourceIdentity, CachedHistory>>,
-);
+pub(crate) struct AcceptedHistoryCache {
+    entries: std::sync::Mutex<std::collections::HashMap<ganglion_core::ResourceIdentity, CachedHistory>>,
+}
 
 /// Bounds the cache when resources come and go.
 const ACCEPTED_HISTORY_CACHE_LIMIT: usize = 4096;
 
 impl GanglionCoordination {
-    /// `accepted_history` for the current committed state. Every committed
-    /// change moves the log id, so a cached entry is used only while the
-    /// state it was built from is still the current one.
+    /// `accepted_history` for the current committed state. An entry built from
+    /// earlier state is used while that state's content digest is unchanged.
     pub(crate) fn cached_accepted_history(
         &self,
         resource: &ganglion_core::ResourceIdentity,
     ) -> std::sync::Arc<Result<fibril_broker::history_replication::AcceptedHistory, String>> {
-        let applied = self.node.read_committed_at(|applied, _| applied);
-        let cache = &self.accepted_histories.0;
-        let hit = cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(resource)
-            .filter(|(at, _)| *at == applied)
-            .map(|(_, history)| history.clone());
-        if let Some(history) = hit {
-            return history;
+        let cache = &self.accepted_histories;
+        {
+            let (digest, _) = self.committed_content_digest();
+            let hit = cache
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(resource)
+                .filter(|(at, _)| *at == digest)
+                .map(|(_, history)| history.clone());
+            if let Some(history) = hit {
+                return history;
+            }
         }
-        let (applied, snapshot) = self
-            .node
-            .read_committed_at(|applied, snapshot| (applied, snapshot.clone()));
-        let history = std::sync::Arc::new(accepted_history(&snapshot, resource));
-        let mut cache = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if cache.len() >= ACCEPTED_HISTORY_CACHE_LIMIT {
-            cache.clear();
+        // The digest and, on a miss, the history come from one read of the
+        // committed state, so an entry is never tagged with other state.
+        let (digest, history) = self.node.read_committed_at(|_, snapshot| {
+            let digest = crate::snapshot_content_digest(snapshot);
+            let hit = cache
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(resource)
+                .filter(|(at, _)| *at == digest)
+                .map(|(_, history)| history.clone());
+            let history = hit.unwrap_or_else(|| std::sync::Arc::new(accepted_history(snapshot, resource)));
+            (digest, history)
+        });
+        let mut entries = cache.entries.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if entries.len() >= ACCEPTED_HISTORY_CACHE_LIMIT {
+            entries.clear();
         }
-        cache.insert(resource.clone(), (applied, history.clone()));
+        entries.insert(resource.clone(), (digest, history.clone()));
         history
     }
 }

@@ -853,6 +853,52 @@ fn hold_existing_placements(
 /// absorb clock skew and election gaps (see ganglion FAILURE_MODES.md §4b.6).
 pub const HEARTBEAT_LABEL: &str = "heartbeat_unix_ms";
 
+/// Longest the controller goes without planning while its inputs look
+/// unchanged, in case something a plan reads is missing from the fingerprint.
+const PLAN_BACKSTOP: Duration = Duration::from_secs(30);
+
+/// Digest of the committed snapshot without its generation and heartbeat
+/// stamps. Heartbeats commit every few seconds while nothing else changes, so
+/// state derived from the rest stays valid across them.
+pub(crate) fn snapshot_content_digest(snapshot: &ganglion_openraft::CoordinationSnapshot) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let nodes: Vec<_> = snapshot
+        .nodes
+        .values()
+        .map(|node| {
+            let labels: Vec<_> = node
+                .labels
+                .iter()
+                .filter(|(key, _)| key.as_str() != HEARTBEAT_LABEL)
+                .collect();
+            (&node.node_id, &node.endpoint, &node.admin_endpoint, labels)
+        })
+        .collect();
+    let assignments: Vec<_> = snapshot.assignments.iter().collect();
+    let content = (nodes, assignments, &snapshot.resources, &snapshot.attributes);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_vec(&content).unwrap_or_default().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Digest of what a controller plan reads: the snapshot content, the live
+/// nodes and the owner hold. Liveness still counts through `live`, which is
+/// derived from heartbeat age.
+fn planning_fingerprint(
+    snapshot: &ganglion_openraft::CoordinationSnapshot,
+    live: &HashMap<String, NodeInfo>,
+    hold_owners: bool,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    snapshot_content_digest(snapshot).hash(&mut hasher);
+    let mut nodes: Vec<_> = live.iter().map(|(id, info)| (id, &info.broker_addr)).collect();
+    nodes.sort();
+    format!("{nodes:?}").hash(&mut hasher);
+    hold_owners.hash(&mut hasher);
+    hasher.finish()
+}
+
 fn unix_millis_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1204,6 +1250,11 @@ pub struct GanglionCoordination {
     // assignment durability is `replica_buffered`.
     default_queue_buffered: std::sync::atomic::AtomicBool,
     accepted_histories: history_activation::AcceptedHistoryCache,
+    /// Content digest of the committed state at a log id. See
+    /// `committed_content_digest`.
+    content_digest: std::sync::Mutex<Option<(Option<ganglion_openraft::openraft::LogId<u64>>, u64)>>,
+    /// Last client topology, by content digest and live gateways.
+    client_topology_cache: std::sync::Mutex<Option<(u64, String, ClientTopology)>>,
 }
 
 impl std::fmt::Debug for GanglionCoordination {
@@ -1261,8 +1312,25 @@ impl GanglionCoordination {
         let forward_tx = tx.clone();
         let forward_node = node_id.clone();
         let forwarder = tokio::spawn(async move {
+            // The view builds an accepted history per partition. A commit that
+            // only moves heartbeat stamps reuses the last view under the new
+            // generation.
+            let mut last: Option<(u64, CoordinationSnapshot)> = None;
             while ganglion_rx.changed().await.is_ok() {
-                let mapped = local_serving_snapshot(&ganglion_rx.borrow_and_update(), &forward_node, history_process);
+                let (digest, mapped) = {
+                    let committed = ganglion_rx.borrow_and_update();
+                    let digest = snapshot_content_digest(&committed);
+                    let mapped = match &last {
+                        Some((previous, view)) if *previous == digest => {
+                            let mut view = view.clone();
+                            view.generation = committed.generation;
+                            view
+                        }
+                        _ => local_serving_snapshot(&committed, &forward_node, history_process),
+                    };
+                    (digest, mapped)
+                };
+                last = Some((digest, mapped.clone()));
                 forward_tx.send_replace(mapped);
             }
         });
@@ -1283,6 +1351,8 @@ impl GanglionCoordination {
             ),
             default_queue_buffered: std::sync::atomic::AtomicBool::new(false),
             accepted_histories: Default::default(),
+            content_digest: Default::default(),
+            client_topology_cache: Default::default(),
         }
     }
 
@@ -2766,6 +2836,10 @@ impl GanglionCoordination {
             // has ended for that term.
             let mut leader_since: Option<std::time::Instant> = None;
             let mut grace_over = false;
+            // Inputs of the last successful plan, and when it ran. Heartbeats
+            // commit every few seconds without changing anything a plan reads,
+            // so an unchanged fingerprint skips the plan until the backstop.
+            let mut last_planned: Option<(u64, std::time::Instant)> = None;
             loop {
                 let queues = provider.registered_queues();
                 let streams = provider.registered_streams();
@@ -2858,12 +2932,26 @@ impl GanglionCoordination {
                     }
                 }
                 previous_suspects = current_suspects;
-                let outcome = if (queues.is_empty() && streams.is_empty()) || live.is_empty() {
+                let fingerprint = active.then(|| {
+                    planning_fingerprint(
+                        &provider.node.committed_snapshot(),
+                        &live,
+                        !waiting_for.is_empty(),
+                    )
+                });
+                let unchanged = fingerprint.is_some_and(|fingerprint| {
+                    last_planned.is_some_and(|(last, at)| {
+                        last == fingerprint && at.elapsed() < PLAN_BACKSTOP
+                    })
+                });
+                let outcome = if unchanged {
+                    None
+                } else if (queues.is_empty() && streams.is_empty()) || live.is_empty() {
                     // Nothing to place (or no live brokers): a normal idle
                     // tick, not an error.
-                    Ok(provider.node.is_leader().await.then(|| provider.snapshot()))
+                    Some(Ok(provider.node.is_leader().await.then(|| provider.snapshot())))
                 } else {
-                    provider
+                    Some(provider
                         .plan_and_commit(
                             planner.as_ref(),
                             &queues,
@@ -2876,13 +2964,24 @@ impl GanglionCoordination {
                             config.max_cas_retries,
                             !waiting_for.is_empty(),
                         )
-                        .await
+                        .await)
                 };
+                if let Some(outcome) = &outcome {
+                    last_planned = match (outcome, fingerprint) {
+                        (Ok(Some(_)), Some(fingerprint)) => {
+                            Some((fingerprint, std::time::Instant::now()))
+                        }
+                        _ => None,
+                    };
+                }
 
                 if let Ok(mut status) = status.write() {
                     status.eager_suspects = suspects;
                     status.startup_grace_waiting_for = waiting_for;
                     match outcome {
+                        // Skipped: the last plan's status still holds.
+                        None => {}
+                        Some(outcome) => match outcome {
                         Ok(Some(snapshot)) => {
                             status.active = true;
                             status.last_plan_generation = Some(snapshot.generation);
@@ -2907,6 +3006,7 @@ impl GanglionCoordination {
                             status.active = true;
                             status.last_error = Some(error.to_string());
                         }
+                        },
                     }
                 }
 
@@ -3155,8 +3255,60 @@ impl GanglionCoordination {
     /// endpoints. Clients read a topic missing from a populated topology as
     /// deleted, so leaving such a partition out would end subscriptions to a
     /// queue that still exists.
+    /// `snapshot_content_digest` of the committed state and its generation.
+    /// Computed once per commit, so per-request caches can check it cheaply.
+    pub fn committed_content_digest(&self) -> (u64, u64) {
+        let mut memo = self.content_digest.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.node.read_committed_at(|applied, snapshot| {
+            let digest = match *memo {
+                Some((at, digest)) if at == applied => digest,
+                _ => snapshot_content_digest(snapshot),
+            };
+            *memo = Some((applied, digest));
+            (digest, snapshot.generation)
+        })
+    }
+
+    /// Every connection checks the topology after each coordination commit,
+    /// and building it projects every partition. It is rebuilt only when the
+    /// content or the live gateways changed, and carries the current
+    /// generation.
     pub fn client_topology(&self) -> ClientTopology {
-        let committed = self.node.committed_snapshot();
+        let (digest, generation) = self.committed_content_digest();
+        let gateways = self.node.read_committed_at(|_, committed| {
+            if committed.nodes.values().any(gateway::node_is_private) {
+                format!(
+                    "{:?}",
+                    gateway::gateway_candidates(
+                        committed.nodes.values(),
+                        unix_millis_now(),
+                        self.gateway_liveness_ttl_ms(),
+                        node_advertise_endpoints,
+                    )
+                )
+            } else {
+                String::new()
+            }
+        });
+        let mut cache = self.client_topology_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((cached_digest, cached_gateways, topology)) = &*cache {
+            if *cached_digest == digest && *cached_gateways == gateways {
+                let mut topology = topology.clone();
+                topology.generation = generation;
+                return topology;
+            }
+        }
+        // Digest and topology from one read, so an entry never pairs a
+        // digest with other state.
+        let (digest, committed) = self
+            .node
+            .read_committed_at(|_, snapshot| (snapshot_content_digest(snapshot), snapshot.clone()));
+        let topology = self.build_client_topology(&committed);
+        *cache = Some((digest, gateways, topology.clone()));
+        topology
+    }
+
+    fn build_client_topology(&self, committed: &ganglion_openraft::CoordinationSnapshot) -> ClientTopology {
         // Per-node advertise list: the full priority-ordered list from the node's
         // advertise label when present, else the single registered endpoint.
         let endpoints: HashMap<String, Vec<String>> = committed
@@ -4136,6 +4288,39 @@ mod cohort_transport_tests {
     }
 
     #[test]
+    fn planning_fingerprint_ignores_heartbeats_only() {
+        let node = |beat: &str| {
+            let mut node = ganglion_core::NodeInfo::new("n1".to_string(), "127.0.0.1:1".to_string(), None);
+            node.labels.insert(HEARTBEAT_LABEL.to_string(), beat.to_string());
+            node
+        };
+        let snapshot = |node: ganglion_core::NodeInfo, generation: u64| {
+            let mut s = ganglion_openraft::CoordinationSnapshot::default();
+            s.nodes.insert(node.node_id.clone(), node);
+            s.generation = generation;
+            s
+        };
+        let live = HashMap::from([(
+            "n1".to_string(),
+            NodeInfo {
+                node_id: "n1".to_string(),
+                broker_addr: "127.0.0.1:1".to_string(),
+                admin_addr: None,
+            },
+        )]);
+        let base = planning_fingerprint(&snapshot(node("1000"), 7), &live, false);
+        // A heartbeat commit: new stamp, new generation, same plan inputs.
+        assert_eq!(base, planning_fingerprint(&snapshot(node("4000"), 8), &live, false));
+        // A label a plan reads.
+        let mut draining = node("4000");
+        draining.labels.insert(DRAINING_LABEL.to_string(), "1".to_string());
+        assert_ne!(base, planning_fingerprint(&snapshot(draining, 9), &live, false));
+        // A node leaving the live set, and the owner hold.
+        assert_ne!(base, planning_fingerprint(&snapshot(node("4000"), 8), &HashMap::new(), false));
+        assert_ne!(base, planning_fingerprint(&snapshot(node("4000"), 8), &live, true));
+    }
+
+    #[test]
     fn aggregate_repartition_drained_unions_and_filters() {
         // Two owners each report a drained old partition for the same grow.
         let a = encode_repartition_drained(&[RepartitionDrainedReport {
@@ -4736,7 +4921,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn accepted_history_cache_follows_every_committed_write() {
+    async fn accepted_history_cache_follows_content_but_not_heartbeats() {
         let router = InProcessRouter::new();
         let config = default_raft_config().expect("config");
         let raft_node = RaftMetadataNode::start(1, config, &router)
@@ -4759,6 +4944,20 @@ mod tests {
         let rebuilt = provider.cached_accepted_history(&resource);
         assert!(!std::sync::Arc::ptr_eq(&first, &rebuilt));
         assert_eq!(*first, *rebuilt);
+        // A heartbeat commit changes nothing the history reads, so the entry
+        // stays. Another label is a real change and rebuilds it.
+        let beat = |stamp: &str, process: &str| {
+            let mut node = ganglion_core::NodeInfo::new("broker-a".to_string(), "127.0.0.1:1".to_string(), None);
+            node.labels.insert(HEARTBEAT_LABEL.to_string(), stamp.to_string());
+            node.labels.insert(HISTORY_PROCESS_LABEL.to_string(), process.to_string());
+            node
+        };
+        provider.node.register_node(beat("1000", "a")).await.unwrap();
+        let registered = provider.cached_accepted_history(&resource);
+        provider.node.register_node(beat("4000", "a")).await.unwrap();
+        assert!(std::sync::Arc::ptr_eq(&registered, &provider.cached_accepted_history(&resource)));
+        provider.node.register_node(beat("7000", "b")).await.unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&registered, &provider.cached_accepted_history(&resource)));
         provider.node.shutdown().await.unwrap();
     }
 
