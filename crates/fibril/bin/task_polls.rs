@@ -2,7 +2,9 @@
 //! `task-polls` feature and `--cfg tokio_unstable`. A task polled again was
 //! woken again, so polls per message by spawn site map the handoffs a message
 //! takes through the broker. Counts go to `FIBRIL_TASK_POLLS_PATH` as
-//! `{"file:line": polls}` once a second. Polls of 1 ms or more go to
+//! `{"file:line": polls}` once a second. Busy time per site goes to
+//! `FIBRIL_TASK_BUSY_PATH`, when set, as `{"file:line": microseconds}`, which
+//! attributes CPU where poll counts alone would not. Polls of 1 ms or more go to
 //! `FIBRIL_LONG_POLLS_PATH`, when set, as
 //! `{"file:line": [over 1 ms, over 4 ms, total us, max us]}`, since one long
 //! poll holds its worker and delays every task queued behind it.
@@ -23,8 +25,14 @@ fn shared() -> &'static Mutex<HashMap<usize, (Site, u64)>> {
     SHARED.get_or_init(Default::default)
 }
 
+fn shared_busy() -> &'static Mutex<HashMap<usize, (Site, u64)>> {
+    static BUSY: OnceLock<Mutex<HashMap<usize, (Site, u64)>>> = OnceLock::new();
+    BUSY.get_or_init(Default::default)
+}
+
 thread_local! {
     static LOCAL: RefCell<(u64, HashMap<usize, (Site, u64)>)> = RefCell::new((0, HashMap::new()));
+    static LOCAL_BUSY: RefCell<HashMap<usize, (Site, u64)>> = RefCell::new(HashMap::new());
     static POLL_STARTED: RefCell<Option<Instant>> = const { RefCell::new(None) };
 }
 
@@ -42,10 +50,13 @@ pub fn finish(meta: &tokio::runtime::TaskMeta<'_>) {
         return;
     };
     let us = started.elapsed().as_micros() as u64;
+    let site = meta.spawned_at();
+    LOCAL_BUSY.with(|busy| {
+        busy.borrow_mut().entry(site as *const _ as usize).or_insert((site, 0)).1 += us;
+    });
     if us < 1000 {
         return;
     }
-    let site = meta.spawned_at();
     let mut long = long_polls().lock().unwrap_or_else(|e| e.into_inner());
     let entry = &mut long.entry(site as *const _ as usize).or_insert((site, [0; 4])).1;
     entry[0] += 1;
@@ -61,6 +72,13 @@ fn merge(local: &mut HashMap<usize, (Site, u64)>) {
     for (key, (site, n)) in local.drain() {
         shared.entry(key).or_insert((site, 0)).1 += n;
     }
+    drop(shared);
+    LOCAL_BUSY.with(|busy| {
+        let mut shared = shared_busy().lock().unwrap_or_else(|e| e.into_inner());
+        for (key, (site, us)) in busy.borrow_mut().drain() {
+            shared.entry(key).or_insert((site, 0)).1 += us;
+        }
+    });
 }
 
 pub fn count(meta: &tokio::runtime::TaskMeta<'_>) {
@@ -82,6 +100,7 @@ pub fn start_writer() {
         return;
     };
     let long_path = std::env::var("FIBRIL_LONG_POLLS_PATH").ok();
+    let busy_path = std::env::var("FIBRIL_TASK_BUSY_PATH").ok();
     std::thread::Builder::new()
         .name("task-polls".into())
         .spawn(move || loop {
@@ -96,6 +115,20 @@ pub fn start_writer() {
                 let tmp = format!("{path}.tmp");
                 if std::fs::write(&tmp, json).is_ok() {
                     let _ = std::fs::rename(&tmp, &path);
+                }
+            }
+            if let Some(busy_path) = &busy_path {
+                let busy: HashMap<String, u64> = shared_busy()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .values()
+                    .map(|(site, us)| (format!("{}:{}", site.file(), site.line()), *us))
+                    .collect();
+                if let Ok(json) = serde_json::to_vec(&busy) {
+                    let tmp = format!("{busy_path}.tmp");
+                    if std::fs::write(&tmp, json).is_ok() {
+                        let _ = std::fs::rename(&tmp, busy_path);
+                    }
                 }
             }
             if let Some(long_path) = &long_path {
