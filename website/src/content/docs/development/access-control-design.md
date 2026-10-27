@@ -81,7 +81,20 @@ dots as separators by convention. Patterns follow the same shape:
 - Both work in the group part too: `billing.**/workers`.
 
 `/` never appears in a name, so a pattern always reads unambiguously as topic
-and group.
+and group. The order follows the client API and the wire format, where a group
+is a namespace under its topic.
+
+| Pattern | Matches |
+| --- | --- |
+| `billing.invoices` | That topic and every group under it |
+| `billing.*` | `billing.invoices` and its groups, not `billing.eu.invoices` |
+| `billing.**` | Every topic under `billing` at any depth, with all their groups |
+| `billing.invoices/workers` | Only the `workers` group of that topic |
+| `billing.invoices/default` | Only the default group of that topic |
+| `billing.invoices/*` | Every group of that topic, the same as leaving the group off |
+| `billing.**/workers` | The `workers` group of every topic under `billing` |
+| `**/workers` | The `workers` group of every topic |
+| `**` | Everything |
 
 ## File format
 
