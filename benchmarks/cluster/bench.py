@@ -94,6 +94,9 @@ def process_sample(process):
         return {"pid": process.pid, "rss_kib": int(rss[1]) if rss else 0,
                 "threads": sum(1 for _ in (proc / "task").iterdir()),
                 "cpu_seconds": (int(stat[11]) + int(stat[12])) / hz,
+                # Fields 10 and 12 of /proc/<pid>/stat, counted after the
+                # command name.
+                "minor_faults": int(stat[7]), "major_faults": int(stat[9]),
                 "voluntary_switches": switches[0], "involuntary_switches": switches[1],
                 "voluntary_switches_by_thread": by_thread,
                 "syscr": int(io["syscr"]), "syscw": int(io["syscw"]), "write_bytes": int(io["write_bytes"])}
