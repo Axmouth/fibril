@@ -636,6 +636,12 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Changed
 
+- The broker uses the mimalloc v2 line (2.3.2) instead of v3 (3.3.2). v3 has
+  open upstream reports of rare multi-threaded segfaults, and a broker
+  segfaulted once in a soak on it. With 200 idle queues v2 holds about 440-495
+  MiB per node against 830-890 MiB, and saturation throughput is about 2-3%
+  lower.
+
 - Coordination work skips heartbeat-only commits. Each broker commits a
   heartbeat every few seconds, which used to make the controller replan,
   every node rebuild its routing view and accepted histories for all
