@@ -40,7 +40,6 @@ fibril-util = { path = "../crates/util" }
 anyhow = "1.0"
 async-trait = "0.1"
 clap = { version = "4.5", features = ["derive"] }
-console-subscriber = "0.5"
 dashmap = "6.1"
 fastrand = "2"
 futures = "0.3"

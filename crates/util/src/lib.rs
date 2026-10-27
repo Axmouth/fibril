@@ -123,11 +123,6 @@ pub fn init_tracing() {
         EnvFilter::new("info,stroma_core=warn,keratin_log=warn")
     });
 
-    // Console needs TRACE-ish telemetry
-    // let console_filter = EnvFilter::new("trace");
-
-    // let console_layer = console_subscriber::ConsoleLayer::builder().spawn();
-
     let (non_blocking, guard) = non_blocking(std::io::stdout());
 
     // Store globally
@@ -141,7 +136,6 @@ pub fn init_tracing() {
         .with_writer(non_blocking);
 
     tracing_subscriber::registry()
-        // .with(console_layer.with_filter(console_filter))
         .with(fmt_layer.with_filter(app_filter))
         .init();
 }
@@ -149,7 +143,10 @@ pub fn init_tracing() {
 pub fn init_tracing_dbg() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
 
-    let console_layer = console_subscriber::ConsoleLayer::builder().spawn();
+    #[cfg(feature = "tokio-console")]
+    let console_layer = Some(console_subscriber::ConsoleLayer::builder().spawn());
+    #[cfg(not(feature = "tokio-console"))]
+    let console_layer: Option<tracing_subscriber::layer::Identity> = None;
 
     let (non_blocking, guard) = non_blocking(std::io::stdout());
 
