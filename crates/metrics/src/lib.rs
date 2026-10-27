@@ -1690,7 +1690,7 @@ impl ForwardStats {
     /// so a low cap never blocks a single message forever.
     pub fn try_reserve_inflight(&self, n: u64, max: u64) -> bool {
         self.inflight_bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 (current == 0 || current.saturating_add(n) <= max)
                     .then(|| current.saturating_add(n))
             })
@@ -1700,7 +1700,7 @@ impl ForwardStats {
     pub fn release_inflight(&self, n: u64) {
         let _ = self
             .inflight_bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 Some(current.saturating_sub(n))
             });
     }
@@ -1725,7 +1725,7 @@ impl ForwardStats {
     pub fn forwarded_session_closed(&self) {
         let _ = self
             .forwarded_sessions
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 Some(current.saturating_sub(1))
             });
     }

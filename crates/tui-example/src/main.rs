@@ -211,7 +211,7 @@ impl Control {
         let Some(n) = self.nack_next.get(client) else {
             return false;
         };
-        n.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_sub(1))
+        n.try_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_sub(1))
             .is_ok()
     }
 

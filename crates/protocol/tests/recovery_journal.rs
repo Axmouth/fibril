@@ -41,7 +41,7 @@ impl QueueOwnership for Authority {
         Box::pin(async move {
             self.reads.fetch_add(1, Ordering::Relaxed);
             self.remaining
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
                 .map_err(|_| "test source temporarily unavailable".to_string())?;
             Ok("a".into())
         })

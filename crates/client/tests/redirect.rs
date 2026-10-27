@@ -142,7 +142,7 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                     if frame.opcode == Op::Subscribe as u16 {
                         let sub: Subscribe = try_decode(&frame).unwrap();
                         if config.reject_subscribes.as_ref().is_some_and(|remaining| {
-                            remaining.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok()
+                            remaining.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok()
                         }) {
                             let (code, op) = config.reject_with.unwrap_or((503, Op::Error));
                             let reply = fibril_wire::ErrorMsg { code, message: "rejected".into() };
@@ -294,7 +294,7 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                             }
                             Some(MockBehavior::UnavailableThen(left)) => {
                                 if left
-                                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
                                         n.checked_sub(1)
                                     })
                                     .is_ok()
@@ -925,7 +925,7 @@ async fn subscriber_discovers_survivor_and_waits_through_recovery() {
     let client = ClientOptions::new().discovery_endpoints([survivor.to_string()])
         .connect(initial).await.unwrap();
     let mut sub = client.subscribe("jobs").unwrap().sub().await.unwrap().into_stream().boxed();
-    tokio::time::timeout(std::time::Duration::from_secs(5), sub.next()).await.unwrap().unwrap();
+    let _first = tokio::time::timeout(std::time::Duration::from_secs(5), sub.next()).await.unwrap().unwrap();
     stop.notify_waiters();
     let delivered = tokio::time::timeout(std::time::Duration::from_secs(8), sub.next())
         .await.expect("same subscription must migrate without a fresh client");
