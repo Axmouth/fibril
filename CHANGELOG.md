@@ -989,6 +989,14 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- The CLI's bundled root store and the TLS certificate checks pick up the
+  eMudhra intermediate CA distrust (rustls-webpki 0.103.16, webpki-roots
+  1.0.11). The private keys of eight eMudhra intermediates were found to be
+  recoverable in October 2026. The HTTP and TLS stack also moves to its latest
+  compatible releases (hyper 1.12, h2 0.4.20, rustls 0.23.46, tonic 0.14.7).
+  The Rust client and the container image trust the operating system's root
+  store, so hosts and images need a current ca-certificates package.
+
 - A Rust client subscription could stop delivering for good after the broker
   it connects through restarted. Its supervisor took a queue missing from a
   populated topology as deleted and stopped resubscribing, but a topology can
