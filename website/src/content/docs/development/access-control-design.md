@@ -78,6 +78,10 @@ dots as separators by convention. Patterns follow the same shape:
   `billing.invoices` but not `billing.eu.invoices`.
 - `**` matches any number of segments: `billing.**` matches both, and `**`
   alone matches everything.
+- A `*` at the end of a segment matches any name starting with the text
+  before it: `team-*` matches `team-billing` and `team-payments`, and
+  `billing.inv*` matches `billing.invoices` and `billing.inventory`. It never
+  crosses a dot. A `*` anywhere else inside a segment is an error.
 - Both work in the group part too: `billing.**/workers`.
 
 `/` never appears in a name, so a pattern always reads unambiguously as topic
@@ -94,6 +98,8 @@ is a namespace under its topic.
 | `billing.invoices/*` | Every group of that topic, the same as leaving the group off |
 | `billing.**/workers` | The `workers` group of every topic under `billing` |
 | `**/workers` | The `workers` group of every topic |
+| `billing.inv*` | `billing.invoices` and `billing.inventory`, not `billing.inv.eu` |
+| `orders/team-*` | Every group of `orders` whose name starts with `team-` |
 | `**` | Everything |
 
 ## File format
@@ -207,8 +213,9 @@ the other documents.
 
 ## Test plan
 
-- Pattern matching for `*`, `**`, groups and the default group, including names
-  at the 128 byte limit.
+- Pattern matching for `*`, `**`, trailing `*` within a segment, groups and the
+  default group, including names at the 128 byte limit, and rejection of a `*`
+  in the middle of a segment.
 - Evaluation: allow only, deny only, mixed, multiple roles where one denies,
   and no roles at all.
 - Every protocol operation and admin route refuses a user without the action
