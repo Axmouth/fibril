@@ -178,6 +178,14 @@ export const sidebar = [
             slug: "development/access-control-design",
           },
           {
+            label: "MCP server",
+            slug: "development/mcp-design",
+          },
+          {
+            label: "Monitoring presets and history",
+            slug: "development/monitoring-design",
+          },
+          {
             label: "Metadata policy",
             slug: "development/metadata-policy",
           },

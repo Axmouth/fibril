@@ -95,7 +95,8 @@ Add a Model Context Protocol (MCP) server for structured, read-only inspection o
 queues, replication, recovery evidence and settings adoption. Return bounded
 results with observation times, explicit unknowns and links to relevant dashboard
 views. Reuse typed operations, validation and authorization across the dashboard,
-CLI and MCP interface, with shared diagnostic definitions.
+CLI and MCP interface, with shared diagnostic definitions. The proposed design
+is [MCP server](/development/mcp-design/).
 
 Extend the interface with scoped, audited administrative actions after the
 read-only surface is validated. Explore Python and TypeScript integrations for
@@ -249,6 +250,9 @@ when reducing repeated reads or changing comparison scheduling.
   written to the OS builds on the same written source. See the
   [buffered queue design](/development/afterflush-design/).
 - Add OpenTelemetry export.
+- Ship Grafana dashboards and alert rules, add latency, fsync, process and
+  disk metrics, and keep telemetry history across restarts. The proposed
+  design is [monitoring presets and history](/development/monitoring-design/).
 
 ## Frontend maintainability
 
