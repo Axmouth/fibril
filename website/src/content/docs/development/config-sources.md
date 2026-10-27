@@ -257,12 +257,21 @@ the dashboard into a file, or back, needs no conversion.
 - An environment override on one node shows as a mismatch.
 - Standalone brokers apply each source as described.
 
+## Decisions
+
+- Adoption counts live members only. A node always runs the cluster's adopted
+  version, so a member that misses a change cannot run different settings. It
+  only reports a mismatch until its file matches. Requiring every member, as
+  CockroachDB does for version finalization, guards binary compatibility, and
+  for plain settings it would only stall changes, including urgent ones during
+  an incident, while a node is down or lost.
+- `config.strict` is off by default. Elasticsearch and NATS likewise refuse
+  only incompatible versions at startup, not configuration differences. The
+  mismatch attention item is always on, and strict start stays available for
+  deployments that want a hard gate.
+- Sources apply per whole document.
+
 ## Open questions
 
-- Whether nodes that are members but down should count for adoption after a
-  grace period, so a permanently lost node does not hold a change pending
-  until it is removed from the cluster.
-- The default for `config.strict`. Off keeps rolling changes forgiving. On is
-  safer for managed deployments that never restore old images.
 - Whether reseeding should also be available in `cluster` mode as a one-off
   import from a file.
