@@ -223,8 +223,9 @@ These feed the dashboard now and the planned MCP diagnostics later.
 
 ## Access policy
 
-The planned access policy is one more document with the same three sources and
-the same file schema in TOML, the dashboard and the API. A policy copied from
+The planned [access policy](/development/access-control-design/) is one more
+document with the same three sources and the same file schema in TOML, the
+dashboard and the API. A policy copied from
 the dashboard into a file, or back, needs no conversion.
 
 ## Implementation order

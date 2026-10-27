@@ -282,7 +282,8 @@ These require a concrete use case or further design:
 
 - Reclaim inflight ownership across broker restart and transfer sessions across
   nodes, with a defined startup grace window and redelivery policy.
-- Per-topic authorization and tenancy controls.
+- Per-topic authorization and tenancy controls. The proposed design for roles
+  and permissions is [access control](/development/access-control-design/).
 - Additional clients, such as Java.
 - Richer bounded stream filters and client-side wildcard publishing.
 - Queue expiration based on coordinated inactivity.

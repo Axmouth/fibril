@@ -174,6 +174,10 @@ export const sidebar = [
             slug: "development/resource-limits-design",
           },
           {
+            label: "Access control",
+            slug: "development/access-control-design",
+          },
+          {
             label: "Metadata policy",
             slug: "development/metadata-policy",
           },
