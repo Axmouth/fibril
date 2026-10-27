@@ -325,6 +325,9 @@ If a setting group is locked:
 
 Do not make ordinary env vars hidden runtime overrides.
 
+The proposed [configuration sources](/development/config-sources/) design
+replaces locks with cluster-wide `cluster`, `seed` and `file` sources.
+
 ## Implementation Status
 
 Done:

@@ -197,7 +197,8 @@ The compatibility work follows this order:
   workflows with explicit failure outcomes.
 - Narrow exclusive-consumer subscriptions to their assigned partition subset.
 - Define replicated policy for cluster-wide runtime locks while retaining local
-  hardware settings such as storage paths and log tuning.
+  hardware settings such as storage paths and log tuning. The proposed design is
+  [configuration sources](/development/config-sources/).
 - Expand deployment, failover and rolling-upgrade runbooks.
 
 ## Large-history recovery availability

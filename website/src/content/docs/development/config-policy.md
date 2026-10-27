@@ -116,6 +116,10 @@ lockable section so far.
 
 Do not make every environment variable an invisible override for persisted state. That creates hard-to-debug behavior.
 
+Locks are evaluated per node. The proposed
+[configuration sources](/development/config-sources/) design replaces them with a
+cluster-wide choice of who owns each document.
+
 ## Global State Shape
 
 Persisted global state lives in the Stroma global store, a versioned key-value store on its own log, separate from queue logs. Runtime settings are one versioned document in it, updated with an expected-version check. In cluster mode the coordination cluster settings document is the authority and each node keeps a local copy.

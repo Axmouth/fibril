@@ -166,6 +166,10 @@ export const sidebar = [
             slug: "development/config-design",
           },
           {
+            label: "Configuration sources",
+            slug: "development/config-sources",
+          },
+          {
             label: "Metadata policy",
             slug: "development/metadata-policy",
           },
