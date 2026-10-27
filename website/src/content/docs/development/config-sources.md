@@ -48,8 +48,7 @@ disagreement is visible.
 
 Configuration sources apply to cluster-wide documents:
 
-- runtime settings, per section (`delivery`, `connection`, `replication` and
-  the rest)
+- runtime settings
 - users
 - the access policy, once it exists
 
@@ -75,20 +74,23 @@ deployments where the file is the only place changes are made.
 
 ## Configuration
 
-One source applies to everything, and a document or settings section can
-override it.
+One source applies to everything, and each document can override it. A
+document has one source as a whole, so a file never owns half of the runtime
+settings.
 
 ```toml
 [config]
 # cluster | seed | file
 source = "seed"
 
+[runtime]
+# The runtime settings document is owned by the file.
+source = "file"
+
 [runtime.delivery]
 inflight_ttl_ms = 30000
 
 [runtime.idle_queue_cleanup]
-# This section is owned by the file even though the rest is seeded.
-source = "file"
 enabled = true
 evict_after_ms = 600000
 
@@ -103,9 +105,10 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
 - `[runtime.*]` replaces `[runtime_seed.*]`, since the section is no longer
   only a seed. `runtime_seed` stays accepted as an alias for one release with a
   startup warning.
-- `[runtime_locks] idle_queue_cleanup = true` is equivalent to
-  `source = "file"` on that section. It is accepted with a warning for one
-  release, then removed.
+- `[runtime_locks]` is removed. Its one lockable section is covered by
+  `source = "file"` on the runtime settings document. A config that still
+  sets it fails to start with an error pointing here, since silently changing
+  who owns the other sections would be worse.
 - `auth.seed_users` keeps working in `seed` mode. `[[auth.users]]` is the
   general form.
 - In `file` mode users carry `password_hash` in PHC format. Plaintext passwords
@@ -118,8 +121,7 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
 
 ## Fingerprints
 
-Each node computes a fingerprint per document and per section with its own
-source: BLAKE3 over a canonical encoding of the merged values (sorted keys,
+Each node computes a fingerprint per document: BLAKE3 over a canonical encoding of the merged values (sorted keys,
 defaults filled in, comments and formatting dropped). Reordering a TOML file or
 adding a comment does not change the fingerprint. Changing a value or the
 source does.
@@ -182,17 +184,17 @@ change start. The node logs both fingerprints and the differing sections.
 
 ### Edits and visibility
 
-The admin API rejects edits to file-owned documents and sections with HTTP 423
+The admin API rejects edits to file-owned documents with HTTP 423
 `setting_locked`, as locks do today, and the error names the source. The
 dashboard shows the values read-only with the adopted fingerprint, adoption
 time and per-node agreement.
 
 ### Changing the source
 
-The source is part of the report. Switching a section from `file` to `seed` or
-`cluster` is a file change like any other: it takes effect once every live node
-reports the new source. Until then the section stays file-owned. Mixed sources
-across nodes are a mismatch.
+The source is part of the report. Switching a document from `file` to `seed`
+or `cluster` is a file change like any other: it takes effect once every live
+node reports the new source. Until then the document stays file-owned. Mixed
+sources across nodes are a mismatch.
 
 ## Standalone brokers
 
@@ -202,19 +204,19 @@ the persisted values. The same notices appear on the settings page.
 
 ## Admin and CLI surface
 
-- `GET /admin/api/config/sources` returns, per document and section: the
+- `GET /admin/api/config/sources` returns, per document: the
   source, the adopted fingerprint and time, each node's reported source and
   fingerprint, and the state (`in_sync`, `pending`, `changed_since_seed`,
   `mismatch`, `unknown`).
 - `fibrilctl config status` prints the same as a table.
 - `fibrilctl config reseed --expected-version <n>` reseeds in `seed` mode.
-- The settings page shows a source badge on each section and the notices above.
+- The settings page shows a source badge on each document and the notices above.
 
 ## Attention items
 
 - A file changed since seeding (seed mode).
 - A pending file version past its timeout (file mode).
-- Nodes reporting different sources for the same section.
+- Nodes reporting different sources for the same document.
 - A node whose report is missing or malformed for longer than the timeout.
 
 These feed the dashboard now and the planned MCP diagnostics later.
@@ -227,16 +229,15 @@ the dashboard into a file, or back, needs no conversion.
 
 ## Implementation order
 
-1. Canonical encoding and fingerprints for runtime settings sections and users,
+1. Canonical encoding and fingerprints for the runtime settings and user documents,
    with unit tests for formatting-independent fingerprints.
 2. Origin metadata on the cluster settings and user documents, and the seed
    mode notice. This alone covers the most common surprise.
 3. Heartbeat reports and the sources status API and CLI.
 4. File mode adoption by the controller, the pending state and its timeout.
 5. `[runtime.*]`, `[auth] source` and `[[auth.users]]`, with the
-   `runtime_seed` and `runtime_locks` aliases and warnings.
-6. Strict start, dashboard badges and read-only views, then removal of
-   `runtime_locks` handling after its alias release.
+   `runtime_seed` alias and the `runtime_locks` startup error.
+6. Strict start, dashboard badges and read-only views.
 
 ## Test plan
 
@@ -251,15 +252,13 @@ the dashboard into a file, or back, needs no conversion.
   leaves the change pending and raises the timeout item.
 - Strict start refuses a node with a stale file and admits the first node of a
   rolling change.
-- Admin edits to file-owned sections fail with 423, and edits to other
-  sections succeed.
+- Admin edits to a file-owned document fail with 423, and edits to a seeded
+  document succeed.
 - An environment override on one node shows as a mismatch.
 - Standalone brokers apply each source as described.
 
 ## Open questions
 
-- Whether per-section sources are needed for every section, or only for
-  runtime settings, with users and the access policy owned whole.
 - Whether nodes that are members but down should count for adoption after a
   grace period, so a permanently lost node does not hold a change pending
   until it is removed from the cluster.
