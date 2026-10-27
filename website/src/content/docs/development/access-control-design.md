@@ -63,6 +63,7 @@ Administration actions have no resource:
 | `users.edit` | Create, change and remove users |
 | `access.edit` | Change roles and their assignment |
 | `cluster.manage` | Drain, membership, rebalancing and recovery actions |
+| `attention.note` | Add notes to attention items and snooze them |
 
 `*` alone means every action, data and administration.
 

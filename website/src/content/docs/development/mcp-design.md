@@ -41,7 +41,7 @@ narrow.
 - `cluster_overview`: nodes, roles, health, versions, coordination leader,
   configuration source states and resource levels.
 - `attention`: the attention feed, with each item's rule, severity, subject,
-  since when it has been raised, and a link.
+  since when it has been raised, any operator note or snooze, and a link.
 - `recent_activity`: the audit feed for a time window: declares, deletes,
   drains, settings changes, raised and resolved attention items, membership
   changes.

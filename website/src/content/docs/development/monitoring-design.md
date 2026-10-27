@@ -98,6 +98,24 @@ Prometheus remains the long-term store. The persistent history covers the
 common case of looking back across a restart or over the last few days
 without one.
 
+## Attention notes
+
+An attention item seen by one operator is often unknown to the rest of the
+team. Any item can carry a note, such as "Alice: renewing the certificate",
+and a state:
+
+- **Investigating**, with the note and who set it.
+- **Snoozed until** a given time, for known conditions such as planned
+  maintenance. A snoozed item stays listed but sorts last and does not fire
+  its alert until the time passes.
+
+Notes are a small cluster document keyed by the item's rule and subject, so
+every node, the dashboard and the [MCP server](/development/mcp-design/) see
+the same notes. A note is cleared automatically when its item resolves, and
+every change is recorded in the activity feed with who made it. The exported
+`fibril_attention_items` gauge carries a `state` label so alert rules can skip
+snoozed items.
+
 ## Implementation order
 
 1. `fibril_attention_items`, process metrics and the disk gauges.
@@ -106,7 +124,8 @@ without one.
    compose example.
 4. The telemetry log with downsampling, then the dashboard and activity feed
    reading from it.
-5. Resource level and limited publish metrics with resource limits.
+5. Attention notes and snoozing.
+6. Resource level and limited publish metrics with resource limits.
 
 ## Open questions
 

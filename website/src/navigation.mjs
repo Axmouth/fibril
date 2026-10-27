@@ -186,6 +186,10 @@ export const sidebar = [
             slug: "development/monitoring-design",
           },
           {
+            label: "Dead-letter replay",
+            slug: "development/dlq-replay-design",
+          },
+          {
             label: "Metadata policy",
             slug: "development/metadata-policy",
           },

@@ -237,7 +237,8 @@ when reducing repeated reads or changing comparison scheduling.
   CPU, memory and network use, plus owner-loss recovery with retained history.
   Record quorum policy and shared-host limits alongside each result.
 - Improve memory use under large backlogs, high inflight load and many idle queues.
-- Improve bulk DLQ replay, message inspection and sparse-queue diagnostics.
+- Improve bulk DLQ replay, message inspection and sparse-queue diagnostics. The
+  proposed replay design is [dead-letter replay](/development/dlq-replay-design/).
 - Extend the shared benchmark harness with stream workloads, portable cluster/fault
   provisioning and repeated workload matrices.
 - Assess sending immutable staged batches to followers before owner fsync, after
