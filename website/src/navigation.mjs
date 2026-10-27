@@ -170,6 +170,10 @@ export const sidebar = [
             slug: "development/config-sources",
           },
           {
+            label: "Resource limits",
+            slug: "development/resource-limits-design",
+          },
+          {
             label: "Metadata policy",
             slug: "development/metadata-policy",
           },

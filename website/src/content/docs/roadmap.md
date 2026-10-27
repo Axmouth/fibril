@@ -200,6 +200,9 @@ The compatibility work follows this order:
   hardware settings such as storage paths and log tuning. The proposed design is
   [configuration sources](/development/config-sources/).
 - Expand deployment, failover and rolling-upgrade runbooks.
+- Slow and then pause publishers before disk or memory run out, add per-queue
+  size limits and share spare segment files across a node. The proposed design
+  is [resource limits](/development/resource-limits-design/).
 
 ## Large-history recovery availability
 
