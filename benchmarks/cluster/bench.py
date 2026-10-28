@@ -409,7 +409,18 @@ def run(args):
                 raise RuntimeError(f"client counts failed validation on {queue}: {counts}")
             results.append(one)
         # Delivery counts alone cannot show settlement or catch duplicates.
-        save(case / "settled.json", wait_for(lambda: topology(settled=True), 120))
+        settled = wait_for(lambda: topology(settled=True), 120)
+        save(case / "settled.json", settled)
+        # A queue whose owner or epoch moved with no broker lost failed over
+        # on its own, for example on a false failure detection.
+        owners = lambda top: {(a["topic"], a.get("group"), a["partition"]): (a["owner"], a["epoch"])
+                              for a in top[0]["coordination"]["assignments"]}
+        first = owners(json.loads((case / "before.json").read_text())["topology"])
+        moved = [f"{k[0]}/{k[2]}: {first[k][0]} epoch {first[k][1]} -> {v[0]} epoch {v[1]}"
+                 for k, v in owners(settled["topology"]).items() if k in first and v != first[k]]
+        save(case / "owner-changes.json", moved)
+        if moved:
+            print(f"unexpected owner changes: {moved}", flush=True)
         after = [process_sample(p) for p in servers]
         time.sleep(1.2)
         save(case / "polls.json", {"before": polls_before, "after": read_polls()})
@@ -534,8 +545,11 @@ def summarize(args, case, results, before, after, samples):
             start_by_thread = start.get("voluntary_switches_by_thread", {})
             end["idle_wakeups_per_sec_by_thread"] = {
                 name: (n - start_by_thread.get(name, 0)) / args.idle_window_secs for name, n in by_thread.items()}
+    moved_path = case / "owner-changes.json"
+    owner_changes = json.loads(moved_path.read_text()) if moved_path.exists() else None
     return {
         "status": "passed",
+        "owner_changes": owner_changes,
         "idle": idle and {"queues": args.idle_queues,
                           "rss_mib_per_node": [i.get("rss_kib", 0) / 1024 for i in idle],
                           "threads_per_node": [i.get("threads") for i in idle],
@@ -650,12 +664,19 @@ def main():
     parser.add_argument("--survive-broker-loss", action="store_true",
                         help="Keep running when a broker dies, then check that every confirmed message "
                              "was delivered and nothing unsent arrived")
+    parser.add_argument("--tuned-failover", action="store_true",
+                        help="Eager failover with a 1 s grace and Raft heartbeats of 100 ms with 0.5-1 s elections")
     parser.add_argument("--kill-owner-at-secs", type=float, default=None,
                         help="SIGKILL the first queue's owner this many seconds into the workload "
                              "(implies --survive-broker-loss)")
     args = parser.parse_args()
     if args.kill_owner_at_secs is not None:
         args.survive_broker_loss = True
+    if args.tuned_failover:
+        args.replication += ["eager_failover=true", "eager_failover_grace_ms=1000"]
+        args.node_env += ["FIBRIL_COORDINATION_RAFT_HEARTBEAT_INTERVAL_MS=100",
+                          "FIBRIL_COORDINATION_RAFT_ELECTION_TIMEOUT_MIN_MS=500",
+                          "FIBRIL_COORDINATION_RAFT_ELECTION_TIMEOUT_MAX_MS=1000"]
     if args.burst_pattern and not args.rate:
         parser.error("--burst-pattern needs --rate")
     if args.burst_pattern:
