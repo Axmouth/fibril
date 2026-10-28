@@ -337,6 +337,11 @@ def run(args):
             if args.burst_pattern:
                 command += ["--burst-pattern", args.burst_pattern]
             command += ["--rate", str(args.rate)] if args.rate else ["--saturation"]
+            if args.rate:
+                # The client refuses a paced plan above its message safety
+                # limit (50M by default), which long soaks exceed.
+                planned = args.rate * (args.warmup_secs + args.duration_secs)
+                command += ["--max-messages", str(max(50_000_000, planned + planned // 10 + 1000))]
             clients.append(launch(command, f"client-{queue}", env, case))
 
         started = time.monotonic()
