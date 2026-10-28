@@ -1030,10 +1030,8 @@ mod tests {
             );
             snapshot.nodes.insert(id.into(), node);
         }
-        snapshot.attributes.insert(
-            quorum_key(&decision.incarnation),
-            serde_json::to_string(&set.prepared_quorum(&snapshot).unwrap()).unwrap(),
-        );
+        let quorum = serde_json::to_string(&set.prepared_quorum(&snapshot).unwrap()).unwrap();
+        snapshot.attributes.insert(quorum_key(&decision.incarnation), quorum);
         // Process replacement before activation is initial preparation, not
         // recovery from an accepted history.
         let mut unactivated = snapshot.clone();

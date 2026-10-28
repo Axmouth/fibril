@@ -960,11 +960,11 @@ pub fn to_ganglion_snapshot(
 
     ganglion_core::CoordinationSnapshot {
         nodes,
-        assignments,
+        assignments: assignments.into(),
         // fibril's snapshot type does not model these; writers that must
         // preserve them (control_iteration) copy from the committed snapshot.
-        resources: std::collections::BTreeSet::new(),
-        attributes: std::collections::BTreeMap::new(),
+        resources: Default::default(),
+        attributes: Default::default(),
         generation: snapshot.generation,
     }
 }

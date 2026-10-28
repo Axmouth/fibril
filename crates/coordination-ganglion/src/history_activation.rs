@@ -573,7 +573,8 @@ mod tests {
                 serde_json::to_string(&quorum).unwrap(),
             ),
             (key(&decision), serde_json::to_string(&activation).unwrap()),
-        ]);
+        ])
+        .into();
         activation.validate(&snapshot, &decision).unwrap();
         for (node, process, _) in prepared {
             let mut info = ganglion_core::NodeInfo::new(*node, "127.0.0.1:1", None::<String>);
