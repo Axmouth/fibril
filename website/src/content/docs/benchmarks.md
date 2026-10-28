@@ -5,6 +5,8 @@ description: Early performance observations for Fibril.
 
 Current benchmark numbers are informal architecture checks, not claims of production capacity.
 
+How the numbers got here is in the [tuning ledger](/development/tuning-ledger/), which shows each performance change with what it gained and cost, and in the [storage write path](/development/storage-write-path/), which animates how durable writes reach disk.
+
 ## Repeatable cross-broker workload
 
 The repository includes a [shared Rust benchmark harness](https://github.com/Axmouth/fibril/tree/main/benchmarks/comparison) for Fibril, NATS JetStream and RabbitMQ. It supports fixed offered rate or saturation, configurable payload size, confirmation and delivery latency, memory/CPU samples, and message identity and settlement checks. Docker Compose provisions fresh single-node instances on the same selected filesystem. Each run retains its exact settings, logs, versions and result table.

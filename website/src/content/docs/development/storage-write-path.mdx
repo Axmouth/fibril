@@ -1,0 +1,28 @@
+---
+title: Storage write path
+description: How Keratin writes, syncs, rolls over and reuses log segments, and the changes that took the fsync floor and the rollover stall out of the write path.
+---
+
+import StorageLifecycle from "../../../components/StorageLifecycle.astro";
+
+Every queue partition is a Keratin log, and a log is a series of segment files.
+A durable publish is confirmed once an fsync covers its record, so the cost and
+timing of those syncs set the latency floor for durable queues. This page
+animates how a segment is written, synced, rolled over and reused, and the
+changes made in October 2026 that cut the per-sync cost from 4.9 ms to about
+0.7 ms and the rollover stall from about 18 ms to about 1 ms.
+
+Each slab below is one segment file. The lighter shade is data written to the
+file, the darker shade is data an fsync has made durable. Measured figures come
+from three brokers sharing one consumer NVMe drive with durable 1 KiB messages,
+and the fsync times in the bubbles are illustrative values at that scale. The
+last scene is a proposed design from [resource limits](/development/resource-limits-design/#segment-pool).
+
+<StorageLifecycle />
+
+## Where the numbers come from
+
+The measurements, commits and conditions behind each scene are rows in the
+[optimization log](/development/optimization-log/). The
+[tuning ledger](/development/tuning-ledger/) puts these changes beside the ones
+that did not pay off, with the trade-offs of each.

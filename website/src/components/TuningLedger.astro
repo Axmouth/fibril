@@ -1,0 +1,86 @@
+---
+import { items, outcomes, dumbbell } from '../data/tuning-ledger.mjs';
+
+const names: Record<string, string> = outcomes;
+const counts: Record<string, number> = Object.fromEntries(Object.keys(names).map((k) => [k, items.filter((it) => it.v === k).length]));
+---
+
+<div class="tuning-ledger not-content" data-tuning-ledger>
+  <div class="tl-filters" role="group" aria-label="Filter by outcome">
+    <button type="button" data-filter="all" aria-pressed="true">all <span>{items.length}</span></button>
+    {Object.entries(names).map(([k, name]) => (
+      <button type="button" data-filter={k} aria-pressed="false">{name} <span>{counts[k]}</span></button>
+    ))}
+  </div>
+  <div class="tl-grid">
+    {items.map((it) => (
+      <article data-outcome={it.v}>
+        <div class="tl-top"><span class={`tl-outcome tl-${it.v}`}>{names[it.v]}</span><span class="tl-date">{it.date}</span></div>
+        <h3>{it.title}</h3>
+        <p class="tl-what">{it.what}</p>
+        <div class="tl-charts" set:html={it.m.map(dumbbell).join('')} />
+        <div><div class="tl-label">trade-off</div><p>{it.trade}</p></div>
+        <div><div class="tl-label">verdict</div><p>{it.why}</p></div>
+      </article>
+    ))}
+  </div>
+</div>
+
+<script>
+  for (const root of document.querySelectorAll<HTMLElement>('[data-tuning-ledger]')) {
+    const buttons = [...root.querySelectorAll<HTMLButtonElement>('[data-filter]')];
+    const cards = [...root.querySelectorAll<HTMLElement>('[data-outcome]')];
+    for (const button of buttons) {
+      button.addEventListener('click', () => {
+        const f = button.dataset.filter;
+        buttons.forEach((b) => b.setAttribute('aria-pressed', b === button ? 'true' : 'false'));
+        cards.forEach((c) => { c.hidden = f !== 'all' && c.dataset.outcome !== f; });
+      });
+    }
+  }
+</script>
+
+<style is:global>
+  .tuning-ledger {
+    --tl-panel: var(--sl-color-gray-6); --tl-line: var(--sl-color-gray-5); --tl-text: var(--sl-color-white);
+    --tl-muted: var(--sl-color-gray-2); --tl-dim: var(--sl-color-gray-3); --tl-acc: var(--sl-color-accent);
+    --tl-organic: #c38a65; --good: #8ad8b1; --bad: #e07b86; --tl-warn: #d8b46f;
+    --muted: var(--tl-dim); --line: var(--tl-line);
+    display: grid; gap: 14px; margin: 2rem 0;
+  }
+  :root[data-theme="light"] .tuning-ledger { --tl-organic: #8f5537; --good: #27704c; --bad: #a03f48; --tl-warn: #7e5b17; }
+  .tuning-ledger .tl-filters { display: flex; flex-wrap: wrap; gap: 8px; }
+  .tuning-ledger .tl-filters button {
+    height: 32px; padding: 0 12px; border: 1px solid var(--tl-line); border-radius: 8px; background: var(--tl-panel);
+    color: var(--tl-text); font: 13px var(--sl-font); cursor: pointer; display: inline-flex; gap: 7px; align-items: center;
+  }
+  .tuning-ledger .tl-filters button span { font: 11px var(--sl-font-mono); color: var(--tl-dim); }
+  .tuning-ledger .tl-filters button[aria-pressed="true"] {
+    border-color: color-mix(in srgb, var(--tl-acc) 42%, transparent); background: color-mix(in srgb, var(--tl-acc) 13%, var(--tl-panel));
+  }
+  .tuning-ledger button:focus-visible { outline: 2px solid var(--tl-acc); outline-offset: 2px; }
+  .tuning-ledger .tl-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  @media (max-width: 760px) { .tuning-ledger .tl-grid { grid-template-columns: minmax(0, 1fr); } }
+  .tuning-ledger article {
+    padding: 16px; border: 1px solid var(--tl-line); border-radius: 11px; background: var(--tl-panel);
+    display: grid; gap: 9px; align-content: start; min-width: 0; font-size: 13.5px; line-height: 1.6;
+  }
+  .tuning-ledger article[hidden] { display: none; }
+  .tuning-ledger article p { margin: 0; color: var(--tl-text); }
+  .tuning-ledger article h3 { margin: 0; font-size: 15px; letter-spacing: -0.02em; line-height: 1.3; color: var(--tl-text); }
+  .tuning-ledger .tl-top { display: flex; gap: 12px; align-items: baseline; }
+  .tuning-ledger .tl-outcome { font: 11px var(--sl-font-mono); }
+  .tuning-ledger .tl-kept { color: var(--good); }
+  .tuning-ledger .tl-setting { color: var(--tl-acc); }
+  .tuning-ledger .tl-parked { color: var(--tl-warn); }
+  .tuning-ledger .tl-removed { color: var(--bad); }
+  .tuning-ledger .tl-pending { color: var(--tl-organic); }
+  .tuning-ledger .tl-date { font: 11px var(--sl-font-mono); color: var(--tl-dim); }
+  .tuning-ledger article .tl-what { color: var(--tl-muted); }
+  .tuning-ledger .tl-label { margin-bottom: 3px; color: var(--tl-organic); font: 12px var(--sl-font-mono); }
+  .tuning-ledger .tl-charts { display: grid; gap: 4px; }
+  .tuning-ledger .tl-charts svg { display: block; width: 100%; height: auto; }
+  .tuning-ledger svg .tm, .tuning-ledger svg .tl { font-family: var(--sl-font-mono); }
+  .tuning-ledger svg .tm:not([fill]) { fill: var(--tl-muted); }
+  .tuning-ledger svg .tl:not([fill]) { fill: var(--tl-text); }
+</style>

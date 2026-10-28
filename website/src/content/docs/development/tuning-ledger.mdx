@@ -1,0 +1,21 @@
+---
+title: Tuning ledger
+description: Performance changes tried on Fibril, what each one gained and cost, and whether it was kept, made a setting, parked or removed.
+---
+
+import TuningLedger from "../../../components/TuningLedger.astro";
+
+Every change here was measured against the build before it. Some were clear
+wins, some became settings because they trade one thing for another, and some
+lost and were removed. Each chart starts at zero, with the earlier build in
+grey and the change in colour: green where it helped, red where it cost.
+
+Unless an entry says otherwise, numbers come from three brokers sharing one
+consumer NVMe drive with durable 1 KiB messages, two or more runs per arm
+alternating, and ranges are run to run. Dates are when the measurement was
+taken. The [optimization log](/development/optimization-log/) holds the full
+rows with commits and conditions, and the
+[storage write path](/development/storage-write-path/) animates the storage
+changes.
+
+<TuningLedger />

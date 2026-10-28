@@ -11,6 +11,11 @@ retain the measurements and hypotheses from their recorded dates.
 Define the cost to reduce, establish a baseline, compare before and after, and
 record the result, including experiments that did not help.
 
+The [tuning ledger](/development/tuning-ledger/) summarizes the recent changes
+with charts, trade-offs and verdicts, and the
+[storage write path](/development/storage-write-path/) animates the storage
+changes.
+
 ## Current measurement surface
 
 Fibril has these end-to-end benchmarks:

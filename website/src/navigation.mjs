@@ -266,6 +266,14 @@ export const sidebar = [
             slug: "development/optimization-log",
           },
           {
+            label: "Tuning ledger",
+            slug: "development/tuning-ledger",
+          },
+          {
+            label: "Storage write path",
+            slug: "development/storage-write-path",
+          },
+          {
             label: "Deterministic simulation",
             slug: "development/deterministic-simulation",
           },

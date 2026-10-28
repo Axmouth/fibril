@@ -1,0 +1,200 @@
+---
+import { scenes, frame } from './storage-lifecycle/scenes.mjs';
+
+// The first scene is drawn at its end on the server, so the figure is complete
+// without JavaScript. The transcript below carries every scene's text.
+const first = frame(0, scenes[0].dur);
+---
+
+<figure class="storage-lifecycle not-content" data-storage-lifecycle>
+  <div class="sl-layout">
+    <ol class="sl-scenes" aria-label="Scenes">
+      {scenes.map((s, i) => (
+        <li>
+          <button type="button" data-scene={i} aria-current={i === 0 ? 'true' : 'false'}>
+            <span>{s.name}</span>
+            {s.tag && <span class="sl-tag">{s.tag}</span>}
+          </button>
+        </li>
+      ))}
+    </ol>
+    <div class="sl-main">
+      <div class="sl-stage">
+        <svg viewBox="0 0 960 400" role="img" aria-label={scenes[0].title} set:html={first} />
+      </div>
+      <div class="sl-controls">
+        <button type="button" data-action="prev">Previous</button>
+        <button type="button" data-action="play" class="sl-primary">Play</button>
+        <button type="button" data-action="next">Next</button>
+        <input type="range" min="0" max="1000" value="1000" aria-label="Position in scene" data-action="scrub" />
+        <span class="sl-clock" data-clock>{scenes[0].dur.toFixed(1)} / {scenes[0].dur} s</span>
+      </div>
+      <div class="sl-legend" aria-label="Legend">
+        <span><i class="sw synced"></i>synced (durable)</span>
+        <span><i class="sw written"></i>written, not yet synced</span>
+        <span><i class="sw hollow"></i>reserved, never written</span>
+        <span><i class="sw zeros"></i>zeros written ahead</span>
+        <span><i class="sw old"></i>old data in a reused file</span>
+        <span><i class="sw spare"></i>spare file</span>
+      </div>
+      <figcaption class="sl-caption" aria-live="polite">
+        <strong data-cap-title>{scenes[0].title}</strong>
+        <span data-cap-text>{scenes[0].text}</span>
+        <span class="sl-fig" data-cap-fig set:html={scenes[0].fig} />
+      </figcaption>
+    </div>
+  </div>
+  <details class="sl-transcript">
+    <summary>Transcript of every scene</summary>
+    <ol>
+      {scenes.map((s) => (
+        <li>
+          <strong>{s.title}</strong>{s.tag && ` (${s.tag})`}. {s.text} <span set:html={s.fig} />
+        </li>
+      ))}
+    </ol>
+  </details>
+</figure>
+
+<script>
+  import { scenes, frame } from './storage-lifecycle/scenes.mjs';
+
+  const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  for (const root of document.querySelectorAll<HTMLElement>('[data-storage-lifecycle]')) {
+    const svg = root.querySelector('svg')!;
+    const scrub = root.querySelector<HTMLInputElement>('[data-action="scrub"]')!;
+    const play = root.querySelector<HTMLButtonElement>('[data-action="play"]')!;
+    const clock = root.querySelector<HTMLElement>('[data-clock]')!;
+    const sceneButtons = [...root.querySelectorAll<HTMLButtonElement>('[data-scene]')];
+    let cur = 0;
+    let t = scenes[0].dur;
+    let playing = false;
+    let last = 0;
+
+    const render = () => {
+      const s = scenes[cur];
+      svg.innerHTML = frame(cur, t);
+      scrub.value = String(Math.round((t / s.dur) * 1000));
+      clock.textContent = `${t.toFixed(1)} / ${s.dur} s`;
+    };
+    const caption = () => {
+      const s = scenes[cur];
+      svg.setAttribute('aria-label', s.title);
+      root.querySelector('[data-cap-title]')!.textContent = s.title;
+      root.querySelector('[data-cap-text]')!.textContent = s.text;
+      root.querySelector('[data-cap-fig]')!.innerHTML = s.fig;
+      sceneButtons.forEach((b, i) => b.setAttribute('aria-current', i === cur ? 'true' : 'false'));
+    };
+    const setPlaying = (on: boolean) => {
+      playing = on;
+      play.textContent = on ? 'Pause' : 'Play';
+      last = performance.now();
+      if (on) requestAnimationFrame(tick);
+    };
+    const tick = (now: number) => {
+      if (!playing) return;
+      t += Math.min(0.1, (now - last) / 1000);
+      last = now;
+      if (t >= scenes[cur].dur) {
+        t = scenes[cur].dur;
+        render();
+        setPlaying(false);
+        return;
+      }
+      render();
+      requestAnimationFrame(tick);
+    };
+    const go = (i: number) => {
+      cur = (i + scenes.length) % scenes.length;
+      t = reduce ? scenes[cur].dur : 0;
+      caption();
+      render();
+      if (!playing && !reduce) setPlaying(true);
+    };
+
+    sceneButtons.forEach((b, i) => b.addEventListener('click', () => go(i)));
+    root.querySelector('[data-action="next"]')!.addEventListener('click', () => go(cur + 1));
+    root.querySelector('[data-action="prev"]')!.addEventListener('click', () => go(cur - 1));
+    play.addEventListener('click', () => {
+      if (!playing && t >= scenes[cur].dur - 0.01) t = 0;
+      setPlaying(!playing);
+    });
+    scrub.addEventListener('input', () => {
+      setPlaying(false);
+      t = clamp((Number(scrub.value) / 1000) * scenes[cur].dur, 0, scenes[cur].dur);
+      render();
+    });
+  }
+</script>
+
+<style is:global>
+  .storage-lifecycle {
+    --sl-bg: var(--sl-color-black); --sl-panel: var(--sl-color-gray-6); --sl-line: var(--sl-color-gray-5);
+    --sl-text: var(--sl-color-white); --sl-muted: var(--sl-color-gray-2); --sl-dim: var(--sl-color-gray-3);
+    --sl-acc: var(--sl-color-accent); --sl-organic: #c38a65;
+    --synced: var(--sl-acc);
+    --written: color-mix(in srgb, var(--sl-acc) 34%, var(--sl-panel));
+    --zeros: var(--sl-organic);
+    --spare: var(--sl-dim);
+    --old: color-mix(in srgb, var(--sl-dim) 45%, var(--sl-panel));
+    --organic: var(--sl-organic);
+    --muted: var(--sl-muted);
+    --text: var(--sl-text);
+    --panel: var(--sl-panel);
+    --panel-2: color-mix(in srgb, var(--sl-panel) 70%, var(--sl-bg));
+    --line: var(--sl-line);
+    --ok: #8ad8b1; --warn: #d8b46f;
+    display: grid; gap: 14px; margin: 2rem 0; color: var(--sl-text);
+  }
+  :root[data-theme="light"] .storage-lifecycle { --sl-organic: #8f5537; --ok: #27704c; --warn: #7e5b17; }
+  /* The docs column is narrow, so scenes sit above the drawing as chips and the drawing gets the full width. */
+  .storage-lifecycle .sl-layout { display: grid; gap: 12px; }
+  .storage-lifecycle .sl-scenes { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; counter-reset: scene; }
+  .storage-lifecycle .sl-scenes li { margin: 0; }
+  .storage-lifecycle .sl-scenes button {
+    text-align: left; font: 13px/1.3 var(--sl-font); color: var(--sl-muted); background: none;
+    border: 1px solid var(--sl-line); border-radius: 8px; padding: 6px 10px; cursor: pointer; display: inline-flex;
+    gap: 7px; align-items: baseline; counter-increment: scene;
+  }
+  .storage-lifecycle .sl-scenes button::before { content: counter(scene, decimal-leading-zero); font: 12px var(--sl-font-mono); color: var(--sl-organic); }
+  .storage-lifecycle .sl-scenes button:hover { color: var(--sl-text); background: var(--sl-panel); }
+  .storage-lifecycle .sl-scenes button[aria-current="true"] { color: var(--sl-text); background: var(--sl-panel); border-color: var(--sl-line); }
+  .storage-lifecycle .sl-tag { font: 11px var(--sl-font-mono); color: var(--sl-organic); }
+  .storage-lifecycle .sl-main { display: grid; gap: 12px; min-width: 0; }
+  .storage-lifecycle .sl-stage { border: 1px solid var(--sl-line); border-radius: 13px; overflow-x: auto; background: var(--sl-panel); box-shadow: 0 12px 40px #00000012; }
+  .storage-lifecycle .sl-stage svg { display: block; width: 100%; min-width: 600px; height: auto; }
+  .storage-lifecycle .sl-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .storage-lifecycle .sl-controls button {
+    height: 32px; padding: 0 12px; border: 1px solid var(--sl-line); border-radius: 8px; background: var(--sl-panel);
+    color: var(--sl-text); font: 13px var(--sl-font); cursor: pointer;
+  }
+  .storage-lifecycle .sl-controls button:hover, .storage-lifecycle .sl-controls .sl-primary {
+    border-color: color-mix(in srgb, var(--sl-acc) 42%, transparent);
+  }
+  .storage-lifecycle .sl-controls .sl-primary { background: color-mix(in srgb, var(--sl-acc) 13%, var(--sl-panel)); }
+  .storage-lifecycle button:focus-visible, .storage-lifecycle input:focus-visible { outline: 2px solid var(--sl-acc); outline-offset: 2px; }
+  .storage-lifecycle .sl-controls input[type="range"] { flex: 1 1 160px; accent-color: var(--sl-acc); }
+  .storage-lifecycle .sl-clock { font: 12px var(--sl-font-mono); color: var(--sl-dim); font-variant-numeric: tabular-nums; min-width: 72px; }
+  .storage-lifecycle .sl-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font: 12px var(--sl-font-mono); color: var(--sl-muted); }
+  .storage-lifecycle .sl-legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .storage-lifecycle .sw { width: 22px; height: 8px; border-radius: 2px; display: inline-block; }
+  .storage-lifecycle .sw.synced { background: var(--synced); }
+  .storage-lifecycle .sw.written { background: var(--written); }
+  .storage-lifecycle .sw.zeros { background: repeating-linear-gradient(135deg, var(--zeros) 0 2px, transparent 2px 5px); }
+  .storage-lifecycle .sw.hollow { border: 1.5px dashed var(--sl-muted); }
+  .storage-lifecycle .sw.old { background: repeating-linear-gradient(45deg, var(--old) 0 3px, transparent 3px 6px); }
+  .storage-lifecycle .sw.spare { background: var(--spare); }
+  .storage-lifecycle .sl-caption { display: grid; gap: 6px; font-size: 14px; line-height: 1.6; }
+  .storage-lifecycle .sl-caption strong { font-size: 16px; }
+  .storage-lifecycle .sl-fig { font: 12.5px/1.6 var(--sl-font-mono); color: var(--sl-muted); }
+  .storage-lifecycle .sl-fig b { color: var(--sl-text); }
+  .storage-lifecycle .sl-transcript { font-size: 14px; color: var(--sl-muted); }
+  .storage-lifecycle .sl-transcript summary { cursor: pointer; color: var(--sl-text); }
+  .storage-lifecycle svg .tm, .storage-lifecycle svg .tl { font-family: var(--sl-font-mono); }
+  .storage-lifecycle svg .t { font-family: var(--sl-font); }
+  .storage-lifecycle svg .tm:not([fill]) { fill: var(--sl-muted); }
+  .storage-lifecycle svg .tl:not([fill]), .storage-lifecycle svg .t:not([fill]) { fill: var(--sl-text); }
+  @media (prefers-reduced-motion: reduce) { .storage-lifecycle * { transition: none !important; } }
+</style>

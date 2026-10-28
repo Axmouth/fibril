@@ -100,6 +100,7 @@ const version = versionMatch ? `v${versionMatch[1]}` : "0.x";
         <h2>Persisted. Confirmed. Still fast.</h2>
         <p>By default, a queue publish confirmation means the message and its enqueue state have crossed the persistence boundary through fsync. Replicated durable policies also wait for the required replicas to persist them.</p>
         <a class="inline-link" href="/reliability/replication/">Explore confirmation guarantees <span>→</span></a>
+        <a class="inline-link" href="/development/storage-write-path/">See how durable writes stay fast <span>→</span></a>
       </div>
       <div class="benchmark-panel">
         <div><strong>250k+</strong><span>messages/sec ingress</span></div>

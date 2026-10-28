@@ -632,6 +632,8 @@ h3 {
 
 .inline-link span { margin-left: 3px; }
 
+.inline-link + .inline-link { margin-left: 18px; }
+
 .matrix-wrap {
   overflow-x: auto;
   border: 1px solid var(--line);
