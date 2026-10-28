@@ -207,6 +207,35 @@ def run(args):
             return {"topology": tops, "queues": debug}
         return None
 
+    def roles_now():
+        """Controller node and each measured queue's owner, from one live node."""
+        for base in endpoints:
+            try:
+                top = http(base, "/admin/api/topology")
+            except (urllib.error.URLError, TimeoutError, ConnectionError):
+                continue
+            leader = top["consensus"].get("leader")
+            owners = {a["topic"]: int(a["owner"].split("-")[1]) - 1
+                      for a in top["coordination"]["assignments"] if a["topic"] in queues}
+            return (leader - 1 if leader else None), owners
+        raise RuntimeError("no broker answered a topology request")
+
+    def pick_kill_target():
+        controller, owners = roles_now()
+        if args.kill_target == "controller":
+            target = controller
+        elif args.kill_target == "owner-only":
+            candidates = [n for q, n in owners.items() if n != controller]
+            if not candidates:
+                raise RuntimeError("every measured queue is owned by the controller, add queues")
+            target = candidates[0]
+        else:
+            target = owners[queues[0]]
+        if target is None:
+            raise RuntimeError("no controller known")
+        return target, {"controller": target == controller,
+                        "owns": sorted(q for q, n in owners.items() if n == target)}
+
     def owner_index(queue):
         if copies == 1:
             return 0
@@ -357,8 +386,12 @@ def run(args):
             samples.append({"elapsed_s": elapsed, "meminfo": meminfo(),
                             "servers": [process_sample(p) for p in servers]})
             if args.kill_owner_at_secs is not None and not killed and elapsed >= args.kill_owner_at_secs:
-                servers[owner_index(queues[0])].kill()
+                target, roles = pick_kill_target()
+                servers[target].kill()
                 killed = True
+                kill_info = {"node": target, "elapsed_s": round(elapsed, 1), **roles}
+                save(case / "kill.json", kill_info)
+                print(f"killed broker {target} ({roles}) at {elapsed:.0f} s", flush=True)
             for i, p in enumerate(servers):
                 if p.poll() is not None and i not in lost_brokers:
                     if not args.survive_broker_loss:
@@ -382,13 +415,17 @@ def run(args):
                 if not one.get("failover"):
                     raise RuntimeError(f"client on {queue} did not finish after the broker loss, see its log")
                 survived.append({"queue": queue, **one["failover"],
+                                 "longest_confirm_pause_s": longest_pause(one, args.warmup_secs),
                                  "latency_ms": one["delivery"]["from_schedule"]})
             verdict = "passed" if all(r["verdict"] == "pass" for r in survived) else "failed"
+            kill_path = case / "kill.json"
             save(case / "summary.json", {"status": verdict, "broker_loss": list(lost_brokers.values()),
+                                         "kill": json.loads(kill_path.read_text()) if kill_path.exists() else None,
                                          "failover": survived,
                                          "latency_ms": [r["latency_ms"] for r in survived]})
             for r in survived:
-                print(f"  {r['queue']}: confirmed {r['confirmed']}, delivered {r['delivered_unique']}, "
+                print(f"  {r['queue']}: longest confirm pause {r['longest_confirm_pause_s']} s, "
+                      f"confirmed {r['confirmed']}, delivered {r['delivered_unique']}, "
                       f"lost {r['lost']}, phantom {r['phantom']}, unknown outcome {r['uncertain']}, "
                       f"repeats {r['repeats']}", flush=True)
             if verdict != "passed":
@@ -454,6 +491,24 @@ def run(args):
         if not args.keep_data:
             for parent in {data, *(d.parent for d in node_data)}:
                 shutil.rmtree(parent, ignore_errors=True)
+
+
+def longest_pause(client, warmup_secs):
+    """Longest stretch with no new confirm while publishing was due, in seconds."""
+    rows = client.get("timeline") or []
+    # Timeline times count from client setup, the workload starts later.
+    start = client.get("workload_start_since_setup_secs", 0)
+    planned_end = start + warmup_secs + client["config"]["duration_secs"]
+    longest, last_t, last_c = 0.0, None, None
+    for row in rows:
+        t, c = row["since_setup_secs"], row["counts"]["confirmed"]
+        if t > planned_end:
+            break
+        if last_c is None or c > last_c:
+            if last_t is not None and last_c is not None and t > start:
+                longest = max(longest, t - last_t)
+            last_t, last_c = t, c
+    return round(longest, 2)
 
 
 def histogram_delta(before, after):
@@ -666,6 +721,9 @@ def main():
                              "was delivered and nothing unsent arrived")
     parser.add_argument("--tuned-failover", action="store_true",
                         help="Eager failover with a 1 s grace and Raft heartbeats of 100 ms with 0.5-1 s elections")
+    parser.add_argument("--kill-target", choices=["owner", "owner-only", "controller"], default="owner",
+                        help="Which broker --kill-owner-at-secs kills: the first queue's owner, an owner that is "
+                             "not the controller, or the controller")
     parser.add_argument("--kill-owner-at-secs", type=float, default=None,
                         help="SIGKILL the first queue's owner this many seconds into the workload "
                              "(implies --survive-broker-loss)")

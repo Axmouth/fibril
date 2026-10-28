@@ -42,6 +42,21 @@ function slab(x, y, o) {
   return s + "</g>";
 }
 
+// Zero-ahead lead for a segment written by wr(t) from time `from`: it starts a
+// window ahead and refills in half-window chunks once the lead drops below
+// half, never past the window or the end of the file. This is a sawtooth, not
+// a fixed distance.
+const WIN = 0.3;
+function zeroAhead(t, wr, from = 0, fillSecs = 0.35) {
+  if (t < from) return 0;
+  let zt = Math.min(wr(from) + WIN, 1), due = -1;
+  for (let tt = from; tt <= t; tt += 0.02) {
+    if (due < 0 && zt - wr(tt) < WIN / 2 && zt < 1) due = tt + fillSecs;
+    if (due >= 0 && tt >= due) { zt = Math.min(zt + WIN / 2, wr(tt) + WIN, 1); due = -1; }
+  }
+  return Math.max(zt, wr(t));
+}
+
 // A cost bubble that rises and fades after an fsync completes.
 function bubble(x, y, text, age, tone = "var(--synced)") {
   // A bubble lives 1 s, shorter than the gap between fsyncs, so two never overlap.
@@ -145,14 +160,7 @@ export const scenes = [
     fig: "Measured: owner fsync p50 <b>4.9 → 0.73 ms</b>. At 1k msg/s end to end, p50 <b>9.5 → 2.6–3.6 ms</b> and p99 <b>28–30 → 13–16 ms</b>.",
     draw(t) {
       const wr = (tt) => clamp(0.03 + 0.06 * tt, 0, 0.6);
-      // Sawtooth lead: refill in chunks of half the window once the lead drops below half.
-      const win = 0.3, chunk = win / 2, fillSecs = 0.35;
-      let zt = 0, due = -1;
-      for (let tt = 0; tt <= t; tt += 0.02) {
-        if (zt === 0) { zt = wr(0) + win; continue; }
-        if (due < 0 && zt - wr(tt) < win / 2) due = tt + fillSecs;
-        if (due >= 0 && tt >= due) { zt = Math.min(zt + chunk, wr(tt) + win, 1); due = -1; }
-      }
+      const win = WIN, zt = zeroAhead(t, wr);
       const s = syncs(t, wr, 0.9, 1.1, zeroed, (f) => slotX(1) + f * W, W, LANE, (c) => `fsync ${c.toFixed(1)} ms`);
       return slab(slotX(0), LANE, { written: 1, synced: 1, full: true, label: "segment 7" })
         + slab(slotX(1), LANE, { reserved: true, zeroTo: Math.max(zt, wr(t)), written: wr(t), synced: s.synced, frontiers: true, label: "segment 8", note: "zeros run ahead" }) + s.out
@@ -174,7 +182,7 @@ export const scenes = [
       const sB = syncs(t, wrB, firstJoint, 1.2, zeroed, (f) => slotX(1) + f * W, W, LANE,
         (c) => `fsync ${c.toFixed(1)} ms`);
       let out = slab(slotX(0), LANE, { written: wrA(Math.min(t, r)), synced: synA, frontiers: t < firstJoint, label: "segment 7" });
-      if (t >= r) out += slab(slotX(1), LANE, { reserved: true, zeroTo: Math.min(1, wrB(t) + 0.3), written: wrB(t), synced: sB.synced, frontiers: true, label: "segment 8" }) + sB.out;
+      if (t >= r) out += slab(slotX(1), LANE, { reserved: true, zeroTo: zeroAhead(t, wrB, r), written: wrB(t), synced: sB.synced, frontiers: true, label: "segment 8" }) + sB.out;
       out += bubble(slotX(0) + W, LANE, "one fsync: segment 7 tail + segment 8 header + directory", t - firstJoint - 0.3);
       out += chips(250, "writer", [{ text: "switch files, about 1 ms", at: r, hold: 0.4, tone: "var(--ok)" }, { text: "keep appending", at: r + 0.3, hold: 99 }], t);
       out += chips(282, "fsync", [{ text: "segment 7 tail", at: firstJoint, hold: 0.5 }, { text: "segment 8 header", at: firstJoint, hold: 0.5 }, { text: "directory entry", at: firstJoint, hold: 0.5 }, { text: "new appends", at: firstJoint, hold: 0.5 }], t);
@@ -205,7 +213,7 @@ export const scenes = [
         out += slab(slotX(3), LANE, { full: true, oldTo: 1, written: wr3(t), synced: s3.synced, frontiers: true, label: "segment 10 (reused file)" }) + s3.out;
       }
       out += slab(slotX(1), LANE, { written: 1, synced: 1, full: true, label: "segment 8" });
-      out += slab(slotX(2), LANE, { written: wr2(Math.min(t, roll)), synced: t >= roll ? 1 : s2.synced, reserved: true, zeroTo: 1, frontiers: t < roll, label: "segment 9" }) + s2.out;
+      out += slab(slotX(2), LANE, { written: wr2(Math.min(t, roll)), synced: t >= roll ? 1 : s2.synced, reserved: true, zeroTo: zeroAhead(Math.min(t, roll), wr2), frontiers: t < roll, label: "segment 9" }) + s2.out;
       if (t >= roll && t < back) out += `<text x="${slotX(3)}" y="${LANE + H / 2 + 4}" class="t" font-size="17">roll: rename a spare into place</text>`;
       return out;
     },
