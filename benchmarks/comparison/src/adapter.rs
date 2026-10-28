@@ -332,6 +332,7 @@ async fn prepare_single(args: &Args) -> Result<Prepared> {
                 fibril_client::ClientOptions::new()
                     .auth("bench", "bench")
                     .publish_timeout_ms(args.drain_secs * 1000)
+                    .discovery_endpoints(args.fibril_discovery.clone())
                     .connect(args.endpoint.as_str())
             };
             let p = connect().await?;

@@ -90,6 +90,16 @@ struct Args {
     duration_secs: u64,
     #[arg(long, default_value_t = 120)]
     drain_secs: u64,
+    /// Keep running when a broker is lost mid-run. Failed sends and confirms
+    /// count as unknown outcomes, and repeats and reordering after failover
+    /// are allowed. The result reports confirmed messages never delivered
+    /// and deliveries never published.
+    #[arg(long)]
+    survive_broker_loss: bool,
+    /// Other Fibril brokers the client may use to rediscover topology when
+    /// its endpoint is lost, comma separated.
+    #[arg(long, value_delimiter = ',')]
+    fibril_discovery: Vec<String>,
     #[arg(long, default_value_t = 4096)]
     confirm_window: usize,
     #[arg(long, default_value_t = 1024)]
@@ -200,6 +210,11 @@ impl Args {
                 "planned offered count exceeds --max-messages"
             );
         }
+        if self.survive_broker_loss {
+            ensure!(matches!(self.broker, Broker::Fibril) && self.rate.is_some() && !self.rpc
+                && !self.fibril_unconfirmed && self.fault_role.is_none() && !self.setup_only,
+                "surviving broker loss requires a paced, confirmed Fibril queue workload");
+        }
         if !self.burst_pattern.is_empty() {
             ensure!(self.rate.is_some() && !self.rpc && self.fault_role.is_none() && !self.setup_only,
                 "bursts require an ordinary paced queue workload");
@@ -271,6 +286,10 @@ struct Stats {
     latency: Latency,
     scheduled: Latency,
     burst_delivery: Latency,
+    /// Sends or confirms that failed, so their outcome is unknown.
+    uncertain: u64,
+    /// Deliveries of an id already delivered, after a failover.
+    repeats: u64,
 }
 impl Stats {
     fn json(&self) -> Value {
@@ -347,9 +366,15 @@ async fn issue(
             publisher.send_unconfirmed(payload).await?;
             drop(permit);
         } else {
-            let confirm = publisher.send(payload, id).await?;
-            tx.send(Pending { stamp, confirm, permit }).await
-                .map_err(|_| anyhow::anyhow!("confirmation collector closed"))?;
+            match publisher.send(payload, id).await {
+                Ok(confirm) => tx.send(Pending { stamp, confirm, permit }).await
+                    .map_err(|_| anyhow::anyhow!("confirmation collector closed"))?,
+                Err(_) if a.survive_broker_loss => {
+                    stats.uncertain += 1;
+                    drop(permit);
+                }
+                Err(error) => return Err(error),
+            }
         }
         stats.total += 1;
         stats.last_ns = ns(start);
@@ -376,9 +401,15 @@ async fn issue(
         }
         let permit = credits.clone().acquire_owned().await?;
         let stamp = Stamp { id: stats.total, intended: ns(start), admitted: ns(start) };
-        let confirm = publisher.send(stamp.encode(a.payload_bytes), stamp.id).await?;
-        tx.send(Pending { stamp, confirm, permit }).await
-            .map_err(|_| anyhow::anyhow!("confirmation collector closed during final barriers"))?;
+        match publisher.send(stamp.encode(a.payload_bytes), stamp.id).await {
+            Ok(confirm) => tx.send(Pending { stamp, confirm, permit }).await
+                .map_err(|_| anyhow::anyhow!("confirmation collector closed during final barriers"))?,
+            Err(_) if a.survive_broker_loss => {
+                stats.uncertain += 1;
+                drop(permit);
+            }
+            Err(error) => return Err(error),
+        }
         stats.total += 1;
         stats.last_ns = ns(start);
         p.issued.store(stats.total, Ordering::Relaxed);
@@ -392,23 +423,43 @@ async fn collect_confirmations(
     p: Arc<Progress>,
     start: Instant,
     mut rx: mpsc::Receiver<Pending>,
-) -> Result<Stats> {
+) -> Result<(Stats, Ids)> {
     let mut pending = FuturesUnordered::new();
     let mut open = true;
     let mut stats = Stats::default();
+    let mut confirmed = Ids::default();
     loop {
         tokio::select! {
             item = rx.recv(), if open => match item {
-                Some(Pending { stamp, confirm, permit }) => pending.push(async move {
-                    confirm.await?;
-                    let observed = ns(start);
-                    drop(permit);
-                    Ok::<_,anyhow::Error>((stamp,observed))
-                }),
+                Some(Pending { stamp, confirm, permit }) => {
+                    let survive = a.survive_broker_loss;
+                    pending.push(async move {
+                        // A confirm in flight when its broker died may never
+                        // resolve, so surviving runs give up on it.
+                        let outcome = if survive {
+                            tokio::time::timeout(Duration::from_secs(15), confirm).await
+                                .unwrap_or_else(|_| Err(anyhow::anyhow!("confirm timed out")))
+                        } else {
+                            confirm.await
+                        };
+                        let observed = ns(start);
+                        drop(permit);
+                        match outcome {
+                            Ok(_) => Ok::<_,anyhow::Error>((stamp, Some(observed))),
+                            Err(_) if survive => Ok((stamp, None)),
+                            Err(error) => Err(error),
+                        }
+                    })
+                }
                 None => open = false,
             },
             Some(result) = pending.next(), if !pending.is_empty() => {
                 let (stamp, observed) = result?;
+                let Some(observed) = observed else {
+                    stats.uncertain += 1;
+                    continue;
+                };
+                confirmed.insert(stamp.id, a.max_messages)?;
                 stats.total += 1; stats.last_ns = stats.last_ns.max(observed);
                 if a.measured(observed) { stats.completed_in_window += 1; }
                 if a.measured(stamp.intended) {
@@ -420,7 +471,7 @@ async fn collect_confirmations(
             else => break,
         }
     }
-    Ok::<_, anyhow::Error>(stats)
+    Ok::<_, anyhow::Error>((stats, confirmed))
 }
 
 async fn workload(args: Arc<Args>, progress: Arc<Progress>, origin: Instant) -> Result<Value> {
@@ -469,18 +520,35 @@ async fn workload(args: Arc<Args>, progress: Arc<Progress>, origin: Instant) -> 
         let mut bursts = metrics::BurstTracker::default();
         let mut stats = Stats::default();
         let mut expected = None;
+        // After a broker loss some published ids may never arrive, so the
+        // consumer stops at a deadline short of the drain timeout.
+        let deadline = finish + Duration::from_secs(a.drain_secs.saturating_sub(5));
+        let survive = a.survive_broker_loss;
         loop {
-            if expected == Some(stats.total) {
+            if expected == Some(if survive { ids.count } else { stats.total }) {
                 break;
             }
             tokio::select! {
                 item = deliveries.next() => {
-                    let message = item.context("consumer ended before drain completed")??;
+                    let message = match item {
+                        Some(Ok(message)) => message,
+                        Some(Err(_)) | None if survive => break,
+                        Some(Err(error)) => return Err(error),
+                        None => anyhow::bail!("consumer ended before drain completed"),
+                    };
                     let received = ns(start);
                     let stamp = Stamp::decode(message.payload(), a.payload_bytes)?;
                     ensure!(received >= stamp.admitted, "delivery precedes admission");
-                    ids.insert(stamp.id, a.max_messages)?; message.check_offset(if a.connections == 1 { Some(stamp.id) } else { None })?;
-                    if a.connections == 1 && matches!(a.broker, Broker::Fibril) {
+                    if survive {
+                        if !ids.insert_once(stamp.id, a.max_messages)? {
+                            stats.repeats += 1;
+                            let _ = message.ack().await;
+                            continue;
+                        }
+                    } else {
+                        ids.insert(stamp.id, a.max_messages)?; message.check_offset(if a.connections == 1 { Some(stamp.id) } else { None })?;
+                    }
+                    if !survive && a.connections == 1 && matches!(a.broker, Broker::Fibril) {
                         ensure!(stamp.id == stats.total, "Fibril delivery reordered: expected {}, got {}", stats.total, stamp.id);
                     }
                     if message.speculative() {
@@ -492,7 +560,7 @@ async fn workload(args: Arc<Args>, progress: Arc<Progress>, origin: Instant) -> 
                     if a.measured(stamp.intended) {
                         stats.measured += 1; stats.latency.record(received-stamp.admitted)?;
                         stats.scheduled.record(received-stamp.intended)?;
-                        if !a.burst_pattern.is_empty() {
+                        if !a.burst_pattern.is_empty() && !survive {
                             let (first, size) = metrics::burst_bounds(stamp.id, &a.burst_pattern);
                             if let Some(last) = bursts.observe(first, size, received)? {
                                 stats.burst_delivery.record(last - stamp.intended)?;
@@ -500,7 +568,11 @@ async fn workload(args: Arc<Args>, progress: Arc<Progress>, origin: Instant) -> 
                         }
                     }
                     p.delivered.store(stats.total, Ordering::Relaxed);
-                    message.ack().await?;
+                    match message.ack().await {
+                        Ok(()) => {}
+                        Err(_) if survive => {}
+                        Err(error) => return Err(error),
+                    }
                     p.ack_sent.store(stats.total, Ordering::Relaxed);
                     if let Some(window) = &delivery_credits { window.add_permits(1); }
                 }
@@ -508,11 +580,14 @@ async fn workload(args: Arc<Args>, progress: Arc<Progress>, origin: Instant) -> 
                     changed.context("publisher exited without final count")?;
                     expected = *done_rx.borrow_and_update();
                 }
+                _ = sleep_until(deadline), if survive => break,
             }
         }
-        ids.finish(expected.context("missing published count")?)?;
-        bursts.finish()?;
-        Ok::<_, anyhow::Error>(stats)
+        if !survive {
+            ids.finish(expected.context("missing published count")?)?;
+            bursts.finish()?;
+        }
+        Ok::<_, anyhow::Error>((stats, ids))
     });
 
     let _abort_on_failure = AbortTasks(vec![
@@ -530,25 +605,46 @@ async fn workload(args: Arc<Args>, progress: Arc<Progress>, origin: Instant) -> 
         })
         .await
         .context("workload exceeded duration + drain timeout")??;
-    ensure!(
-        args.expected_confirmations(producer.total) == confirmer.total && producer.total == consumer.total,
-        "total count mismatch"
-    );
-    ensure!(
-        producer.measured > 0
-            && (if args.fibril_unconfirmed { confirmer.measured == 0 } else { producer.measured == confirmer.measured })
-            && producer.measured == consumer.measured,
-        "measurement cohort mismatch or empty measurement"
-    );
+    let (confirmer, confirmed_ids) = confirmer;
+    let (consumer, delivered_ids) = consumer;
+    let failover = args.survive_broker_loss.then(|| {
+        let (lost, lost_examples) = confirmed_ids.missing_from(&delivered_ids, 20);
+        let phantom = if delivered_ids.count == 0 || delivered_ids.highest < producer.total { 0 }
+            else { delivered_ids.highest + 1 - producer.total };
+        json!({"issued": producer.total, "confirmed": confirmer.total,
+            "uncertain": producer.uncertain + confirmer.uncertain,
+            "delivered_unique": delivered_ids.count, "repeats": consumer.repeats,
+            "lost": lost, "lost_examples": lost_examples, "phantom": phantom,
+            "verdict": if lost == 0 && phantom == 0 { "pass" } else { "fail" }})
+    });
+    if !args.survive_broker_loss {
+        ensure!(
+            args.expected_confirmations(producer.total) == confirmer.total && producer.total == consumer.total,
+            "total count mismatch"
+        );
+        ensure!(
+            producer.measured > 0
+                && (if args.fibril_unconfirmed { confirmer.measured == 0 } else { producer.measured == confirmer.measured })
+                && producer.measured == consumer.measured,
+            "measurement cohort mismatch or empty measurement"
+        );
+    }
     let workload_done_ns = ns(start);
-    let settlement = tokio::time::timeout(Duration::from_secs(30), connections.flush()).await??;
+    let settlement = match tokio::time::timeout(Duration::from_secs(30), connections.flush()).await {
+        Ok(Ok(settled)) => Some(settled),
+        _ if args.survive_broker_loss => None,
+        Ok(Err(error)) => return Err(error),
+        Err(elapsed) => return Err(elapsed.into()),
+    };
     drop(publisher_owner);
     let elapsed = ((confirmer.last_ns.max(consumer.last_ns) as f64 / 1e9)
         .max((args.warmup_secs + args.duration_secs) as f64)
         - args.warmup_secs as f64)
         .max(1e-9);
     Ok(
-        json!({"schema_version":1,"status":"client_validated", "config":*args, "adapter_settings":settings,
+        json!({"schema_version":1,
+        "status":if args.survive_broker_loss { "client_validated_with_failover" } else { "client_validated" },
+        "failover":failover, "config":*args, "adapter_settings":settings,
         "publish":producer.json(),"confirm":confirmer.json(),"delivery":consumer.json(),
         "delivery_path":{"early_total":consumer.early_total,"early_measured":consumer.early_measured,
             "ordinary_measured":consumer.measured-consumer.early_measured,

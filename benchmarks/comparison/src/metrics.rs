@@ -88,6 +88,36 @@ impl Ids {
         self.highest = self.highest.max(id);
         Ok(())
     }
+    /// Record a delivery that may repeat after a broker failover. Returns
+    /// false for a repeat.
+    pub fn insert_once(&mut self, id: u64, limit: u64) -> Result<bool> {
+        ensure!(id < limit, "delivery id {id} outside configured limit {limit}");
+        let word = (id / 64) as usize;
+        self.words.resize(self.words.len().max(word + 1), 0);
+        let bit = 1 << (id % 64);
+        if self.words[word] & bit != 0 {
+            return Ok(false);
+        }
+        self.words[word] |= bit;
+        self.count += 1;
+        self.highest = self.highest.max(id);
+        Ok(true)
+    }
+    /// Ids recorded here but not in `other`, with up to `examples` of them.
+    pub fn missing_from(&self, other: &Ids, examples: usize) -> (u64, Vec<u64>) {
+        let mut count = 0;
+        let mut ids = Vec::new();
+        for (i, word) in self.words.iter().enumerate() {
+            let missing = word & !other.words.get(i).copied().unwrap_or(0);
+            count += u64::from(missing.count_ones());
+            let mut bits = missing;
+            while bits != 0 && ids.len() < examples {
+                ids.push(i as u64 * 64 + u64::from(bits.trailing_zeros()));
+                bits &= bits - 1;
+            }
+        }
+        (count, ids)
+    }
     pub fn finish(&self, issued: u64) -> Result<()> {
         ensure!(
             self.count == issued && (issued == 0 || self.highest + 1 == issued),
@@ -173,6 +203,22 @@ pub struct Counts {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn repeats_and_losses_after_failover() {
+        let mut confirmed = Ids::default();
+        let mut delivered = Ids::default();
+        for id in [0, 1, 2, 63, 64, 130] {
+            confirmed.insert(id, 1000).unwrap();
+        }
+        for id in [0, 2, 64, 130, 131] {
+            assert!(delivered.insert_once(id, 1000).unwrap());
+        }
+        assert!(!delivered.insert_once(64, 1000).unwrap());
+        assert_eq!(delivered.count, 5);
+        assert_eq!(confirmed.missing_from(&delivered, 20), (2, vec![1, 63]));
+        assert_eq!(confirmed.missing_from(&delivered, 1), (2, vec![1]));
+    }
+
     use super::*;
     #[test]
     fn rejects_duplicates_holes_and_corruption() {

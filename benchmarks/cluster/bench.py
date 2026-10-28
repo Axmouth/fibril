@@ -330,12 +330,17 @@ def run(args):
                        "--prefetch", str(args.prefetch),
                        "--confirm-window", str(args.confirm_window), "--delivery-window", str(args.confirm_window),
                        "--workers", "4", "--warmup-secs", str(args.warmup_secs),
-                       "--duration-secs", str(args.duration_secs), "--drain-secs", "15",
+                       "--duration-secs", str(args.duration_secs),
+                       # Redeliveries after a failover can take a lease timeout to arrive.
+                       "--drain-secs", "45" if args.survive_broker_loss else "15",
                        "--output", str(case / f"client-{queue}.json")]
             if args.unconfirmed:
                 command += ["--fibril-unconfirmed"]
             if args.burst_pattern:
                 command += ["--burst-pattern", args.burst_pattern]
+            if args.survive_broker_loss:
+                command += ["--survive-broker-loss", "--fibril-discovery",
+                            ",".join(f"127.0.0.1:{broker_port(i)}" for i in range(copies))]
             command += ["--rate", str(args.rate)] if args.rate else ["--saturation"]
             if args.rate:
                 # The client refuses a paced plan above its message safety
@@ -345,14 +350,24 @@ def run(args):
             clients.append(launch(command, f"client-{queue}", env, case))
 
         started = time.monotonic()
+        lost_brokers = {}
+        killed = False
         while any(c.poll() is None for c in clients):
-            samples.append({"elapsed_s": time.monotonic() - started, "meminfo": meminfo(),
+            elapsed = time.monotonic() - started
+            samples.append({"elapsed_s": elapsed, "meminfo": meminfo(),
                             "servers": [process_sample(p) for p in servers]})
-            if any(p.poll() is not None for p in servers):
-                raise RuntimeError("a broker exited during the workload")
+            if args.kill_owner_at_secs is not None and not killed and elapsed >= args.kill_owner_at_secs:
+                servers[owner_index(queues[0])].kill()
+                killed = True
+            for i, p in enumerate(servers):
+                if p.poll() is not None and i not in lost_brokers:
+                    if not args.survive_broker_loss:
+                        raise RuntimeError("a broker exited during the workload")
+                    lost_brokers[i] = {"node": i, "elapsed_s": round(elapsed, 1), "returncode": p.returncode}
+                    print(f"broker {i} exited at {elapsed:.0f} s with {p.returncode}, continuing", flush=True)
             if any(c.poll() not in (None, 0) for c in clients):
                 raise RuntimeError("a client failed, see the client logs")
-            if time.monotonic() - started > args.duration_secs + args.warmup_secs + 60:
+            if time.monotonic() - started > args.duration_secs + args.warmup_secs + (90 if args.survive_broker_loss else 60):
                 raise TimeoutError("workload deadline exceeded")
             time.sleep(1)
         for profiler in profilers:
@@ -360,12 +375,35 @@ def run(args):
         for profiler in profilers:
             profiler.wait(timeout=120)
 
+        if lost_brokers:
+            survived = []
+            for queue in queues:
+                one = json.loads((case / f"client-{queue}.json").read_text())
+                if not one.get("failover"):
+                    raise RuntimeError(f"client on {queue} did not finish after the broker loss, see its log")
+                survived.append({"queue": queue, **one["failover"],
+                                 "latency_ms": one["delivery"]["from_schedule"]})
+            verdict = "passed" if all(r["verdict"] == "pass" for r in survived) else "failed"
+            save(case / "summary.json", {"status": verdict, "broker_loss": list(lost_brokers.values()),
+                                         "failover": survived,
+                                         "latency_ms": [r["latency_ms"] for r in survived]})
+            for r in survived:
+                print(f"  {r['queue']}: confirmed {r['confirmed']}, delivered {r['delivered_unique']}, "
+                      f"lost {r['lost']}, phantom {r['phantom']}, unknown outcome {r['uncertain']}, "
+                      f"repeats {r['repeats']}", flush=True)
+            if verdict != "passed":
+                raise RuntimeError(f"broker loss check failed: {survived}")
+            print(f"passed {case.name} with broker loss", flush=True)
+            return
+
         results = []
         for queue in queues:
             one = json.loads((case / f"client-{queue}.json").read_text())
             counts = one["counts"]
             confirms = args.connections if args.unconfirmed else counts["issued"]
-            if (one["status"] != "client_validated" or counts["issued"] <= args.connections
+            if (one["status"] not in ("client_validated", "client_validated_with_failover")
+                    or (one.get("failover") or {}).get("verdict", "pass") != "pass"
+                    or counts["issued"] <= args.connections
                     or counts["confirmed"] != confirms
                     or counts["delivered"] != counts["issued"] or counts["ack_sent"] != counts["issued"]):
                 raise RuntimeError(f"client counts failed validation on {queue}: {counts}")
@@ -609,7 +647,15 @@ def main():
     parser.add_argument("--idle-window-secs", type=int, default=IDLE_WINDOW_SECS,
                         help="Length of the quiet window measured after --idle-queues are open")
     parser.add_argument("--keep-data", action="store_true", help="Keep broker data after the run")
+    parser.add_argument("--survive-broker-loss", action="store_true",
+                        help="Keep running when a broker dies, then check that every confirmed message "
+                             "was delivered and nothing unsent arrived")
+    parser.add_argument("--kill-owner-at-secs", type=float, default=None,
+                        help="SIGKILL the first queue's owner this many seconds into the workload "
+                             "(implies --survive-broker-loss)")
     args = parser.parse_args()
+    if args.kill_owner_at_secs is not None:
+        args.survive_broker_loss = True
     if args.burst_pattern and not args.rate:
         parser.error("--burst-pattern needs --rate")
     if args.burst_pattern:

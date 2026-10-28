@@ -70,6 +70,26 @@ benchmarks/cluster/bench.py --output results/one --storage /mnt/nvme/fibril-benc
   --rate 10000 --durability buffered
 ```
 
+## Broker loss
+
+By default a broker that exits mid-run fails the run at once. With
+`--survive-broker-loss` the run continues: the client gets every broker's
+address for rediscovery, waits for failover, and checks delivery at the end.
+A send or confirm that failed during the loss counts as an unknown outcome,
+and a message delivered twice after failover counts as a repeat. The run
+passes when every confirmed message was delivered and nothing arrived that
+was never published. `--kill-owner-at-secs N` kills the first queue's owner N
+seconds in, to test this on purpose:
+
+```sh
+python3 benchmarks/cluster/bench.py --output results/kill-owner --storage /path/on/test/drive \
+  --copies 3 --rate 1000 --warmup-secs 5 --duration-secs 60 --kill-owner-at-secs 25
+```
+
+The summary lists the lost broker and, per queue, the confirmed, delivered,
+lost, phantom, unknown-outcome and repeated counts. Latency in such a run
+includes the failover pause.
+
 ## Reading results
 
 `summary.json` in each run directory carries a label (nodes, policy, queue

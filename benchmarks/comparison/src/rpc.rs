@@ -65,12 +65,10 @@ pub(super) async fn run(
         Arc::new(Semaphore::new(args.confirm_window)),
         Some(request_credits.clone()),
     ));
-    let confirmer = tokio::spawn(collect_confirmations(
-        args.clone(),
-        progress.clone(),
-        start,
-        rx,
-    ));
+    let confirmer = tokio::spawn({
+        let collected = collect_confirmations(args.clone(), progress.clone(), start, rx);
+        async move { collected.await.map(|(stats, _)| stats) }
+    });
     let a = args.clone();
     let publisher = response_publisher.clone();
     let mut done = done_rx.clone();
