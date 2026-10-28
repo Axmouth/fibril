@@ -192,3 +192,15 @@ with the scripts in `profile/`:
 | `syscalls.py` | CPU share per system call |
 | `switches.py` | Where threads went to sleep, for `--perf switches` |
 | `frames.py` | The innermost Fibril, Stroma, Keratin or Ganglion frame, optionally only under one hot symbol |
+
+## Ramps and backlogs
+
+`--rate-profile 0:500,300:20000,600:500` changes the offered rate over the
+run, linearly between `SECONDS:RATE` points counted from the workload start,
+and sets `--rate` to the peak. `--consumer-pause 60:60` stops the consumers
+reading for 60 seconds at second 60, so a backlog builds on the broker, then
+lets them drain it. The summary reports the normal and peak backlog and how
+long the drain took. Keep `--prefetch` well under the backlog, or the broker
+pushes the backlog into the client's buffer and the drain only measures the
+client, and set `--confirm-window` above the backlog, or the publisher
+throttles itself once that many messages are undelivered.

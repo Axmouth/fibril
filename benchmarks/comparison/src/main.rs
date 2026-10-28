@@ -77,6 +77,17 @@ struct Args {
     /// Fixed offered messages/s. Omit for saturation.
     #[arg(long, conflicts_with = "saturation")]
     rate: Option<u64>,
+    /// A rate that changes over the run, as SECONDS:RATE points, linear in
+    /// between, e.g. 0:500,60:5000,120:500. Needs --rate as the nominal peak.
+    #[arg(long, value_delimiter = ',')]
+    rate_profile: Vec<String>,
+    #[arg(skip)]
+    #[serde(skip)]
+    profile: metrics::RateProfile,
+    /// Stop reading deliveries for a while, then drain the backlog:
+    /// START_SECS:PAUSE_SECS from workload start.
+    #[arg(long)]
+    consumer_pause: Option<String>,
     /// Repeating burst sizes at the average --rate, e.g. 200,100.
     #[arg(long, value_delimiter = ',')]
     burst_pattern: Vec<u64>,
@@ -197,14 +208,21 @@ impl Args {
                     .all(|b| b.is_ascii_alphanumeric() || b == b'_'),
             "queue name must be alphanumeric/underscore"
         );
+        if !self.rate_profile.is_empty() {
+            ensure!(self.rate.is_some() && self.burst_pattern.is_empty() && !self.rpc && self.fault_role.is_none(),
+                "a rate profile needs --rate as its nominal peak and no burst pattern");
+        }
+        if let Some(pause) = &self.consumer_pause {
+            let (a, b) = pause.split_once(':').context("--consumer-pause looks like START_SECS:PAUSE_SECS")?;
+            let (_, _): (f64, f64) = (a.parse()?, b.parse()?);
+            ensure!(self.rate.is_some() && !self.rpc && self.fault_role.is_none(), "a consumer pause needs a paced queue workload");
+        }
         if let Some(rate) = self.rate {
             ensure!(
                 rate > 0,
                 "rate must be positive; use --saturation for an unpaced run"
             );
-            let count = rate
-                .checked_mul(self.warmup_secs + self.duration_secs)
-                .context("offered count overflow")?;
+            let count = self.planned_count().context("offered count overflow")?;
             ensure!(
                 count.checked_add(self.final_barriers()).is_some_and(|n| n <= self.max_messages),
                 "planned offered count exceeds --max-messages"
@@ -227,6 +245,26 @@ impl Args {
                 "warmup and duration must each contain whole burst cycles at the requested rate");
         }
         Ok(())
+    }
+    /// Messages a paced run offers, from the rate or the rate profile.
+    fn planned_count(&self) -> Option<u64> {
+        let secs = self.warmup_secs + self.duration_secs;
+        if !self.profile.is_empty() {
+            return Some(self.profile.count_at(secs as f64).floor() as u64);
+        }
+        self.rate.and_then(|r| r.checked_mul(secs))
+    }
+    /// When message `id` is due, in nanoseconds from workload start.
+    fn due_ns(&self, id: u64) -> Option<u64> {
+        if !self.profile.is_empty() {
+            return Some(self.profile.due_ns(id, (self.warmup_secs + self.duration_secs) as f64));
+        }
+        self.rate.map(|r| scheduled_ns(metrics::burst_bounds(id, &self.burst_pattern).0, r))
+    }
+    /// The consumer pause window, in seconds from workload start.
+    fn pause_window(&self) -> Option<(f64, f64)> {
+        let (a, b) = self.consumer_pause.as_ref()?.split_once(':')?;
+        Some((a.parse().ok()?, b.parse().ok()?))
     }
     fn final_barriers(&self) -> u64 {
         if self.delivery_window > 0 { self.connections as u64 } else { 0 }
@@ -328,7 +366,7 @@ async fn issue(
     request_credits: Option<Arc<Semaphore>>,
 ) -> Result<Stats> {
     sleep_until(start).await;
-    let count = a.rate.map(|r| r * (a.warmup_secs + a.duration_secs));
+    let count = a.planned_count();
     let mut stats = Stats::default();
     loop {
         let id = stats.total;
@@ -339,10 +377,7 @@ async fn issue(
             id < a.max_messages - a.final_barriers(),
             "message safety limit reached during saturation; increase --max-messages"
         );
-        let intended = a
-            .rate
-            .map(|r| scheduled_ns(metrics::burst_bounds(id, &a.burst_pattern).0, r))
-            .unwrap_or_else(|| ns(start));
+        let intended = a.due_ns(id).unwrap_or_else(|| ns(start));
         pace_until(start + Duration::from_nanos(intended)).await;
         let request_permit = match &request_credits {
             Some(window) => Some(window.clone().acquire_owned().await?),
@@ -524,6 +559,13 @@ async fn workload(args: Arc<Args>, progress: Arc<Progress>, origin: Instant) -> 
         // consumer stops at a deadline short of the drain timeout.
         let deadline = finish + Duration::from_secs(a.drain_secs.saturating_sub(5));
         let survive = a.survive_broker_loss;
+        // A consumer pause stops reading deliveries so a backlog builds, then
+        // the consumer drains it.
+        let (pause_at, pause_end) = match a.pause_window() {
+            Some((at, len)) => (start + Duration::from_secs_f64(at), start + Duration::from_secs_f64(at + len)),
+            None => (start, start),
+        };
+        let mut paused = a.pause_window().is_none();
         loop {
             if expected == Some(if survive { ids.count } else { stats.total }) {
                 break;
@@ -581,6 +623,10 @@ async fn workload(args: Arc<Args>, progress: Arc<Progress>, origin: Instant) -> 
                     expected = *done_rx.borrow_and_update();
                 }
                 _ = sleep_until(deadline), if survive => break,
+                _ = sleep_until(pause_at), if !paused => {
+                    sleep_until(pause_end).await;
+                    paused = true;
+                }
             }
         }
         if !survive {
@@ -682,7 +728,8 @@ fn client_sample() -> Value {
     json!({"rss_kib":rss,"cpu_ticks":stat})
 }
 fn main() -> Result<()> {
-    let args = Args::parse();
+    let mut args = Args::parse();
+    args.profile = metrics::RateProfile::parse(&args.rate_profile)?;
     args.validate()?;
     ensure!(!args.output.exists(), "output already exists");
     if let Some(parent) = args.output.parent().filter(|p| !p.as_os_str().is_empty()) {

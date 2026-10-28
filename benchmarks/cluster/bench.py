@@ -367,6 +367,10 @@ def run(args):
                 command += ["--fibril-unconfirmed"]
             if args.burst_pattern:
                 command += ["--burst-pattern", args.burst_pattern]
+            if args.rate_profile:
+                command += ["--rate-profile", args.rate_profile]
+            if args.consumer_pause:
+                command += ["--consumer-pause", args.consumer_pause]
             if args.survive_broker_loss:
                 command += ["--survive-broker-loss", "--fibril-discovery",
                             ",".join(f"127.0.0.1:{broker_port(i)}" for i in range(copies))]
@@ -493,6 +497,22 @@ def run(args):
                 shutil.rmtree(parent, ignore_errors=True)
 
 
+def backlog_drain(client, pause):
+    """Peak backlog during a consumer pause and how long it took to drain."""
+    if not pause:
+        return None
+    at, length = (float(x) for x in pause.split(":"))
+    start = client.get("workload_start_since_setup_secs", 0)
+    rows = [(r["since_setup_secs"] - start, r["counts"]["confirmed"] - r["counts"]["delivered"])
+            for r in client.get("timeline") or []]
+    before = sorted(b for t, b in rows if 1 < t < at) or [0]
+    normal = before[len(before) // 2]
+    peak = max((b for t, b in rows if at <= t <= at + length + 1), default=0)
+    drained = next((t for t, b in rows if t > at + length and b <= max(2 * normal, 50)), None)
+    return {"normal_backlog": normal, "peak_backlog": peak,
+            "drain_secs": round(drained - (at + length), 2) if drained is not None else None}
+
+
 def longest_pause(client, warmup_secs):
     """Longest stretch with no new confirm while publishing was due, in seconds."""
     rows = client.get("timeline") or []
@@ -605,6 +625,7 @@ def summarize(args, case, results, before, after, samples):
     return {
         "status": "passed",
         "owner_changes": owner_changes,
+        "consumer_pause": [backlog_drain(r, args.consumer_pause) for r in results] if args.consumer_pause else None,
         "idle": idle and {"queues": args.idle_queues,
                           "rss_mib_per_node": [i.get("rss_kib", 0) / 1024 for i in idle],
                           "threads_per_node": [i.get("threads") for i in idle],
@@ -719,6 +740,11 @@ def main():
     parser.add_argument("--survive-broker-loss", action="store_true",
                         help="Keep running when a broker dies, then check that every confirmed message "
                              "was delivered and nothing unsent arrived")
+    parser.add_argument("--rate-profile", metavar="SECS:RATE,...",
+                        help="Rate that changes over the run, linear between points, for example "
+                             "0:500,60:5000,120:500. Sets --rate to its peak")
+    parser.add_argument("--consumer-pause", metavar="START:SECS",
+                        help="Consumers stop reading for SECS seconds at START, then drain the backlog")
     parser.add_argument("--tuned-failover", action="store_true",
                         help="Eager failover with a 1 s grace and Raft heartbeats of 100 ms with 0.5-1 s elections")
     parser.add_argument("--kill-target", choices=["owner", "owner-only", "controller"], default="owner",
@@ -730,6 +756,8 @@ def main():
     args = parser.parse_args()
     if args.kill_owner_at_secs is not None:
         args.survive_broker_loss = True
+    if args.rate_profile:
+        args.rate = max(int(float(p.split(":")[1])) for p in args.rate_profile.split(","))
     if args.tuned_failover:
         args.replication += ["eager_failover=true", "eager_failover_grace_ms=1000"]
         args.node_env += ["FIBRIL_COORDINATION_RAFT_HEARTBEAT_INTERVAL_MS=100",

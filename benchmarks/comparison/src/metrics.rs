@@ -1,4 +1,4 @@
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use hdrhistogram::Histogram;
 use serde::Serialize;
 
@@ -166,8 +166,106 @@ impl BurstTracker {
 }
 
 // Deadline is computed from the original start, including after a missed deadline.
+/// A paced rate that changes over the run: points of (seconds from workload
+/// start, messages per second), linear in between and flat outside them.
+#[derive(Clone, Debug, Default)]
+pub struct RateProfile {
+    points: Vec<(f64, f64)>,
+}
+
+impl RateProfile {
+    pub fn parse(items: &[String]) -> Result<Self> {
+        let mut points = Vec::new();
+        for item in items {
+            let (t, r) = item.split_once(':').context("rate profile points look like SECONDS:RATE")?;
+            let (t, r): (f64, f64) = (t.trim().parse()?, r.trim().parse()?);
+            ensure!(t >= 0.0 && r > 0.0 && r <= 10_000_000.0, "rate profile point {item} out of range");
+            if let Some(&(last, _)) = points.last() {
+                ensure!(t > last, "rate profile times must increase");
+            }
+            points.push((t, r));
+        }
+        Ok(Self { points })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.points.is_empty()
+    }
+
+    /// Pieces of the rate curve as (start, end, rate at start, rate at end),
+    /// with flat pieces before the first and after the last point.
+    fn pieces(&self, until: f64) -> Vec<(f64, f64, f64, f64)> {
+        let mut out = Vec::new();
+        let (t0, r0) = self.points[0];
+        if t0 > 0.0 {
+            out.push((0.0, t0, r0, r0));
+        }
+        for w in self.points.windows(2) {
+            out.push((w[0].0, w[1].0, w[0].1, w[1].1));
+        }
+        let (tn, rn) = *self.points.last().unwrap();
+        out.push((tn, until.max(tn) + 1.0, rn, rn));
+        out
+    }
+
+    /// Messages offered by time `t` seconds.
+    pub fn count_at(&self, t: f64) -> f64 {
+        let mut n = 0.0;
+        for (a, b, ra, rb) in self.pieces(t) {
+            if t <= a {
+                break;
+            }
+            let end = t.min(b);
+            let slope = (rb - ra) / (b - a);
+            let d = end - a;
+            n += ra * d + slope * d * d / 2.0;
+        }
+        n
+    }
+
+    /// When message number `n` is due, in nanoseconds from workload start.
+    pub fn due_ns(&self, n: u64, until: f64) -> u64 {
+        let target = n as f64;
+        let mut done = 0.0;
+        for (a, b, ra, rb) in self.pieces(until) {
+            let len = b - a;
+            let slope = (rb - ra) / len;
+            let piece = ra * len + slope * len * len / 2.0;
+            if done + piece >= target {
+                let need = target - done;
+                // Solve ra*d + slope*d^2/2 = need for d.
+                let d = if slope.abs() < 1e-12 {
+                    need / ra
+                } else {
+                    (-ra + (ra * ra + 2.0 * slope * need).max(0.0).sqrt()) / slope
+                };
+                return ((a + d) * 1e9) as u64;
+            }
+            done += piece;
+        }
+        (until * 1e9) as u64
+    }
+}
+
 pub fn scheduled_ns(id: u64, rate: u64) -> u64 {
     ((id as u128 * 1_000_000_000) / rate as u128) as u64
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+    #[test]
+    fn ramp_counts_and_schedules_agree() {
+        let p = RateProfile::parse(&["0:100".into(), "10:1100".into(), "20:100".into()]).unwrap();
+        // Area under the ramp up and down: 2 * (100 * 10 + 1000 * 10 / 2) = 12000.
+        assert!((p.count_at(20.0) - 12_000.0).abs() < 1e-6);
+        // First 5 s: 100 * 5 + (100 per s per s) * 5^2 / 2 = 1750.
+        assert!((p.count_at(5.0) - 1_750.0).abs() < 1e-6);
+        let t = p.due_ns(1_750, 20.0) as f64 / 1e9;
+        assert!((t - 5.0).abs() < 1e-6, "{t}");
+        // Flat after the last point.
+        assert!((p.count_at(30.0) - 13_000.0).abs() < 1e-6);
+    }
 }
 
 #[cfg(test)]
