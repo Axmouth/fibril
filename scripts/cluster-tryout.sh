@@ -78,10 +78,13 @@ CLUSTER_TRYOUT_RUN_ROOT="${CLUSTER_TRYOUT_RUN_ROOT:-/tmp}"
 ADMIN_WAIT_SECS=5
 CLUSTER_WAIT_SECS=90
 # Keep wide spacing between port bands so large local clusters do not make
-# broker/admin/raft ports collide as node indexes grow.
-BASE_BROKER_PORT=17180
-BASE_ADMIN_PORT=27180
-BASE_RAFT_PORT=37180
+# broker/admin/raft ports collide as node indexes grow. Every band stays below
+# Linux's ephemeral range (32768 and up by default): a port in that range can be
+# taken by an outgoing connection while its broker is down, and a restarted
+# broker then fails to bind it.
+BASE_BROKER_PORT=12180
+BASE_ADMIN_PORT=17180
+BASE_RAFT_PORT=22180
 STABLE_ROUNDS_REQUIRED=10
 
 while [[ $# -gt 0 ]]; do
@@ -269,8 +272,8 @@ offset_is_free() {
 }
 
 # Raft sits on the highest base, so it bounds how far the offset can reach
-# before any port would exceed 65535.
-MAX_OFFSET=$((65535 - BASE_RAFT_PORT - EXPECTED_PROCESSES - 1))
+# before any port would enter the ephemeral range.
+MAX_OFFSET=$((32767 - BASE_RAFT_PORT - EXPECTED_PROCESSES - 1))
 if [[ "$MAX_OFFSET" -lt 0 ]]; then
   echo "FAIL: $EXPECTED_PROCESSES nodes need more ports than the local range allows" >&2
   exit 1

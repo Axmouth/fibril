@@ -22,6 +22,12 @@ and test each host's storage before choosing a deployment policy.
   secret, never with a user account. Ganglion mode refuses to start without one.
 - **The coordination peers.** Each node knows the raft address of every member,
   including itself, and exactly one node bootstraps the group on first boot.
+- **Ports outside the ephemeral range.** Pick the broker, admin and raft ports
+  below the operating system's range for outgoing connections, which on Linux
+  starts at 32768 by default (`net.ipv4.ip_local_port_range`). A port inside it
+  can be taken by an outgoing connection while its broker is down, and the
+  restarted broker then fails to bind it with "address already in use". The
+  defaults, 9876 and 8081, are already below it.
 - **TLS, if connections leave the host.** Passwords and replicated data travel
   the network. Enable the `tls` section (see [configuration](/configuration/)).
   With TLS enabled, replication and coordination traffic between brokers is
