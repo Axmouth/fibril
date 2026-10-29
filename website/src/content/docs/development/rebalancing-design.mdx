@@ -11,6 +11,10 @@ placement is described in [clustering](/concepts/clustering/), recovery in
 [failover and recovery](/reliability/recovery-sealing/), and cooperative owner
 handoff in [recovery continuation](/development/recovery-continuation/).
 
+For the lost-follower case, a first step that keeps the queue serving by
+suspending the lost copy is in
+[follower loss without fencing](/development/follower-loss-design/).
+
 ## Goals
 
 - Use new or idle nodes without stopping the queues that move onto them.

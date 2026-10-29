@@ -240,6 +240,10 @@ export const sidebar = [
             slug: "development/failover-plan",
           },
           {
+            label: "Follower loss without fencing",
+            slug: "development/follower-loss-design",
+          },
+          {
             label: "Recovery continuation and handoff",
             slug: "development/recovery-continuation",
           },
