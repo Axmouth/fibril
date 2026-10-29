@@ -88,7 +88,7 @@ Names, as checked on 2026-07-06:
 | Rust client | crates.io | `fibril-client` | Free. Bare `fibril` is a different, unrelated crate. |
 | Go client | Go modules | `github.com/Axmouth/fibril/clients/go` | Module path is the repo path |
 | Broker | crates.io | `fibril-broker` | Free |
-| Coordination | crates.io | `ganglion` and its member crates | Free |
+| Coordination | crates.io | `ganglion` and its member crates | `ganglion` claimed. Member crate names were free in July. |
 | Storage | crates.io | `keratin-log`, `stroma-core`, `stroma-common` | Free. Bare `keratin` is a different crate, and none is published under that name. |
 
 crates.io has no name reservation, so a minimal first release is the reservation.
