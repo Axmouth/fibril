@@ -4,6 +4,7 @@ import starlightVersions from "starlight-versions";
 import tailwindcss from "@tailwindcss/vite";
 import { sidebar } from "./src/navigation.mjs";
 import rehypeWrapTables from "./src/plugins/rehype-wrap-tables.mjs";
+import remarkRepoLinks from "./src/plugins/remark-repo-links.mjs";
 
 export default defineConfig({
   site: "https://fibril.sh",
@@ -40,6 +41,7 @@ export default defineConfig({
     }),
   ],
   markdown: {
+    remarkPlugins: [remarkRepoLinks],
     rehypePlugins: [rehypeWrapTables],
   },
   vite: {

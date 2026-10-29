@@ -55,7 +55,7 @@ details supported paths and conditions. The [roadmap](/roadmap/) and
 [failover plan](/development/failover-plan/) describe remaining work.
 [Engineering notes](/development/engineering-notes/) and the
 [optimization log](/development/optimization-log/) record fixes and investigations.
-The [changelog](https://github.com/Axmouth/fibril/blob/main/CHANGELOG.md) records changes.
+The [changelog](../../../../CHANGELOG.md) records changes.
 
 ## Versions
 

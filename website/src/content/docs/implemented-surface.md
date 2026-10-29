@@ -532,7 +532,7 @@ See also: [client usage](/clients/),
 
 Rust, TypeScript, Python, Go and C# expose the shared messaging and reconnect
 surface. Python offers asynchronous APIs and a blocking facade. The
-[client feature matrix](https://github.com/Axmouth/fibril/blob/main/clients/FEATURE_MATRIX.md)
+[client feature matrix](../../../../clients/FEATURE_MATRIX.md)
 records language-specific options and exceptions.
 
 | Item | Status | Client surface |
@@ -596,7 +596,7 @@ Conditions and limits:
 - They are not a stable published performance contract.
 - Hardware, storage, durability settings, payload size, queue depth, and batching strongly affect results.
 
-The repository includes a [shared Rust queue workload](https://github.com/Axmouth/fibril/tree/main/benchmarks/comparison) with fixed offered rates, saturation, payload identity checks and completion histograms. A Python/Docker runner provisions fresh single-node Fibril, JetStream and RabbitMQ instances, verifies final settlement and records CPU/memory samples. Existing-server modes support RPC reply pipelining, multiple connections and declarations requesting three copies; cluster placement and durability must be verified separately.
+The repository includes a [shared Rust queue workload](../../../../benchmarks/comparison) with fixed offered rates, saturation, payload identity checks and completion histograms. A Python/Docker runner provisions fresh single-node Fibril, JetStream and RabbitMQ instances, verifies final settlement and records CPU/memory samples. Existing-server modes support RPC reply pipelining, multiple connections and declarations requesting three copies; cluster placement and durability must be verified separately.
 
 Stream adapters, portable cluster/fault provisioning and a repeated workload matrix remain planned. These tools provide reproducible measurements and do not establish power-loss safety or production capacity.
 

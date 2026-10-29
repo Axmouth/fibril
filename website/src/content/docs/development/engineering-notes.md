@@ -851,7 +851,7 @@ confirmation guarantees or optimize the other SDKs' transports.
 
 ### Reproducible comparison tooling
 
-The [shared Rust harness](https://github.com/Axmouth/fibril/tree/main/benchmarks/comparison)
+The [shared Rust harness](../../../../../benchmarks/comparison)
 records message identity, offered load, completion latency and resource samples,
 with isolated single-node Docker provisioning and repeatable burst arrivals.
 Existing-server modes also cover pipelined request/reply and multiple

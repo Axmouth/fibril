@@ -9,7 +9,7 @@ How the numbers got here is in the [tuning ledger](/development/tuning-ledger/),
 
 ## Repeatable cross-broker workload
 
-The repository includes a [shared Rust benchmark harness](https://github.com/Axmouth/fibril/tree/main/benchmarks/comparison) for Fibril, NATS JetStream and RabbitMQ. It supports fixed offered rate or saturation, configurable payload size, confirmation and delivery latency, memory/CPU samples, and message identity and settlement checks. Docker Compose provisions fresh single-node instances on the same selected filesystem. Each run retains its exact settings, logs, versions and result table.
+The repository includes a [shared Rust benchmark harness](../../../../benchmarks/comparison) for Fibril, NATS JetStream and RabbitMQ. It supports fixed offered rate or saturation, configurable payload size, confirmation and delivery latency, memory/CPU samples, and message identity and settlement checks. Docker Compose provisions fresh single-node instances on the same selected filesystem. Each run retains its exact settings, logs, versions and result table.
 
 The first profile compares one durable queue and one stored copy. JetStream timed-sync results carry a separate durability label. Stream fan-out and replicated cluster profiles are planned extensions.
 

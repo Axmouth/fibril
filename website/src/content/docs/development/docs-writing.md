@@ -41,6 +41,11 @@ reader will learn. Animated stories belong in their subject's guide and in the
 direct heading link. Run `npm run nav:check` in `website` to check current page
 coverage. The website build runs this check too.
 
+Link other docs pages by site path, such as `/reliability/replication/`. Link
+repository files outside the docs, such as scripts or `CHANGELOG.md`, with a
+relative path from the page's source file. The link then works when the source
+is read on GitHub, and the build rewrites it to the file's GitHub URL on main.
+
 ## Keeping documentation current
 
 The [roadmap](/roadmap/) and active planning documents contain remaining work,
