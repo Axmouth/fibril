@@ -11,7 +11,7 @@ Rust, TypeScript, Python, Go and C#.
 The user-facing contract is documented in
 [implemented surface](../../website/src/content/docs/implemented-surface.md#reconnects).
 Remaining stream settlement work is in
-[GATE3_RECONNECT_PLAN.md](../../GATE3_RECONNECT_PLAN.md).
+[client lifecycle completion in FOLLOWUPS.md](../../FOLLOWUPS.md#client-lifecycle-completion).
 
 ## Design (as built for the Rust reference)
 

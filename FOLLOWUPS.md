@@ -2,14 +2,11 @@
 
 ## Priorities
 
-1. Make checkpoint installation and backfill safe under interruption and
-   promotion. [CHECKPOINT_RECOVERY_PLAN.md](archive/implementation-notes/CHECKPOINT_RECOVERY_PLAN.md) defines
-   the reproduced failures and acceptance checks.
-2. Complete stream settlement semantics and reconnect continuity coverage.
-   [GATE3_RECONNECT_PLAN.md](GATE3_RECONNECT_PLAN.md) defines this work.
-3. Complete domain typing, wire/storage compatibility policy, the five-client
+1. Complete stream settlement semantics and reconnect continuity coverage. See
+   [client lifecycle completion](#client-lifecycle-completion).
+2. Complete domain typing, wire/storage compatibility policy, the five-client
    API review, and automated compatibility enforcement (#109-#112).
-4. Add node enrollment and operational workflows for cluster management.
+3. Add node enrollment and operational workflows for cluster management.
 
 Current capabilities, interfaces and limits belong in
 [implemented surface](website/src/content/docs/implemented-surface.md).
@@ -188,9 +185,63 @@ Tests:
 
 ## Client lifecycle completion
 
-See [GATE3_RECONNECT_PLAN.md](GATE3_RECONNECT_PLAN.md) for stream settlement,
-resubscription continuity and acceptance criteria. Public-contract decisions must
-precede the client API freeze.
+Complete stream settlement semantics and reconnect continuity coverage before
+freezing the client APIs, since these are public-contract decisions. Current
+resume, closure and staleness behavior is specified in
+[implemented surface](website/src/content/docs/implemented-surface.md#reconnects)
+and the [reconnect guide](website/src/content/docs/reliability/reconnects.md).
+
+### Stream settlement semantics
+
+A manual stream NACK currently has no broker effect even when the client call
+returns successfully. Define a supported contract across all five clients:
+
+- Decide whether `fail`, `retry` and `retry_after` are rejected with a typed
+  unsupported-operation error or have explicit cursor/redelivery semantics.
+- Specify ordering, cursor advancement, durable-name ownership and interaction
+  with retention before adding stream redelivery behavior.
+- Ensure unsupported operations cannot appear to succeed silently.
+
+Acceptance checks must cover Rust, TypeScript, Python, Go and C#, including
+retry classification and the absence of unintended cursor advancement.
+
+### Settlement after resumed stream reconnect
+
+A held delivery's cursor ACK can arrive before the subscription supervisor has
+re-established the stream subscription. Define a bounded wait or retained-commit
+mechanism so a valid settle reaches the new subscription. Specify behavior on
+terminal closure, timeout and a subsequent non-resumed reconnect.
+
+Acceptance checks:
+
+- Hold a delivery across a resumed reconnect and settle before re-subscription.
+- Verify the durable cursor advances after re-subscription and survives restart.
+- Verify a stale incarnation sends no settle frame.
+- Exercise repeated reconnects and shutdown without unbounded buffering or hangs.
+
+### Automatic recreation continuity
+
+Add the focused auto-resubscribe-on counterpart to the existing opt-out close
+scenario. Force a safe `RecreateClientSide` verdict and verify that:
+
+- the same application subscription continues receiving;
+- the supervisor binds to the replacement server subscription;
+- unsettled queue messages remain eligible for redelivery;
+- stale held deliveries cannot settle against a new incarnation;
+- terminal errors still surface once, and shutdown terminates the supervisor.
+
+Exercise the behavior across all five clients using their typed receive APIs.
+Keep queue and stream scenarios distinct because their settlement models differ.
+
+### Further scope
+
+Cross-node session transfer, preservation of inflight ownership across process
+restart, and automatic recreation of auto-ack subscriptions require separate
+semantics and are outside this completion pass.
+
+Historical protocol decisions and validation records are in
+[Reconnect design](archive/implementation-notes/RECONNECT_DESIGN.md) and
+[stale-delivery settlement](archive/implementation-notes/STALE_TAG_104_PLAN.md).
 
 ## Compatibility freeze (#109-#112)
 
@@ -226,7 +277,13 @@ handshake.
 - #111 client API freeze: the public-API review across Rust/TS/Python/Go/C#
   against FEATURE_MATRIX; the typed subscription-lifecycle enum from the
   reconciliation family is ratified here; deprecations resolved; then
-  semver discipline begins (breaking = major).
+  semver discipline begins (breaking = major). Open review questions from the
+  July 2026 client API audit (typed close reason, a ReconciliationFailed
+  outcome, a typed retryability accessor, a distinct type for unsafe resumed
+  handles) are in Tier 5 Group A of
+  [API_CONSISTENCY_AUDIT.md](archive/API_CONSISTENCY_AUDIT.md). Typed close
+  reasons and stale-delivery settlement have since landed, so review the
+  current surface rather than the audit's description of it.
 - #112 compat matrix + enforcement: a CI job running explicitly selected
   baseline clients (published packages or pinned source revisions) against the
   candidate broker image for a smoke (connect, publish, consume, stream,
@@ -242,6 +299,9 @@ previous-client smoke (the matrix gate).
 ## Authorization exploration
 
 ### Per-topic authorization (compact brief - precedent first)
+
+A fuller design is in
+[access control](website/src/content/docs/development/access-control-design.md).
 
 Standing note (2026-07-04): this item is NOT committed -
 it reads as tenancy-adjacent and only
@@ -576,11 +636,6 @@ Retention and idle-expiration settings should use consistent declare-time
 millisecond fields and survive replication and snapshot recovery. Each worker
 needs a bounded batch size and a configurable cadence.
 
-## Stream settlement
-
-[GATE3_RECONNECT_PLAN.md](GATE3_RECONNECT_PLAN.md) specifies the remaining stream
-NACK contract and resumed cursor-settlement work, including cross-client checks.
-
 ## Stream and filtering exploration
 
 Assess keyed-index reads for efficient selective stream consumption when a
@@ -712,9 +767,8 @@ Use [FEATURE_MATRIX.md](clients/FEATURE_MATRIX.md) for current parity and
     scoring substrate rather than a bespoke mechanism). Gate on a feasibility check
     of openraft 0.9's leadership-transfer API and metric access, and instrument
     what actually causes leader slowness in practice BEFORE building the policy. [AUTHOR]
-- Live repartitioning beyond fixed-at-create: partition_count is already
-  versioned and routing is version-parameterized. The hard deferred semantic is
-  per-key ordering across a resize. [PLAN/MEM]
+- Live repartitioning is experimental (grow and shrink from the admin topology
+  page). The hard deferred semantic is per-key ordering across a resize. [PLAN/MEM]
 - Transactional or cross-partition writes. [PLAN]
 - Self-hosted metadata to replace external coordination. Explicitly deferred. [PLAN]
 - Follower reads: rejected for the work-queue model (no analog). [PLAN]
@@ -725,65 +779,16 @@ These elevate Fibril feature-wise but are tracked separately, not on the
 replication roadmap. Raw notes are preserved in
 `archive/replication-sharding-plan/TODOTHOUGHTS.md`.
 
-- TTL and message expiration, time-based retention, queue purge, and queue
-  deletion lifecycle (the author's first post-wrap nice-to-haves).
-- Broker restart reconciliation and update reconciliation: persistent session
-  continuity built on the existing reconnect model. Noted as the most distinctive
-  of the bunch.
-- In-memory (non-durable) queues via a pluggable Keratin write target.
-- Express-lane and speculative delivery with deferred publisher confirmation.
+- Time-based log retention for queues, a replicated queue purge, and coordinated
+  queue deletion. Message TTL, single-node deletion and stream retention exist.
+- Update reconciliation: session continuity across a broker upgrade, on top of
+  the restart reconciliation that exists.
+- In-memory (non-durable) queues via a pluggable Keratin write target. Buffered
+  queues cover the confirm-before-fsync case.
 - Client opt-out of convenience features and client-enforced rate limits.
 - Settings proverbs (a delight touch on the durability override), more Keratin
   writer pipelining, topic and node id interning, dashboard QoL such as hiding
   inactive queues plus search, and a RabbitMQ-compatibility easter egg.
-
-## Low-latency durable publish (see archive/implementation-notes/LOW_LATENCY_DURABILITY_PLAN.md)
-
-Root-caused (2026-07-07) the ~15-20ms nvme low-load durable-publish latency floor:
-it is ~4 serialized fdatasyncs per publish (keratin sync() does .log + .idx, x two
-serial durability round-trips - msg-log durable THEN event-log durable). Measured,
-not theorized (tmpfs=2ms proves it is fsync cost, not scheduling; flat across linger
-and rate sweeps). Three-phase plan in `archive/implementation-notes/LOW_LATENCY_DURABILITY_PLAN.md`, executing
-Phase 1:
-1. Drop the per-commit `.idx` fdatasync; rebuild the `.idx` tail on dirty open.
-2. Specialized `CancelEnqueue(offset)` event + runtime compensation on msg-fsync failure.
-3. Parallel fsync (event off the msg APPEND offset, both concurrent, ack on both-durable)
-   + recovery fold-then-validate (Enqueue+Cancel annihilate; clean-tail-suffix dangling
-   reclassified as expected truncation, not quarantine). Safety anchor: confirm only on
-   both-durable, so any dangling enqueue is unconfirmed and safe to drop.
-
-## Client API freeze bundle (#111) - Tier 5 Group A of the client-API audit
-
-Historical design input: typed close reasons and stale-delivery settlement
-have since landed across all five clients. Do not reimplement the lifecycle
-from this older "Today" description. Review and ratify the actual surface at
-#111; remaining proposals below are review questions, not accepted new scope.
-
-From clients/API_CONSISTENCY_AUDIT.md (archived). These reshape the client
-receive/error surface, so they are designed ONCE at the API freeze, not piecemeal.
-Recommended actions (assessed on merit 2026-07-09):
-
-1. Typed stream-close reason (ANCHOR). Today a closed subscription just ends
-   (None/null/channel-close/iteration-end) with no reason. Make the receive surface
-   yield a typed terminal reason (End / Unsubscribed / ReconciledClosed / Recreated /
-   Disconnected / BrokerError / PermissionRevoked). Design decision already made
-   (reconnection-grace note 2026-06-29): the reason travels WITH the stream, not a
-   side channel. This changes every recv()/iteration signature, so design it first;
-   everything else slots in.
-2. Reconnect outcome - TRIM, do not build the full state machine. All 5 clients
-   already return a terminal ReconnectOutcome (Resumed/FreshConnection/...). Just add
-   a ReconciliationFailed terminal variant. Skip the observable transient
-   Reconnecting/Disconnected states - that fights "just works" and users rarely need
-   to watch mid-reconnect.
-3. Whole-surface error taxonomy - SPLIT, mostly do-now. Grow error_guides.json cases
-   + align messages incrementally (the Group B way, no API change). Only the typed
-   retryability accessor on every error type needs the freeze.
-4. Typed unsafe-resume value (pairs with 1). On a non-resume, old subscription
-   handles are unsafe; make them a distinctly-typed value you cannot accidentally
-   treat as live. Reshapes handle types -> design with item 1.
-
-Sequencing: item 3 progresses now (fixtures); items 1 + 4 + the outcome-enum half of
-2 are the one typed-lifecycle freeze pass. Folds in the shelved #102/#103.
 
 ## Future: enable TLS from the dashboard (no config edit)
 
@@ -1020,15 +1025,11 @@ admin-dashboard.md and the CLI section. CHANGELOG.
 
 ## Future: TUI demo rework - remaining milestones (brief 2026-07-12)
 
-The tui-example rework was mid-flight when parked. Remaining milestones:
+The live repartition keys landed. Remaining milestones:
 1. Cohort partition ownership display: show which consumer in the cohort
    owns which partitions, live, as the churn scenario reassigns them.
 2. Website single-command tryout: one copy-paste command that launches
    the TUI demo against a fresh broker (decide cargo-run vs container).
-3. Live repartition keys: a keybinding that triggers a repartition so the
-   ownership display visibly rebalances during a demo.
-Session cursor with the exact mid-edit state lives in assistant memory
-(tui-demo-cursor) - read it before resuming.
 
 ## Future: per-partition edge rates for the diagram (brief 2026-07-12)
 

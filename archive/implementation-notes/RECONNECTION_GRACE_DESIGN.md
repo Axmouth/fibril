@@ -2,7 +2,7 @@
 
 Original development notes, retained for design history. Current behavior is
 documented in [reconnection grace](../../website/src/content/docs/development/reconnection-grace.md).
-Remaining lifecycle work is in [the active plan](../../GATE3_RECONNECT_PLAN.md).
+Remaining lifecycle work is in [FOLLOWUPS.md](../../FOLLOWUPS.md#client-lifecycle-completion).
 
 This is a development note covering the protocol design and broker internals. The
 current user-facing behavior and per-client support matrix live on the

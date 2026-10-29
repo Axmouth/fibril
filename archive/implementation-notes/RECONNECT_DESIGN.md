@@ -2,7 +2,7 @@
 
 Original implementation record. Current behavior is documented in
 [implemented surface](../../website/src/content/docs/implemented-surface.md#reconnects);
-remaining work is in [the lifecycle plan](../../GATE3_RECONNECT_PLAN.md).
+remaining work is in [FOLLOWUPS.md](../../FOLLOWUPS.md#client-lifecycle-completion).
 
 ## Original Gate 3 record (#102-#105)
 
