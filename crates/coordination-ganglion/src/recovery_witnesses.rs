@@ -233,7 +233,7 @@ mod tests {
         proposed.owner = "new-node".into();
         proposed.followers = vec!["f1".into()];
         proposed.durability = ReplicationDurabilityPolicy::MajorityDurable;
-        retain_unproven_assignments(&committed, &mut desired).unwrap();
+        retain_unproven_assignments(&committed, &mut desired, &|_| false).unwrap();
         let request =
             serde_json::from_str(&desired.attributes[&pending_recovery_key(&resource)]).unwrap();
         (desired, request)

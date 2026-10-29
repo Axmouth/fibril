@@ -896,6 +896,11 @@ impl ServerConfig {
                 "runtime_seed.replication.eager_failover_grace_ms must be between 0 and 60000",
             ));
         }
+        if self.runtime_seed.replication.follower_loss_hold_ms > 86_400_000 {
+            return Err(ConfigError::validation(
+                "runtime_seed.replication.follower_loss_hold_ms must be between 0 and 86400000",
+            ));
+        }
         if self.runtime_seed.replication.caught_up_poll_ms == 0
             || self.runtime_seed.replication.retry_poll_ms == 0
             || self.runtime_seed.replication.checkpoint_retry_poll_ms == 0
@@ -1880,6 +1885,8 @@ pub struct ReplicationSettings {
     /// 0 disables. Resets on process/log replacement; interval remains the fallback.
     pub agreed_checkpoint_max_bytes: u64,
     pub eager_failover_grace_ms: u64,
+    /// See `replication.follower_loss_hold_ms` in the broker runtime settings.
+    pub follower_loss_hold_ms: u64,
     pub confirm_timeout_ms: u64,
     pub caught_up_poll_ms: u64,
     pub retry_poll_ms: u64,
@@ -1961,6 +1968,7 @@ impl Default for ReplicationSettings {
             agreed_checkpoint_max_events: 0,
             agreed_checkpoint_max_bytes: 0,
             eager_failover_grace_ms: 1_000,
+            follower_loss_hold_ms: 300_000,
             confirm_timeout_ms: 5_000,
             caught_up_poll_ms: 1_000,
             retry_poll_ms: 100,

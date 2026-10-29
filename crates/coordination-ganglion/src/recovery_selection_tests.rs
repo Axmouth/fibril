@@ -42,7 +42,7 @@ fn selecting(
         .unwrap();
     assignment.owner = "b".into();
     assignment.followers = vec!["a".into(), "c".into()];
-    promotion::retain_unproven_assignments(&snapshot, &mut recovering).unwrap();
+    promotion::retain_unproven_assignments(&snapshot, &mut recovering, &|_| false).unwrap();
     let pending = serde_json::from_str(
         &recovering.attributes[&promotion::pending_recovery_key(&decision.incarnation.resource)],
     )

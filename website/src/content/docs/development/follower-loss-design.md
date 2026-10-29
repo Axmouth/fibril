@@ -3,7 +3,9 @@ title: Follower loss without fencing
 description: Design for keeping a queue serving when one of its followers is lost, by suspending the lost copy instead of starting a recovery.
 ---
 
-This is a proposed design. It covers the first step toward the lost-follower
+The hold described here is implemented as `replication.follower_loss_hold_ms`,
+5 minutes by default. A follower lost for longer is still replaced through
+recovery. This note covers the first step toward the lost-follower
 case of [live rebalancing](/development/rebalancing-design/), and reuses the
 suspension that restarted followers already get, described in
 [restarted queue followers](/reliability/recovery-sealing/#restarted-queue-followers).

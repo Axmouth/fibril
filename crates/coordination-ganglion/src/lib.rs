@@ -1154,6 +1154,7 @@ pub struct ControllerConfig {
     /// Boot policy until a cluster runtime-settings document exists.
     pub eager_failover: bool,
     pub eager_failover_grace_ms: u64,
+    pub follower_loss_hold_ms: u64,
     pub target_followers: usize,
     /// Replica followers for a DURABLE stream partition (the durable tier; the
     /// express tiers stay owner-only). Tuned independently of the queue
@@ -1176,6 +1177,7 @@ impl Default for ControllerConfig {
         Self {
             eager_failover: false,
             eager_failover_grace_ms: 1_000,
+            follower_loss_hold_ms: 300_000,
             target_followers: 1,
             stream_replication_factor: 1,
             default_durability: ReplicationDurabilityPolicy::LocalDurable,
@@ -1249,6 +1251,10 @@ pub struct GanglionCoordination {
     // Mode for queues first declared without one. Buffered when the cluster
     // assignment durability is `replica_buffered`.
     default_queue_buffered: std::sync::atomic::AtomicBool,
+    // How long a lost queue follower keeps its place before placement
+    // replaces it through recovery. The controller sets it from the runtime
+    // settings every tick. Zero, the value before that, replaces at once.
+    follower_loss_hold_ms: std::sync::atomic::AtomicU64,
     accepted_histories: history_activation::AcceptedHistoryCache,
     /// Content digest of the committed state at a log id. See
     /// `committed_content_digest`.
@@ -1350,6 +1356,7 @@ impl GanglionCoordination {
                 ControllerConfig::default().liveness_ttl.as_millis() as u64,
             ),
             default_queue_buffered: std::sync::atomic::AtomicBool::new(false),
+            follower_loss_hold_ms: std::sync::atomic::AtomicU64::new(0),
             accepted_histories: Default::default(),
             content_digest: Default::default(),
             client_topology_cache: Default::default(),
@@ -2851,10 +2858,14 @@ impl GanglionCoordination {
                     Ok(None) => fibril_broker::runtime_settings::ReplicationRuntimeSettings {
                         eager_failover: config.eager_failover,
                         eager_failover_grace_ms: config.eager_failover_grace_ms,
+                        follower_loss_hold_ms: config.follower_loss_hold_ms,
                         ..Default::default()
                     },
                     _ => Default::default(),
                 };
+                provider
+                    .follower_loss_hold_ms
+                    .store(policy.follower_loss_hold_ms, std::sync::atomic::Ordering::Relaxed);
                 let active = provider.node.is_leader().await;
                 if !active {
                     leader_since = None;
@@ -3770,7 +3781,21 @@ impl GanglionCoordination {
             desired.nodes = committed.nodes.clone();
             ganglion_core::stamp_assignment_epochs(&committed, &mut desired);
 
-            let held = promotion::retain_unproven_assignments(&committed, &mut desired)
+            // A follower that stopped heartbeating less than the hold ago keeps
+            // its place, so the queue serves on instead of recovering.
+            let hold_ms = self.follower_loss_hold_ms.load(std::sync::atomic::Ordering::Relaxed);
+            let now_ms = unix_millis_now();
+            let hold_lost_follower = |node: &str| {
+                hold_ms > 0
+                    && !live_nodes.contains_key(node)
+                    && committed
+                        .nodes
+                        .get(node)
+                        .and_then(|info| info.labels.get(HEARTBEAT_LABEL))
+                        .and_then(|raw| raw.parse::<u64>().ok())
+                        .is_some_and(|beat| now_ms.saturating_sub(beat) < hold_ms)
+            };
+            let held = promotion::retain_unproven_assignments(&committed, &mut desired, &hold_lost_follower)
                 .map_err(|error| ControlError::Consensus(OpenraftAdapterError::Storage(error)))?;
             operator_override::clear_settled_owner_losses(&mut desired, |node| {
                 live_nodes.contains_key(node) && !draining.contains(node)

@@ -347,6 +347,12 @@
         <input id="replication.eager_failover_grace_ms" data-runtime-setting type="number" min="0" max="60000" step="1">
       <span id="seed.replication.eager_failover_grace_ms" class="settings-help"></span>
       </label>
+      <label class="settings-field">
+        <span class="settings-label">Follower loss hold (ms)</span>
+        <span class="settings-help">How long a lost follower keeps its place before a recovery replaces it. The queue keeps serving meanwhile as long as enough copies remain to confirm, and a follower back within the hold rejoins without a recovery. Zero replaces at once.</span>
+        <input id="replication.follower_loss_hold_ms" data-runtime-setting type="number" min="0" max="86400000" step="1">
+      <span id="seed.replication.follower_loss_hold_ms" class="settings-help"></span>
+      </label>
       <label class="checkbox-label">
         <input id="replication.early_replication" data-runtime-setting type="checkbox">
         <span>

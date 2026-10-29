@@ -606,7 +606,7 @@ mod tests {
         restart(&mut restarted, "c", [10; 16]);
         let mut desired = restarted.clone();
         desired.generation += 1;
-        assert_eq!(promotion::retain_unproven_assignments(&restarted, &mut desired).unwrap(), 0);
+        assert_eq!(promotion::retain_unproven_assignments(&restarted, &mut desired, &|_| false).unwrap(), 0);
         assert!(!desired.attributes.contains_key(&promotion::pending_recovery_key(resource)));
         let history = accepted_history(&restarted, resource).unwrap();
         assert_eq!(history.replicas.len(), 3);
@@ -619,7 +619,7 @@ mod tests {
         restart(&mut restarted, "b", [11; 16]);
         let mut desired = restarted.clone();
         desired.generation += 1;
-        assert_eq!(promotion::retain_unproven_assignments(&restarted, &mut desired).unwrap(), 0);
+        assert_eq!(promotion::retain_unproven_assignments(&restarted, &mut desired, &|_| false).unwrap(), 0);
         let history = accepted_history(&restarted, resource).unwrap();
         assert_eq!(history.suspended_replicas.len(), 2);
         assert!(history.permits_role("a"));
@@ -629,7 +629,7 @@ mod tests {
         restart(&mut restarted, "a", [12; 16]);
         let mut desired = restarted.clone();
         desired.generation += 1;
-        assert_eq!(promotion::retain_unproven_assignments(&restarted, &mut desired).unwrap(), 1);
+        assert_eq!(promotion::retain_unproven_assignments(&restarted, &mut desired, &|_| false).unwrap(), 1);
         let pending: promotion::PendingRecovery = serde_json::from_str(
             &desired.attributes[&promotion::pending_recovery_key(resource)],
         )
@@ -648,6 +648,72 @@ mod tests {
     }
 
     #[test]
+    fn lost_follower_is_held_while_the_queue_keeps_serving() {
+        let (snapshot, decision, _) =
+            activated_with(&three_prepared(), ReplicationDurabilityPolicy::MajorityDurable);
+        let resource = &decision.incarnation.resource;
+        let current = snapshot.assignments[resource].clone();
+        assert_eq!(current.owner, "a");
+        assert_eq!(promotion::write_requirement(&current).unwrap(), 2);
+        let within_hold = |node: &str| node == "c";
+        let propose = |followers: &[&str]| {
+            let mut desired = snapshot.clone();
+            desired.generation += 1;
+            desired.assignments.get_mut(resource).unwrap().followers =
+                followers.iter().map(|f| f.to_string()).collect();
+            desired
+        };
+
+        // Placement drops the lost follower c. Within the hold the queue keeps
+        // its exact assignment: no pending recovery, still projected to brokers.
+        let mut desired = propose(&["b"]);
+        assert_eq!(promotion::retain_unproven_assignments(&snapshot, &mut desired, &within_hold).unwrap(), 1);
+        assert_eq!(desired.assignments[resource], current);
+        assert!(!desired.attributes.contains_key(&promotion::pending_recovery_key(resource)));
+        assert!(accepted_history(&desired, resource).is_ok());
+
+        // A larger cluster proposes a replacement for c. It waits for the hold
+        // too, rather than fencing the queue to install it.
+        let mut desired = propose(&["b", "d"]);
+        assert_eq!(promotion::retain_unproven_assignments(&snapshot, &mut desired, &within_hold).unwrap(), 1);
+        assert_eq!(desired.assignments[resource], current);
+        assert!(!desired.attributes.contains_key(&promotion::pending_recovery_key(resource)));
+
+        // Past the hold, replacing c goes through recovery as before.
+        let mut desired = propose(&["b"]);
+        assert_eq!(promotion::retain_unproven_assignments(&snapshot, &mut desired, &|_| false).unwrap(), 1);
+        assert!(desired.attributes.contains_key(&promotion::pending_recovery_key(resource)));
+
+        // Losing both followers leaves too few copies to confirm, so this hold
+        // does not apply. The proposal would also lower W from 2 to 1, which
+        // the write requirement rule holds without a recovery either way.
+        let mut desired = propose(&[]);
+        let both = |node: &str| node == "b" || node == "c";
+        assert_eq!(promotion::retain_unproven_assignments(&snapshot, &mut desired, &both).unwrap(), 1);
+        assert_eq!(desired.assignments[resource], current);
+        assert!(!desired.attributes.contains_key(&promotion::pending_recovery_key(resource)));
+
+        // A follower that is alive but leaving, for example draining, is not
+        // held: the predicate only covers lost copies.
+        let mut desired = propose(&["b"]);
+        assert_eq!(promotion::retain_unproven_assignments(&snapshot, &mut desired, &|_| false).unwrap(), 1);
+        assert!(desired.attributes.contains_key(&promotion::pending_recovery_key(resource)));
+    }
+
+    #[test]
+    fn lost_follower_of_an_owner_only_queue_is_not_held() {
+        // W = 1 has no spare witness, so replacing a follower still recovers.
+        let (snapshot, decision, _) =
+            activated_with(&three_prepared(), ReplicationDurabilityPolicy::LocalDurable);
+        let resource = &decision.incarnation.resource;
+        let mut desired = snapshot.clone();
+        desired.generation += 1;
+        desired.assignments.get_mut(resource).unwrap().followers.retain(|f| f != "c");
+        promotion::retain_unproven_assignments(&snapshot, &mut desired, &|node: &str| node == "c").unwrap();
+        assert!(desired.attributes.contains_key(&promotion::pending_recovery_key(resource)));
+    }
+
+    #[test]
     fn follower_restart_on_an_owner_only_queue_still_recovers() {
         // W = 1 needs a seal from every eligible replica, so there is no spare
         // witness while a follower rejoins.
@@ -658,7 +724,7 @@ mod tests {
         restart(&mut restarted, "b", [10; 16]);
         let mut desired = restarted.clone();
         desired.generation += 1;
-        assert_eq!(promotion::retain_unproven_assignments(&restarted, &mut desired).unwrap(), 1);
+        assert_eq!(promotion::retain_unproven_assignments(&restarted, &mut desired, &|_| false).unwrap(), 1);
         let pending: promotion::PendingRecovery = serde_json::from_str(
             &desired.attributes[&promotion::pending_recovery_key(resource)],
         )
@@ -681,7 +747,7 @@ mod tests {
         recovering.assignments.get_mut(resource).unwrap().owner = "b".into();
         recovering.assignments.get_mut(resource).unwrap().followers = vec!["a".into(), "c".into()];
         assert_eq!(
-            promotion::retain_unproven_assignments(&snapshot, &mut recovering).unwrap(),
+            promotion::retain_unproven_assignments(&snapshot, &mut recovering, &|_| false).unwrap(),
             1
         );
         let pending: promotion::PendingRecovery = serde_json::from_str(

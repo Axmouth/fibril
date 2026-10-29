@@ -111,6 +111,7 @@ pub fn runtime_seed_from_config(config: &ServerConfig) -> RuntimeSettings {
             agreed_checkpoint_max_events: config.runtime_seed.replication.agreed_checkpoint_max_events,
             agreed_checkpoint_max_bytes: config.runtime_seed.replication.agreed_checkpoint_max_bytes,
             eager_failover_grace_ms: config.runtime_seed.replication.eager_failover_grace_ms,
+            follower_loss_hold_ms: config.runtime_seed.replication.follower_loss_hold_ms,
             confirm_timeout_ms: config.runtime_seed.replication.confirm_timeout_ms,
             caught_up_poll_ms: config.runtime_seed.replication.caught_up_poll_ms,
             retry_poll_ms: config.runtime_seed.replication.retry_poll_ms,
@@ -822,6 +823,7 @@ pub async fn open_tcp_ganglion_parts(
                 fibril_coordination_ganglion::ControllerConfig {
                     eager_failover: config.runtime_seed.replication.eager_failover,
                     eager_failover_grace_ms: config.runtime_seed.replication.eager_failover_grace_ms,
+                    follower_loss_hold_ms: config.runtime_seed.replication.follower_loss_hold_ms,
                     target_followers: section.target_followers,
                     stream_replication_factor: section.stream_replication_factor,
                     default_durability: assignment_durability_from_config(

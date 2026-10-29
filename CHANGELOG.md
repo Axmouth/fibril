@@ -989,6 +989,14 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- Losing a follower no longer stalls its queues. A queue that still had
+  enough copies to confirm used to start a recovery when placement dropped the
+  lost follower, which paused it for several seconds and failed the publishes
+  in flight. The lost follower now keeps its place for
+  `replication.follower_loss_hold_ms`, 5 minutes by default, while the queue
+  keeps serving, and a follower that returns within it rejoins without a
+  recovery. Past the hold, placement replaces it through recovery as before.
+
 - The CLI's bundled root store and the TLS certificate checks pick up the
   eMudhra intermediate CA distrust (rustls-webpki 0.103.16, webpki-roots
   1.0.11). The private keys of eight eMudhra intermediates were found to be

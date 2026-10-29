@@ -220,6 +220,11 @@ impl RuntimeSettings {
                 "replication.eager_failover_grace_ms must be between 0 and 60000".into(),
             ));
         }
+        if self.replication.follower_loss_hold_ms > 86_400_000 {
+            return Err(RuntimeSettingsError::Invalid(
+                "replication.follower_loss_hold_ms must be between 0 and 86400000".into(),
+            ));
+        }
         if self.replication.stream_initial_credit_bytes > MAX_STREAM_INITIAL_CREDIT_BYTES {
             return Err(RuntimeSettingsError::Invalid(format!(
                 "replication.stream_initial_credit_bytes must be at most {MAX_STREAM_INITIAL_CREDIT_BYTES}"
@@ -370,6 +375,11 @@ pub struct ReplicationRuntimeSettings {
     pub agreed_checkpoint_max_bytes: u64,
     /// Minimum failed-reconnect grace; heartbeat expiry remains the fallback.
     pub eager_failover_grace_ms: u64,
+    /// How long a lost follower of a queue that still meets its write
+    /// requirement keeps its place before placement replaces it through a
+    /// recovery. The queue keeps serving meanwhile, and a follower that
+    /// returns within it rejoins without one. 0 replaces at once.
+    pub follower_loss_hold_ms: u64,
     /// How long a publish confirm may wait for the assignment's replication
     /// durability policy (replica acks) before failing with a clear error.
     pub confirm_timeout_ms: u64,
@@ -439,6 +449,7 @@ impl Default for ReplicationRuntimeSettings {
             agreed_checkpoint_max_events: 0,
             agreed_checkpoint_max_bytes: 0,
             eager_failover_grace_ms: 1_000,
+            follower_loss_hold_ms: 300_000,
             confirm_timeout_ms: 5_000,
             caught_up_poll_ms: 1_000,
             retry_poll_ms: 100,

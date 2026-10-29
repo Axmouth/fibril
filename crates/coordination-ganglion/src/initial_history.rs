@@ -1039,7 +1039,7 @@ mod tests {
         let mut unactivated = snapshot.clone();
         unactivated.nodes.get_mut("a").unwrap().labels.insert(crate::HISTORY_PROCESS_LABEL.into(), uuid::Uuid::from_bytes([9; 16]).to_string());
         let mut desired = unactivated.clone();
-        assert_eq!(promotion::retain_unproven_assignments(&unactivated, &mut desired).unwrap(), 0);
+        assert_eq!(promotion::retain_unproven_assignments(&unactivated, &mut desired, &|_| false).unwrap(), 0);
         let activation = crate::history_activation::InitialHistoryActivation {
             version: 1, decision: decision.digest().unwrap(),
             prepared_quorum: crate::history_activation::quorum_digest(&set.prepared_quorum(&snapshot).unwrap()).unwrap(),
@@ -1047,7 +1047,7 @@ mod tests {
         snapshot.attributes.insert(crate::history_activation::key(&decision), serde_json::to_string(&activation).unwrap());
         let mut unchanged = snapshot.clone();
         assert_eq!(
-            promotion::retain_unproven_assignments(&snapshot, &mut unchanged).unwrap(),
+            promotion::retain_unproven_assignments(&snapshot, &mut unchanged, &|_| false).unwrap(),
             0
         );
         // A restarted follower keeps the queue serving. It is suspended in the
@@ -1059,7 +1059,7 @@ mod tests {
         );
         let mut desired = follower_restarted.clone();
         desired.generation += 1;
-        assert_eq!(promotion::retain_unproven_assignments(&follower_restarted, &mut desired).unwrap(), 0);
+        assert_eq!(promotion::retain_unproven_assignments(&follower_restarted, &mut desired, &|_| false).unwrap(), 0);
         assert_eq!(desired.assignments, snapshot.assignments);
         assert!(!desired.attributes.contains_key(&promotion::pending_recovery_key(&resource)));
         let history = crate::history_activation::accepted_history(&follower_restarted, &resource).unwrap();
@@ -1083,7 +1083,7 @@ mod tests {
             let mut desired = replaced.clone();
             desired.generation += 1;
             assert_eq!(
-                promotion::retain_unproven_assignments(&replaced, &mut desired).unwrap(),
+                promotion::retain_unproven_assignments(&replaced, &mut desired, &|_| false).unwrap(),
                 1
             );
             assert_eq!(desired.assignments, snapshot.assignments);
@@ -1098,7 +1098,7 @@ mod tests {
             let mut old_heartbeat = desired.clone();
             old_heartbeat.nodes = snapshot.nodes.clone();
             assert_eq!(
-                promotion::retain_unproven_assignments(&desired, &mut old_heartbeat).unwrap(),
+                promotion::retain_unproven_assignments(&desired, &mut old_heartbeat, &|_| false).unwrap(),
                 1
             );
             assert_eq!(old_heartbeat.attributes, desired.attributes);
