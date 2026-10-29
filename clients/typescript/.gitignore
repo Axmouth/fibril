@@ -1,2 +1,5 @@
 node_modules
 dist
+# Copied from the repo root by scripts/copy-shared.mjs at pack time
+/LICENSE
+/AI_POLICY.md

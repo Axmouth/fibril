@@ -2,6 +2,24 @@
   "name": "@fibril/client",
   "version": "0.4.0",
   "description": "Fibril broker TypeScript client",
+  "keywords": [
+    "fibril",
+    "message-broker",
+    "message-queue",
+    "pubsub",
+    "client"
+  ],
+  "homepage": "https://fibril.sh",
+  "bugs": {
+    "url": "https://github.com/Axmouth/fibril/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Axmouth/fibril.git",
+    "directory": "clients/typescript"
+  },
+  "license": "MIT",
+  "author": "Axmouth",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -13,10 +31,13 @@
   },
   "files": [
     "dist",
-    "src"
+    "src",
+    "AI_POLICY.md"
   ],
   "scripts": {
     "build": "tsc",
+    "prepack": "npm run build && node scripts/copy-shared.mjs",
+    "postpack": "node scripts/copy-shared.mjs --clean",
     "test": "tsc --noEmit && node --test --import tsx tests/*.test.ts",
     "test:quiet": "tsc --noEmit && node --test --test-reporter=dot --import tsx tests/*.test.ts",
     "typecheck": "tsc --noEmit"
@@ -37,5 +58,8 @@
   },
   "engines": {
     "node": ">=20.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

@@ -149,3 +149,14 @@ explicitly. Plain values passed to publish methods use msgpack.
 - Global DLQ target configuration is available through the admin UI/API and
   `fibrilctl admin global-dlq`. Queue retry/DLQ
   policy can be declared with `QueueConfig`.
+
+## More
+
+- [Client architecture](https://github.com/Axmouth/fibril/blob/main/clients/ARCHITECTURE.md), the layering and invariants shared by every client
+- [Feature matrix](https://github.com/Axmouth/fibril/blob/main/clients/FEATURE_MATRIX.md), what each client supports
+- [Documentation](https://fibril.sh)
+
+## License
+
+MIT. See [AI_POLICY.md](https://github.com/Axmouth/fibril/blob/main/AI_POLICY.md)
+for the text and data mining reservation that comes with this package.
