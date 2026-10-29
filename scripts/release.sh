@@ -57,6 +57,7 @@ set_versions() {
   sed -i -E "s/(DEFAULT_CLIENT_VERSION = \")[0-9]+\.[0-9]+\.[0-9]+(\")/\1$version\2/" clients/python/src/fibril/client.py
   sed -i -E "s/(client_version: str = \")[0-9]+\.[0-9]+\.[0-9]+(\")/\1$version\2/" clients/python/src/fibril/engine.py
   sed -i -E "s/^(__version__ = \")[0-9]+\.[0-9]+\.[0-9]+(\")/\1$version\2/" clients/python/src/fibril/__init__.py
+  sed -i -E "s/(<Version>)[0-9]+\.[0-9]+\.[0-9]+(<\/Version>)/\1$version\2/" clients/csharp/Fibril/Fibril.csproj
 }
 
 if [[ "$mode" == "release" ]]; then

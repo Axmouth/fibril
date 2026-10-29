@@ -17,4 +17,25 @@
     <NoWarn>CS1591</NoWarn>
   </PropertyGroup>
 
+  <!-- NuGet package metadata. Version is bumped by scripts/release.sh. -->
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>Fibril</PackageId>
+    <Version>0.4.0</Version>
+    <Authors>Axmouth</Authors>
+    <Description>.NET client for the Fibril message broker.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://fibril.sh</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Axmouth/fibril</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>fibril;message-broker;message-queue;pubsub;client</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <!-- README and AI policy have one copy each in the repo, packed from there. -->
+  <ItemGroup>
+    <None Include="..\README.md" Pack="true" PackagePath="\" Visible="false" />
+    <None Include="..\..\..\AI_POLICY.md" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
+
 </Project>

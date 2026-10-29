@@ -36,7 +36,7 @@ async Task<Client> DialAsync()
         return await Client.ConnectAsync(addr, new ClientOptions
         {
             ClientName = "bench",
-            Auth = new Credentials(Env("FIBRIL_USER", "fibril"), Env("FIBRIL_PASS", "fibril")),
+            Credentials = new Credentials(Env("FIBRIL_USER", "fibril"), Env("FIBRIL_PASS", "fibril")),
         }, new CancellationTokenSource(TimeSpan.FromSeconds(10)).Token);
     }
     catch (Exception ex)
@@ -56,7 +56,7 @@ if (isQueue)
 }
 else
 {
-    await admin.DeclarePlexusAsync(topic, new PlexusDeclareOptions { PartitionCount = partitions, Durability = durability });
+    await admin.DeclarePlexusAsync(topic, new StreamConfig { PartitionCount = partitions, Durability = durability });
 }
 await admin.DisposeAsync();
 
