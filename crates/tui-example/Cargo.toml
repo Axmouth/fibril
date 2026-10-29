@@ -10,7 +10,7 @@ publish = false
 [dependencies]
 fibril-broker = { path = "../broker" }
 fibril-protocol = { path = "../protocol" }
-fibril-util = { path = "../util" }
+fibril-util.workspace = true
 ratatui = "0.30"
 crossterm = "0.29"
 anyhow = "1.0"

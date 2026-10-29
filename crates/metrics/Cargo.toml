@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-fibril-util = { path = "../util" }
+fibril-util.workspace = true
 arc-swap = "1.9"
 async-trait = "0.1"
 dashmap = "6.1"

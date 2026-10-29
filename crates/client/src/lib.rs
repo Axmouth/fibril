@@ -8502,3 +8502,8 @@ mod tests {
         ));
     }
 }
+
+// Compiles the README example as a doctest so it stays in step with the API.
+#[doc = include_str!("../README.md")]
+#[cfg(doctest)]
+pub struct ReadmeDoctests;

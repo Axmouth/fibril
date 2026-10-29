@@ -1605,14 +1605,10 @@ dependencies = [
  "console-subscriber",
  "fastrand",
  "futures",
- "opentelemetry",
- "opentelemetry_sdk",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-appender",
- "tracing-error",
- "tracing-opentelemetry",
  "tracing-subscriber",
  "turmoil",
  "x509-parser",
@@ -1841,6 +1837,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

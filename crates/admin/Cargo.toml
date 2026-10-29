@@ -10,7 +10,7 @@ repository.workspace = true
 fibril-broker = { path = "../broker" }
 fibril-protocol = { path = "../protocol" }
 fibril-metrics = { path = "../metrics" }
-fibril-util = { path = "../util" }
+fibril-util.workspace = true
 fs2 = "0.4"
 askama = { version = "0.15" }
 async-trait = "0.1"

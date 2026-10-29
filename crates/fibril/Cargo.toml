@@ -17,7 +17,7 @@ fibril-config = { path = "../config" }
 fibril-protocol = { path = "../protocol" }
 fibril-metrics = { path = "../metrics" }
 fibril-tls = { path = "../tls" }
-fibril-util = { path = "../util" }
+fibril-util = { workspace = true, features = ["server"] }
 fibril-coordination-ganglion = { path = "../coordination-ganglion" }
 ganglion-core = { git = "https://github.com/Axmouth/ganglion.git", branch = "main" }
 ganglion = { git = "https://github.com/Axmouth/ganglion.git", branch = "main" }

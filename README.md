@@ -35,8 +35,8 @@ change between releases.
 The message carries its own lifecycle:
 
 ```rust
-while let Some(msg) = sub.recv().await? {
-    process(msg.content()?).await?;
+while let SubEvent::Delivery(msg) = sub.recv().await {
+    process(&msg.payload).await?;
 
     msg.complete().await?;    // acknowledge
     // or msg.retry().await?  // requeue

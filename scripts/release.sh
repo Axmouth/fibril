@@ -51,6 +51,8 @@ echo "release: target version $version (docs version $minor), mode=$mode"
 # Bump every version location to <version> (idempotent).
 set_versions() {
   sed -i -E "s/^(version = \")[0-9]+\.[0-9]+\.[0-9]+(\")/\1$version\2/" Cargo.toml
+  # In-repo crates in [workspace.dependencies] carry the version too, for crates.io.
+  sed -i -E "s/^(fibril-[a-z]+ = \{ path = \"[^\"]+\", version = \")[0-9]+\.[0-9]+\.[0-9]+(\")/\1$version\2/" Cargo.toml
   sed -i -E "s/(\"version\": \")[0-9]+\.[0-9]+\.[0-9]+(\")/\1$version\2/" clients/typescript/package.json
   sed -i -E "s/(DEFAULT_CLIENT_VERSION = \")[0-9]+\.[0-9]+\.[0-9]+(\")/\1$version\2/" clients/typescript/src/client.ts
   sed -i -E "s/^(version = \")[0-9]+\.[0-9]+\.[0-9]+(\")/\1$version\2/" clients/python/pyproject.toml

@@ -16,10 +16,10 @@ name = "encode"
 harness = false
 
 [dependencies]
-fibril-wire = { path = "../wire" }
+fibril-wire.workspace = true
 fibril-broker = { path = "../broker" }
 fibril-metrics = { path = "../metrics" }
-fibril-util = { path = "../util" }
+fibril-util = { workspace = true, features = ["server"] }
 anyhow = "1.0"
 arc-swap = "1.9"
 async-trait = "0.1"

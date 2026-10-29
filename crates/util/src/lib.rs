@@ -1,9 +1,8 @@
-use std::{
-    sync::OnceLock,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "server")]
 use tracing_appender::non_blocking;
+#[cfg(feature = "server")]
 use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 pub mod net;
@@ -17,7 +16,7 @@ pub fn unix_millis() -> UnixMillis {
     // lease and expiry deadlines pass as the simulation advances.
     #[cfg(feature = "simulation")]
     if let Some(elapsed) = turmoil::sim_elapsed() {
-        static SIM_EPOCH: OnceLock<UnixMillis> = OnceLock::new();
+        static SIM_EPOCH: std::sync::OnceLock<UnixMillis> = std::sync::OnceLock::new();
         return *SIM_EPOCH.get_or_init(wall_millis) + elapsed.as_millis() as u64;
     }
     wall_millis()
@@ -112,8 +111,10 @@ mod tests {
     }
 }
 
-static LOG_GUARD: OnceLock<non_blocking::WorkerGuard> = OnceLock::new();
+#[cfg(feature = "server")]
+static LOG_GUARD: std::sync::OnceLock<non_blocking::WorkerGuard> = std::sync::OnceLock::new();
 
+#[cfg(feature = "server")]
 pub fn init_tracing() {
     let app_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         // The storage engine's info logs scale with queue count (per-partition
@@ -140,6 +141,7 @@ pub fn init_tracing() {
         .init();
 }
 
+#[cfg(feature = "server")]
 pub fn init_tracing_dbg() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
 
@@ -166,8 +168,6 @@ pub fn init_tracing_dbg() {
         )
         .init();
 }
-
-// TODO: make a "common" crate?
 
 /// Outcome of an authentication attempt. A denial carries the message the
 /// client sees in `AuthErr`, so peer-dependent rules can guide the fix
@@ -216,6 +216,7 @@ pub trait AuthHandler {
 /// Identity a verified client certificate asserts: the first DNS subject
 /// alternative name, else the subject common name. Identities in the `@`
 /// namespace never map, so node principals stay unclaimable by certificate.
+#[cfg(feature = "server")]
 pub fn client_identity_from_der(cert_der: &[u8]) -> Option<String> {
     let (_, parsed) = x509_parser::parse_x509_certificate(cert_der).ok()?;
     let identity = parsed

@@ -5,6 +5,10 @@ edition = "2024"
 description = "Shared utilities for Fibril, including the pluggable network seam for deterministic simulation"
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords = ["fibril"]
+categories = ["network-programming"]
 
 [dependencies]
 async-trait = "0.1"
@@ -14,28 +18,29 @@ futures = "0.3"
 thiserror = "2.0"
 tokio = { version = "1", features = ["full", "tracing"] }
 tracing = "0.1"
-x509-parser = "0.16"
-tracing-subscriber = { version = "0.3", features = [
+# Server-side helpers only, behind the `server` feature, so the published client
+# does not pull in log setup or certificate parsing.
+x509-parser = { version = "0.16", optional = true }
+tracing-subscriber = { version = "0.3", optional = true, features = [
     "fmt",
     "env-filter",
     "json",
 ] }
-tracing-appender = "0.2"
-tracing-error = "0.2"
-tracing-opentelemetry = "0.32"
-opentelemetry = "0.31"
-opentelemetry_sdk = "0.31"
+tracing-appender = { version = "0.2", optional = true }
 # Deterministic-simulation network types, swapped in for tokio's under the
 # `simulation` feature via the `net` seam (task #97). Off in normal builds.
 turmoil = { version = "0.7", optional = true }
 
 [features]
+# Log setup and client certificate identity, used by the broker and server
+# binaries.
+server = ["dep:x509-parser", "dep:tracing-subscriber", "dep:tracing-appender"]
 # Flip fibril_util::net to turmoil's simulated TcpStream/TcpListener so the whole
 # stack can run inside a turmoil Sim for cluster failure-path tests.
 simulation = ["dep:turmoil"]
 # Diagnostic. Adds the tokio-console layer to init_tracing_dbg. Task data
 # needs a build with --cfg tokio_unstable.
-tokio-console = ["dep:console-subscriber"]
+tokio-console = ["server", "dep:console-subscriber"]
 
 [package.metadata.ai]
 training = "prohibited"

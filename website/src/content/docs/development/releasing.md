@@ -108,12 +108,26 @@ What each package still needs:
   (`PackageId`, `Version`, `Authors`, `Description`,
   `PackageLicenseExpression=MIT`, `RepositoryUrl`, `PackageTags`,
   `PackageReadmeFile`).
-- **Rust crates:** `description`, `license`, `repository`, `readme`, `keywords`
-  and `categories` on every published crate. crates.io rejects `path` and `git`
-  dependencies, so publish bottom-up: `fibril-util` and `fibril-wire` before
-  `fibril-client`, `stroma-common` then `stroma-core` then `keratin-log`, and
-  the Ganglion member crates before `ganglion`. Run
-  `cargo publish --dry-run -p <crate>` first.
+- **Rust crates:** the client chain and the Keratin crates carry their metadata.
+  In-repo dependencies name a version beside their path or git source, through
+  `[workspace.dependencies]` in Fibril, which `scripts/release.sh` bumps.
+  crates.io resolves every dependency from the registry, so publish bottom-up:
+  1. `stroma-common` and `keratin-log` (Keratin repo)
+  2. `stroma-core`
+  3. `fibril-common` and `fibril-util`
+  4. `fibril-wire`
+  5. `fibril-client`
+
+  `cargo publish --dry-run -p <crate>` passes for the crates in steps 1 and 3.
+  The later steps can only run their dry-run once the earlier ones are on
+  crates.io. `fibril-util` keeps log setup and certificate parsing behind its
+  `server` feature, so the client does not pull them in.
+- **Ganglion and the broker crates:** blocked. `ganglion-openraft` depends on a
+  patched copy of openraft 0.9.25 (see `vendor/openraft/PATCHES.md` in Ganglion),
+  and no released openraft 0.9 carries the fix. Publishing needs either an
+  upstream release with it or the patched copy published under its own name.
+  The broker crates depend on Ganglion, so they wait too. Ganglion also has no
+  LICENSE file yet.
 - **Go and C#:** a README each.
 
 Per registry:

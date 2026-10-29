@@ -9,10 +9,10 @@ repository.workspace = true
 [dependencies]
 blake3 = "1.8"
 fibril-metrics = { path = "../metrics" }
-fibril-common = { path = "../common" }
-fibril-util = { path = "../util" }
+fibril-common.workspace = true
+fibril-util = { workspace = true, features = ["server"] }
 stroma-core = { git = "https://github.com/Axmouth/keratin.git", branch = "main" }
-stroma-common = { git = "https://github.com/Axmouth/keratin.git", branch = "main" }
+stroma-common.workspace = true
 anyhow = "1.0"
 arc-swap = "1.9"
 async-trait = "0.1"

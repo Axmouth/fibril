@@ -5,10 +5,15 @@ edition = "2024"
 description = "Async Rust client for the Fibril message broker, with cluster routing, reconnect, and reliable publish"
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+readme = "README.md"
+keywords = ["message-broker", "queue", "messaging", "fibril", "async"]
+categories = ["network-programming", "asynchronous"]
 
 [dependencies]
-fibril-wire = { path = "../wire" }
-fibril-util = { path = "../util" }
+fibril-wire.workspace = true
+fibril-util.workspace = true
 arc-swap = "1.7"
 dashmap = "6.1"
 fastrand = "2"
