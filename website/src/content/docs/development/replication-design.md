@@ -41,6 +41,11 @@ queue never opens a stream session and the reverse. Queue confirms count only
 queue progress and stream confirms count only stream record progress, so cursor
 events never release a record confirm.
 
+A `durable` stream without followers keeps its records and cursors on the owner
+alone. It survives an owner restart but not the loss of the owner node, so the
+partition waits for that owner to return. See
+[failure modes](/reliability/failure-modes/).
+
 A caught-up stream follower long-polls the owner with `max_wait_ms`. The owner's
 read waits on the queue replication wakeup and on the stream channel's durability
 signal, which fires when new stream records or cursor commits become durable. A

@@ -1,5 +1,7 @@
 # Durable stream replication — transport design (#73c)
 
+> Archived 2026-10-29. Durable stream replication shipped, and the current follower path is described in the replication design page.
+
 Status: DRAFT for review (precedes 73b/73c/73d implementation). Working doc;
 archive when implemented (per the design-notes-home convention).
 

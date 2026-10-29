@@ -1,5 +1,7 @@
 # Go client plan
 
+> Archived 2026-10-29. The codec, engine and reconnect layers all exist, and parity is tracked in clients/FEATURE_MATRIX.md.
+
 The Go client (`clients/go`) ports the reference client to full feature parity.
 Read `../ARCHITECTURE.md` (layering, invariants, porting lessons) and
 `../FEATURE_MATRIX.md` (the parity checklist) first - this doc records the

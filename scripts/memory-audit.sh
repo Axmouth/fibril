@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Broker memory regression probe: repeated load -> drain -> evict cycles
 # against one broker, reporting settled RSS per cycle. Findings and the
-# reasoning behind the thresholds live in MEMORY_AUDIT.md.
+# reasoning behind the thresholds live in archive/implementation-notes/MEMORY_AUDIT.md.
 #
 #   scripts/memory-audit.sh                 # 2 cycles, report only
 #   scripts/memory-audit.sh --check         # non-zero exit on regression

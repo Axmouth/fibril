@@ -74,10 +74,10 @@ worth a fresh pass.
   - Next: make message inspection status filtering explicit, either with a
     bounded admin-side scan-fill loop or a response/UI note that filtering
     happens after a bounded page read.
-- [ ] Client API parity
-  - Status: Pending
-  - Detail: not started
-  - Next: audit Rust and TypeScript clients against the current protocol and docs.
+- [x] Client API parity
+  - Status: Addressed 2026-07-09
+  - Detail: [API_CONSISTENCY_AUDIT.md](archive/API_CONSISTENCY_AUDIT.md), tiers 1-4, 5B and 6 executed
+  - Next: per-feature parity is tracked in [clients/FEATURE_MATRIX.md](clients/FEATURE_MATRIX.md).
 - [ ] Performance-sensitive paths
   - Status: Audited
   - Detail: [PERFORMANCE_SENSITIVE_PATHS_AUDIT.md](archive/replication-sharding-plan/PERFORMANCE_SENSITIVE_PATHS_AUDIT.md)
@@ -101,7 +101,7 @@ worth a fresh pass.
     global confirm-path atomics (P1), and slow-consumer HOL blocking (D1).
 - [x] Broker memory after queue eviction
   - Status: Addressed (no leak found)
-  - Detail: [MEMORY_AUDIT.md](MEMORY_AUDIT.md)
+  - Detail: [MEMORY_AUDIT.md](archive/implementation-notes/MEMORY_AUDIT.md)
   - Next: low-priority follow-up recorded there - identify the ~1 MB
     retained per materialized queue-partition if a large-queue-count
     deployment ever appears. Regression probe: scripts/memory-audit.sh.

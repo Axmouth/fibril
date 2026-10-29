@@ -6,7 +6,8 @@ thin blocking facade for synchronous callers.
 It ports the Rust reference client (`crates/client`) and the TypeScript client
 (`clients/typescript`) to full feature parity. See `clients/ARCHITECTURE.md` for
 the shared layering and invariants, `clients/FEATURE_MATRIX.md` for the parity
-grid, and `clients/PYTHON_CLIENT_PLAN.md` for the Python-specific decisions.
+grid. The original plan with the Python-specific decisions is archived at
+`archive/implementation-notes/PYTHON_CLIENT_PLAN.md`.
 
 ## Status
 

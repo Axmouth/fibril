@@ -1,5 +1,7 @@
 # Python client plan
 
+> Archived 2026-10-29. The Python client reached feature parity, tracked in clients/FEATURE_MATRIX.md.
+
 The Python client (`clients/python`) ports the Rust reference and TypeScript
 second client to full feature parity. Read `ARCHITECTURE.md` (layering,
 invariants, continuity model, porting lessons) and `FEATURE_MATRIX.md` (the

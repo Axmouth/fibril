@@ -12,6 +12,20 @@ engineering follow-ups in [FOLLOWUPS.md](../FOLLOWUPS.md) and [AUDITS.md](../AUD
 - [Stream operational parity](implementation-notes/STREAM_PARITY_AUDIT.md)
 - [Stale-delivery settlement](implementation-notes/STALE_TAG_104_PLAN.md)
 - [Completed follow-ups](implementation-notes/FOLLOWUPS_COMPLETED.md)
+- [Reconnect design](implementation-notes/RECONNECT_DESIGN.md)
+- [Reconnection grace design](implementation-notes/RECONNECTION_GRACE_DESIGN.md)
+- [Low-latency durable publish plan](implementation-notes/LOW_LATENCY_DURABILITY_PLAN.md)
+- [Durable stream replication transport](implementation-notes/STREAM_REPLICATION_DESIGN.md)
+- [Broker memory audit, July 2026](implementation-notes/MEMORY_AUDIT.md)
+- [Python client plan](implementation-notes/PYTHON_CLIENT_PLAN.md)
+- [Go client plan](implementation-notes/GO_CLIENT_PLAN.md)
+- [TUI example rework plan](implementation-notes/TUI_EXAMPLE_REWORK_PLAN.md)
+
+Audits closed before the implementation-notes folder existed:
+
+- [Client API consistency audit](API_CONSISTENCY_AUDIT.md)
+- [Parallel durable publish audit](PARALLEL_PUBLISH_AUDIT.md)
+- [CA fingerprint pinning fix](SECURITY_CA_PIN_FIX.md)
 
 The replication-sharding-plan directory preserves earlier planning and audit
 material. Open audit findings remain indexed by AUDITS.md.

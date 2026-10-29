@@ -1,5 +1,7 @@
 # Broker memory audit (2026-07-16)
 
+> Archived 2026-10-29. Closed 2026-07-16 with no leak found. The remaining follow-up is in FOLLOWUPS.md under Memory follow-up.
+
 The trigger observation: broker RSS does not drop back to earlier levels
 after all active queues evict. Suspects filed with it: mimalloc arena
 retention, keratin tail caches not releasing on eviction, admin in-memory

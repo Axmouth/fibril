@@ -1,5 +1,7 @@
 # Low-latency durable publish plan
 
+> Archived 2026-10-29. Steps 1-3 landed in July 2026, and single-log queues later replaced the two-log layout this plan assumes. Current numbers are in the optimization log.
+
 Cut the single-node durable publish->confirm/deliver latency floor on real
 (non-tmpfs) storage from ~15-20ms toward ~4-6ms, without weakening durability or
 the crash-recovery guarantees.

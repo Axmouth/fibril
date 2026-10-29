@@ -737,13 +737,13 @@ replication roadmap. Raw notes are preserved in
   writer pipelining, topic and node id interning, dashboard QoL such as hiding
   inactive queues plus search, and a RabbitMQ-compatibility easter egg.
 
-## Low-latency durable publish (active - see LOW_LATENCY_DURABILITY_PLAN.md)
+## Low-latency durable publish (see archive/implementation-notes/LOW_LATENCY_DURABILITY_PLAN.md)
 
 Root-caused (2026-07-07) the ~15-20ms nvme low-load durable-publish latency floor:
 it is ~4 serialized fdatasyncs per publish (keratin sync() does .log + .idx, x two
 serial durability round-trips - msg-log durable THEN event-log durable). Measured,
 not theorized (tmpfs=2ms proves it is fsync cost, not scheduling; flat across linger
-and rate sweeps). Three-phase plan in `LOW_LATENCY_DURABILITY_PLAN.md`, executing
+and rate sweeps). Three-phase plan in `archive/implementation-notes/LOW_LATENCY_DURABILITY_PLAN.md`, executing
 Phase 1:
 1. Drop the per-commit `.idx` fdatasync; rebuild the `.idx` tail on dirty open.
 2. Specialized `CancelEnqueue(offset)` event + runtime compensation on msg-fsync failure.
@@ -867,7 +867,7 @@ DEFLAKE PROTOCOL (execution-ready):
 ## Memory follow-up
 
 Identify the residual per-materialized-partition memory cost recorded in
-[MEMORY_AUDIT.md](MEMORY_AUDIT.md), using the existing regression probe.
+[MEMORY_AUDIT.md](archive/implementation-notes/MEMORY_AUDIT.md), using the existing regression probe.
 
 ## Future: mirrored ring orientation flag (2026-07-12)
 

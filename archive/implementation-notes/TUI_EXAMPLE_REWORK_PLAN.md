@@ -1,5 +1,7 @@
 # TUI example rework plan (task #32)
 
+> Archived 2026-10-29. The core and routing rework is done, and remaining milestones are in FOLLOWUPS.md.
+
 Queued plan for the rework. Scope for the first pass: **Core + partitions**.
 Interactive keys are designed here but implemented in a later stretch pass.
 
