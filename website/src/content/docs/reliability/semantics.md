@@ -7,13 +7,27 @@ Fibril currently targets best-effort at-least-once delivery.
 
 ## Durability
 
-Fibril stores message payloads and queue state durably. Recovery is based on:
+Fibril stores message payloads and queue state in an append-only log, and
+recovers from snapshots plus replay of the log after them. Commands are
+designed to be idempotent and replay-safe.
 
-- persisted message records
-- persisted queue-state records
-- snapshots and replay
+When a publish is confirmed depends on the queue's mode and the cluster's
+assignment durability:
 
-Commands are designed to be idempotent and replay-safe.
+- **Durable queues** (the default) confirm and deliver a message only after
+  every required copy has synced it to disk. A confirmed message survives a
+  crash or power loss of those nodes.
+- **Buffered queues** confirm and deliver once every required copy has written
+  the message to the operating system, and a background sync makes it durable
+  shortly after. A power loss on every required node at once can lose confirmed
+  messages from that window. See [buffered queues](/reliability/buffered-queues/).
+- **Required copies.** A standalone broker has one copy. Clusters default to
+  `majority_durable`, so a queue with three copies confirms once two have the
+  message, and survives losing one node without losing confirmed messages. See
+  [replication](/reliability/replication/).
+
+Streams have their own durability tiers, described in
+[Plexus streams](/concepts/plexus-streams/#durability-tiers).
 
 ## Acknowledgements
 

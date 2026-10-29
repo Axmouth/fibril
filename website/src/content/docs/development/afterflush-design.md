@@ -1,12 +1,12 @@
 ---
 title: Buffered queues (AfterFlush)
-description: Proposed opt-in queue mode that confirms and delivers once the required copies are written to the OS, with periodic background sync.
+description: Design record for buffered queues, the opt-in mode that confirms and delivers once the required copies are written to the OS, with periodic background sync.
 ---
 
-This design note records proposed work. Nothing in it is implemented as a queue
-mode. Keratin has the `KDurability::AfterFlush` completion primitive and live
-writer settings, but Fibril queues always confirm and deliver at fsync. Current
-guarantees are in [delivery guarantees](/reliability/semantics/),
+This is the design record for buffered queues, which shipped as an experimental
+opt-in in October 2026. The user guide is
+[buffered queues](/reliability/buffered-queues/). Fenced mode changes on an
+existing queue are the remaining step. Current guarantees are in [delivery guarantees](/reliability/semantics/),
 [replication](/reliability/replication/) and
 [failover and recovery](/reliability/recovery-sealing/). The stream tiers that
 serve as the main precedent are in
@@ -105,7 +105,7 @@ What the experiments also showed:
 | Delivery gate | `refresh_visibility_ceiling` and the publish observer compute the ceiling from written positions on a buffered queue and durable ones otherwise. Solo queues have no ceiling because apply follows the append. |
 | `replica_accepted` | Deprecated. Config maps it to `replica_durable` with a warning. |
 | `replica_buffered:N` | Cluster config mode. Assignments get `replica_durable:N`, and new queues declared without a mode are buffered. Admin shows a buffered queue's policy as `replica_buffered`. |
-| Early replication | Runtime setting `replication.early_replication`, off by default, history-bound assignments only. Ships written records to followers before owner fsync. Always on for buffered queues with a history-bound assignment. |
+| Early replication | Runtime setting `replication.early_replication`, on by default since October 2026, history-bound assignments only. Ships written records to followers before owner fsync. Always on for buffered queues with a history-bound assignment. |
 | Background sync cadence | Runtime setting `storage.background_sync_interval_ms`, applied to open queue logs and to logs opened later (Keratin `9a69acb`). |
 | Seal fence | An epoch advance syncs every written record first, also when no append waits (Keratin `9a69acb`). Before that a seal of a follower holding unsynced buffered records refused. |
 | Live writer settings | Keratin `e333bce`. Revision-checked changes to default durability, batch limits and fsync timers, adopted after a persistence barrier, reset on reopen. |
@@ -192,7 +192,7 @@ the `fibril/queue_declaration/...` Raft attribute. It is a contract with the
 publisher, so it belongs to queue state, in line with
 [configuration policy](/development/config-policy/).
 
-- Phase 1 makes it fixed at first declare. A re-declare that names a different
+- The first version makes it fixed at first declare. A re-declare that names a different
   mode is rejected with a clear error, not silently ignored. Streams currently
   ignore a conflicting tier on re-declare, which is worth fixing at the same
   time.
@@ -217,7 +217,7 @@ Alternatives considered:
 
 ### Changing mode on an existing queue
 
-Phase 3 adds fenced transitions, using the existing assignment, history and
+A later step adds fenced transitions, using the existing assignment, history and
 process fences.
 
 - **Durable to written.** Explicit opt-in on that queue. The owner records an
@@ -561,7 +561,7 @@ Follow the [optimization log](/development/optimization-log/) protocol:
 - Report publish-to-receive and receive-to-deliver separately, plus saturation
   and a many-queue screen.
 
-## 10. Phased plan
+## 10. Delivery steps
 
 1. **Keratin (done).** Public written frontier and watch. Writer background
    sync with `background_sync_interval`, status and failure latch. Tests for

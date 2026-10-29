@@ -14,6 +14,7 @@ export default defineConfig({
   redirects: {
     "/latest": "/",
     "/latest/[...slug]": "/[...slug]",
+    "/development/config-design": "/development/config-policy/",
   },
   integrations: [
     starlight({

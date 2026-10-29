@@ -18,6 +18,15 @@ Fibril settings should be classified before implementation.
 ### Bootstrap Settings
 
 Bootstrap settings are required before the broker can open or accept traffic.
+The `fibril-config` crate loads them into one finished `ServerConfig`, with
+this precedence:
+
+```txt
+compiled defaults < TOML config file < environment variables < CLI arguments
+```
+
+The same precedence applies to first-boot runtime seeds, but environment
+variables never override persisted runtime settings after they exist.
 
 Examples:
 
@@ -141,60 +150,72 @@ Planned or partial:
   resets on restart. The durable trail is the broker log.
 - Snapshots or compaction of the global store log.
 
-Runtime settings are grouped into sections where atomic updates matter. The
-document has these sections, shown here with a few of their fields at their
-first-boot values. The full list and meanings are in
-[configuration](/configuration/), where each one can be seeded under
-`[runtime_seed.<section>]`.
+Runtime settings are grouped into sections where atomic updates matter, such as
+`delivery`, `idle_queue_cleanup`, `connection`, `replication`, `partitioning`,
+`stream`, `consumer_groups`, `publish`, `storage` and `routing`. The full list,
+defaults and meanings are in [configuration](/configuration/), where each section
+can be seeded under `[runtime_seed.<section>]`.
 
-```toml
-[delivery]
-inflight_ttl_ms = 30000
-expiry_poll_min_ms = 15000
+### Store interface
 
-[idle_queue_cleanup]
-enabled = false
-evict_after_ms = 600000
-sweep_interval_ms = 60000
-# publisher_idle_timeout_ms is unset by default, so publishers on an open
-# connection never expire.
+Stroma does not know what Fibril's settings mean. It stores opaque bytes with a
+version, under a namespaced key (`fibril.runtime` / `settings` for runtime
+settings), and offers compare-and-swap and a watch:
 
-[connection]
-# The startup seed fills these two on first boot.
-reconnect_grace_ms = 5000
-resume_session_restart_ttl_ms = 60000
-# drain_handoff_timeout_ms is unset by default, which waits up to 30000 ms.
-
-[replication]
-confirm_timeout_ms = 5000
-min_in_sync_replicas = 1
-eager_failover = false
-eager_failover_grace_ms = 1000
-agreed_checkpoint_interval_ms = 0
-
-[partitioning]
-default_partition_count = 1
-
-[stream]
-cursor_commit_window_us = 100
-cursor_commit_max_batch = 1024
-idle_evict_enabled = false
-
-[consumer_groups]
-# default_target_per_consumer is unset by default, which disables the signal.
-
-[publish]
-buffered_coalesce = "gap"
-buffered_gap_us = 100
-durable_coalesce = "window"
-durable_gap_us = 100
-
-[routing]
-max_upstream_sessions = 4096
-max_upstream_sessions_per_owner = 1024
-forward_timeout_ms = 30000
-upstream_idle_close_ms = 30000
+```rust
+impl GlobalStore {
+    pub async fn get(&self, key: &GlobalKey) -> Result<Option<GlobalValue>>;
+    pub async fn put(
+        &self,
+        key: GlobalKey,
+        value: Vec<u8>,
+        expected_version: Option<u64>,
+    ) -> Result<PutOutcome>; // Stored { version } or Conflict { current }
+    pub async fn watch(&self, key: GlobalKey) -> Result<watch::Receiver<Option<GlobalValue>>>;
+}
 ```
+
+Broker and admin code own encoding and validation. Values are MessagePack
+through Serde rather than JSON: compact, schema-friendly and off the hot path.
+
+### Versioned updates
+
+Every update names the version it was edited from. If the stored version still
+matches, the update commits and the version goes up by one. Otherwise it returns
+a conflict with the current document instead of overwriting, so two operators
+cannot silently clobber each other.
+
+The admin API reads and writes the whole document at once
+(`GET` and `PUT /admin/api/runtime-settings`, the `PUT` body carrying
+`expected_version` and `settings`). Whole-document writes keep atomicity clear
+and avoid partial merge rules. Responses:
+
+- `200` stored, with the new effective settings
+- `400` validation failed
+- `409` stale `expected_version`, with the current effective settings
+- `423` the request changed a locked section
+- `404` runtime settings are unavailable on this admin server
+
+On a conflict the settings page warns that settings changed, shows the current
+values beside the attempted ones, marks the fields the operator changed, and lets
+them resubmit from the new version. It never merges silently.
+
+### Live application
+
+Readers never lock on the hot path. The write goes request, validation, encode,
+compare-and-swap put, watchers notified, and components swap in a new immutable
+snapshot. A setting that cannot apply live must be labelled restart-required
+rather than pretend to take effect. Such settings should stay rare until a
+controlled restart flow (drain, persist, restart, reconnect) exists.
+
+Changing a global queue default affects new queues only. Existing queues never
+inherit a later default change implicitly.
+
+### Open questions
+
+- A reset or repair flow for corrupted runtime settings.
+- Whether the global store belongs in Stroma core or a separate metadata module.
+- The admin auth model for mutations once read-only admin access exists.
 
 ## Naming Direction
 

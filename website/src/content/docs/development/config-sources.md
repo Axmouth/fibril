@@ -4,8 +4,7 @@ description: Design for choosing whether the cluster, a seeding file or a manage
 ---
 
 This is a proposed design. Nothing here is implemented yet. It builds on the
-[configuration policy](/development/config-policy/) and
-[configuration design](/development/config-design/), and replaces the
+[configuration policy](/development/config-policy/), and replaces the
 `[runtime_locks]` mechanism described there. The access policy it mentions is
 planned work with its own design.
 

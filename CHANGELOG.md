@@ -24,11 +24,7 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   longer experimental. Owners send written records to followers before their
   own fsync, and confirms still wait for the owner's own sync. The setting is
   stored with the cluster, so an existing cluster that saved it keeps its
-  value. Turn it on from the settings page.
-
-- Early replication is the `replication.early_replication` runtime setting,
-  off by default, shared by the cluster and adjustable live from the settings
-  page. The `early-replication-experiment` build feature, the
+  value. Change it live from the settings page. The `early-replication-experiment` build feature, the
   `FIBRIL_EXPERIMENT_EARLY_REPLICATION` and
   `FIBRIL_EXPERIMENT_EVENT_TAIL_CACHE_BYTES` variables are removed. Targeted queue routing
   loses its `targeted-routing-experiment` feature and

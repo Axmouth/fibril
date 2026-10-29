@@ -58,6 +58,7 @@ See also: [reliability semantics](/reliability/semantics/) and
 | Snapshots | Implemented | Storage recovery and periodic snapshot path |
 | Lazy startup indexing | Implemented | Existing queues can be indexed without materializing all queue state at startup |
 | Queue recovery on first use | Implemented | First active operation can materialize and recover an indexed queue |
+| Buffered queues | Experimental | A queue declared `buffered` confirms and delivers once the required copies are written to the OS, with a background sync every 100 ms by default (`storage.background_sync_interval_ms`). Fixed at first declare. Cluster form: `replica_buffered:N` assignment durability. See [buffered queues](/reliability/buffered-queues/) |
 
 Conditions and limits:
 
@@ -69,6 +70,9 @@ Conditions and limits:
 - Message TTL (dropping individual messages by age) is implemented. Log
   retention by age (truncating old durable messages on a schedule) is not yet a
   user-facing feature.
+- A buffered queue can lose confirmed messages from its unsynced window if every
+  required node loses power or storage at once. Its mode cannot be changed after
+  the first declare yet.
 
 ## Recovery Quarantine
 
@@ -410,7 +414,7 @@ Developer-facing note:
 
 See also: [configuration](/configuration/),
 [configuration policy](/development/config-policy/), and
-[configuration design](/development/config-design/).
+[configuration policy](/development/config-policy/).
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
@@ -592,6 +596,10 @@ Conditions and limits:
 - They are not a stable published performance contract.
 - Hardware, storage, durability settings, payload size, queue depth, and batching strongly affect results.
 
+The repository includes a [shared Rust queue workload](https://github.com/Axmouth/fibril/tree/main/benchmarks/comparison) with fixed offered rates, saturation, payload identity checks and completion histograms. A Python/Docker runner provisions fresh single-node Fibril, JetStream and RabbitMQ instances, verifies final settlement and records CPU/memory samples. Existing-server modes support RPC reply pipelining, multiple connections and declarations requesting three copies; cluster placement and durability must be verified separately.
+
+Stream adapters, portable cluster/fault provisioning and a repeated workload matrix remain planned. These tools provide reproducible measurements and do not establish power-loss safety or production capacity.
+
 ## Validation and Compatibility Tooling
 
 | Item | Status | Implemented surface |
@@ -765,6 +773,13 @@ Conditions and limits:
   pending.
 - More failure testing is needed before treating this as production-ready HA.
 
+### Recovery inspection efficiency
+
+Automatic inspection reuses authenticated source connections and a verified source
+artifact within one attempt. Bounded sequential reads validate complete sealed
+log digests and receiver replay before producing evidence. Fallback target copying
+retains per-page verification; [compatible retained-data reuse](/development/recovery-internals/#compatible-retained-data-reuse) avoids transfer and installation copies for matching payloads. See [limits and broker compatibility](/development/recovery-internals/#bounded-sequential-inspection).
+
 ## Not Implemented or Not Planned
 
 | Item | Status | Notes |
@@ -776,16 +791,3 @@ Conditions and limits:
 | Log retention by age (truncate old messages) | Planned or undecided | Not currently exposed as a user feature |
 | Message purge (empty a queue) | Planned | Re-scoped: needs a replicated reset, not in-memory only |
 | Java client | Planned | Future client priority |
-
-## Benchmark tooling
-
-The repository includes a [shared Rust queue workload](https://github.com/Axmouth/fibril/tree/main/benchmarks/comparison) with fixed offered rates, saturation, payload identity checks and completion histograms. A Python/Docker runner provisions fresh single-node Fibril, JetStream and RabbitMQ instances, verifies final settlement and records CPU/memory samples. Existing-server modes support RPC reply pipelining, multiple connections and declarations requesting three copies; cluster placement and durability must be verified separately.
-
-Stream adapters, portable cluster/fault provisioning and a repeated workload matrix remain planned. These tools provide reproducible measurements and do not establish power-loss safety or production capacity.
-
-### Recovery inspection efficiency
-
-Automatic inspection reuses authenticated source connections and a verified source
-artifact within one attempt. Bounded sequential reads validate complete sealed
-log digests and receiver replay before producing evidence. Fallback target copying
-retains per-page verification; [compatible retained-data reuse](/development/recovery-internals/#compatible-retained-data-reuse) avoids transfer and installation copies for matching payloads. See [limits and broker compatibility](/development/recovery-internals/#bounded-sequential-inspection).

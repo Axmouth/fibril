@@ -35,6 +35,7 @@ For a more detailed checklist of what is wired and what conditions apply, see
 | Checkpoint installation | Experimental | Journaled installation resumes across interruption. Required payload backfill blocks promotion, including after restart. Linux fault and process-kill tests cover the path |
 | Agreed recovery checkpoints | Experimental, opt-in | Durable same-cut capsules and all-admitted replica receipts publish through consensus. Retention preserves the accepted base and later suffix. Recovery verifies retained bytes and keeps the existing quorum/fencing requirements. Event/append-byte triggers and shared dashboard diagnostics complement periodic cadence. Live backlog still requires payload validation |
 | Early replication | Stable, on by default | The `replication.early_replication` runtime setting applies cluster-wide and can change live. The owner sends written records of enrolled queues to followers before its own fsync. Publisher confirms and delivery keep their normal durability gates |
+| Buffered queues | Experimental, opt-in | A queue declared `buffered` confirms and delivers once the required copies are written to the OS, with a background sync every 100 ms by default. Power loss on every required node at once can lose confirmed messages from that window. The mode is fixed at first declare. See [buffered queues](/reliability/buffered-queues/) |
 | Speculative queue delivery | Experimental prototype, unmerged | Local-queue results remain separate from main. Correctness reconciliation and replicated speculation are pending; Plexus stream tiers have their own existing contract |
 | Recovery quarantine | Available | A damaged queue log is detected on recovery and isolated per the `recovery.on_mismatch` policy, with operator repair |
 | TLS in transit | Available | The broker listener serves TLS from operator PEMs or generated per-deployment material, mismatches are named in both directions, the clients connect with CA-file, fingerprint-pin, or OS-roots trust, the dashboard serves HTTPS from the same material, and first-boot setup mode offers generate/supply/skip before the broker ever serves. Inter-broker replication and coordination traffic is encrypted too (`tls.inter_broker`, shared-CA lane for generated material), the serving certificate rotates live via `fibrilctl admin reload-tls`, and `tls.client_auth` turns client certificates into credentials (a verified identity authenticates as the matching user with no password, `require` closes the handshake to certless peers) |
@@ -59,8 +60,7 @@ acceptance, authoritative stream-history recovery and safe reclamation of retain
 recovery data. There is no history-independent failover latency guarantee; see the
 [failover plan](/development/failover-plan/) for the remaining gates.
 
-## Early performance observations
+## Performance
 
-Informal internal measurements on a Ryzen 5950X system have observed roughly `250k+` messages/sec ingress and egress with 1KB payloads on the durable path. Plexus stream fan-out reaches roughly `1.5M` delivered records/sec across sixteen readers on a single partition, and one partition fans out to hundreds of readers when delivery throughput is not the bottleneck.
-
-These numbers are architecture sanity checks, not a rigorous benchmark suite. Hardware, durability settings, batching, queue depth, workload, and storage behavior all matter. See [benchmarks](/benchmarks/) for the fuller queue and stream tables.
+Measured throughput and latency, each labelled with its hardware, durability
+and workload, are on the [benchmarks](/benchmarks/) page.

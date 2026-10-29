@@ -1,12 +1,11 @@
 ---
 title: Deterministic simulation testing
-description: Evaluation of turmoil and madsim for testing Fibril's cluster failure paths, and the staged plan for adopting one.
+description: How Fibril tests cluster failure paths under deterministic simulation with turmoil, why turmoil was chosen over madsim, and how it fits with soaks and multi-process runs.
 ---
 
-This is a development note: the evaluation behind task #97 and the plan for
-getting deterministic simulation into the cluster test suite. It is the
-credibility gate for the 1.0 cluster-confidence milestone - the difference
-between "the cluster path passes my tests" and "I would run it across nodes."
+This is the record of Fibril's deterministic simulation suite: why turmoil was
+chosen, how it was adopted, and what it covers. Every stage below is done, and
+the suite runs weekly in CI. It is part of the cluster-confidence gate for 1.0.
 
 ## What we want to catch
 
@@ -54,7 +53,7 @@ not cooperate.
 
 ## Recommendation
 
-Adopt **turmoil first**, as the task name implies. It targets exactly the
+Adopt **turmoil first**. It targets exactly the
 network-fault cluster paths that need proving, at a moderate and mechanical
 integration cost, without betting the whole dependency graph on a runtime swap.
 Treat **madsim as a later, optional escalation** only if scheduling-order
@@ -72,7 +71,7 @@ determinism catches - and only after weighing it against the openraft dep graph.
    bootstrap-wiring refactor (see the near-term roadmap) and is a hard
    prerequisite for any multi-node simulation.
 
-## Staged plan
+## How it was adopted
 
 1. **De-risk the tool.** DONE - confirmed turmoil 0.7 builds and runs in our
    toolchain.
@@ -179,15 +178,15 @@ determinism catches - and only after weighing it against the openraft dep graph.
 ## Relationship to other testing
 
 This complements rather than replaces the existing coverage. The chaos and soak
-suite (task #115, in `crates/broker/tests/soak.rs`) exercises a real broker over
+suite (`crates/broker/tests/soak.rs`) exercises a real broker over
 real wall-clock time with real fsync: crash recovery from disk across restart
 cycles, and sustained concurrent load with no loss or duplication. It is CI-small
 by default and scales into a long soak via `FIBRIL_SOAK_*` environment variables.
 Deterministic simulation instead finds the rare interleavings a soak might hit
-only once in a thousand runs, and reproduces them exactly. Loom (task #96,
-assessed as low fit) targets fine-grained atomics, a different layer again.
+only once in a thousand runs, and reproduces them exactly. Loom (assessed as
+a low fit) targets fine-grained atomics, a different layer again.
 
-The third leg is a real multi-node run on separate OS processes (task #116):
+The third leg is a real multi-node run on separate OS processes:
 `scripts/cluster-tryout.sh` stands up N real `fibril-server` processes forming one
 Ganglion raft cluster over real TCP. Its `--failover-verify` mode runs an
 identity-tagged producer/consumer through public client routing, kills the

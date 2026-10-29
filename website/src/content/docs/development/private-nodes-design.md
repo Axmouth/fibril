@@ -3,9 +3,9 @@ title: Private nodes and internal routing
 description: Design for brokers that are never advertised to clients, with public brokers forwarding to them over internal connections.
 ---
 
-This design note records the design of private brokers. Phases 1 and 2
-(section 9) are implemented, section 11 lists where the build differs from the
-text, and phase 3 holds later options. User-facing behavior is in
+This design note records the design of private brokers. The Swarm slice and
+the full client surface (section 9) are implemented, section 11 lists where the
+build differs from the text, and section 9 also holds later options. User-facing behavior is in
 [private brokers](/configuration/#private-brokers). It expands the roadmap
 entry
 [public/private endpoints and routing fallback](/roadmap/#publicprivate-endpoints-and-routing-fallback).
@@ -485,7 +485,7 @@ owner shows forwarded sessions as "via node P for user U".
 
 ## 9. Phased plan
 
-**Phase 1: the Swarm slice (implemented, see section 11).** Enough for a load
+**The Swarm slice (implemented, see section 11).** Enough for a load
 balancer in front of one or a few public brokers, with every SDK unchanged.
 
 - `broker.visibility`, `broker.peer_advertise`, their env vars, validation and
@@ -499,7 +499,7 @@ balancer in front of one or a few public brokers, with every SDK unchanged.
 - The `routing` limits, the `504` code and the failure table above.
 - Metrics and logs from section 8.
 
-**Phase 2: full client surface (implemented, see section 11).**
+**Full client surface (implemented, see section 11).**
 
 - Streams: `SubscribeStream`, stream publish and cursor commits.
 - Exclusive consumer groups with member id resolution at the gateway.
@@ -507,7 +507,7 @@ balancer in front of one or a few public brokers, with every SDK unchanged.
 - Reconcile with the restore policy for forwarded subscriptions.
 - Dashboard marking of private nodes and forwarded load.
 
-**Phase 3: later options.**
+**Later options.**
 
 - Tagged private endpoints for internal clients.
 - The multiplexed upstream link if socket counts become a limit.
@@ -556,7 +556,7 @@ Decided:
 2. Unknown outcome: a new `504` code. The upstream was lost after the request
    was sent, the outcome is unknown, and clients must not replay blindly.
 3. Config shape: the `broker.visibility` enum, with `broker.peer_advertise`
-   shipping in phase 1, since a load balancer advertise address breaks
+   shipping in the first slice, since a load balancer advertise address breaks
    broker to broker replication without it.
 4. Private nodes accept ordinary client AUTH. Private means not advertised,
    so internal clients that can reach a private node directly keep working.
@@ -567,7 +567,7 @@ Decided:
    know it may ignore it. To stay readable by such owners the marker keeps its
    `FFS1` body without flags and uses `FFS2` with a flags byte only when one
    is set. An owner that refuses `FFS2` gets the `FFS1` body on the same
-   connection, which is the phase 1 behavior.
+   connection, which is the first slice's behavior.
 
 Still open:
 
@@ -715,7 +715,7 @@ forwarder, upstream sessions), `crates/coordination-ganglion/src/gateway.rs`
   `504` on a dropped upstream, `503` when nothing was sent, rebuilt redirects,
   the one retry on a move to another private owner, the per-owner cap, and
   the `ForwardedSession` checks (node principal only, one hop, once per
-  session, never forwarding again). Phase 2 adds stream publish, durable
+  session, never forwarding again). The full client surface adds stream publish, durable
   cursor commit and filter against a real owner, stream subscribe
   replacement, member id resolution and relayed assignment changes for
   exclusive groups, upstream resume (kept, partly lost and not found),

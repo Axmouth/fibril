@@ -33,7 +33,7 @@ separate rounds when their dependencies permit.
    representative physical-storage measurements. Production configuration and
    confirmation/identity contracts are required before adoption. Replicated
    speculation remains a separate increment. Replication before owner fsync
-   exists as the opt-in early replication experiment.
+   already ships as early replication, on by default.
 4. **Python and TypeScript performance.** Profile scheduling, decoding, delivery
    and flushing against shared broker workloads. Apply useful transport changes
    across SDKs where the same mechanism applies, retaining consistent semantics.
@@ -241,15 +241,10 @@ when reducing repeated reads or changing comparison scheduling.
   proposed replay design is [dead-letter replay](/development/dlq-replay-design/).
 - Extend the shared benchmark harness with stream workloads, portable cluster/fault
   provisioning and repeated workload matrices.
-- Assess sending immutable staged batches to followers before owner fsync, after
-  promotion can distinguish and preserve committed history. Keep local durability
-  and complete replica dependencies as confirmation requirements, with bounded
-  buffering and recovery rules for tentative suffixes. Validate [owner write/fsync
-  failures after follower persistence](/development/recovery-continuation/#early-replication-under-owner-io-failure),
-  including ambiguous client outcomes, ordinary delivery gates and old-owner restart.
-  An opt-in queue mode that confirms and delivers once the required copies are
-  written to the OS builds on the same written source. See the
-  [buffered queue design](/development/afterflush-design/).
+- Let an existing queue change between durable and buffered with a fenced
+  transition. Buffered queues themselves shipped as an experimental opt-in in
+  October 2026, see [buffered queues](/reliability/buffered-queues/) and the
+  [design record](/development/afterflush-design/).
 - Add OpenTelemetry export.
 - Ship Grafana dashboards and alert rules, add latency, fsync, process and
   disk metrics, and keep telemetry history across restarts. The proposed
