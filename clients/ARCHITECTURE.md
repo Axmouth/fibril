@@ -15,7 +15,7 @@ TypeScript module names are given as a concrete example, but the layering is
 language-agnostic.
 
 1. **Wire codec** (`wire.ts`) - byte-exact encode/decode of each frame body in
-   the broker's custom binary format (`crates/protocol/src/v1/wire.rs`). Big
+   the broker's custom binary format (`crates/wire/src/wire.rs`). Big
    endian, length-prefixed strings and bytes, 16-byte UUIDs, a one-byte tag for
    options, a 4-byte ASCII magic per op. This is the only layer that touches
    bytes and the only one that must match the broker exactly.

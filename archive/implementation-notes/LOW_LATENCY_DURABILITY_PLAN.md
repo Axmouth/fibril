@@ -217,4 +217,4 @@ parallelization, gated on its safety machinery. Build order:
 - Decide the `CancelEnqueue` event: new variant vs. an existing removal event that fits.
 - Replication interaction: verify the follower catch-up path keeps the two logs
   consistent under the parallel scheme (the cache/file durable-gating asymmetry in
-  keratin-log's tail cache is relevant here - see TAIL_CACHE_PLAN.md follow-up 1).
+  keratin-log's tail cache is relevant here - see the keratin archive/implementation-notes/TAIL_CACHE_PLAN.md follow-up 1).

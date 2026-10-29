@@ -15,7 +15,8 @@ The first profile compares one durable queue and one stored copy. JetStream time
 
 ## Early observations
 
-Internal measurements with the current TCP transport and durable path on a single Ubuntu node have observed:
+Internal measurements in May 2026 of a standalone broker over TCP with durable
+queues, on one Ubuntu workstation, observed:
 
 | Workload | Observation |
 | --- | --- |

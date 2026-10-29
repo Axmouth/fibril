@@ -429,7 +429,7 @@ on storage writer threads linked much of the idle RSS excess after bursts to
 allocator retention after staging capacity was released. Fibril enables the
 policy by default, with `adaptive_staging = false` as the retained-buffer opt-out.
 Configuration and retention details are in [configuration](/configuration/) and
-Keratin's `experiments/ADAPTIVE_STAGING.md`.
+Keratin's `docs/ADAPTIVE_STAGING.md`.
 
 ### Follower transition before storage admission
 

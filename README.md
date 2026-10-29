@@ -19,99 +19,94 @@
 
 ### Intent
 
-Fibril is a message broker focused on durable delivery, retries, leasing, and asynchronous workflow coordination, built from first principles in Rust.
+Fibril is a message broker focused on durable delivery, retries, leasing and
+asynchronous workflow coordination, built from first principles in Rust.
 
-Most applications need durable queues, predictable delivery semantics, reconnect behavior that doesn't surprise them, and operational controls that are easy to understand during incidents. Fibril optimizes for that path.
+Most applications need durable queues, predictable delivery semantics, reconnects
+that don't surprise them, and operational controls that are easy to understand
+during an incident. Fibril optimizes for that path rather than replicating every
+feature of existing brokers.
 
-The project is currently in a pre-alpha stage and under active development. APIs, persistence formats, and operational behavior may still change significantly as the system evolves.
-
-Fibril aims to provide a simpler and more ergonomic messaging model, where the message itself carries the lifecycle of processing:
-
-```rust
-msg.complete().await?;
-msg.retry().await?;
-msg.fail().await?;
-```
-
-The architecture is intentionally modular. The broker, durability layer, and state-management components are designed to remain reusable independently, and the broker core may also be embedded directly into applications or custom systems where lightweight durable messaging semantics are useful.
-
-The long-term direction is not to replicate every feature or abstraction of existing brokers, but to provide a practical, observable, and operationally simple system that covers the majority of real-world messaging workflows.
+Fibril is pre-alpha. APIs, persistence formats and operational behavior can still
+change between releases.
 
 ### The shape of the API
 
-Messaging should not feel like bureaucracy. In Fibril, the message itself can carry the intent of the system, allowing for a natural, asynchronous flow:
+The message carries its own lifecycle:
 
 ```rust
 while let Some(msg) = sub.recv().await? {
     process(msg.content()?).await?;
 
-    msg.complete().await?;    // Acknowledge successful processing
+    msg.complete().await?;    // acknowledge
+    // or msg.retry().await?  // requeue
+    // or msg.fail().await?   // settle as failed
 }
 ```
 
-Messages can also be retried or failed explicitly:
-
-```rust
-    msg.retry().await?;  // Requeue immediately
-    msg.fail().await?;   // Mark failed without requeueing
-```
-
-Delayed publish and delayed retry are available through the public client paths.
-
-Common access patterns:
-```rust
-    let value: MyType = msg.deserialize()?;
-```
-
-> Messages are `#[must_use]` (in Rust). So forgotten lifecycle handling is warned about.
-
-> Fibril is still evolving, and some APIs shown here may change or may not yet
-> be fully implemented end to end.
+In Rust, messages are `#[must_use]`, so a forgotten settlement is a compiler
+warning.
 
 ## What's here
 
-* **Durable work queues** over a custom TCP protocol: publish/subscribe, explicit
-  ack/nack, leasing with redelivery, delayed publish and delayed retry, message
-  TTL, and dead-lettering with configurable policies.
+* **Durable work queues** over a custom TCP protocol: explicit ack and nack,
+  leasing with redelivery, delayed publish and delayed retry, message TTL, and
+  dead-lettering with configurable policies. Queues are durable by default, and
+  an experimental **buffered** mode confirms before fsync for lower latency.
 
-* **Plexus streams** - a fan-out channel type alongside the work queues, where
-  every subscriber receives every record, with durable named cursors, per-stream
-  durability tiers, and header filters.
+* **Plexus streams**, a fan-out channel type where every subscriber receives
+  every record, with durable named cursors, per-stream durability tiers and
+  header filters.
 
-* **Partitioned queues and streams** with client-side key routing and transparent
-  fan-in, plus opt-in wildcard subscribe (subscribe to every channel matching a
-  pattern, auto-picking up new ones).
+* **Partitioned queues and streams** with client-side key routing and fan-in,
+  plus opt-in wildcard subscribe.
 
-* **Exclusive consumer groups** - ordered, balanced, sticky, self-healing
-  consumption of a partitioned queue.
+* **Exclusive consumer groups**: ordered, balanced, sticky consumption of a
+  partitioned queue.
 
-* **Experimental clustering** (Ganglion coordination): partition ownership,
-  follower replication, epoch-fenced failover, replica-durable confirms, and live
-  repartitioning.
+* **Experimental clustering** through Ganglion coordination: partition
+  ownership, follower replication, epoch-fenced failover, majority-durable
+  confirms and live repartitioning.
 
-* **First-party clients** in Rust, TypeScript, and Python (async plus a blocking
-  facade), kept at parity by shared wire vectors.
+* **First-party clients** in Rust, TypeScript, Python, Go and C#, kept at parity
+  by shared wire vectors and a [feature matrix](clients/FEATURE_MATRIX.md).
 
-* **Admin dashboard** for queues, streams, topology, message inspection, DLQ
-  replay, and runtime settings.
+* **Admin dashboard** for queues, streams, topology, message inspection,
+  dead-letter replay and runtime settings, plus `fibrilctl` and Prometheus
+  metrics.
 
-* **TUI demo** - a terminal UI that visualizes messages moving through the system.
+* **TLS and authentication**: TLS for clients and between brokers, a replicated
+  user store and optional client certificates.
 
-See the [project status](https://fibril.sh/status/) and
-[implemented surface](https://fibril.sh/implemented-surface/) for exactly
-what is wired and under what conditions.
+The [project status](https://fibril.sh/status/) and
+[implemented surface](https://fibril.sh/implemented-surface/) say exactly what is
+wired and under what conditions. The [roadmap](https://fibril.sh/roadmap/) holds
+what comes next.
+
+## Performance
+
+The [benchmarks](https://fibril.sh/benchmarks/) page has the measurements, each
+labelled with its hardware, durability and workload. Two reference points, both
+1 KiB durable messages on one Ryzen 5950X workstation with a consumer NVMe drive:
+
+* A standalone broker sustained roughly 250k messages/s in and out (May 2026).
+* Three brokers sharing that drive, with the shipped `majority_durable` default
+  and early replication on, reached roughly 125k confirmed messages/s at
+  saturation over one client connection (October 2026).
+
+The [repeatable comparison](benchmarks/comparison/README.md) runs the same
+workload against Fibril, NATS JetStream and RabbitMQ, and
+[BENCHMARKING.md](BENCHMARKING.md) explains how to run each bench.
 
 ## Related components
 
-* **Stroma**
-  The state machine driving broker behavior. It uses Keratin for durability.
-  Currently lives alongside Keratin, but may move into this repository to better align with the broker implementation, as it is already a fairly broker-specific state machine.
+* **Keratin** is the storage layer: a small, fast append-only segmented log,
+  kept independent of broker logic. It also holds **Stroma**, the queue and
+  stream state machine on top of Keratin, which handles snapshots, checkpoints,
+  recovery and sealing. https://github.com/Axmouth/keratin
 
-* **Keratin**
-  A small durability layer focused on implementing a simple, (blazingly) fast append-only segmented log.
-  The intention is to keep it simple and reusable, independent of broker-specific logic.
-
-  https://github.com/Axmouth/keratin
+* **Ganglion** is the raft coordination library behind clustering, built on
+  openraft. https://github.com/Axmouth/ganglion
 
 ### Local Keratin development
 
@@ -137,17 +132,6 @@ scripts/stroma-source.sh git
 
 The local patch currently expects the Keratin checkout at `../keratin`.
 
-## Direction
-
-Fibril is being developed with dogfooding in mind, aiming to build small, real use cases on top of it to better understand:
-
-* delivery guarantees
-* retries and failure handling
-* scheduling and delayed execution
-* observability of message flow
-
-The system may change significantly as these areas are explored.
-
 ## Naming
 
 The naming follows a loose biological analogy:
@@ -163,293 +147,10 @@ In short:
 - Stroma handles queue state and coordination
 - Fibril handles broker and transport behavior
 
-## Status
-
-Early and incomplete. Expect rough edges, missing features, and frequent changes.
-The early iteration used RocksDB as the persistence layer, but the current version is now fully migrated to Keratin.
-All layers from the broker and below have a decent implementation of graceful shutdown.
-Glad to have reached a point where the current features should reliably work.
-The TCP layer can use meaningful improvements, and the admin interface and internal layers are still very basic.
-Moving from shared locked data structures to a more actor like approach for queues and other components has improved reliability and simplicity, and will likely be the default going forward.
-
-## Implemented functionality
-
-The current implementation provides a minimal but working set of broker semantics:
-
-### Messaging
-
-* **Publish (pub)** over a custom TCP protocol
-* **Delayed publish** using a distinct delayed-publish protocol frame
-* **Message TTL** (per-message `ttl_ms` or a per-queue `default_message_ttl`); an
-  unconsumed message past its deadline is dropped, or dead-lettered when the
-  queue has a DLQ policy
-* **Subscribe (sub)** to topics and receive messages
-* **Topic plus optional group addressing** (partition selection is internal)
-* **Admin queue management** (create, delete single-node, hide-inactive + search)
-* **Rust, TypeScript, and Python clients** for publishing and consuming (the
-  Python client has an async API plus a thin blocking facade)
-
-### Delivery model
-
-* **Pull-based delivery with leasing**
-
-  * Consumers request messages via `PollReadyAndMark`
-  * Messages are moved to **inflight** with a lease deadline
-
-* **Explicit acknowledgements**
-
-  * `Ack` / `AckBatch` mark messages as processed
-  * ACKs are idempotent and final
-
-* **Negative acknowledgements**
-
-  * `Nack { requeue=true }` → message returns to **ready** with retry increment
-  * `Nack { requeue=false }` → terminal (treated as acked)
-  * Retry tracking exists but is still evolving
-
-* **At-least-once delivery (best effort)**
-
-  * Messages may be redelivered if not acked before lease expiry
-
-### Queue state model
-
-Each message offset moves through a strict state machine:
-
-* **Ready** → eligible for delivery
-* **Inflight** → leased to a consumer (with deadline)
-* **Settled** → terminal (acked, terminally nacked, or dead-lettered)
-
-Key transitions:
-
-* `Enqueue` → Ready
-* `EnqueueDelayed` → Ready after its `not_before` deadline
-* `PollReadyAndMark` / `MarkInflight` → Inflight
-* `Ack` → Settled (terminal)
-* `Nack(requeue=true)` → Ready
-* `CollectExpired` → Inflight → Ready
-
-Key invariants:
-
-* An offset exists in at most one of `{ready, inflight, settled}`
-* Settlement is final (no re-entry into delivery)
-* Delivery eligibility is determined solely by **ready**
-* All operations are idempotent and replay-safe
-
-### Ordering and settlement tracking
-
-* **Coalesced settled-range set**
-
-  * Settlements (ack, terminal nack, dead-letter) are recorded as a set of
-    settled offset ranges, coalesced as they fill in.
-  * Out-of-order settlements are handled without a fixed window: a gap is just a
-    range that has not closed yet.
-
-* **Monotonic settled frontier (`settled_until`)**
-
-  * Derived from the range set: the end of the contiguous run of settled offsets
-    from 0.
-  * Offsets below it are settled and gone; it advances as gaps close.
-
-This keeps memory proportional to the number of open gaps (usually tiny) rather
-than a fixed window, and the frontier is always exact.
-
-### Leasing and retries
-
-* **Lease deadlines**
-
-  * Inflight messages have a deadline
-  * Expired leases are re-queued via
-
-* **Retry tracking**
-
-  * Per-offset retry count
-  * Max-retry dead-letter routing is wired; replay and inspection tooling is still early
-
-### Persistence
-
-* **Append-only logs (via Keratin)**
-
-  * Message log
-  * Event/state log
-
-* **Snapshot + replay**
-
-  * Queue state can be encoded and restored
-  * All commands are designed to be replay-safe
-
-### Runtime model
-
-* **Single-threaded command processing per queue**
-
-  * Commands are processed sequentially (actor-like model)
-  * Avoids shared mutable state and locking
-
-* **Graceful shutdown**
-
-  * Supported across broker layers
-
----
-
-This represents the current working baseline. Some areas (DLQ, retries, protocol details) are still incomplete or evolving.
-
-## Performance (early observations)
-
-The [repeatable broker comparison](benchmarks/comparison/README.md) runs a shared Rust queue workload against Fibril, NATS JetStream and RabbitMQ. It records throughput, admission and completion latency, resource use, settings and validation evidence, with Docker setups for repeating the measurements.
-
-Informal internal benchmarks using the current TCP transport and durable path on a single Ubuntu 26.04 node have observed throughput in the range of:
-
-* ~250k+ messages/sec ingress
-* ~250k+ messages/sec egress
-* 1KB payloads
-* durable delivery path enabled
-
-Measured on a Ryzen 5950X system.
-
-Observed memory usage during these runs ranged from a few hundred MB at lower load up to roughly ~1–2GB at peak throughput, depending on queue depth, batching behavior, and inflight state. Memory behavior is still being optimized, and allocator retention may cause RSS usage to remain elevated after load subsides.
-
-Throughput decreases as payload sizes increase, as expected. Larger payloads eventually become increasingly constrained by memory pressure, copying overhead, storage throughput, and network I/O characteristics.
-
-These numbers are intended primarily as a sanity check of the current architecture rather than a rigorous benchmark suite.
-
-Current optimization work is focused mostly on architectural efficiency and correctness rather than aggressive micro-optimizations. Areas such as zero-copy delivery paths, allocation reduction, string interning, and further batching improvements are still open for exploration.
-
-Real-world performance will vary significantly depending on:
-
-* storage hardware and durability settings
-* batching and client behavior
-* workload characteristics
-* queue depth and inflight pressure
-* network conditions and protocol overhead
-
-For a more typical workload scenario, a sustained run of approximately ~400 messages/sec with ~48KB payloads over roughly 5 hours showed a peak working set around ~150MB, with memory usage later falling back toward the ~40–70MB range during lower activity periods.
-
-Performance characteristics are expected to evolve significantly as the system matures.
-
-## Core areas to expand on:
-
-* **Removal of inefficiencies in command dispatch**
-
-  - ~~Potential microbatching incoming publish events, settle events and append together, clogging the command queue and other inputs much less on high load~~
-  - Create Queue handles at Query Engine and Stroma level that do not need to seek the relevant Queue handle on every command, plus related checks
-  
-  Update: Microbatching implemented, optimizations in calling queue handles less often are ongoing.
-
-* **Faster state loading utilizing snapshots**
-
-  ~~Will likely pair with compation improvements, to make better use of snapshots feature, so a broker with longer history does not rerun many events to initiate its state~~
-
-  Compaction implemented and loading uses snapshots, vastly improving startup after long usage.
-
-* **Client libraries**
-
-  Building client libraries in various languages to make it easier to interact with the broker and test its
-  features in real applications.
-
-  The Rust, TypeScript, and Python clients are at parity across the core surface
-  (publish/subscribe, settlement, delayed publish, TTL, streams, partitioning,
-  consumer groups, wildcard subscribe), kept honest by shared wire vectors.
-  Next considered languages: Go, C#, Java.
-
-* **Admin interface**
-
-  A more robust and user-friendly interface for managing the broker, monitoring its state, and performing administrative tasks.
-
-* **Event log debug interface**
-
-  Perhaps tucked in admin page somewhere, able to read paginated events to help debug things.
-
-* **Heartbeats and connection management**
-
-  ~~-Implementing a heartbeat mechanism to detect and handle client disconnections more gracefully.~~
-
-  Update: Heartbeat plus timeout implemented on server side plus Rust and TypeScript clients.
-
-* **Higher level test cases**
-
-  Building more complex test cases that simulate real-world usage patterns, including failure scenarios, to validate the broker's behavior and robustness. Especially around the TCP layer.
-
-* **Dead letter queue and retry mechanisms**
-
-  ~~Implementing a dead letter queue for messages that cannot be delivered after a certain number of attempts, and exploring different retry strategies.~~
-
-  Update: Retry is implemented, deadletter logic is implemented with different policies(global dlq, custom set dlq, just discard). Works when maxxing out retries as well.
-
-* **Compaction and cleanup**
-
-  ~~Implementing mechanisms for compacting the message log and cleaning up old messages to manage storage usage effectively.~~ As well as shrinking in memory data structures for tracking state after prolonged inactivity. Plus potentially full teardown of relevant in memory structures after a longer period.
-
-  Update: Periodic compaction of event and message log implemented
-
-* **Consistent backpressure and flow control**
-
-  Exploring strategies for applying backpressure to producers and consumers based on the broker's current load and capacity. (Note: Backpressure exists to some extent thanks to bounded channels in key parts of the broker)
-
-* **Memory/storage limits and message capacity limits**
-
-  Throttle(asymptotically?) publishers based on getting near a memory or undelivered message limit (finding an efficient way to keep track of memory, or the right parts of memory, pending)
-
-* **Transition from primitive types to newtype wrappers**
-
-  To improve type safety and code clarity, introduce newtype wrappers around
-  primitive types like `u64` for offsets, `String` for topic names, etc.
-
-  Update: Partition, Offset, and Epoch are newtypes today. The remaining
-  Topic/Group newtype + `Arc<str>` pass is folded into the pre-1.0 API freeze.
-
-## Potential areas to explore:
-
-* **Protocol improvements**
-
-  Adding features like encryption, and more robust framing. Ability to set settings on the connection/queue/message level, etc.
-
-* **Message Expiration and TTL**
-
-  ~~Support for expiring messages after a certain time, and handling of expired messages.~~
-
-  Update: Message TTL is implemented (per-message `ttl_ms` and per-queue default); expired messages drop or dead-letter.
-
-* **Expiration and cleanup of queues and other resources**
-
-  Implementing mechanisms for expiring and cleaning up unused queues, connections, and other resources to prevent resource leaks.
-
-* **Exactly-once delivery semantics**
-
-  Exploring how to implement exactly-once delivery semantics, and the trade-offs involved in achieving this level of guarantee. The goal is to improve delivery guarantees, not necessarily achieve true exactly once semantics in all cases, as that may not be possible or desirable. This would likely involve optional delivery confirmation acknowledgements and publish confirm acks as incremental improvements.
-
-* **Clustering and distributed coordination**
-
-  Update: An experimental cluster path exists (Ganglion coordination): partition
-  ownership, follower replication, epoch-fenced failover, replica-durable
-  confirms, and live repartitioning. It needs more failure testing before it is
-  production-grade high availability, but multiple brokers can share state and
-  fail over today.
-
-* **Direct delivery/Express lane/Speculative Egress**
-
-  A mode to use when we know there are subscribers to a "channel" we publish to. Likely would need to use a shortcut to delivery loop, and confirm on disk write even if the consumer has already act, for zero durability compromise. Might end up too niche however, as stored messages, which came earlier, have higher priority anyway. Also could end up not worth the hassle for what it brings.
-  Potential implementation details: Semaphore to open lane slots, when we know ready state empty and no pending publishes. confirm on disk fsync as usual. Explore if better to directly set to inflight together with enqueue.
-
-* **Message lease extension while it is being processed**
-
-  Especially some manner for the client side to keep the lease alive as long as connection is intact
-
-* **Delayed messages and scheduling**
-
-  Delayed publish and delayed retry are wired through the broker protocol plus Rust and TypeScript clients.
-
-### The following features may be explored under a separate advanced routing layer on top of the core broker, to keep the core focused on durability and delivery semantics:
-(Note: the above is not the guaranteed direction, but a possibility)
-
-* **Message prioritization**
-
-  Allowing messages to be prioritized in the queue, and exploring different strategies for handling priorities.
-
-* **Routing and topic-based messaging**
-
-  Implementing more complex routing logic, such as topic-based messaging or content-based routing.
-
-* **Exchanges and bindings**
-
-  Implementing concepts like exchanges and bindings to provide more flexible routing options.
-
-Historical design records are indexed in the [archive](archive/README.md).
+## Further reading
+
+* [Docs](https://fibril.sh/) and [quickstart](https://fibril.sh/quickstart/)
+* [Reliability semantics](https://fibril.sh/reliability/semantics/)
+* [Follow-ups](FOLLOWUPS.md) and [audits](AUDITS.md) for engineering work in
+  progress
+* Historical design records are indexed in the [archive](archive/README.md).

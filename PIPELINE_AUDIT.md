@@ -1,4 +1,4 @@
-# Pipeline audit: work inside serialized contexts (DRAFT, 2026-07-18)
+# Pipeline audit: work inside serialized contexts (2026-07-18)
 
 Goal: per-partition ordering serializes the ORDER, not the work. This audit
 walks the hot paths and flags work that runs inside a serialized context
@@ -6,8 +6,7 @@ walks the hot paths and flags work that runs inside a serialized context
 stages of one partition's flow can interleave across successive messages.
 Feeds the throughput/latency assessment in FOLLOWUPS (the million target).
 
-STATUS: queue-actor section complete. Delivery-path and publish-confirm
-sections pending (exploration in flight when this draft was written).
+STATUS: all sections written. Open findings are tracked in AUDITS.md.
 
 ## Queue actor (stroma/core/src/state.rs) - findings
 

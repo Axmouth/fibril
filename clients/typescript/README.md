@@ -6,6 +6,9 @@ for subscriptions, `bigint` for u64 fields).
 
 ## Install
 
+Not yet published to npm. Build from this directory with `npm install && npm run build`
+and depend on it by path. Once published, it will install with:
+
 ```bash
 npm install @fibril/client
 ```

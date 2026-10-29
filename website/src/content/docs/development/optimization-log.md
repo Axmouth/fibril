@@ -191,6 +191,43 @@ Its tracks:
   and 5 nodes, separate idle from active partitions, and name the cause of the
   knee.
 
+### Storage candidates from Keratin
+
+Carried over from Keratin's June and July 2026 performance notes, which are
+archived in the Keratin repo at `archive/performance/PERFORMANCE_NOTES_2026H1.md`.
+The K numbers are that file's.
+
+- **Stream publish chains two group commits (K2, 2026-07-03).** Queues use one
+  log since 2026-09-28, so a queue publish waits on one fsync. Streams still
+  keep a payload log and a cursor log. If stream publish latency becomes a
+  target, stage both appends at once and gate only the cursor log fsync on the
+  covering payload fsync.
+- **Readers reopen segment files on every scan (K3, 2026-07-03).**
+  `LogReader::scan_from` and `fetch` open the segment and index files, seek and
+  scan on each call. A per-reader cache of the current segment handle and
+  position would take those syscalls off tail cache misses. Unmeasured.
+- **Event clone in the unordered apply completion (K5, 2026-07-03).** The
+  ordered path that all queues use moves the event. The unordered path still
+  clones it, which matters only while that path stays in use.
+- **No test for a clean manifest with inconsistent metadata (2026-06-14).**
+  After a clean shutdown, `Log::open` trusts the manifest and skips the segment
+  scan. No test shows that obviously inconsistent metadata is refused or falls
+  back to the scan.
+- **Tail cache on stream payload logs (2026-07-07).** Stream payload logs fill
+  the tail cache, but the live stream tail is served from `StreamRing`, so the
+  cache is rarely read. Set it to 0 there or decide which layer owns tail
+  residency.
+- **Skip the CRC on tail cache hits (2026-07-07).** Hits still run the full
+  record decode with CRC32C on trusted in-memory bytes, a cost that grows with
+  fan-out. Benchmark a no-CRC decode for cached records.
+- **Cache decoded records instead of bytes (2026-07-07).** A hit still decodes
+  and copies each record. Caching decoded or shared records would cut delivery
+  CPU at a higher memory cost. Assess after the CRC item.
+- **Tail cache budget is soft for oversized flushes (2026-07-07).** The newest
+  batch is kept even when it alone exceeds `tail_cache_bytes`, which only
+  happens when the cache is smaller than `flush_target_bytes`. Document that
+  minimum or clamp the setting.
+
 ### Adaptive dial candidates
 
 Listed in July 2026. A fixed tunable can instead derive its value at runtime from

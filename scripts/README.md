@@ -16,6 +16,8 @@ documented in depth (recipes, metric glossary, ceilings) in
 | `bench-e2e-c.sh` | End-to-end: publish N, drain, report throughput. `FIREHOSE=1` drops reader latency tracking to isolate broker delivery. | `MESSAGES`, `CLIENTS`, `SIZE`, `FIREHOSE`, `CONFIRMED` |
 | `bench-stream.sh` | Plexus stream steady-state (stream counterpart of `bench-steady-c.sh`). | `DURABILITY` (tier), `RATE_PER_SEC`, `PARTITIONS`, `DATA_DIR` (device to measure) |
 | `../benchmarks/cluster/matrix.py` | Local standalone and three-node cluster suites with throughput, latency, CPU, syscalls and context switches per message. Runs the reference matrix in `BENCHMARKING.md`. | suite name, `--storage`, `--tag`, see `benchmarks/cluster/README.md` |
+| `bench-e2e-history.py` | Repeats the historical two-process `e2e_c` workload on fresh solo or three-copy nodes, or the paced `steady_c` workload with `--rate-per-sec`. Keeps results and data in persistent directories. | `--copies`, `--node-storage`, `--rate-per-sec`, `--confirm-window`, `--prefetch` |
+| `memory-audit.sh` | Memory regression probe: repeated load, drain and evict cycles against one broker, reporting settled RSS per cycle. | `--check` (non-zero exit on regression), `QUEUES`, `MSGS`, `CYCLES` |
 | `fsync-probe.py` | Raw `fdatasync`/`fsync` cost on a device: in-place vs extending vs preallocated. | `--extend`, `--fallocate`, `--gap-ms`, `--path` |
 
 Also see `../clients/bench-plexus-fanout.sh` (Plexus fan-out with one OS process
@@ -35,7 +37,9 @@ Note: `bench-steady-c.sh` names the server data-dir knob `SERVER_DATA_DIR`;
 
 | Script | Does |
 |---|---|
-| `cluster-tryout.sh` | Starts N real `fibril-server` processes (own ports/data dirs) and checks each one's topology via `fibrilctl`. `--ganglion` forms one raft coordination cluster; `--staggered` joins nodes one by one. |
+| `cluster-tryout.sh` | Starts N real `fibril-server` processes (own ports/data dirs) and checks each one's topology via `fibrilctl`. `--ganglion` forms one raft coordination cluster and `--staggered` joins nodes one by one. Also: `--keep`/`--hold` to leave it running, `--viz` for the terminal visualizer, `--dynamic-membership`, `--failover-smoke`, `--failover-verify`, `--repartition-smoke`, `--chaos` with `--chaos-rounds`, `--hard-kill`, `--steady-bench`, `--replica-durable`/`--assignment-durability`, `--prealloc`, and `--summary`/`--resource-summary` for large node counts. Ports stay below the ephemeral range. |
+| `failover-remaining-follower.sh` | Three-copy failover check: promotes one follower, then verifies the queue keeps serving from the one remaining follower, with publishes after the crash so earlier deliveries alone cannot pass. |
+| `scenario.sh` | Drives a broker or small cluster through a scripted sequence of operator actions from `scripts/scenarios/*.scenario`, to watch the dashboard activity feed, attention panel and notifications react. `--admin URL` drives an existing broker. |
 | `coordination-playground.sh` | 3 brokers + an embedded raft controller in one process. Interactive, or `--script "status; assign orders 2; kill broker-1; ..."` for a scripted demo. |
 
 ## Release
