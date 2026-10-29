@@ -191,6 +191,45 @@ Its tracks:
   and 5 nodes, separate idle from active partitions, and name the cause of the
   knee.
 
+### Adaptive dial candidates
+
+Listed in July 2026. A fixed tunable can instead derive its value at runtime from
+a measured signal: an atomic read where it is used, written by a slow observer
+with hysteresis and clamps, with config giving the bounds and a pin override and
+the derived value shown in the debug surface. Changing the constant first is a
+sensitivity probe. If moving it moves nothing, it stays a plain constant.
+
+Budget rule: a coalesce window should stay at or under about 10% of expected
+end-to-end latency, 20% at most. Reference at the time: publish-to-deliver p50
+2-4 ms and durable confirm p50 4-5 ms, single node, 1 KiB messages, fast storage,
+July 2026.
+
+| Dial | Where | Value (July 2026) | Could key off | Status |
+| --- | --- | --- | --- | --- |
+| Settle coalesce window | `spawn_settle_loop` | 100 µs, 64 items | - | Probed: 500 µs and 100 µs measured the same, so no controller |
+| Publisher sink window | `publisher_sink` | 250 µs, 256 items | observed confirm p50 | Open, low priority, 6-12% of the budget |
+| Connection writer flush | connection writer task | 32 frames high priority, 128 frames / 1 MB / 5 ms | frame arrival rate | Not needed, sparse flushes go out at once |
+| Keratin batch linger | Keratin writer | 0-5 ms by batch fill | - | Adaptive |
+| Keratin fsync idle floor | Keratin `commit_when_idle` | 0, self-clocked | moving average of fsync time | Open |
+| Timer floor probe | new, feeds all windows | none | measured sleep granularity | Open, aimed at Windows oversleep |
+| Stream cursor commit linger | `replication_stream_apply_linger_us` | fixed setting | cursor commit round trip | Open |
+| Replication decode offload | replication read apply | `spawn_blocking` by judgement | per-byte decode cost against the scheduler tick budget | Open |
+| Delivery poll batch | delivery loop | credit-derived | - | Adaptive |
+
+Batching has two jobs. Under load, batches form from backlog without waiting, so
+the max batch size is what protects actor dispatch. The coalesce window only
+pre-forms batches at low load, where there is no congestion, so a window trades
+latency and nothing else. A serial queue actor costs roughly 0.3-5 µs per
+command, about 200k-1M commands/s per queue, so a batch factor of 8 or more puts
+dispatch past every other limit. The publish sink cap counts items only, so 256
+items of 1 MiB stage 256 MiB into one engine call. A byte budget beside the count
+cap, a few MiB, would close that.
+
+On 2026-07-03, per-command metrics read at 500k/s offered showed zero in every
+lane counter: hot operations do not pass the metered lanes, which carry control
+commands only. Attributing the 500-600k/s knee at the time needed a timing
+counter on the queue handle's own serialization point first.
+
 ## Experiment record
 
 Add entries here when an optimization is actually tried. Commits are Fibril

@@ -178,6 +178,47 @@ the broker port is exposed to untrusted or multi-tenant clients, this needs a
 cluster-issued signed identity token so one tenant cannot spoof another's member
 id. The per-partition gate still keeps delivery correct in the meantime.
 
+## Local playgrounds
+
+Two single-process playgrounds exercise consensus and assignment without
+starting brokers.
+
+The raft playground lives in the Ganglion repo and runs a durable openraft
+cluster in one process:
+
+```bash
+scripts/cluster-playground.sh                  # 3 durable nodes, interactive
+scripts/cluster-playground.sh --script "status; write 1; kill 2; status; quit"
+```
+
+Its commands are `status`, `write <gen>`, `kill <id>`, `restart <id>`, `add <id>`,
+`remove <id>` and `quit`. Killing the leader shows re-election, and restarting a
+node after a few hundred writes shows recovery loading the snapshot and replaying
+only the short log tail.
+
+The coordination playground in this repo runs three Fibril coordination
+providers sharing one raft group, with the leader acting as controller:
+
+```bash
+scripts/coordination-playground.sh --script \
+  "status; assign orders 2; kill broker-1; assign orders 2; status; quit"
+```
+
+In that run, the partition owned by `broker-1` moves and its epoch goes from 1
+to 2, while the other partition keeps its owner and epoch, because only an owner
+change fences.
+
+## Large local clusters
+
+`scripts/cluster-tryout.sh --nodes N --ganglion --summary --resource-summary`
+starts N broker processes that are all raft voters and prints process count,
+RSS and file descriptors before shutting down. Local runs of 15, 21 and 88 nodes
+passed with stable leader agreement, queue declaration and runtime settings sync.
+The 88-node run used about 6.5 GiB RSS across 88 brokers under
+`ulimit -n 2048` (one workstation, 2026). That is a stress test, not a target
+shape: a large cluster should keep a small voting set and run the other brokers
+as registered members.
+
 ## See also
 
 - [Clustering](/concepts/clustering/) and [consumer groups](/concepts/consumer-groups/) for the user-facing model.

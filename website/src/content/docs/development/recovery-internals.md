@@ -54,6 +54,46 @@ truncate or reuse offsets. Checkpoint installation has a separate journal coveri
 the retained payload-bearing event prefix and actor snapshot. The prefix may start
 before the snapshot cut when older messages remain live.
 
+## Checkpoint installation
+
+Installing an owner checkpoint on a follower resets its logs, so an error,
+cancellation or crash in the middle must never leave a queue whose state
+references payloads the reset removed.
+
+On Unix, installation first persists a checksummed record holding the complete
+checkpoint, the queue identity, the expected epochs and the continuation offsets,
+and only then resets any log. It holds the partition lifecycle and follower
+application locks, and a cancelled caller leaves the task running to completion.
+A failure keeps the partition gated and the record in place for a retry.
+
+Ordinary access retries an interrupted live installation. On restart the record
+is resolved before normal log opening and replay. Recovery locks the log roots
+and checks the persisted epochs before deleting anything, so it can rebuild
+partly removed or incomplete segment files without accepting a newer
+assignment's history. Missing, damaged or mismatched metadata is an explicit
+error.
+
+The installed snapshot is synced before a durable completion receipt replaces the
+pending record. Repeating an identical completed request returns without
+resetting later backfill, and so does a restart. Snapshot generations and
+teardown fencing reject stale snapshot writes prepared before an installation or
+by an earlier incarnation of the queue.
+
+Queue state keeps the message coverage it references across restart. Owner
+activation and promotion wait for that coverage, including ready, inflight,
+delayed, pending-DLQ and settled history. Coverage alone does not prove the old
+owner's full confirmed history, so coordinated recovery still validates history
+and dependency evidence before activation.
+
+Linux tests cover each installation boundary through injected errors, caller
+cancellation, restart and child-process SIGKILL, plus partial segment files,
+repeated interruptions, offset zero, corrupted or misaddressed records,
+concurrent maintenance and idempotent retry after backfill. SIGKILL coverage says
+nothing about power loss. On other platforms, new installations and pending
+records return `Unsupported` before any destructive change, while ordinary data
+stays readable. The original reproductions that motivated this are archived in
+`archive/implementation-notes/CHECKPOINT_RECOVERY_PLAN.md`.
+
 ## Evidence and stage formats
 
 Recovery evidence names its logs by resource kind. A queue has one log and a

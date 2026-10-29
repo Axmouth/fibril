@@ -1,5 +1,7 @@
 # Checkpoint recovery: behavior, regressions and remaining gates
 
+> Archived 2026-10-29. The implemented behavior is described in the recovery internals page (Checkpoint installation) and the remaining gates are in the failover plan. Written when queues still had separate message and event logs.
+
 Checkpoint recovery must preserve a consistent relationship between message
 bodies, event history and queue state across errors, cancellation and restart.
 Promotion requires the message coverage referenced by the installed state.
@@ -8,7 +10,7 @@ The original reproductions below used Fibril `59d47be` and Keratin `11ef6a9`.
 Payload-coverage promotion guards and recoverable local checkpoint installation
 are implemented. Coordinated queue recovery now adds certified source selection,
 new-quorum activation and exact-process admission. Current protocol details are
-in [recovery sealing](website/src/content/docs/reliability/recovery-sealing.mdx).
+in [recovery sealing](../../website/src/content/docs/reliability/recovery-sealing.mdx).
 
 ## Original reproductions
 
@@ -104,4 +106,4 @@ an implementation and platform validation before enabling this installation path
 - Power-loss testing of filesystem/device persistence ordering.
 
 The implementation sequence is maintained in the current
-[failover plan](website/src/content/docs/development/failover-plan.md).
+[failover plan](../../website/src/content/docs/development/failover-plan.md).

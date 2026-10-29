@@ -89,6 +89,47 @@ reset its accepted history. A replacement uses an authorized learner or recovery
 installation, with a verified snapshot and the retained payload range it needs.
 Exact duplicate appends preserve idempotence. Incompatible evidence stays fenced.
 
+### Overlap diagnostics
+
+A record that conflicts with an existing offset is an error, and diagnostics only
+help reconstruct how the two histories diverged. They never bypass validation or
+discard either history, and a content mismatch does not request a repair on its
+own.
+
+To read a report, join these log lines by node and process, queue identity, log
+and `diagnostic_id`. IDs are local to a process.
+
+1. `applying queue assignment transition` records the intended owner and epoch.
+   It is an attempt, not proof that the transition completed.
+2. `replication overlap diagnostic` holds the conflicting offset, the local head,
+   next and durable-next boundaries, the compared range, which record components
+   differ, and the recent control operations on that log.
+3. `replication overlap event coordinates` lists local events near the conflict,
+   the latest local events and the incoming events near the conflict, with their
+   offsets, kinds and the highest payload offset each references.
+4. `follower replication worker tick failed` adds the source owner, the
+   assignment epoch and the worker's continuation offset.
+
+A control history offset is the boundary observed at that operation, not
+necessarily a record's identity, so use the event windows for exact offsets.
+Control timestamps and sequence numbers order observations within one log only.
+Reports never contain message bodies, headers, hashes, declaration settings,
+cursor names or DLQ destinations.
+
+Limits, chosen so diagnostics cost nothing on the normal path:
+
+- Each open log keeps its last 32 control operations in memory. Role changes,
+  declarations, epoch changes, truncations and checkpoint resets add one, and
+  ordinary appends do not.
+- Each log emits a full report at most once per 30 s. Repeats keep the same ID,
+  skip the event scans and still fail, and the next full report counts the
+  suppressed ones.
+- Each event window holds at most 8 entries, records over 64 KiB are not decoded,
+  and the reads run on the blocking pool only for a full report.
+- History is lost when a log reopens or the process restarts, and a concurrent
+  truncation or checkpoint replacement can change what the windows show, so
+  capture the first failure before attempting recovery.
+
 ## Replica-durable visibility: consumers see only committed data
 
 Durability (when a publish confirms) and visibility (when a consumer may receive

@@ -26,6 +26,9 @@ installation, exact quorum activation and bounded recovery are documented in
 5. Design [resumable recovery phases, storage-health policy and cooperative owner
    handoff](/development/recovery-continuation/). Add actual write/fsync-failure
    injection before adopting early replication or fault-triggered relinquishment.
+6. Support durable checkpoint installation on Windows, which needs durable
+   metadata and platform crash testing, and test filesystem and device
+   persistence ordering under power loss. Current crash tests use SIGKILL on Linux.
 
 Fresh cluster queues enroll automatically on every platform. The worker prepares
 their write quorum, activates exact instances and retries local admission

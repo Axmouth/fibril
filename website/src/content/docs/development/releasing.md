@@ -70,3 +70,57 @@ The release rhythm mirrors the roadmap's gate structure: open a version, land th
 work for it (each item closing a slice of a gate), then a release gate - update
 the changelog, run `release.sh --check`, refresh the docs snapshot - before
 tagging. The same shape repeats for each minor on the way to 1.0.
+
+## Publishing packages
+
+No package is on a registry yet. Everything is MIT. The AI policy is a separate
+document, not a license change, so link `AI_POLICY.md` from each package README.
+Prefer trusted publishing from GitHub Actions (OIDC) over stored tokens, which
+npm, PyPI, NuGet and crates.io all support.
+
+Names, as checked on 2026-07-06:
+
+| Package | Registry | Name | Note |
+| --- | --- | --- | --- |
+| TypeScript client | npm | `@fibril/client` | Free. Unscoped `fibril` is a parked placeholder, so stay scoped and claim the `@fibril` org. |
+| Python client | PyPI | `fibril` | Free |
+| C# client | NuGet | `Fibril` | Free |
+| Rust client | crates.io | `fibril-client` | Free. Bare `fibril` is a different, unrelated crate. |
+| Go client | Go modules | `github.com/Axmouth/fibril/clients/go` | Module path is the repo path |
+| Broker | crates.io | `fibril-broker` | Free |
+| Coordination | crates.io | `ganglion` and its member crates | Free |
+| Storage | crates.io | `keratin-log`, `stroma-core`, `stroma-common` | Free. Bare `keratin` is a different crate, and none is published under that name. |
+
+crates.io has no name reservation, so a minimal first release is the reservation.
+
+What each package still needs:
+
+- **TypeScript:** `repository`, `license`, `author`, `keywords` and
+  `publishConfig: { "access": "public" }` in `package.json`, since scoped
+  packages default to restricted.
+- **Python:** `[project.urls]` and a `readme` pointing at the package README.
+- **C#:** packaging metadata in `Fibril.csproj` or a `Directory.Build.props`
+  (`PackageId`, `Version`, `Authors`, `Description`,
+  `PackageLicenseExpression=MIT`, `RepositoryUrl`, `PackageTags`,
+  `PackageReadmeFile`).
+- **Rust crates:** `description`, `license`, `repository`, `readme`, `keywords`
+  and `categories` on every published crate. crates.io rejects `path` and `git`
+  dependencies, so publish bottom-up: `fibril-util` and `fibril-wire` before
+  `fibril-client`, `stroma-common` then `stroma-core` then `keratin-log`, and
+  the Ganglion member crates before `ganglion`. Run
+  `cargo publish --dry-run -p <crate>` first.
+- **Go and C#:** a README each.
+
+Per registry:
+
+- **npm:** `npm run build` in `clients/typescript`, then
+  `npm publish --access public`.
+- **PyPI:** `uv build` then `uv publish` in `clients/python`.
+- **NuGet:** `dotnet pack -c Release clients/csharp/Fibril/Fibril.csproj`, then
+  `dotnet nuget push` the `.nupkg`.
+- **Go:** no upload. The client is a submodule, so tag with its path, for example
+  `git tag clients/go/v0.5.0`, and push the tag. The repo must be public for
+  pkg.go.dev.
+
+First registry releases use the current cycle's version, with client and
+workspace versions aligned through `scripts/release.sh`.

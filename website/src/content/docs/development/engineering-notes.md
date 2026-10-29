@@ -977,7 +977,7 @@ Overlap reports include bounded control history, offsets and effective record
 identities, with payloads and headers excluded. An isolated reintroduction of the
 declaration bug produced a report showing the local declaration and the incoming
 enqueue at event offset zero. See the
-[diagnostic format](https://github.com/Axmouth/fibril/blob/main/REPLICATION_OVERLAP_DIAGNOSTICS.md)
+[diagnostic format](/development/replication-design/#overlap-diagnostics)
 and [keratin 11ef6a9](https://github.com/Axmouth/keratin/commit/11ef6a9455dc9a992a234c8d5ca8b4e9951899cd).
 
 ### Interrupted checkpoints and early promotion (fixed)

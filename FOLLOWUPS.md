@@ -3,7 +3,7 @@
 ## Priorities
 
 1. Make checkpoint installation and backfill safe under interruption and
-   promotion. [CHECKPOINT_RECOVERY_PLAN.md](CHECKPOINT_RECOVERY_PLAN.md) defines
+   promotion. [CHECKPOINT_RECOVERY_PLAN.md](archive/implementation-notes/CHECKPOINT_RECOVERY_PLAN.md) defines
    the reproduced failures and acceptance checks.
 2. Complete stream settlement semantics and reconnect continuity coverage.
    [GATE3_RECONNECT_PLAN.md](GATE3_RECONNECT_PLAN.md) defines this work.

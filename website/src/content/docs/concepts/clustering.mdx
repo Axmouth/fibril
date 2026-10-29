@@ -153,6 +153,17 @@ A few variations are worth trying:
   repartition is coordination-only, so the keys do nothing against a single
   standalone broker.
 
+- `--dynamic-membership` adds one extra server once the cluster is healthy,
+  promotes it into the coordination voting set, checks every node sees it, then
+  removes it from the voting set again.
+- `--keep` leaves the cluster running after the checks and prints a
+  `fibrilctl --admin ... admin topology` command for each node.
+
+Against a running broker, `fibrilctl admin topology` prints the members,
+per-partition owners, followers and epochs, and the raft block (leader, voters,
+learners, applied index) when coordination is on. Add `--json` for the raw view
+that also drives the dashboard topology page.
+
 This needs `cargo`, plus `jq` and `curl` for the coordinated-mode checks. The
 first run builds the broker and CLI, so it takes longer than later runs.
 
