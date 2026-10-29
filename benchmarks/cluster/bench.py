@@ -294,6 +294,7 @@ def run(args):
             save(case / f"declare-{queue}.json", http(endpoints[0], "/admin/api/queues", body))
         save(case / "before.json", wait_for(topology))
         if args.idle_queues is not None:
+            declare_start = time.monotonic()
             for k in range(args.idle_queues):
                 http(endpoints[0], "/admin/api/queues",
                      {"topic": f"idle{k}", "partition_count": 1, "durability": args.durability}, timeout=30)
@@ -301,7 +302,10 @@ def run(args):
             per_node = args.idle_queues + args.queues
             opened = lambda: all(sum(1 for q in http(b, "/admin/api/queues_debug", timeout=30)["queues"]
                                      if q.get("materialized")) >= per_node for b in endpoints)
+            declared = time.monotonic()
             wait_for(opened, 600)
+            save(case / "idle-timing.json", {"declare_secs": declared - declare_start,
+                                             "open_secs": time.monotonic() - declared})
             time.sleep(5)
             # A quiet window with no traffic at all: what idle queues cost.
             idle_polls = lambda kind="polls": [json.loads(f.read_text()) if f.exists() else {}
@@ -627,6 +631,8 @@ def summarize(args, case, results, before, after, samples):
         "owner_changes": owner_changes,
         "consumer_pause": [backlog_drain(r, args.consumer_pause) for r in results] if args.consumer_pause else None,
         "idle": idle and {"queues": args.idle_queues,
+                          **(json.loads((case / "idle-timing.json").read_text())
+                             if (case / "idle-timing.json").exists() else {}),
                           "rss_mib_per_node": [i.get("rss_kib", 0) / 1024 for i in idle],
                           "threads_per_node": [i.get("threads") for i in idle],
                           "cpu_ms_per_sec_per_node": [i.get("idle_cpu_ms_per_sec") for i in idle],
