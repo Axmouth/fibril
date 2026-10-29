@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
@@ -8,15 +8,19 @@ version = "0.4.0"
 description = "Python client for the Fibril message broker"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
-authors = [{ name = "Fibril" }]
-keywords = ["fibril", "message-queue", "broker", "asyncio"]
+license = "MIT"
+license-files = ["LICENSE", "AI_POLICY.md"]
+authors = [{ name = "Axmouth" }]
+keywords = ["fibril", "message-queue", "message-broker", "pubsub", "asyncio"]
 classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Framework :: AsyncIO",
-    "License :: OSI Approved :: MIT License",
     "Typing :: Typed",
 ]
 # No required runtime dependencies. Optional extras: msgpack for the msgpack
@@ -24,12 +28,29 @@ classifiers = [
 # CA-fingerprint pin (leaf-fingerprint pinning works without it).
 dependencies = []
 
+[project.urls]
+Homepage = "https://fibril.sh"
+Documentation = "https://fibril.sh"
+Repository = "https://github.com/Axmouth/fibril"
+Issues = "https://github.com/Axmouth/fibril/issues"
+
 [project.optional-dependencies]
 msgpack = ["msgpack>=1.0"]
 tls-pin = ["cryptography>=42"]
 
 [dependency-groups]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "mypy>=1.10"]
+
+# LICENSE and AI_POLICY.md live once at the repo root. The sdist copies them in,
+# and wheels are built from the sdist, so both artifacts carry them. A wheel
+# built straight from the source tree (uv build --wheel) lacks them, so publish
+# from a plain uv build.
+[tool.hatch.build.targets.sdist]
+only-include = ["src", "tests", "README.md", "pyproject.toml"]
+
+[tool.hatch.build.targets.sdist.force-include]
+"../../LICENSE" = "LICENSE"
+"../../AI_POLICY.md" = "AI_POLICY.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fibril"]
