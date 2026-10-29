@@ -78,18 +78,23 @@ document, not a license change, so link `AI_POLICY.md` from each package README.
 Prefer trusted publishing from GitHub Actions (OIDC) over stored tokens, which
 npm, PyPI, NuGet and crates.io all support.
 
-Names, as checked on 2026-07-06:
+Names, as checked on 2026-10-29:
 
-| Package | Registry | Name | Note |
+| Package | Registry | Name | State |
 | --- | --- | --- | --- |
-| TypeScript client | npm | `@fibril/client` | Free. Unscoped `fibril` is a parked placeholder, so stay scoped and claim the `@fibril` org. |
+| Coordination | crates.io | `ganglion`, `ganglion-core`, `ganglion-openraft`, `ganglion-coordination`, `ganglion-storage` | Claimed, 0.0.1 placeholders |
+| Storage | crates.io | `keratin-log`, `stroma` | Claimed, 0.0.1 placeholders. Their repository field points at a `stroma` repo that does not exist, so fix it on the first real release. |
+| Storage | crates.io | `stroma-core`, `stroma-common` | Free |
+| Broker and Rust client | crates.io | `fibril-client`, `fibril-wire`, `fibril-util`, `fibril-broker` and the other `fibril-*` workspace names | Free |
+| TypeScript client | npm | `@fibril/client` | Free. The `@fibril` org could not be checked from the registry API, so confirm by creating it. |
 | Python client | PyPI | `fibril` | Free |
-| C# client | NuGet | `Fibril` | Free |
-| Rust client | crates.io | `fibril-client` | Free. Bare `fibril` is a different, unrelated crate. |
-| Go client | Go modules | `github.com/Axmouth/fibril/clients/go` | Module path is the repo path |
-| Broker | crates.io | `fibril-broker` | Free |
-| Coordination | crates.io | `ganglion` and its member crates | `ganglion` claimed. Member crate names were free in July. |
-| Storage | crates.io | `keratin-log`, `stroma-core`, `stroma-common` | Free. Bare `keratin` is a different crate, and none is published under that name. |
+| C# client | NuGet | `Fibril`, `Fibril.Client` | Free |
+| Go client | Go modules | `github.com/Axmouth/fibril/clients/go` | Module path is the repo path, and the repo is public |
+
+Taken by unrelated projects: crates.io `fibril` (a fibers library) and `keratin`
+(an embedded database), and npm `fibril` (a parked placeholder). None of them is
+needed, since the workspaces already use `fibril-*`, `keratin-log` and scoped npm
+names.
 
 crates.io has no name reservation, so a minimal first release is the reservation.
 
