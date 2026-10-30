@@ -122,12 +122,10 @@ What each package still needs:
   The later steps can only run their dry-run once the earlier ones are on
   crates.io. `fibril-util` keeps log setup and certificate parsing behind its
   `server` feature, so the client does not pull them in.
-- **Ganglion and the broker crates:** blocked. `ganglion-openraft` depends on a
-  patched copy of openraft 0.9.25 (see `vendor/openraft/PATCHES.md` in Ganglion),
-  and no released openraft 0.9 carries the fix. Publishing needs either an
-  upstream release with it or the patched copy published under its own name.
-  The broker crates depend on Ganglion, so they wait too. Ganglion also has no
-  LICENSE file yet.
+- **Ganglion:** uses openraft 0.9.25 from crates.io, so its crates publish after
+  `keratin-log`, in the order `ganglion-core`, `ganglion-storage`,
+  `ganglion-coordination`, `ganglion-openraft`, `ganglion`.
+  `cargo publish --dry-run -p ganglion-core` passes.
 - **Go and C#:** a README each.
 
 Per registry:

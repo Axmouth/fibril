@@ -453,12 +453,11 @@ interruption during transfer as separate acceptance work.
 ### OpenRaft empty-read panic
 
 An empty replication read panicked an OpenRaft 0.9.24 background task, sometimes
-while the surrounding test still passed. The 0.9.25 heartbeat fallback also fails
-at index zero. Ganglion carries a narrow retry patch that reports no progress for
-unread data and retires old streams on step-down, with subprocess checks for
-panics, eventual replication and cancellation. Dependency provenance and removal
-conditions are recorded in Ganglion's `vendor/openraft/PATCHES.md`. The scheduling
-cause of the original intermittent empty read remains unconfirmed.
+while the surrounding test still passed. OpenRaft 0.9.25 turns that read into a
+retry in release builds. Debug builds still stop on an assertion, because an
+empty read for a non-empty range breaks the log reader contract. Ganglion
+carried a patched 0.9.25 for a while and moved back to the crates.io release in
+October 2026, since the release-build behavior is acceptable.
 
 ### Background learner catch-up
 
