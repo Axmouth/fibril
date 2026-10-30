@@ -141,6 +141,14 @@ def seed_toml(args):
              f"stream_apply_linger_us = {args.linger_us}",
              f"early_replication = {str(bool(args.early_replication)).lower()}"]
     lines += [f"{key} = {value}" for key, value in (item.split("=", 1) for item in args.replication)]
+    # Other sections, from --seed section.key=value.
+    sections = {}
+    for item in args.seed:
+        name, value = item.split("=", 1)
+        section, key = name.split(".", 1)
+        sections.setdefault(section, []).append(f"{key} = {value}")
+    for section, entries in sections.items():
+        lines += ["", f"[runtime_seed.{section}]", *entries]
     return "\n".join(lines) + "\n"
 
 
@@ -786,6 +794,8 @@ def main():
     parser.add_argument("--size", type=int, default=1024, help="Payload bytes")
     parser.add_argument("--connections", type=int, default=1,
                         help="Publisher and consumer connection pairs per queue, sharing the total rate and credit")
+    parser.add_argument("--seed", action="append", default=[], metavar="SECTION.KEY=VALUE",
+                        help="Seed any other runtime setting, for example stream.cursor_commit_window_us=5000")
     parser.add_argument("--stream", choices=["durable", "speculative", "ephemeral"],
                         help="Run a Plexus stream workload with this tier instead of queues. Needs --rate, "
                              "the total publish rate for the stream's one partition")
