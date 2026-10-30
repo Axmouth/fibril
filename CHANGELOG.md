@@ -985,6 +985,12 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- A pull replication follower that stops a pass at its read limit reads again
+  at once instead of waiting the 100 ms failure retry delay. Replicated durable
+  streams, which still replicate by pull, confirmed and delivered up to 100 ms
+  late because of it. At 1k msg/s their p99 confirm went from about 104 ms to
+  about 20 ms (three nodes on one NVMe, 1 KiB records).
+
 - A replicated durable stream no longer hands records to subscribers before
   the required replicas hold them. Delivery used to follow the owner's own
   fsync, so after a failover consumers could have processed records the new

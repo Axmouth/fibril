@@ -1094,8 +1094,11 @@ impl FollowerReplicationWorkerState {
             BrokerQueueCatchUp::CaughtUp(progress) => {
                 (progress, FollowerReplicationWorkerStatus::CaughtUp, 0)
             }
+            // The tick stopped with records still waiting, so read again at
+            // once. The retry delay is for failures, and waiting it out here
+            // held a pull follower up to that long behind a busy owner.
             BrokerQueueCatchUp::IterationLimit { progress } => {
-                (progress, FollowerReplicationWorkerStatus::PendingRetry, cfg.retry_poll_ms)
+                (progress, FollowerReplicationWorkerStatus::PendingRetry, 0)
             }
             BrokerQueueCatchUp::CheckpointRequired { progress, required } => (
                 progress,
@@ -1124,10 +1127,11 @@ impl FollowerReplicationWorkerState {
                 self.status = FollowerReplicationWorkerStatus::CaughtUp;
                 self.next_delay_ms = 0;
             }
+            // As for queues: more records are waiting, so read again at once.
             BrokerStreamCatchUp::IterationLimit { progress } => {
                 self.apply_stream_progress(progress);
                 self.status = FollowerReplicationWorkerStatus::PendingRetry;
-                self.next_delay_ms = cfg.retry_poll_ms;
+                self.next_delay_ms = 0;
             }
             BrokerStreamCatchUp::CheckpointRequired {
                 progress,

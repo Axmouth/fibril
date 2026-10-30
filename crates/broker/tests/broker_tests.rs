@@ -5177,7 +5177,8 @@ fn follower_worker_state_records_iteration_limit_as_retry() {
     assert_eq!(state.cursor, stream_cursor(3, 4));
     assert_eq!(state.status, FollowerReplicationWorkerStatus::PendingRetry);
     assert_eq!(state.last_progress, Some(CatchUpProgress::Stream(progress)));
-    assert_eq!(state.next_delay_ms, cfg.retry_poll_ms);
+    // Records are still waiting, so the next read starts at once.
+    assert_eq!(state.next_delay_ms, 0);
 }
 
 #[test]
@@ -5338,7 +5339,7 @@ async fn follower_worker_tick_records_catch_up_progress() {
                 applied_records: 1,
                 next_offset: 1,
             })),
-            next_delay_ms: cfg.retry_poll_ms,
+            next_delay_ms: 0,
         })
     );
     let observability = follower.sparse_queue_observability_report();
