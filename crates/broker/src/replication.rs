@@ -1847,6 +1847,10 @@ pub struct ReplicationConfirmGate {
 /// Durable follower position, reported over a progress session whose kind is
 /// fixed when the session opens. A queue names one position in its single
 /// log. A stream names its record log and its cursor-event log separately.
+/// A stream's `event_next` counts cursor events written but maybe not yet
+/// synced, as followers leave cursor commits to the background sync. It is
+/// for reporting only. Confirms count records, and the owner never trims
+/// history by it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DurableProgress {
@@ -2702,12 +2706,24 @@ impl Broker<StromaEngine> {
         } else {
             None
         };
+        // Only records are served early, so only record writes wake here.
         let early_wake = async {
-            if let Some((messages, events)) = &mut written {
-                tokio::select! { _ = messages.changed() => {}, _ = events.changed() => {} }
+            if let Some((messages, _)) = &mut written {
+                let _ = messages.changed().await;
                 return;
             }
             std::future::pending::<()>().await;
+        };
+        // Cursor events are served once durable, which for cursor commits
+        // happens in the background sync with no other signal.
+        let mut cursor_durable = self
+            .engine
+            .watch_stream_cursor_events_durable(topic, partition.id())
+            .await?;
+        let cursor_wake = async {
+            if cursor_durable.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
         };
         let notified = qs.replication_notify.notified();
         tokio::pin!(notified);
@@ -2742,6 +2758,7 @@ impl Broker<StromaEngine> {
             _ = &mut notified => {}
             _ = stream_wake => {}
             _ = early_wake => {}
+            _ = cursor_wake => {}
             _ = self.shutdown_publishers.cancelled() => {}
             _ = tokio::time::sleep(Duration::from_millis(max_wait_ms)) => {}
         }
@@ -2781,9 +2798,13 @@ impl Broker<StromaEngine> {
                     max_bytes,
                 )
                 .await?;
+            // Cursor events ship only once durable, even with early records.
+            // They are written without an fsync, and a follower holding one
+            // the owner then lost to a power cut would diverge when the owner
+            // reuses its offset.
             let events = self
                 .engine
-                .read_owner_stream_cursor_events_early(
+                .read_owner_stream_cursor_events(
                     topic,
                     partition.id(),
                     event_from,
@@ -2993,9 +3014,9 @@ impl Broker<StromaEngine> {
                     epoch: batch.epoch,
                     first_offset: batch.records[0].0,
                     events: batch.records.into_iter().map(|(_, event)| event).collect(),
-                    // Followers apply durably so their reported pull offsets
-                    // are honest DURABLE progress for owner confirm policies
-                    // (replica_durable/majority_durable).
+                    // Stroma writes a cursor-only batch without an fsync and
+                    // leaves it to the background sync. Other events, such as
+                    // retention truncates, are synced.
                     durability: Some(KDurability::AfterFsync),
                     encoded: None,
                 })
@@ -4750,9 +4771,12 @@ mod queue_dependency_tests {
         DurableProgress::Queue { next }
     }
     fn accepted_assignment() -> PartitionAssignment {
+        accepted_assignment_for("q")
+    }
+    fn accepted_assignment_for(topic: &str) -> PartitionAssignment {
         use crate::history_replication::{AcceptedHistory, ReplicaHistoryInstance};
         let mut a = PartitionAssignment::new(
-            crate::coordination::QueueIdentity::new("q", 0.into(), None),
+            crate::coordination::QueueIdentity::new(topic, 0.into(), None),
             "a",
             vec!["b".into(), "c".into()],
             1,
@@ -4782,6 +4806,94 @@ mod queue_dependency_tests {
             replica_generations: Default::default(),
         }));
         a
+    }
+
+    /// With early replication on, records may ship before the owner syncs
+    /// them, but cursor events only once durable. Cursor commits are left to
+    /// the background sync, and an owner long-poll wakes when it lands.
+    #[tokio::test]
+    async fn early_owner_reads_ship_only_durable_cursor_events() {
+        use crate::queue_engine::StreamStore;
+        let dir = stroma_core::test_dir!("early_durable_cursor_events");
+        let interval = Duration::from_millis(500);
+        let opened = Instant::now();
+        let engine = StromaEngine::open(
+            &dir.root,
+            stroma_core::StromaKeratinConfig::from_message_log(stroma_core::KeratinConfig {
+                background_sync_interval: interval,
+                ..stroma_core::KeratinConfig::test_default()
+            }),
+            stroma_core::SnapshotConfig::default(),
+        )
+        .await
+        .unwrap();
+        let broker = Broker::new(engine, BrokerConfig::default(), None);
+        assert!(broker.config_snapshot().replication_early);
+        broker.cache_queue_assignment(&accepted_assignment_for("s"));
+        assert!(broker.early_replication_enabled("s", 0.into(), None));
+        let engine = broker.engine();
+        engine.create_stream("s", 0, None).await.unwrap();
+        let headers = stroma_core::MessageHeaders {
+            published: 0,
+            publish_received: 0,
+            content_type: None,
+            extra: Default::default(),
+        };
+        for value in 0..3u8 {
+            engine
+                .append_stream_record("s", 0, &headers, vec![value])
+                .await
+                .unwrap();
+        }
+        engine
+            .commit_stream_cursors("s", 0, vec![("reader".into(), 2)])
+            .await
+            .unwrap();
+        let durable = engine
+            .watch_stream_cursor_events_durable("s", 0)
+            .await
+            .unwrap();
+
+        let read = broker
+            .read_owner_stream_records("s", 0.into(), 0, 0, 100, 100, usize::MAX, 0)
+            .await
+            .unwrap();
+        let OwnerReplicationRead::Batch(messages) = read.messages else {
+            panic!("records retained");
+        };
+        assert_eq!(messages.records.len(), 3);
+        let OwnerReplicationRead::Batch(events) = read.events else {
+            panic!("events retained");
+        };
+        if opened.elapsed() < interval {
+            assert_eq!(*durable.borrow(), 0);
+            assert!(
+                events.records.is_empty(),
+                "an unsynced cursor event shipped"
+            );
+        }
+        assert!(
+            events
+                .records
+                .iter()
+                .all(|(offset, _)| *offset < *durable.borrow()),
+            "a cursor event above the durable frontier shipped"
+        );
+
+        // A long-poll for cursor events alone returns once the background
+        // sync makes the commit durable, well before its wait runs out.
+        let started = Instant::now();
+        let read = broker
+            .read_owner_stream_records("s", 0.into(), 3, 0, 100, 100, usize::MAX, 10_000)
+            .await
+            .unwrap();
+        let OwnerReplicationRead::Batch(events) = read.events else {
+            panic!("events retained");
+        };
+        assert_eq!(events.records.len(), 1);
+        assert!(*durable.borrow() >= 1);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        broker.shutdown().await;
     }
 
     #[test]

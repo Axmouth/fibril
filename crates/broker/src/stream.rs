@@ -568,7 +568,6 @@ async fn run_cursor_committer(
     part: u32,
     cfg: Arc<ArcSwap<BrokerConfig>>,
     mut rx: mpsc::Receiver<CursorCommitMsg>,
-    durable_progress: Arc<tokio::sync::Notify>,
 ) {
     loop {
         // Block until the first message of a new window arrives.
@@ -640,8 +639,10 @@ async fn run_cursor_committer(
         let mut outcome = Ok(());
         if !pending.is_empty() {
             let commits: Vec<(String, Offset)> = pending.into_iter().collect();
+            // The commit returns once written. Replication long-polls wake
+            // on the cursor log's durable frontier, not here.
             match engine.commit_stream_cursors(&tp, part, commits).await {
-                Ok(()) => durable_progress.notify_waiters(),
+                Ok(()) => {}
                 Err(err) => {
                     tracing::warn!(
                         topic = %tp,
@@ -981,7 +982,6 @@ impl StreamChannel {
                 part,
                 cfg,
                 cursor_commit_rx,
-                durable_progress.clone(),
             ));
         }
 

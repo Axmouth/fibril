@@ -1172,16 +1172,14 @@ impl StromaEngine {
             .await
     }
 
-    pub async fn read_owner_stream_cursor_events_early(
+    /// Durable frontier of a stream's cursor-event log, as a watch.
+    pub async fn watch_stream_cursor_events_durable(
         &self,
         tp: &str,
         part: u32,
-        from: Offset,
-        max: usize,
-        max_bytes: usize,
-    ) -> Result<OwnerReplicationRead<StromaEvent>, StromaError> {
+    ) -> Result<tokio::sync::watch::Receiver<u64>, StromaError> {
         self.inner
-            .read_owner_stream_cursor_events_early(tp, part, from, max, max_bytes)
+            .watch_stream_cursor_events_durable(tp, part)
             .await
     }
 

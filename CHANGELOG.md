@@ -632,6 +632,16 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Changed
 
+- Stream cursor commits no longer wait for an fsync each. The owner writes
+  them to the operating system and the cursor log's background sync, about
+  every 100 ms, makes them durable. Followers write replicated cursor commits
+  the same way, so a durable publish confirm on a replicated stream no longer
+  waits on a follower's cursor log fsync. A power cut can lose cursor advances
+  from about the last sync interval, and readers resuming from those cursors
+  receive those records again. Records are never lost this way. The owner
+  replicates cursor events only once they are durable, even with early
+  replication on, so a follower never holds one the owner could lose.
+
 - The broker uses the mimalloc v2 line (2.3.2) instead of v3 (3.3.2). v3 has
   open upstream reports of rare multi-threaded segfaults, and a broker
   segfaulted once in a soak on it. With 200 idle queues v2 holds about 440-495

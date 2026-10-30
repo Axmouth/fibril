@@ -51,7 +51,8 @@ Cross-cutting guarantees that hold across a restart or a clean failover:
   not lost across a broker restart - it becomes deliverable again.
 - **Streams resume from the durable cursor**, not a client-held offset, so a
   reconnecting or failed-over reader continues where its committed cursor left
-  off.
+  off. Cursor commits are synced in the background, so a power cut can roll a
+  cursor back by about the last 100 ms of acks and re-deliver those records.
 
 ## Operator runbook
 

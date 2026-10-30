@@ -41,6 +41,26 @@ queue never opens a stream session and the reverse. Queue confirms count only
 queue progress and stream confirms count only stream record progress, so cursor
 events never release a record confirm.
 
+Cursor commits skip the per-commit fsync. The owner writes them with
+`AfterFlush` and the cursor log's background sync, about every 100 ms, makes
+them durable. The owner serves cursor events to followers only up to the cursor
+log's durable frontier, even when early replication serves records from the
+written frontier. A follower therefore never holds a cursor event the owner can
+lose, and an owner power cut cannot make the owner reuse an offset a follower
+already applied. A follower writes a replicated batch of only cursor commits
+with `AfterFlush` too, so the record append in the same frame does not wait on
+the cursor log fsync. A batch with any other event, such as a retention
+truncate, keeps its fsync. The cursor-event position a stream follower reports
+counts written events. It is for reporting only, and nothing trims history by
+it.
+
+A power cut can lose cursor advances from about the last background sync
+interval, on the owner or on a follower. Readers resuming from those cursors
+receive those records again, which at-least-once delivery allows. Records are
+never lost this way. A follower restarts from the end of its local cursor log
+and pulls the lost events again. A stream snapshot syncs the cursor log through
+its boundary first, so after a power cut the log never ends below the snapshot.
+
 A `durable` stream without followers keeps its records and cursors on the owner
 alone. It survives an owner restart but not the loss of the owner node, so the
 partition waits for that owner to return. See
@@ -48,10 +68,11 @@ partition waits for that owner to return. See
 
 A caught-up stream follower long-polls the owner with `max_wait_ms`. The owner's
 read waits on the queue replication wakeup and on the stream channel's durability
-signal, which fires when new stream records or cursor commits become durable. A
-caught-up follower therefore gets new durable data right away instead of
-sleeping out the full wait, and replica-durable stream confirms do not wait for
-the long-poll timeout. The signal has no memory, so the read registers for it
+signal, which fires when new stream records become durable, and on the cursor
+log's durable frontier, which moves when the background sync lands cursor
+commits. A caught-up follower therefore gets new durable data right away instead
+of sleeping out the full wait, and replica-durable stream confirms do not wait
+for the long-poll timeout. The signal has no memory, so the read registers for it
 before checking for data.
 
 Queue checkpoint backfill may include payload-bearing records older than the
