@@ -533,9 +533,12 @@ const EPHEMERAL_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_
 enum CursorCommitMsg {
     /// Advance a cursor (coalesced into the current window).
     Settle { name: String, offset: Offset },
-    /// Flush all pending cursors durably now, then acknowledge. Used by tests and
-    /// graceful teardown to make prior settles durable on demand.
-    Flush { ack: oneshot::Sender<()> },
+    /// Flush all pending cursors durably now, then acknowledge with the commit
+    /// result. Used by tests and graceful teardown to make prior settles durable
+    /// on demand.
+    Flush {
+        ack: oneshot::Sender<Result<(), StromaError>>,
+    },
 }
 
 /// Record a cursor advance in the pending batch, keeping the highest offset per
@@ -573,7 +576,7 @@ async fn run_cursor_committer(
             break;
         };
         let mut pending: HashMap<String, Offset> = HashMap::new();
-        let mut acks: Vec<oneshot::Sender<()>> = Vec::new();
+        let mut acks: Vec<oneshot::Sender<Result<(), StromaError>>> = Vec::new();
         let mut closed = false;
         let mut force_flush = false;
         match first {
@@ -634,20 +637,25 @@ async fn run_cursor_committer(
             }
         }
 
+        let mut outcome = Ok(());
         if !pending.is_empty() {
             let commits: Vec<(String, Offset)> = pending.into_iter().collect();
             match engine.commit_stream_cursors(&tp, part, commits).await {
                 Ok(()) => durable_progress.notify_waiters(),
-                Err(err) => tracing::warn!(
-                    topic = %tp,
-                    partition = part,
-                    "stream cursor batch commit failed: {err}"
-                ),
+                Err(err) => {
+                    tracing::warn!(
+                        topic = %tp,
+                        partition = part,
+                        "stream cursor batch commit failed: {err}"
+                    );
+                    outcome = Err(err.to_string());
+                }
             }
         }
-        // Acknowledge flush waiters only after the durable commit completed.
+        // Acknowledge flush waiters only after the commit finished, with its
+        // result, so teardown learns when cursors did not persist.
         for ack in acks {
-            let _ = ack.send(());
+            let _ = ack.send(outcome.clone().map_err(StromaError::Io));
         }
         if closed {
             break;
@@ -1192,7 +1200,7 @@ impl StreamChannel {
             .send(CursorCommitMsg::Flush { ack })
             .await
             .map_err(|_| StromaError::QueueActorGone)?;
-        wait.await.map_err(|_| StromaError::QueueActorGone)
+        wait.await.map_err(|_| StromaError::QueueActorGone)?
     }
 
     pub async fn unsubscribe(&self, id: u64) {
@@ -1622,6 +1630,7 @@ mod channel_tests {
     struct GatedStore {
         inner: Arc<dyn StreamStore>,
         limit: std::sync::atomic::AtomicU64,
+        fail_cursor_commits: std::sync::atomic::AtomicBool,
     }
 
     impl GatedStore {
@@ -1681,6 +1690,12 @@ mod channel_tests {
             part: u32,
             commits: Vec<(String, Offset)>,
         ) -> Result<(), StromaError> {
+            if self
+                .fail_cursor_commits
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(StromaError::Io("injected cursor commit failure".into()));
+            }
             self.inner.commit_stream_cursors(tp, part, commits).await
         }
         async fn stream_cursor(
@@ -1863,6 +1878,7 @@ mod channel_tests {
         let gated = Arc::new(GatedStore {
             inner: engine(&dir).await,
             limit: std::sync::atomic::AtomicU64::new(u64::MAX),
+            fail_cursor_commits: std::sync::atomic::AtomicBool::new(false),
         });
         // Ring of 4 on the speculative tier, so the ring holds staged records
         // well past the durable frontier.
@@ -1921,6 +1937,45 @@ mod channel_tests {
             .expect("backfill stalled after records became durable");
         assert_eq!(rest, (3..10).collect::<Vec<Offset>>());
         driver.abort();
+    }
+
+    #[tokio::test]
+    async fn cursor_flush_reports_a_failed_commit() {
+        let dir = temp_dir("stream_cursor_flush_failure");
+        let store = Arc::new(GatedStore {
+            inner: engine(&dir).await,
+            limit: std::sync::atomic::AtomicU64::new(u64::MAX),
+            fail_cursor_commits: std::sync::atomic::AtomicBool::new(false),
+        });
+        let ch = StreamChannel::open(
+            store.clone(),
+            "sensors",
+            0,
+            StreamDurability::Durable,
+            None,
+            64,
+            64,
+            test_cfg(),
+        )
+        .await
+        .unwrap();
+        for i in 0..3u32 {
+            ch.publish(hdr(&[]), format!("m{i}").into_bytes())
+                .await
+                .unwrap();
+        }
+        ch.settle("group-a", 0).await.unwrap();
+        ch.flush_cursor_commits().await.unwrap();
+
+        store
+            .fail_cursor_commits
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        ch.settle("group-a", 2).await.unwrap();
+        let err = ch
+            .flush_cursor_commits()
+            .await
+            .expect_err("a failed cursor commit must not flush as success");
+        assert!(err.to_string().contains("injected cursor commit failure"), "{err}");
     }
 
     #[tokio::test]

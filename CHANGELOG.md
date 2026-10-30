@@ -992,6 +992,10 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   Delivery now waits for the assignment's replicas, as queue delivery does,
   while the producer confirm keeps its own replica wait and timeout.
 
+- Flushing a stream's cursor commits reports a failed commit instead of
+  returning success. Shutdown flushes cursors this way, so a cursor that did not
+  persist now shows up as an error in the log.
+
 - Losing a follower no longer stalls its queues. A queue that still had
   enough copies to confirm used to start a recovery when placement dropped the
   lost follower, which paused it for several seconds and failed the publishes
