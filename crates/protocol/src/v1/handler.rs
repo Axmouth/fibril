@@ -5049,21 +5049,46 @@ where
                         max_records: declare.retention.max_records,
                     });
                 // Map the wire durability tier to the broker enum (same ordinals).
-                let durability =
-                    BrokerStreamDurability::from_u8(declare.durability.as_u8()).unwrap_or_default();
-
-                // Materialize each partition's stream channel (idempotent). The
-                // durability tier is recorded for observability; the broker
-                // persists durable-first for all tiers today (the express lane for
-                // ephemeral/speculative is a later refinement).
+                let requested_config = fibril_broker::broker::StreamOpenConfig {
+                    durability: BrokerStreamDurability::from_u8(declare.durability.as_u8())
+                        .unwrap_or_default(),
+                    retention,
+                };
+                // The first declaration wins, as in coordination, so a later
+                // declare naming another tier or retention opens partitions with
+                // the stored declaration rather than its own request.
                 let mut failure: Option<(u16, String)> = None;
+                let config = if declare_coordinator.is_some() {
+                    broker
+                        .declared_stream_config(&declare.topic)
+                        .unwrap_or(requested_config)
+                } else {
+                    match broker
+                        .declare_local_stream(&declare.topic, requested_config.clone())
+                        .await
+                    {
+                        Ok(config) => config,
+                        Err(err) => {
+                            failure = Some((
+                                500,
+                                format!("could not record the stream declaration: {err}"),
+                            ));
+                            requested_config
+                        }
+                    }
+                };
+
+                // Materialize each partition's stream channel (idempotent).
                 for partition in 0..partition_count {
+                    if failure.is_some() {
+                        break;
+                    }
                     match broker
                         .get_or_open_stream(
                             &declare.topic,
                             partition,
-                            durability,
-                            retention.clone(),
+                            config.durability,
+                            config.retention,
                         )
                         .await
                     {

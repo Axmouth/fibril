@@ -360,6 +360,9 @@ pub trait QueueEngine {
 
     async fn global_dlq(&self) -> Result<GlobalDlqSnapshot, StromaError>;
 
+    /// The node's versioned global key-value store.
+    async fn global_store(&self) -> Result<Arc<GlobalStore>, StromaError>;
+
     async fn set_global_dlq(
         &self,
         target: Option<GlobalDLQ>,
@@ -1918,6 +1921,10 @@ impl QueueEngine for StromaEngine {
 
     async fn global_dlq(&self) -> Result<GlobalDlqSnapshot, StromaError> {
         self.inner.global_dlq().await
+    }
+
+    async fn global_store(&self) -> Result<Arc<GlobalStore>, StromaError> {
+        self.inner.global_store().await
     }
 
     async fn set_global_dlq(

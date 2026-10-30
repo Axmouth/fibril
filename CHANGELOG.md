@@ -996,6 +996,13 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
   returning success. Shutdown flushes cursors this way, so a cursor that did not
   persist now shows up as an error in the log.
 
+- A standalone broker keeps a stream's declared tier and retention across a
+  restart or idle eviction. They used to reopen as durable with no retention,
+  so a speculative or ephemeral stream silently became durable. The first
+  declaration is stored and wins over later ones, as in a cluster, and a
+  clustered broker opens partitions with coordination's declaration rather
+  than the request's.
+
 - Losing a follower no longer stalls its queues. A queue that still had
   enough copies to confirm used to start a recovery when placement dropped the
   lost follower, which paused it for several seconds and failed the publishes

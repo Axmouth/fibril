@@ -347,6 +347,10 @@ impl QueueEngine for FailingPublishEngine {
         unimplemented!()
     }
 
+    async fn global_store(&self) -> Result<Arc<stroma_core::GlobalStore>, StromaError> {
+        unimplemented!()
+    }
+
     async fn set_global_dlq(
         &self,
         _target: Option<GlobalDLQ>,
@@ -3872,6 +3876,66 @@ async fn stream_owner_opened_after_its_assignment_writes_at_the_assignment_epoch
     assert_eq!(progress.applied_message_records, 1);
     owner.shutdown().await;
     follower.shutdown().await;
+}
+
+/// A standalone broker has no coordination to hold a stream's declaration, so
+/// a restart used to reopen every stream as durable with no retention. The
+/// first declaration is stored and wins over later ones, as in coordination.
+#[tokio::test]
+async fn standalone_stream_keeps_its_declaration_across_restart() {
+    use fibril_broker::broker::StreamOpenConfig;
+    use fibril_broker::stream::StreamDurability;
+
+    let cfg = BrokerConfig::default();
+    let (broker, dir) = open_test_broker_with_cfg(cfg.clone()).await;
+    let retention = stroma_core::RetentionConfig {
+        max_age_ms: Some(60_000),
+        max_bytes: None,
+        max_records: Some(500),
+    };
+    let declared = broker
+        .declare_local_stream(
+            "ticks",
+            StreamOpenConfig {
+                durability: StreamDurability::Speculative,
+                retention: Some(retention),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(declared.durability, StreamDurability::Speculative);
+    let again = broker
+        .declare_local_stream(
+            "ticks",
+            StreamOpenConfig {
+                durability: StreamDurability::Durable,
+                retention: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(again.durability, StreamDurability::Speculative, "first declaration wins");
+    assert_eq!(again.retention, Some(retention));
+    broker
+        .get_or_open_stream("ticks", 0, declared.durability, declared.retention)
+        .await
+        .unwrap();
+    broker.shutdown().await;
+    drop(broker);
+
+    let engine = StromaEngine::open(
+        &dir.root,
+        StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+        SnapshotConfig::default(),
+    )
+    .await
+    .unwrap();
+    let broker = Broker::new(engine, cfg, None);
+    assert_eq!(broker.warm_streams_from_storage().await.unwrap(), 1);
+    let channel = broker.route_stream("ticks", 0).await.expect("stream reopened");
+    assert_eq!(channel.durability(), StreamDurability::Speculative);
+    assert_eq!(channel.retention().copied(), Some(retention));
+    broker.shutdown().await;
 }
 
 /// A replicated durable stream must not hand a record to subscribers before

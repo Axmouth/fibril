@@ -586,6 +586,52 @@ pub struct StreamOpenConfig {
     pub retention: Option<RetentionConfig>,
 }
 
+/// A standalone broker's stream declaration, kept in the global store so a
+/// restart or idle eviction reopens the stream with its declared tier and
+/// retention. Clustered brokers read the declaration from coordination.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LocalStreamDeclaration {
+    format_version: u32,
+    durability: u8,
+    max_age_ms: Option<u64>,
+    max_bytes: Option<u64>,
+    max_records: Option<u64>,
+}
+
+impl LocalStreamDeclaration {
+    const NAMESPACE: &'static str = "fibril.streams";
+
+    fn key(topic: &str) -> Result<stroma_core::GlobalKey, StromaError> {
+        stroma_core::GlobalKey::new(Self::NAMESPACE, topic)
+    }
+
+    fn from_config(config: &StreamOpenConfig) -> Self {
+        let retention = config.retention.unwrap_or_default();
+        Self {
+            format_version: 1,
+            durability: config.durability.as_u8(),
+            max_age_ms: retention.max_age_ms,
+            max_bytes: retention.max_bytes,
+            max_records: retention.max_records,
+        }
+    }
+
+    fn into_config(self) -> Option<StreamOpenConfig> {
+        if self.format_version != 1 {
+            return None;
+        }
+        let retention = RetentionConfig {
+            max_age_ms: self.max_age_ms,
+            max_bytes: self.max_bytes,
+            max_records: self.max_records,
+        };
+        Some(StreamOpenConfig {
+            durability: StreamDurability::from_u8(self.durability)?,
+            retention: (retention != RetentionConfig::default()).then_some(retention),
+        })
+    }
+}
+
 /// The broker's stream-ownership window, kept separate from `QueueOwnership`: the
 /// whole stream stack is a parallel track (own identity, placement, config), so
 /// ownership stays separate too. A single coordination provider implements both.
@@ -2182,6 +2228,66 @@ impl<
     /// it when the partition is durably marked a stream but not yet hosted (e.g. a
     /// publish that reaches a fresh owner after failover). Returns `None` for queue
     /// partitions, which take the lease/poll path instead.
+    /// The stream's declaration as coordination recorded it, if this broker has
+    /// a coordination view of it.
+    pub fn declared_stream_config(&self, tp: &str) -> Option<StreamOpenConfig> {
+        self.stream_ownership.stream_open_config(tp)
+    }
+
+    /// Record a standalone stream declaration, keeping the first one like a
+    /// coordinated declare does, and return the declaration in effect.
+    pub async fn declare_local_stream(
+        &self,
+        tp: &str,
+        requested: StreamOpenConfig,
+    ) -> Result<StreamOpenConfig, StromaError> {
+        let store = self.engine.global_store().await?;
+        let key = LocalStreamDeclaration::key(tp)?;
+        if let Some(existing) = self.local_stream_config(tp).await {
+            return Ok(existing);
+        }
+        let bytes = serde_json::to_vec(&LocalStreamDeclaration::from_config(&requested))
+            .map_err(|err| StromaError::Io(format!("encode stream declaration: {err}")))?;
+        match store.put(key, bytes, None).await? {
+            stroma_core::PutOutcome::Stored { .. } => Ok(requested),
+            // A concurrent declare stored first, and its declaration wins.
+            stroma_core::PutOutcome::Conflict { .. } => {
+                Ok(self.local_stream_config(tp).await.unwrap_or(requested))
+            }
+        }
+    }
+
+    /// A standalone stream declaration from the global store. Streams declared
+    /// before declarations were stored have none and reopen with defaults.
+    async fn local_stream_config(&self, tp: &str) -> Option<StreamOpenConfig> {
+        let store = self.engine.global_store().await.ok()?;
+        let value = store
+            .get(&LocalStreamDeclaration::key(tp).ok()?)
+            .await
+            .ok()??;
+        match serde_json::from_slice::<LocalStreamDeclaration>(&value.bytes) {
+            Ok(declaration) => declaration.into_config(),
+            Err(err) => {
+                tracing::warn!(topic = tp, "unreadable stream declaration: {err}");
+                None
+            }
+        }
+    }
+
+    /// How to reopen a stream found in local storage: coordination's
+    /// declaration first, then the standalone one, then defaults.
+    async fn stored_stream_config(&self, tp: &str) -> StreamOpenConfig {
+        if let Some(config) = self.declared_stream_config(tp) {
+            return config;
+        }
+        self.local_stream_config(tp)
+            .await
+            .unwrap_or(StreamOpenConfig {
+                durability: StreamDurability::default(),
+                retention: None,
+            })
+    }
+
     pub async fn route_stream(&self, tp: &str, part: u32) -> Option<Arc<StreamChannel>> {
         let key = QueueKey {
             tp: tp.to_string(),
@@ -2200,11 +2306,13 @@ impl<
                 .await
                 .ok();
         }
-        // Fallback: a durable on-disk stream marker (data already present locally)
-        // with no coordination view — open with defaults.
+        // Fallback: a durable on-disk stream marker (data already present
+        // locally) with no coordination view. Open with the standalone
+        // declaration, or defaults when none was stored.
         if self.engine.durable_is_stream(tp, part) {
+            let config = self.stored_stream_config(tp).await;
             return self
-                .get_or_open_stream(tp, part, StreamDurability::default(), None)
+                .get_or_open_stream(tp, part, config.durability, config.retention)
                 .await
                 .ok();
         }
@@ -2216,17 +2324,17 @@ impl<
     /// after a restart. Without this a standalone broker forgets its streams
     /// until a re-declare: the in-memory channel map starts empty, there is no
     /// coordination view to consult, and a publish routed down the queue path
-    /// is refused by the engine's kind guard. Config detail (durability tier,
-    /// retention) reopens with the same defaults as route_stream's durable
-    /// fallback - the stream's own persisted state carries its data.
+    /// is refused by the engine's kind guard. Each stream reopens with its
+    /// declared tier and retention, as route_stream's durable fallback does.
     pub async fn warm_streams_from_storage(&self) -> Result<usize, StromaError> {
         let mut opened = 0;
         for (tp, part, group) in self.engine.list_partitions().await? {
             if group.is_some() || !self.engine.durable_is_stream(&tp, part) {
                 continue;
             }
+            let config = self.stored_stream_config(&tp).await;
             match self
-                .get_or_open_stream(&tp, part, StreamDurability::default(), None)
+                .get_or_open_stream(&tp, part, config.durability, config.retention)
                 .await
             {
                 Ok(_) => opened += 1,
