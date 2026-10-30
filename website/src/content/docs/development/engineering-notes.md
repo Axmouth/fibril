@@ -459,6 +459,12 @@ empty read for a non-empty range breaks the log reader contract. Ganglion
 carried a patched 0.9.25 for a while and moved back to the crates.io release in
 October 2026, since the release-build behavior is acceptable.
 
+One cause is confirmed. A leader that steps down and truncates conflicting
+entries does not stop its replication streams at once, so an old stream can read
+the truncated range and get nothing back. OpenRaft 0.9.24 panicked there. On
+0.9.25 the read becomes a heartbeat whose report belongs to a retired session
+and is dropped. Ganglion's `step_down_read_race` test forces that interleaving.
+
 ### Background learner catch-up
 
 Assigned replicas excluded from an activated quorum can copy and backfill the
