@@ -3874,6 +3874,78 @@ async fn stream_owner_opened_after_its_assignment_writes_at_the_assignment_epoch
     follower.shutdown().await;
 }
 
+/// A replicated durable stream must not hand a record to subscribers before
+/// the required replicas hold it, or a failover could promote an owner that
+/// lacks a record consumers already processed. The producer confirm still
+/// resolves from local durability plus its own replica wait.
+#[tokio::test]
+async fn replicated_durable_stream_delivers_only_after_replicas_hold_the_record() {
+    use fibril_broker::coordination::ReplicationDurabilityPolicy;
+    use fibril_broker::stream::{StreamDurability, SubscribeStart};
+
+    let (broker, _dir) = open_test_broker().await;
+    broker.cache_queue_assignment(
+        &PartitionAssignment::new(
+            QueueIdentity::new("events", Partition::new(0), None),
+            "owner-a",
+            vec!["follower-a".to_string()],
+            1,
+        )
+        .with_durability(ReplicationDurabilityPolicy::ReplicaDurable { nodes: 2 }),
+    );
+    let channel = broker
+        .get_or_open_stream("events", 0, StreamDurability::Durable, None)
+        .await
+        .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let driver = tokio::spawn({
+        let channel = channel.clone();
+        async move { channel.run_subscription(SubscribeStart::Earliest, None, tx).await }
+    });
+
+    let headers = MessageHeaders {
+        published: unix_millis(),
+        publish_received: unix_millis(),
+        content_type: None,
+        extra: Default::default(),
+    };
+    let confirm = channel
+        .publish_pipelined(headers, b"first".to_vec())
+        .await
+        .unwrap();
+    // Local durability resolves the drain's confirm without any replica.
+    let offset = tokio::time::timeout(Duration::from_secs(5), confirm)
+        .await
+        .expect("local durable confirm")
+        .unwrap()
+        .unwrap();
+    assert_eq!(offset, 0);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), rx.recv())
+            .await
+            .is_err(),
+        "record reached a subscriber before any replica held it"
+    );
+
+    broker.record_follower_replication_progress(
+        "events",
+        Partition::new(0),
+        None,
+        "follower-a",
+        DurableProgress::Stream {
+            message_next: 1,
+            event_next: 0,
+        },
+    );
+    let record = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("record delivered once the replica holds it")
+        .unwrap();
+    assert_eq!(record.offset, 0);
+    driver.abort();
+    broker.shutdown().await;
+}
+
 /// A caught-up stream follower's long-poll must wake when the owner makes a
 /// new record durable, instead of sleeping out the whole `max_wait_ms`.
 #[tokio::test]

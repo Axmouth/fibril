@@ -985,6 +985,13 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Fixed
 
+- A replicated durable stream no longer hands records to subscribers before
+  the required replicas hold them. Delivery used to follow the owner's own
+  fsync, so after a failover consumers could have processed records the new
+  owner never had, and those offsets were then reused for different records.
+  Delivery now waits for the assignment's replicas, as queue delivery does,
+  while the producer confirm keeps its own replica wait and timeout.
+
 - Losing a follower no longer stalls its queues. A queue that still had
   enough copies to confirm used to start a recovery when placement dropped the
   lost follower, which paused it for several seconds and failed the publishes

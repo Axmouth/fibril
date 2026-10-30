@@ -24,8 +24,9 @@ use crate::storage::Offset;
 use arc_swap::ArcSwap;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::broker::BrokerConfig;
+use crate::broker::{BrokerConfig, QueueKey};
 use crate::queue_engine::StreamStore;
+use crate::replication::ReplicationConfirmGate;
 use stroma_core::{KDurability, MessageHeaders, RetentionConfig, StromaError};
 
 /// Per-channel durability tier (a channel-level knob, not a separate channel
@@ -401,6 +402,37 @@ enum FanoutCmd {
     },
 }
 
+/// Wait until the assignment's required replicas hold `offset`. Records are
+/// already durable on the owner, so a timeout or a briefly unhealthy replica
+/// set is retried rather than dropping them. The wait ends early once the
+/// channel shuts down.
+async fn await_replicated(
+    gate: &ReplicationConfirmGate,
+    key: &QueueKey,
+    offset: Offset,
+    fanout: &mpsc::Sender<FanoutCmd>,
+) {
+    let mut backoff = std::time::Duration::from_millis(50);
+    loop {
+        match gate.await_stream_confirm(key, offset).await {
+            Ok(()) => return,
+            Err(err) => {
+                if fanout.is_closed() {
+                    return;
+                }
+                tracing::debug!(
+                    topic = %key.tp,
+                    partition = %key.part,
+                    offset,
+                    "stream delivery waits for replicas: {err}"
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(std::time::Duration::from_secs(1));
+            }
+        }
+    }
+}
+
 /// Render a durability completion failure (an error result or a dropped channel)
 /// as a message for the producer confirm.
 fn durable_error_message(
@@ -453,6 +485,9 @@ pub struct StreamChannel {
     /// fans them out. The frame loop only enqueues here, so the fsync is off the
     /// connection path and keratin batches the flushes.
     durable_ingest_tx: mpsc::Sender<DurableIngest>,
+    /// Holds durable records back from subscribers until the assignment's
+    /// required replicas have them. `None` in standalone tests.
+    replication: Option<ReplicationConfirmGate>,
     /// Acks/settles go here. A per-channel committer task coalesces a window of
     /// cursor advances (high-water mark per name) into one durable batch commit
     /// off the delivery hot path, so high-fan-out auto-ack stops committing one
@@ -634,6 +669,35 @@ impl StreamChannel {
         live_channel_capacity: usize,
         cfg: Arc<ArcSwap<BrokerConfig>>,
     ) -> Result<Self, StromaError> {
+        Self::open_gated(
+            engine,
+            tp,
+            part,
+            durability,
+            retention,
+            ring_capacity,
+            live_channel_capacity,
+            cfg,
+            None,
+        )
+        .await
+    }
+
+    /// Open with a replication gate: durable records reach subscribers only
+    /// once the assignment's required replicas hold them, as queue delivery
+    /// does. Without an assignment the gate passes at once.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_gated(
+        engine: Arc<dyn StreamStore>,
+        tp: &str,
+        part: u32,
+        durability: StreamDurability,
+        retention: Option<RetentionConfig>,
+        ring_capacity: usize,
+        live_channel_capacity: usize,
+        cfg: Arc<ArcSwap<BrokerConfig>>,
+        replication: Option<ReplicationConfirmGate>,
+    ) -> Result<Self, StromaError> {
         engine.create_stream(tp, part, retention.clone()).await?;
         let (_head, tail) = engine.stream_head_tail(tp, part).await?;
 
@@ -758,6 +822,12 @@ impl StreamChannel {
         let drain_cmd_tx = cmd_tx.clone();
         let drain_durability = durability;
         let drain_progress = durable_progress.clone();
+        let drain_key = QueueKey {
+            tp: tp.to_string(),
+            part: part.into(),
+            group: None,
+        };
+        let drain_replication = replication.clone();
         tokio::spawn(async move {
             while let Some(item) = durable_batch_rx.recv().await {
                 let DurableBatch {
@@ -782,18 +852,30 @@ impl StreamChannel {
                     match durable.await {
                         Ok(Ok(())) => {
                             drain_progress.notify_waiters();
+                            // Confirm local durability first. The producer's own
+                            // replica wait then runs with its timeout, instead of
+                            // queueing behind the delivery gate below.
+                            let mut records = Vec::with_capacity(items.len());
                             for (i, (headers, payload, confirm)) in items.into_iter().enumerate() {
                                 let record =
                                     StreamRecord::from_stored(base + i as u64, payload, headers);
-                                let off = record.offset;
-                                // Hand the record to the fan-out actor in offset order;
-                                // its FIFO command channel preserves that order, so no
-                                // per-record round-trip is needed. The confirm only
-                                // needs durability (already reached), not the multicast.
+                                let _ = confirm.send(Ok(record.offset));
+                                records.push(record);
+                            }
+                            // Subscribers must never see a record a new owner could
+                            // lack after failover, so delivery waits for the required
+                            // replicas, like the queue visibility ceiling.
+                            if let (Some(gate), Some(last)) = (&drain_replication, records.last()) {
+                                await_replicated(gate, &drain_key, last.offset, &drain_cmd_tx)
+                                    .await;
+                            }
+                            // Hand records to the fan-out actor in offset order. Its
+                            // FIFO command channel keeps that order without a
+                            // per-record round-trip.
+                            for record in records {
                                 let _ = drain_cmd_tx
                                     .send(FanoutCmd::Publish { record, resp: None })
                                     .await;
-                                let _ = confirm.send(Ok(off));
                             }
                         }
                         other => {
@@ -910,6 +992,7 @@ impl StreamChannel {
             active_subscriptions: std::sync::atomic::AtomicUsize::new(0),
             lag_evictions,
             durable_progress,
+            replication,
         })
     }
 
@@ -987,6 +1070,14 @@ impl StreamChannel {
             .append_stream_record(&self.tp, self.part, &headers, payload.clone())
             .await?;
         self.durable_progress.notify_waiters();
+        if let Some(gate) = &self.replication {
+            let key = QueueKey {
+                tp: self.tp.to_string(),
+                part: self.part.into(),
+                group: None,
+            };
+            await_replicated(gate, &key, offset, &self.cmd_tx).await;
+        }
         let record = StreamRecord::from_stored(offset, payload, headers);
         let (resp, rx) = oneshot::channel();
         self.cmd_tx

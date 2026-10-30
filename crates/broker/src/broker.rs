@@ -1986,7 +1986,7 @@ impl<
         }
         let engine: Arc<dyn StreamStore> = self.engine.clone();
         let open = || {
-            StreamChannel::open(
+            StreamChannel::open_gated(
                 engine.clone(),
                 tp,
                 part,
@@ -1995,6 +1995,7 @@ impl<
                 STREAM_RING_CAPACITY,
                 STREAM_LIVE_CHANNEL_CAPACITY,
                 self.cfg.clone(),
+                Some(self.replication_confirm_gate()),
             )
         };
         let opened = match open().await {
