@@ -146,6 +146,15 @@ struct Args {
     /// Partition count for the stream.
     #[arg(long, default_value_t = 1)]
     partitions: u32,
+
+    /// Prefix for durable reader cursor names. Reader processes sharing a
+    /// stream need distinct prefixes, or their readers share cursors.
+    #[arg(long, default_value = "bench-reader")]
+    reader_name_prefix: String,
+
+    /// Also write the results as JSON to this path.
+    #[arg(long)]
+    json_out: Option<std::path::PathBuf>,
 }
 
 fn rate_for_writer(rate_per_sec: u64, writers: usize, writer_id: usize) -> u64 {
@@ -221,6 +230,7 @@ async fn main() {
             args.readers,
             args.prefetch,
             args.durable_readers,
+            args.reader_name_prefix.clone(),
             writers_done.clone(),
             measured_sent_total.clone(),
             args.drain_timeout_secs,
@@ -313,6 +323,46 @@ async fn main() {
             &mut writer_stats.confirm_latency_ms.clone(),
         );
     }
+    if let Some(path) = &args.json_out {
+        // The latency vectors are sorted by print_latency above.
+        let summary = |values: &[u64]| {
+            if values.is_empty() {
+                return serde_json::Value::Null;
+            }
+            let sum: u64 = values.iter().sum();
+            serde_json::json!({
+                "samples": values.len(),
+                "mean_ms": sum as f64 / values.len() as f64,
+                "p50_ms": percentile(values, 0.50),
+                "p95_ms": percentile(values, 0.95),
+                "p99_ms": percentile(values, 0.99),
+                "p999_ms": percentile(values, 0.999),
+                "max_ms": values.last().copied().unwrap_or_default(),
+            })
+        };
+        let mut confirm = writer_stats.confirm_latency_ms.clone();
+        confirm.sort_unstable();
+        let out = serde_json::json!({
+            "mode": format!("{:?}", args.mode),
+            "durability": format!("{:?}", args.durability),
+            "readers": args.readers,
+            "writers": args.writers,
+            "durable_readers": args.durable_readers,
+            "duration_secs": args.duration_secs,
+            "sent_total": writer_stats.sent_total,
+            "measured_sent": writer_stats.measured_sent,
+            "confirmed_total": writer_stats.confirmed_total,
+            "publish_errors": writer_stats.publish_errors,
+            "confirm_errors": writer_stats.confirm_errors,
+            "received_total": reader_stats.received_total,
+            "measured_received": reader_stats.measured_received,
+            "publish_to_deliver": summary(&reader_stats.publish_to_delivery_ms),
+            "publish_to_server_receive": summary(&reader_stats.publish_to_server_receive_ms),
+            "server_receive_to_deliver": summary(&reader_stats.server_receive_to_delivery_ms),
+            "confirm": summary(&confirm),
+        });
+        std::fs::write(path, serde_json::to_vec_pretty(&out).unwrap()).unwrap();
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -323,6 +373,7 @@ fn start_readers(
     readers: usize,
     prefetch: u32,
     durable_readers: bool,
+    reader_name_prefix: String,
     writers_done: Arc<AtomicBool>,
     measured_sent_total: Arc<AtomicU64>,
     drain_timeout_secs: u64,
@@ -332,6 +383,7 @@ fn start_readers(
         let writers_done = writers_done.clone();
         let measured_sent_total = measured_sent_total.clone();
         let topic = topic.clone();
+        let reader_name = format!("{reader_name_prefix}-{reader_index}");
         handles.push(tokio::spawn(async move {
             let client = ClientOptions::new()
                 .auth("fibril", "fibril")
@@ -348,7 +400,7 @@ fn start_readers(
                 .partitions(partitions)
                 .prefetch(prefetch);
             let builder = if durable_readers {
-                builder.durable(format!("bench-reader-{reader_index}"))
+                builder.durable(reader_name)
             } else {
                 builder.from_latest()
             };

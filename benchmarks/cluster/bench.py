@@ -153,7 +153,7 @@ def run(args):
     case = args.output
     copies = args.copies
     publish = publish_settings(args)
-    queues = ["topic1"] + [f"topic{k}" for k in range(2, args.queues + 1)]
+    queues = [] if args.stream else ["topic1"] + [f"topic{k}" for k in range(2, args.queues + 1)]
     data = args.storage / case.name
     data.mkdir(parents=True, exist_ok=False)
     node_data = [(args.node_storage[i] / case.name if args.node_storage else data) / f"node-{i}"
@@ -356,6 +356,8 @@ def run(args):
                     ["perf", "record", *mode, "-o", str(case / f"perf-node-{n}.data"), "-p", str(servers[n].pid)],
                     stdout=subprocess.DEVNULL, stderr=(case / f"perf-node-{n}.err").open("w"), preexec_fn=raise_fds))
 
+        if args.stream:
+            clients += launch_stream_clients(args, case, env, broker_port(0), launch)
         for queue in queues:
             command = [str(args.compare_bin), "--broker", "fibril", "--fibril-sparse-offsets", "--queue", queue,
                        "--endpoint", f"127.0.0.1:{broker_port(owner_index(queue))}", "--copies", str(copies),
@@ -415,6 +417,13 @@ def run(args):
             profiler.send_signal(2)
         for profiler in profilers:
             profiler.wait(timeout=120)
+
+        if args.stream:
+            after = [process_sample(p) for p in servers]
+            save(case / "after-topology.json", http(endpoints[0], "/admin/api/topology"))
+            save(case / "summary.json", stream_summary(args, case, before, after, samples))
+            print(f"passed {case.name}", flush=True)
+            return
 
         if lost_brokers:
             survived = []
@@ -499,6 +508,73 @@ def run(args):
         if not args.keep_data:
             for parent in {data, *(d.parent for d in node_data)}:
                 shutil.rmtree(parent, ignore_errors=True)
+
+
+def launch_stream_clients(args, case, env, port, launch):
+    """Reader processes first, then one publisher, all bench-stream.
+
+    Readers are spread over processes because one client process saturates
+    well before the broker does at high fan-out."""
+    base = [str(args.bin_dir / "bench-stream"), "--durability", args.stream, "--topic", "stream1",
+            "--broker-addr", f"127.0.0.1:{port}", "--warmup-secs", str(args.warmup_secs),
+            "--duration-secs", str(args.duration_secs), "--drain-timeout-secs", "10",
+            "--size", str(args.size)]
+    procs = max(1, min(args.reader_procs, args.stream_readers))
+    clients = []
+    for j in range(procs):
+        readers = args.stream_readers // procs + (1 if j < args.stream_readers % procs else 0)
+        command = base + ["--mode", "subscribe-only", "--readers", str(readers),
+                          "--prefetch", str(args.prefetch), "--reader-name-prefix", f"bench-r{j}",
+                          "--json-out", str(case / f"stream-readers-{j}.json")]
+        if args.durable_readers:
+            command += ["--durable-readers"]
+        clients.append(launch(command, f"stream-readers-{j}", env, case))
+    # Let every reader attach before the measured window starts.
+    time.sleep(3)
+    command = base + ["--mode", "publish-only", "--writers", "4", "--rate-per-sec", str(args.rate),
+                      "--confirm-window", str(args.confirm_window),
+                      "--json-out", str(case / "stream-publisher.json")]
+    if not args.unconfirmed:
+        command += ["--confirmed"]
+    clients.append(launch(command, "stream-publisher", env, case))
+    return clients
+
+
+def stream_summary(args, case, before, after, samples):
+    """Check every reader saw every measured record and summarize the run."""
+    publisher = json.loads((case / "stream-publisher.json").read_text())
+    readers = [json.loads(f.read_text()) for f in sorted(case.glob("stream-readers-*.json"))
+               if re.fullmatch(r"stream-readers-\d+\.json", f.name)]
+    sent = publisher["measured_sent"]
+    for r in readers:
+        expected = sent * r["readers"]
+        if r["measured_received"] != expected:
+            raise RuntimeError(f"a reader process saw {r['measured_received']} of {expected} measured records")
+    if publisher["publish_errors"] or publisher["confirm_errors"]:
+        raise RuntimeError(f"publish errors {publisher['publish_errors']}, confirm errors {publisher['confirm_errors']}")
+    delivered = sum(r["measured_received"] for r in readers)
+    top = json.loads((case / "after-topology.json").read_text())
+    assignment = next((a for a in top.get("coordination", {}).get("stream_assignments", [])
+                       if a.get("topic") == "stream1"), None)
+    cpu = sum(a["cpu_seconds"] - b["cpu_seconds"] for a, b in zip(after, before))
+    worst = lambda key, stat: max((r[key] or {}).get(stat, 0) for r in readers)
+    return {
+        "status": "passed",
+        "label": {"nodes": args.copies, "policy": args.assignment, "tier": args.stream,
+                  "rate_per_partition": args.rate, "payload_bytes": args.size,
+                  "readers": args.stream_readers, "reader_processes": len(readers),
+                  "durable_readers": args.durable_readers, "confirmed": not args.unconfirmed,
+                  "owner": assignment and assignment.get("owner"),
+                  "followers": assignment and assignment.get("followers")},
+        "published_per_sec": sent / args.duration_secs,
+        "delivered_per_sec": delivered / args.duration_secs,
+        "confirm_ms": publisher["confirm"],
+        "publish_to_deliver_ms_by_process": [r["publish_to_deliver"] for r in readers],
+        "publish_to_deliver_worst_ms": {s: worst("publish_to_deliver", s) for s in ("p50_ms", "p99_ms", "p999_ms", "max_ms")},
+        "cpu_seconds_per_million_published": cpu * 1e6 / max(1, publisher["sent_total"]),
+        "cpu_seconds_per_million_delivered": cpu * 1e6 / max(1, sum(r["received_total"] for r in readers)),
+        "peak_rss_mib": max((sum(s.get("rss_kib", 0) for s in sample["servers"]) for sample in samples), default=0) / 1024,
+    }
 
 
 def backlog_drain(client, pause):
@@ -710,6 +786,13 @@ def main():
     parser.add_argument("--size", type=int, default=1024, help="Payload bytes")
     parser.add_argument("--connections", type=int, default=1,
                         help="Publisher and consumer connection pairs per queue, sharing the total rate and credit")
+    parser.add_argument("--stream", choices=["durable", "speculative", "ephemeral"],
+                        help="Run a Plexus stream workload with this tier instead of queues. Needs --rate, "
+                             "the total publish rate for the stream's one partition")
+    parser.add_argument("--stream-readers", type=int, default=4, help="Stream readers, each receives every record")
+    parser.add_argument("--reader-procs", type=int, default=2, help="Client processes the stream readers are spread over")
+    parser.add_argument("--durable-readers", action="store_true",
+                        help="Stream readers keep named cursors, which exercises cursor commits and their replication")
     parser.add_argument("--idle-queues", type=int,
                         help="Extra queues declared and left without traffic, then a quiet window measures their cost. 0 measures the baseline")
     parser.add_argument("--confirm-window", type=int, default=32768)
@@ -771,6 +854,10 @@ def main():
                           "FIBRIL_COORDINATION_RAFT_ELECTION_TIMEOUT_MAX_MS=1000"]
     if args.burst_pattern and not args.rate:
         parser.error("--burst-pattern needs --rate")
+    if args.stream and (not args.rate or args.survive_broker_loss or args.burst_pattern or args.rate_profile
+                        or args.consumer_pause or args.perf):
+        parser.error("--stream needs --rate and does not support broker loss, burst, rate profile, "
+                     "consumer pause or perf options yet")
     if args.burst_pattern:
         # In whole messages: a float cycle like 0.7 s does not divide 7 s exactly.
         total = sum(int(n) for n in args.burst_pattern.split(","))
