@@ -46,6 +46,8 @@ A subscription can carry a **header filter**: an AND of `header == pattern`
 clauses, where the value pattern may contain `*` wildcards (`eu-*`). It is
 deliberately tiny — no regex, no OR, no nesting. A record is delivered only when
 it carries every named header and each matches. Filtering is stream-only.
+[Stream filters](/development/stream-filters-design/) describes the planned
+richer filters and the shared pattern rules.
 
 ## Partitioning: fan-in, not work-sharing
 

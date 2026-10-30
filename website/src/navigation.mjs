@@ -174,6 +174,10 @@ export const sidebar = [
             slug: "development/access-control-design",
           },
           {
+            label: "Stream filters",
+            slug: "development/stream-filters-design",
+          },
+          {
             label: "MCP server",
             slug: "development/mcp-design",
           },

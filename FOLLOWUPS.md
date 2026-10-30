@@ -455,10 +455,11 @@ Tiers are grouped by concern, not strictly ordered.
   subscribers by Arc identity (note: `try_send` per matched subscriber likely
   dominates the loop, so dedup saves filter-eval, not the whole per-sub cost); (b)
   a faster header-key lookup (the SipHash key hashing is the per-clause cost).
-  PHASE 2: expand the filtering vocabulary (OR groups, negation, value ranges,
-  header-set membership) while staying declarative and bounded - NOT
-  content-routing scripting, which is out of scope (see roadmap). The bench is the
-  regression baseline for both.
+  Next: the design in
+  [stream filters](website/src/content/docs/development/stream-filters-design.md),
+  covering the access control pattern rules for header values, groups of
+  clauses joined by OR, bounds and filter interning. The bench is the
+  regression baseline.
 
 This file tracks the replication and clustering roadmap leftovers. Non-replication
 feature ideas live in their own track, summarized at the end.
