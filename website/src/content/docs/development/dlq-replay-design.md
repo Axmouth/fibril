@@ -63,8 +63,8 @@ deleted afterwards without touching the dead-letter queue.
 ## Permissions
 
 Under [access control](/development/access-control-design/), previews need
-`view` on the dead-letter queue. Replays need `purge` on the dead-letter queue,
-which covers moving dead-lettered messages, and `publish` on every target.
+`read` on the dead-letter queue, since they show payloads. Replays and moves
+need `replay` on the dead-letter queue and `publish` on every target.
 
 ## Implementation order
 

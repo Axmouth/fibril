@@ -49,11 +49,21 @@ Data actions apply to topics and groups:
 | Action | Covers |
 | --- | --- |
 | `publish` | Publish and delayed publish |
-| `consume` | Subscribe, and settle the deliveries of that subscription |
-| `declare` | Declare queues and streams, change their settings |
+| `consume` | Subscribe to an existing queue, group or stream, and settle the deliveries of that subscription |
+| `declare` | Create queues, groups and streams, and change their settings |
 | `delete` | Delete queues and streams |
-| `purge` | Purge, replay and move dead-lettered messages |
-| `view` | See the topic in listings, metrics and message inspection |
+| `purge` | Empty a queue. It destroys data, so it is granted rarely |
+| `replay` | Replay or move dead-lettered messages. The target also needs `publish` |
+| `view` | See the topic's name, settings and metrics in listings and the dashboard |
+| `read` | Read stored payloads outside a subscription: message inspection, dead-letter previews and the MCP payload tools |
+
+Seeing that a topic exists and reading what is in it are different trust
+levels, so `view` never shows payloads. A subscriber already receives payloads
+through `consume` and needs no `read` for that. Replay re-publishes data while
+purge destroys it, and an operator who may retry failed work usually should
+not be able to empty a queue, so they are separate actions. `declare` covers
+both creating and reconfiguring, since fewer actions keep policies readable.
+A separate action for reconfiguring can be added if someone needs it.
 
 Administration actions have no resource:
 
@@ -61,7 +71,7 @@ Administration actions have no resource:
 | --- | --- |
 | `settings.view`, `settings.edit` | Runtime settings and the global dead-letter target |
 | `users.edit` | Create, change and remove users |
-| `access.edit` | Change roles and their assignment |
+| `access.edit` | Change roles and their assignment. Without a resource it is root, see delegated administration below |
 | `cluster.manage` | Drain, membership, rebalancing and recovery actions |
 | `attention.note` | Add notes to attention items and snooze them |
 
@@ -84,6 +94,21 @@ dots as separators by convention. Patterns follow the same shape:
   `billing.inv*` matches `billing.invoices` and `billing.inventory`. It never
   crosses a dot. A `*` anywhere else inside a segment is an error.
 - Both work in the group part too: `billing.**/workers`.
+
+### Delegated administration
+
+`access.edit` may carry resources, as in `"access.edit: payments.**"`. A
+delegated administrator can then create and change roles whose every rule
+names only resources inside their own patterns, and assign those roles to
+users. They cannot grant administration actions, including `access.edit`
+itself, and cannot change a role that names anything outside their patterns.
+Bare `access.edit`, with no resource, is root: whoever holds it can grant
+themselves anything, and the dashboard labels it that way.
+
+Checking that a rule stays inside a scope compares patterns segment by
+segment: `payments.eu.*` is inside `payments.**`, while `payments.*` is not
+inside `payments.eu.**`. The check function exposes this so the dashboard can
+explain a refusal.
 
 `/` never appears in a name, so a pattern always reads unambiguously as topic
 and group. The order follows the client API and the wire format, where a group
@@ -165,7 +190,10 @@ One check function serves the protocol, the admin API, the CLI and the planned
 MCP server.
 
 - **Protocol.** The broker checks when a connection first publishes to a topic
-  and group, subscribes, declares, deletes or purges. Results are cached per
+  and group, subscribes, declares, deletes or purges.
+- **Creating by use.** A publish or subscribe that would create a queue, group
+  or stream, as standalone brokers do for undeclared queues, needs `declare` on
+  it as well. Using one that already exists needs only `publish` or `consume`. Results are cached per
   connection and keyed by the policy version, so the cost is one map lookup per
   publish batch. Settling a delivery needs no separate check, since only the
   subscription that received it can settle it.
@@ -188,9 +216,31 @@ MCP server.
   and topic.
 - **Effective access.** Each user's page lists what they can do, grouped by
   topic pattern, so reviewing a role does not require evaluating rules by hand.
-- **Audit.** Policy and user changes are logged with who made them. Denied
-  requests are logged once per connection, user, action and resource, so a
-  misbehaving client cannot flood the log.
+- **Audit.** Policy, user and token changes are logged with who made them, and
+  so are allowed destructive and administrative actions: delete, purge,
+  replay, settings changes and cluster actions, each with the actor, the
+  resource and the outcome. This needs no configuration. Denied requests are
+  logged once per connection, user, action and resource, so a misbehaving
+  client cannot flood the log.
+- **Check a policy file.** `fibrilctl access check-policy policy.toml`
+  validates a file with the same parser and line-numbered errors as the
+  broker, and `--fmt` rewrites it in a normalized order, so typos fail before
+  they reach a cluster and reviews stay clean.
+
+## Service tokens
+
+Services authenticate with scoped, expiring API tokens instead of shared
+passwords or certificates.
+
+- A token belongs to a user, usually a service user with no password, and
+  carries a subset of that user's roles. It can never do more than its user.
+- Tokens are created through the admin API, `fibrilctl` or the dashboard, are
+  shown once, and are stored only as a hash in the user document.
+- Each token has an expiry, an optional label and a last-used time, and can be
+  revoked at once. Rotation is creating a new token, deploying it and revoking
+  the old one, all admin API operations.
+- On the wire a token authenticates like a password, so every client gets it
+  without a protocol change.
 
 ## Storage
 
@@ -201,8 +251,8 @@ the other documents.
 
 ## Implementation order
 
-1. The policy model, parser, pattern matching and the check function, with
-   the explanation output, as a library with unit tests.
+1. The policy model, parser, pattern matching, scope containment and the
+   check function, with the explanation output, as a library with unit tests.
 2. The cluster document, its configuration source and the admin API to read
    and write it.
 3. Protocol enforcement with per-connection caching, `ERR_FORBIDDEN` and the
@@ -210,7 +260,9 @@ the other documents.
 4. Admin API and dashboard enforcement, filtered listings, and the policy
    editor with the check box.
 5. Forwarded session checks on both ends.
-6. `fibrilctl access check` and the effective access view.
+6. `fibrilctl access check`, `check-policy` and the effective access view.
+7. The audit of allowed destructive and administrative actions.
+8. Service tokens.
 
 ## Test plan
 
@@ -226,14 +278,21 @@ the other documents.
 - Forwarded publishes are refused at the public broker and, with a deliberately
   stale entry policy, at the owner.
 - The lockout guard refuses a policy without `access.edit`.
+- A delegated administrator scoped to `payments.**` can create and assign a
+  role on `payments.eu.**`, and is refused a role naming `billing.**`, an
+  administration action or `access.edit`.
+- `view` alone lists a topic but refuses message inspection, and `read` allows
+  it. `replay` without `purge` replays but cannot empty the queue.
+- A publish or subscribe that would create a queue or group is refused without
+  `declare`.
+- Allowed deletes, purges and replays appear in the audit with their actor.
+- An expired or revoked token is refused, and a token never exceeds its user.
 - A file policy round-trips through the API and the dashboard unchanged.
 
 ## Open questions
 
 - Whether roles should include other roles. Multiple roles per user cover the
   common cases without it.
-- Whether services should get API tokens as an alternative to passwords and
-  certificates.
 - Whether per-user publish rate quotas belong in roles or with
   [resource limits](/development/resource-limits-design/).
 - Single sign-on for the dashboard, which would map external groups to roles.
