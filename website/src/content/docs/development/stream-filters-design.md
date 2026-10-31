@@ -28,19 +28,30 @@ Header value patterns follow the [access control pattern rules](/development/acc
 with dots as segment separators:
 
 - A pattern with no `*` matches that exact value.
-- `*` as a whole segment matches one segment: `orders.*.created` matches
-  `orders.eu.created` but not `orders.eu.west.created`.
-- `**` matches any number of segments: `orders.**` matches every value under
-  `orders`, and `**` alone matches any value.
-- A `*` at the end of a segment matches values starting with the text before
-  it, within that segment: `eu-*` matches `eu-west` and `eu-central`.
-- A `*` anywhere else inside a segment is an error at subscribe time.
+- `*` as a whole segment matches exactly one segment: `orders.*.created`
+  matches `orders.eu.created` but not `orders.eu.west.created`.
+- `**` as a whole segment matches any number of segments, including none,
+  once per pattern, anywhere: `orders.**`, `**.created` and
+  `orders.**.created`. `**` alone matches any value.
+- Inside a segment, one `*` matches any run of characters within that
+  segment: `eu-*`, `*-west` and `eu-*-1`.
+- More than one `*` inside a segment, more than one `**`, and `**` joined to
+  other text are errors at subscribe time.
+
+| Filter value pattern | Matches | Does not match |
+| --- | --- | --- |
+| `eu-*` | `eu-west`, `eu-central` | `us-east`, `eu.west` |
+| `*-west` | `eu-west`, `us-west` | `eu-west-1` |
+| `orders.*.created` | `orders.eu.created` | `orders.created`, `orders.eu.west.created` |
+| `orders.**` | `orders`, `orders.eu`, `orders.eu.created` | `billing.orders` |
+| `**.created` | `created`, `orders.eu.created` | `orders.created.v2` |
+| `orders.**.created` | `orders.created`, `orders.eu.west.created` | `orders.eu.updated` |
 
 A value without dots is a single segment, so filters like `region = eu-*` keep
 working. The one change from today is that `*` no longer crosses a dot, so
 `orders.*` stops matching `orders.eu.created`. `orders.**` is the new spelling
-for that. A leading or inner `*` such as `*-west` becomes an error with a
-message pointing at the new rules.
+for that. A pattern with several `*` in one segment, which today's matcher
+accepts, becomes an error with a message pointing at the new rules.
 
 The rules live in one matcher shared by the broker's filters and access
 control. The clients' wildcard subscribe follows the same rules, checked

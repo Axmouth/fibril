@@ -85,15 +85,22 @@ dots as separators by convention. Patterns follow the same shape:
 - `billing.invoices` names one topic and every group under it.
 - `billing.invoices/workers` names one group of that topic. The default group
   is `default`.
-- `*` matches one dot-separated segment: `billing.*` matches
-  `billing.invoices` but not `billing.eu.invoices`.
-- `**` matches any number of segments: `billing.**` matches both, and `**`
-  alone matches everything.
-- A `*` at the end of a segment matches any name starting with the text
-  before it: `team-*` matches `team-billing` and `team-payments`, and
-  `billing.inv*` matches `billing.invoices` and `billing.inventory`. It never
-  crosses a dot. A `*` anywhere else inside a segment is an error.
+- `*` as a whole segment matches exactly one segment, anywhere in the
+  pattern: `billing.*` matches `billing.invoices` but not
+  `billing.eu.invoices`, and `billing.*.invoices` matches `billing.eu.invoices`.
+- `**` as a whole segment matches any number of segments, including none, and
+  may appear once per pattern, anywhere: `billing.**` matches every topic
+  under `billing`, `**.dlq` matches every topic ending in `dlq`, and
+  `billing.**.audit` matches `billing.audit` and `billing.eu.west.audit`.
+  `**` alone matches everything.
+- Inside a segment, one `*` matches any run of characters within that
+  segment, never crossing a dot: `team-*`, `*-prod` and `orders-*-v2`.
 - Both work in the group part too: `billing.**/workers`.
+
+These limits are deliberate. One `*` per segment and one `**` per pattern keep
+matching linear and make the check that one pattern lies inside another exact,
+which delegated administration needs. They also keep every pattern readable at
+a glance.
 
 ### Delegated administration
 
@@ -126,7 +133,21 @@ is a namespace under its topic.
 | `**/workers` | The `workers` group of every topic |
 | `billing.inv*` | `billing.invoices` and `billing.inventory`, not `billing.inv.eu` |
 | `orders/team-*` | Every group of `orders` whose name starts with `team-` |
+| `*-prod.**` | Everything under a first segment ending in `-prod`, such as `billing-prod.invoices` |
+| `orders.*-v2` | `orders.eu-v2` and `orders.us-v2`, not `orders.eu.v2` |
+| `billing.*.invoices` | `billing.eu.invoices`, not `billing.invoices` or `billing.eu.west.invoices` |
+| `**.dlq` | `dlq`, `orders.dlq` and `billing.eu.dlq` |
+| `billing.**.audit` | `billing.audit` and `billing.eu.west.audit` |
 | `**` | Everything |
+
+Refused at load time, with the line and the reason:
+
+| Pattern | Why |
+| --- | --- |
+| `team-*-*` | More than one `*` inside a segment |
+| `billing.**.eu.**` | More than one `**` in a pattern |
+| `billing**` | `**` must be a whole segment |
+| `billing..invoices` | Empty segment |
 
 ## File format
 
